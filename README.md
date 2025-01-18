@@ -1,6 +1,6 @@
 # PAglets
 
-Python library (currently just a first draft code), loosly inspired by Java Aglets.
+Python library (currently just a first draft code), loosely inspired by Java Aglets.
 
 ## Test
 
