@@ -24,19 +24,19 @@ def load_config():
         raise SystemExit(1)
 
 
-def send_message(host, port, message):
+def send_message(host_with_port, message):
     try:
+        host, port = host_with_port.split(":")
         with socket.create_connection((host, port), timeout=5) as sock:
             sock.sendall(message.encode())
     except socket.error as e:
         print(f"Error connecting to {host}:{port}: {e}")
 
 
-def send_message_to_all(message, port):
+def send_message_to_all(message):
     known_hosts = load_config().get("known_hosts", [])
     for host_with_port in known_hosts:
-        host, host_port = host_with_port.split(":")
-        send_message(host, int(host_port), message)
+        send_message(host_with_port, message)
 
 def receive_message(sock):
     try:
@@ -80,7 +80,7 @@ class BaseAgent:
     def move_to_all(self):
         data = self.get_data()
         message = json.dumps({"type": "move", "data": data, "source": self.config["host"], "id": self.id})
-        send_message_to_all(message, self.config["port"])
+        send_message_to_all(message)
 
 class TimeAgent(BaseAgent):
     def get_data(self):
@@ -154,7 +154,7 @@ def handle_move_message(message):
                 "id": message["id"],
                 "is_error": False
             })
-            send_message(source_host, int(agent.config["port"]), result_message)
+            send_message(source_host, result_message)
     except Exception as e:
         error_message = json.dumps({
             "type": "error",
@@ -163,7 +163,7 @@ def handle_move_message(message):
             "id": message["id"],
             "is_error": True
         })
-        send_message(source_host, int(agent.config["port"]), error_message)
+        send_message(source_host, error_message)
 
 
 def handle_result_or_error_message(message):
