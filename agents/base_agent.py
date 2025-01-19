@@ -23,20 +23,21 @@ class BaseAgent:
     def get_data(self):
         return {}
 
-    def on_arrive(self, data, source_host):
+    def on_arrive(self, data, meta_data, source_host):
         pass
 
-    def result_received(self, task_id, source_host, result):
+    def result_received(self, task_id, source_host, result, meta_data):
         if task_id in self.pending_tasks:
             expected_results, results = self.pending_tasks[task_id]
-            results.append(result)
+            results.append((result, meta_data))
 
             if len(results) == expected_results:
-                self.on_all_results(task_id, results)
+                result_data, result_meta_data = zip(*results)
+                self.on_all_results(task_id, result_data, result_meta_data)
                 del self.pending_tasks[task_id]
 
-    def on_all_results(self, task_id, results):
-        results_formatted = json.dumps(results, indent=2)
+    def on_all_results(self, task_id, result_data, result_meta_data):
+        results_formatted = json.dumps(result_data, indent=2)
         print(f"All results received for task {task_id}:\n{results_formatted}")
 
     def move_to(self, host_with_port):

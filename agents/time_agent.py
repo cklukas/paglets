@@ -11,17 +11,17 @@ class TimeAgent(BaseAgent):
         print("Requesting time from all known hosts")
         super().move_to_all()
 
-    def on_arrive(self, data, source_host):
+    def on_arrive(self, data, meta_data, source_host):
         if data.get("request") == "time":
             print(f"Received time request from {source_host}, returning current time")
             time.sleep(10)  # Simulate processing delay
             return {"server": self.home_host_with_port, "time": time.ctime()}
         return None
 
-    def on_all_results(self, task_id, results):
+    def on_all_results(self, task_id, result_data, result_meta_data):
         print(f"All results received for task {task_id}")
         time_results = sorted(
-            (result for result in results if not result.get("is_error")),
+            (result for result in result_data if not result.get("is_error")),
             key=lambda x: x["data"]["time"],
         )
         if time_results:

@@ -65,22 +65,23 @@ def handle_incoming_messages(AGENT_CLASSES, port, host_with_port):
 def handle_client_connection(AGENT_CLASSES, conn, addr, host_with_port):
     with conn:
         # try:
-        message = receive_message(conn)
+        message, message_size = receive_message(conn)
         if not message or "type" not in message:
             print(f"Invalid message received from {addr}")
             return
 
         if message["type"] == "move":
-            handle_move_message(AGENT_CLASSES, message, host_with_port)
+            handle_move_message(AGENT_CLASSES, message, message_size, host_with_port)
         elif message["type"] in {"result", "error"}:
-            handle_result_or_error_message(message)
+            handle_result_or_error_message(message, message_size)
         # except Exception as e:
         #    print(f"Error handling client {addr}: {e}")
 
 
-def handle_move_message(AGENT_CLASSES, message, host_with_port):
+def handle_move_message(AGENT_CLASSES, message, message_size, host_with_port):
     agent_data = message["data"]
     source_host = message["source"]
+    meta_data = {"message_size": message_size}
     agent_type = agent_data.get("agent_type", "BaseAgent")
     agent_class = AGENT_CLASSES.get(agent_type, None)
     if not agent_class:
@@ -90,7 +91,7 @@ def handle_move_message(AGENT_CLASSES, message, host_with_port):
     agent = agent_class(home_host_with_port=host_with_port)
 
     try:
-        result = agent.on_arrive(agent_data, source_host)
+        result = agent.on_arrive(agent_data, meta_data, source_host)
         if result:
             send_message(
                 source_host,
@@ -117,13 +118,18 @@ def handle_move_message(AGENT_CLASSES, message, host_with_port):
         )
 
 
-def handle_result_or_error_message(message):
+def handle_result_or_error_message(message, message_size):
     with registry_lock:
         agent_ref = registry.get(message["id"])
         if agent_ref:
             agent = agent_ref()
             if agent:
-                agent.result_received(message["task_id"], message["source"], message)
+                agent.result_received(
+                    message["task_id"],
+                    message["source"],
+                    message,
+                    meta_data={"message_size": message_size},
+                )
 
 
 def shutdown_handler(signum, frame):
@@ -148,10 +154,12 @@ def receive_message(sock):
             if not chunk:
                 break
             message.extend(chunk)
-        return json.loads(message.decode())
+
+        message_size = len(message)
+        return json.loads(message.decode()), message_size
     except (socket.error, json.JSONDecodeError) as e:
         print(f"Error receiving or parsing message: {e}")
-        return {}
+        return {}, -1
 
 
 def wait_for_exit():
