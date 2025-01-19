@@ -19,7 +19,7 @@ class TimeAgent(BaseAgent):
         return None
 
     def on_all_results(self, task_id, results):
-        super().on_all_results(task_id, results)
+        print(f"All results received for task {task_id}")
         time_results = sorted(
             (result for result in results if not result.get("is_error")),
             key=lambda x: x["data"]["time"],

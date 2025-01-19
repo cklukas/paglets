@@ -142,13 +142,13 @@ def load_config():
 
 def receive_message(sock):
     try:
-        chunks = []
+        message = bytearray()
         while True:
             chunk = sock.recv(BUFFER_SIZE)
             if not chunk:
                 break
-            chunks.append(chunk)
-        return json.loads(b"".join(chunks).decode())
+            message.extend(chunk)
+        return json.loads(message.decode())
     except (socket.error, json.JSONDecodeError) as e:
         print(f"Error receiving or parsing message: {e}")
         return {}

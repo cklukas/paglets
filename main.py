@@ -2,6 +2,7 @@ import threading
 import signal
 import argparse
 
+from agents.dataframe_agent import DataframeAgent
 from agents.load_agent import LoadAgent
 from agents.time_agent import TimeAgent
 from paglets.util import (
@@ -28,7 +29,11 @@ if __name__ == "__main__":
     conf = load_config()
     host_with_port = f"{conf['host']}:{MESSAGE_PORT}"
 
-    AGENT_CLASSES = {"TimeAgent": TimeAgent, "LoadAgent": LoadAgent}
+    AGENT_CLASSES = {
+        "TimeAgent": TimeAgent,
+        "LoadAgent": LoadAgent,
+        "DataframeAgent": DataframeAgent,
+    }
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -51,6 +56,9 @@ if __name__ == "__main__":
 
         load_agent = LoadAgent(host_with_port)
         load_agent.move_to_all()
+
+        dataframe_agent = DataframeAgent(host_with_port)
+        dataframe_agent.move_to_all()
 
     wait_for_exit()
 
