@@ -4,6 +4,10 @@ from agents.base_agent import BaseAgent
 
 
 class TimeAgent(BaseAgent):
+    """
+    An agent that requests the current time from all known hosts
+    """
+
     def get_data(self):
         return {"request": "time", "agent_type": "TimeAgent"}
 

@@ -7,6 +7,10 @@ from agents.base_agent import BaseAgent
 
 
 class DataframeAgent(BaseAgent):
+    """
+    An agent that requests a random dataframe from all known hosts
+    """
+
     def get_data(self):
         return {"request": "generate_dataframe", "agent_type": "DataframeAgent"}
 

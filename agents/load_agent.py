@@ -4,6 +4,10 @@ from agents.base_agent import BaseAgent
 
 
 class LoadAgent(BaseAgent):
+    """
+    An agent that requests system load information from all known hosts
+    """
+
     def get_data(self):
         return {"request": "load", "agent_type": "LoadAgent"}
 

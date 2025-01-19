@@ -11,6 +11,10 @@ from paglets.util import (
 
 
 class BaseAgent:
+    """
+    Base class for agents that can 'move' between hosts and request data from other agents.
+    """
+
     def __init__(self, home_host_with_port: str):
         self.home_host_with_port = home_host_with_port
         self.id = str(uuid.uuid4())
@@ -21,6 +25,10 @@ class BaseAgent:
         forget_agent(self)
 
     def get_data(self):
+        """
+        Return the data to be sent to other agents when moving. See on_arrive,
+        the data returned here will be passed to on_arrive as the first argument.
+        """
         return {}
 
     def on_arrive(self, data, meta_data, source_host):
