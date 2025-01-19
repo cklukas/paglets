@@ -26,15 +26,13 @@ class DataframeAgent(BaseAgent):
                 columns=[f"col_{i}" for i in range(cols)],
             )
 
-            # Serialize the dataframe to JSON for transfer
-            df_json = df.to_json(orient="split")
-
             return {
                 "server": self.home_host_with_port,
-                "dataframe": json.loads(df_json),  # Send as dictionary
+                "dataframe": df.to_dict(orient="split"),
                 "rows": rows,
                 "cols": cols,
             }
+
         return None
 
     def on_all_results(self, task_id, results):
