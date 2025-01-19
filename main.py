@@ -2,6 +2,7 @@ import threading
 import signal
 import argparse
 
+from agents.load_agent import LoadAgent
 from agents.time_agent import TimeAgent
 from paglets.util import (
     handle_incoming_messages,
@@ -27,7 +28,7 @@ if __name__ == "__main__":
     conf = load_config()
     host_with_port = f"{conf['host']}:{MESSAGE_PORT}"
 
-    AGENT_CLASSES = {"TimeAgent": TimeAgent}
+    AGENT_CLASSES = {"TimeAgent": TimeAgent, "LoadAgent": LoadAgent}
 
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
@@ -45,8 +46,11 @@ if __name__ == "__main__":
         print(
             f"Started as a server at {host_with_port}, sending time agent to all known hosts"
         )
-        agent = TimeAgent(host_with_port)
-        agent.move_to_all()
+        time_agent = TimeAgent(host_with_port)
+        time_agent.move_to_all()
+
+        load_agent = LoadAgent(host_with_port)
+        load_agent.move_to_all()
 
     wait_for_exit()
 

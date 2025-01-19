@@ -1,6 +1,6 @@
-from agents.base_agent import BaseAgent
 import time
-import socket
+
+from agents.base_agent import BaseAgent
 
 
 class TimeAgent(BaseAgent):
@@ -13,9 +13,9 @@ class TimeAgent(BaseAgent):
 
     def on_arrive(self, data, source_host):
         if data.get("request") == "time":
-            print("Received time request, returning current time")
+            print(f"Received time request from {source_host}, returning current time")
             time.sleep(10)  # Simulate processing delay
-            return {"server": socket.gethostname(), "time": time.ctime()}
+            return {"server": self.home_host_with_port, "time": time.ctime()}
         return None
 
     def on_all_results(self, task_id, results):
@@ -33,5 +33,5 @@ class TimeAgent(BaseAgent):
                 time.strptime(min_time)
             )
             print(
-                f"Time difference between {min_time_server} and {max_time_server}: {time_diff} seconds"
+                f"Time difference: {max_time_server} is {time_diff} seconds ahead of {min_time_server}"
             )
