@@ -375,3 +375,9 @@ tests/
 
 Those constraints keep the first stub robust and understandable while preserving
 the central Aglets idea: mobile objects with explicit state, events, and proxies.
+
+## License
+
+This project is licensed under the MIT License.
+
+Copyright (c) 2026 by C. Klukas.

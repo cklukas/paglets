@@ -1,3 +1,5 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
 from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState
