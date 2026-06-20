@@ -18,6 +18,30 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.messages
 
+## Mailboxes
+
+::: paglets.mailbox
+
+## Services
+
+::: paglets.services
+
+## Transfer Tickets
+
+::: paglets.transfer
+
+## Proxy References
+
+::: paglets.references
+
+## Context Events
+
+::: paglets.context_events
+
+## Resources
+
+::: paglets.resources
+
 ## Mesh Registry
 
 ::: paglets.mesh

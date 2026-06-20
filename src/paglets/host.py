@@ -2,7 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import is_dataclass
+from dataclasses import is_dataclass, replace
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,18 +10,24 @@ import threading
 import time
 import uuid
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState
 from .client import HostClient
+from .context_events import ContextEvent, ContextEventLog, ContextListener
 from .envelope import PagletEnvelope
-from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError
+from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError, TransferError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
+from .mailbox import MessageMailbox
 from .mesh import HostRef, MeshRegistry
-from .messages import DEACTIVATE, Message, ReplySet
+from .messages import DEACTIVATE, UNQUEUED_PRIORITY, Message, ReplySet
 from .persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord, QueuedMessage
 from .proxy import PagletProxy
+from .references import PagletProxyRef
+from .resources import ResourceRegistry
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
+from .services import ServiceRecord, ServiceRegistry, ServiceScope
+from .transfer import TransferTicket
 
 
 HOST_CAPABILITIES = [
@@ -35,8 +41,13 @@ HOST_CAPABILITIES = [
     "agents:activate",
     "agents:deactivate",
     "agents:dispose",
+    "events:list",
     "hosts:list",
     "hosts:join",
+    "messages:mailbox",
+    "services:list",
+    "services:mesh",
+    "transfer:tickets",
 ]
 
 
@@ -72,6 +83,7 @@ class Host:
         self.address = f"http://{host}:{port}"
         self.client = client or HostClient()
         self._agents: dict[str, Paglet] = {}
+        self._mailboxes: dict[str, MessageMailbox] = {}
         self.persistence_dir = (
             Path(persistence_dir).expanduser()
             if persistence_dir is not None
@@ -79,6 +91,8 @@ class Host:
         )
         self._inactive_dir = self.persistence_dir / "inactive"
         self._inactive: dict[str, InactiveRecord] = {}
+        self._services = ServiceRegistry()
+        self._events = ContextEventLog()
         self._properties: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._server: _PagletHTTPServer | None = None
@@ -115,6 +129,7 @@ class Host:
         self._activate_startup_records()
         self._start_activation_scheduler()
         self.mesh.start()
+        self._emit("context-start")
 
     def serve_forever(self) -> None:
         self.start_background()
@@ -135,6 +150,7 @@ class Host:
         if deactivate_active:
             self._deactivate_active_for_shutdown()
         self.mesh.stop()
+        self._emit("context-shutdown")
         server.shutdown()
         server.server_close()
         self._server = None
@@ -164,6 +180,7 @@ class Host:
         )
         agent.on_creation(event)
         agent.run()
+        self._emit("create", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__))
         return self._current_or_last_proxy(agent)
 
     def get_proxy(self, agent_id: str) -> PagletProxy | None:
@@ -202,6 +219,9 @@ class Host:
             raise HostError(f"Paglet {agent_id!r} state is not {state_cls!r}")
         return state
 
+    def resources_for(self, agent_id: str) -> ResourceRegistry:
+        return self._require_agent(agent_id).resources
+
     def list_agents(self, *, active: bool = True, inactive: bool = False) -> list[dict[str, Any]]:
         with self._lock:
             agents = [self._summary(agent) for agent in self._agents.values()] if active else []
@@ -229,6 +249,86 @@ class Host:
         self.mesh.register_wire(payload)
         return self.mesh.hosts(include_self=True)
 
+    def add_listener(self, listener: ContextListener) -> None:
+        self._events.add_listener(listener)
+
+    def remove_listener(self, listener: ContextListener) -> None:
+        self._events.remove_listener(listener)
+
+    def list_events(self, *, since: int = 0, limit: int = 100) -> list[ContextEvent]:
+        return self._events.events_since(since, limit=limit)
+
+    def advertise_service(
+        self,
+        agent_id: str,
+        name: str,
+        *,
+        capabilities: list[str] | tuple[str, ...] | None = None,
+        metadata: dict[str, Any] | None = None,
+        scope: ServiceScope = "local",
+        ttl: float | None = None,
+    ) -> ServiceRecord:
+        self._require_agent(agent_id)
+        record = self._services.advertise(
+            host_name=self.name,
+            host_url=self.address,
+            name=name,
+            proxy=PagletProxyRef(self.address, agent_id),
+            capabilities=capabilities,
+            metadata=metadata,
+            scope=scope,
+            ttl=ttl,
+        )
+        self._emit("service-advertise", agent_id=agent_id, service_name=name, data=record.to_wire())
+        return record
+
+    def unadvertise_service(self, name: str, *, agent_id: str | None = None) -> list[ServiceRecord]:
+        removed = self._services.unadvertise(name, agent_id=agent_id)
+        for record in removed:
+            self._emit("service-remove", agent_id=record.proxy.agent_id, service_name=record.name)
+        return removed
+
+    def lookup_service(
+        self,
+        name: str,
+        *,
+        capability: str | None = None,
+        scope: ServiceScope = "local",
+    ) -> ServiceRecord | None:
+        matches = self.lookup_services(name, capability=capability, scope=scope)
+        return matches[0] if matches else None
+
+    def lookup_services(
+        self,
+        name: str | None = None,
+        *,
+        capability: str | None = None,
+        scope: ServiceScope = "local",
+    ) -> list[ServiceRecord]:
+        records = self._services.lookup_all(name, capability)
+        if scope == "mesh":
+            records.extend(self._lookup_mesh_services(name=name, capability=capability))
+        return records
+
+    def _lookup_mesh_services(self, *, name: str | None = None, capability: str | None = None) -> list[ServiceRecord]:
+        records: list[ServiceRecord] = []
+        for host_ref in self.mesh.hosts(online_only=True, include_self=False):
+            query: dict[str, str] = {}
+            if name is not None:
+                query["name"] = name
+            if capability is not None:
+                query["capability"] = capability
+            suffix = f"?{urlencode(query)}" if query else ""
+            try:
+                separator = "&" if suffix else "?"
+                payload = self.client.get_json(f"{host_ref.url.rstrip('/')}/services{suffix}{separator}scope=mesh", timeout=2.0)
+            except PagletError:
+                continue
+            for item in payload.get("services", []):
+                if isinstance(item, dict):
+                    records.append(ServiceRecord.from_wire(item))
+        return records
+
     def create_remote(
         self,
         target: str,
@@ -253,9 +353,10 @@ class Host:
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def dispatch(self, agent_id: str, target: str) -> PagletProxy:
+    def dispatch(self, agent_id: str, target: str | TransferTicket) -> PagletProxy:
+        ticket = self._prepare_ticket(target)
         agent = self._require_agent(agent_id)
-        target_info = self._host_info(target)
+        target_info = self._preflight_transfer(ticket)
         event = MobilityEvent(
             agent_id=agent_id,
             host_name=self.name,
@@ -267,17 +368,17 @@ class Host:
             reason="dispatch",
         )
         agent.on_dispatching(event)
-        envelope = self._make_envelope(agent, "dispatch", target_info)
-        response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
-        with self._lock:
-            if self._agents.get(agent_id) is agent:
-                self._agents.pop(agent_id, None)
+        self._cleanup_agent_resources(agent, reason="dispatch")
+        envelope = self._make_envelope(agent, "dispatch", target_info, ticket=ticket)
+        response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        self._remove_active_agent(agent_id, agent)
+        self._emit("dispatch", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def clone(self, agent_id: str, *, target: str | None = None) -> PagletProxy:
+    def clone(self, agent_id: str, *, target: str | TransferTicket | None = None) -> PagletProxy:
         agent = self._require_agent(agent_id)
-        target = target or self.address
-        target_info = self._host_info(target)
+        ticket = self._prepare_ticket(target or self.address)
+        target_info = self._preflight_transfer(ticket)
         clone_id = uuid.uuid4().hex
         cloning_event = CloneEvent(
             agent_id=agent_id,
@@ -291,8 +392,8 @@ class Host:
             target_host_address=target_info["address"],
         )
         agent.on_cloning(cloning_event)
-        envelope = self._make_envelope(agent, "clone", target_info, agent_id=clone_id, clone_of=agent_id)
-        response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
+        envelope = self._make_envelope(agent, "clone", target_info, agent_id=clone_id, clone_of=agent_id, ticket=ticket)
+        response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         cloned_event = CloneEvent(
             agent_id=agent_id,
             host_name=self.name,
@@ -305,6 +406,12 @@ class Host:
             target_host_address=target_info["address"],
         )
         agent.on_cloned(cloned_event)
+        self._emit(
+            "clone",
+            agent_id=agent_id,
+            class_name=qualified_name(agent.__class__),
+            data={"clone_agent_id": clone_id, "target": target_info},
+        )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
     def retract(self, remote_host_url: str, agent_id: str) -> PagletProxy:
@@ -333,13 +440,15 @@ class Host:
             policy=policy,
         )
         agent.on_deactivating(event)
+        self._cleanup_agent_resources(agent, reason="deactivate")
         info = {"name": self.name, "address": self.address}
         envelope = self._make_envelope(agent, "activation", info)
         record = InactiveRecord(envelope=envelope, policy=policy, request=request)
         self._write_inactive_record(record)
         with self._lock:
             self._inactive[agent_id] = record
-            self._agents.pop(agent_id, None)
+        self._remove_active_agent(agent_id, agent)
+        self._emit("deactivate", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"reason": request.reason})
         return PagletProxy(self.address, agent_id, self.client)
 
     def activate(self, agent_id: str) -> PagletProxy:
@@ -351,11 +460,13 @@ class Host:
         try:
             proxy = self._receive_envelope(record.envelope, inactive_record=record)
         except Exception:
+            self._remove_active_agent(agent_id)
             self._write_inactive_record(record)
             with self._lock:
                 self._inactive[agent_id] = record
             raise
         self._drain_queued_messages(record)
+        self._emit("activate", agent_id=agent_id, data={"queued_message_count": len(record.queued_messages)})
         return proxy
 
     def dispose(self, agent_id: str) -> None:
@@ -366,14 +477,15 @@ class Host:
             if inactive is None:
                 raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
             self._delete_inactive_record(agent_id)
+            self._emit("dispose", agent_id=agent_id, class_name=inactive.envelope.agent_class_name, data={"active": False})
             return
         event = PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="dispose")
         agent.on_disposing(event)
-        with self._lock:
-            if self._agents.get(agent_id) is agent:
-                self._agents.pop(agent_id, None)
+        self._cleanup_agent_resources(agent, reason="dispose")
+        self._remove_active_agent(agent_id, agent)
         if inactive is not None:
             self._delete_inactive_record(agent_id)
+        self._emit("dispose", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"active": True})
 
     # ------------------------------------------------------------------
     # Message/lifecycle internals
@@ -401,18 +513,41 @@ class Host:
                 raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
             if activate_if_inactive and inactive.policy.activate_on_message:
                 self.activate(agent_id)
-                agent = self._require_agent(agent_id)
             elif no_delay or not inactive.policy.queue_messages_when_inactive:
                 raise PagletInactiveError(f"Paglet {agent_id!r} is inactive on {self.name}")
             else:
                 inactive.queued_messages.append(QueuedMessage(message=message, oneway=oneway))
                 self._write_inactive_record(inactive)
+                self._emit("message-queued", agent_id=agent_id, message_id=message.message_id)
                 return None if oneway else {"queued": True, "message_id": message.message_id}
+        with self._lock:
+            mailbox = self._mailboxes.get(agent_id)
+        if mailbox is None:
+            raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+        if message.priority == UNQUEUED_PRIORITY:
+            future = mailbox.submit_unqueued(message, oneway=oneway)
         else:
-            inactive = None
-        result = agent.handle_message(message)
+            future = mailbox.submit(message, oneway=oneway)
+            self._emit("message-queued", agent_id=agent_id, message_id=message.message_id)
+        return None if oneway else future.result()
+
+    def _deliver_active_message(self, agent_id: str, message: Message, *, oneway: bool = False) -> Any:
+        with self._lock:
+            agent = self._agents.get(agent_id)
+        if agent is None:
+            error = InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
+            raise error
+        try:
+            result = agent.handle_message(message)
+        except Exception as exc:
+            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(exc))
+            raise
         if result is NOT_HANDLED:
-            raise NotHandledError(f"{agent.__class__.__name__} did not handle {message.kind!r}")
+            error = NotHandledError(f"{agent.__class__.__name__} did not handle {message.kind!r}")
+            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
+            raise error
+        self._emit("message-delivered", agent_id=agent_id, message_id=message.message_id)
         return None if oneway else result
 
     def multicast_message(
@@ -427,8 +562,30 @@ class Host:
         for proxy in self.get_proxies(ACTIVE):
             if proxy.agent_id in exclude:
                 continue
-            reply_set.add_future_reply(proxy.send_future_message(kind, args or {}, sender=self.address))
+            message = Message.from_wire(kind.to_wire()) if isinstance(kind, Message) else Message(kind=kind, args=args or {}, sender=self.address)
+            if message.sender is None:
+                message.sender = self.address
+            reply_set.add_future_reply(proxy.send_future(message))
         return reply_set
+
+    def wait_message(self, agent_id: str, *, timeout: float | None = None) -> bool:
+        return self._require_mailbox(agent_id).wait_message(timeout)
+
+    def notify_message(self, agent_id: str) -> None:
+        self._require_mailbox(agent_id).notify_message()
+
+    def notify_all_messages(self, agent_id: str) -> None:
+        self._require_mailbox(agent_id).notify_all_messages()
+
+    def mailbox_status(self, agent_id: str) -> dict[str, int]:
+        return self._require_mailbox(agent_id).status().to_wire()
+
+    def _require_mailbox(self, agent_id: str) -> MessageMailbox:
+        with self._lock:
+            mailbox = self._mailboxes.get(agent_id)
+        if mailbox is None:
+            raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+        return mailbox
 
     def _retract_to(self, agent_id: str, target: str) -> PagletProxy:
         agent = self._require_agent(agent_id)
@@ -444,11 +601,11 @@ class Host:
             reason="retract",
         )
         agent.on_reverting(event)
+        self._cleanup_agent_resources(agent, reason="retract")
         envelope = self._make_envelope(agent, "retract", target_info)
         response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
-        with self._lock:
-            if self._agents.get(agent_id) is agent:
-                self._agents.pop(agent_id, None)
+        self._remove_active_agent(agent_id, agent)
+        self._emit("retract", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
 
     def _receive_envelope(
@@ -457,6 +614,19 @@ class Host:
         *,
         inactive_record: InactiveRecord | None = None,
     ) -> PagletProxy:
+        if inactive_record is None and self._arrival_mode(envelope) == "inactive":
+            record = self._inactive_arrival_record(envelope)
+            self._write_inactive_record(record)
+            with self._lock:
+                self._inactive[record.agent_id] = record
+            self._emit(
+                "arrival",
+                agent_id=record.agent_id,
+                class_name=record.envelope.agent_class_name,
+                data={"active": False, "kind": envelope.kind},
+            )
+            return PagletProxy(self.address, record.agent_id, self.client)
+
         agent_cls = resolve_qualified_name(envelope.agent_class_name)
         state_cls = resolve_qualified_name(envelope.state_class_name)
         if not issubclass(agent_cls, Paglet):
@@ -480,6 +650,7 @@ class Host:
             )
             agent.on_arrival(event)
             agent.run()
+            self._emit("arrival", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__), data={"kind": envelope.kind})
         elif envelope.kind == "clone":
             event = CloneEvent(
                 agent_id=agent.agent_id,
@@ -494,6 +665,7 @@ class Host:
             )
             agent.on_clone(event)
             agent.run()
+            self._emit("clone", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__), data={"source_agent_id": envelope.clone_of})
         elif envelope.kind == "activation":
             event = PersistencyEvent(
                 agent_id=agent.agent_id,
@@ -520,6 +692,99 @@ class Host:
         state = dataclass_from_wire(state_cls, payload.get("state") or {})
         return self.create(agent_cls, state, init=payload.get("init"), agent_id=payload.get("agent_id"))
 
+    def _prepare_ticket(self, target: str | TransferTicket) -> TransferTicket:
+        ticket = TransferTicket.from_target(target)
+        return replace(ticket, destination=self.mesh.resolve_url(ticket.destination).rstrip("/"))
+
+    def _preflight_transfer(self, ticket: TransferTicket) -> dict[str, Any]:
+        url = ticket.destination.rstrip("/")
+        try:
+            info = self.health() if url == self.address.rstrip("/") else self.client.get_json(
+                f"{url}/health",
+                timeout=ticket.timeout,
+            )
+        except Exception as exc:
+            self._emit("transfer-failed", data={"destination": url, "stage": "preflight"}, error=str(exc))
+            raise TransferError(f"Could not preflight transfer target {url}: {exc}") from exc
+        code_version = str(info.get("code_version") or "")
+        if ticket.expected_code_version is not None and code_version != ticket.expected_code_version:
+            message = (
+                f"Transfer target {url} has code version {code_version!r}, "
+                f"expected {ticket.expected_code_version!r}"
+            )
+            self._emit("transfer-failed", data={"destination": url, "stage": "preflight"}, error=message)
+            raise TransferError(message)
+        capabilities = {str(item) for item in info.get("capabilities", [])}
+        missing = [capability for capability in ticket.required_capabilities if capability not in capabilities]
+        if missing:
+            message = f"Transfer target {url} is missing capabilities: {', '.join(missing)}"
+            self._emit("transfer-failed", data={"destination": url, "stage": "preflight"}, error=message)
+            raise TransferError(message)
+        return {
+            "name": str(info.get("name") or urlparse(url).netloc or url),
+            "address": str(info.get("address") or url).rstrip("/"),
+            "code_version": code_version,
+            "capabilities": sorted(capabilities),
+        }
+
+    def _post_envelope_with_ticket(
+        self,
+        ticket: TransferTicket,
+        target_info: dict[str, Any],
+        envelope: PagletEnvelope,
+    ) -> dict[str, Any]:
+        url = f"{str(target_info['address']).rstrip('/')}/agents"
+        attempts = max(0, ticket.retries) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return self.client.post_json(url, {"envelope": envelope.to_wire()}, timeout=ticket.timeout)
+            except Exception as exc:
+                last_error = exc
+                self._emit(
+                    "transfer-failed",
+                    agent_id=envelope.agent_id,
+                    class_name=envelope.agent_class_name,
+                    data={"destination": target_info["address"], "attempt": attempt + 1, "attempts": attempts},
+                    error=str(exc),
+                )
+                if attempt + 1 < attempts:
+                    time.sleep(max(0.0, ticket.retry_interval))
+        raise TransferError(f"Transfer to {target_info['address']} failed after {attempts} attempt(s): {last_error}")
+
+    def _cleanup_agent_resources(self, agent: Paglet, *, reason: str) -> None:
+        agent.resources.cleanup(reason=reason)
+
+    def _arrival_mode(self, envelope: PagletEnvelope) -> str:
+        ticket = envelope.metadata.get("transfer_ticket")
+        if isinstance(ticket, dict):
+            return str(ticket.get("arrival_mode") or "activate")
+        return "activate"
+
+    def _inactive_arrival_record(self, envelope: PagletEnvelope) -> InactiveRecord:
+        activation_envelope = PagletEnvelope(
+            kind="activation",
+            agent_id=envelope.agent_id,
+            agent_class_name=envelope.agent_class_name,
+            state_class_name=envelope.state_class_name,
+            state=dict(envelope.state),
+            source_host_name=envelope.source_host_name,
+            source_host_address=envelope.source_host_address,
+            target_host_name=self.name,
+            target_host_address=self.address,
+            clone_of=envelope.clone_of,
+            metadata=dict(envelope.metadata),
+        )
+        return InactiveRecord(
+            envelope=activation_envelope,
+            policy=DeactivationPolicy(),
+            request=DeactivationRequest(
+                reason=f"{envelope.kind}-arrival",
+                source="transfer",
+                metadata={"arrival_mode": "inactive"},
+            ),
+        )
+
     def _current_or_last_proxy(self, agent: Paglet) -> PagletProxy:
         proxy = self.get_proxy(agent.agent_id)
         if proxy is not None:
@@ -530,9 +795,29 @@ class Host:
         raise InvalidAgentError(f"Paglet {agent.agent_id!r} moved or disappeared without a proxy")
 
     def _register(self, agent: Paglet) -> None:
-        agent._attach(PagletContext(self))
+        agent._attach(PagletContext(self, agent.agent_id))
+        mailbox = MessageMailbox(
+            agent.agent_id,
+            lambda message, oneway, agent_id=agent.agent_id: self._deliver_active_message(agent_id, message, oneway=oneway),
+        )
         with self._lock:
+            old_mailbox = self._mailboxes.pop(agent.agent_id, None)
             self._agents[agent.agent_id] = agent
+            self._mailboxes[agent.agent_id] = mailbox
+        if old_mailbox is not None:
+            old_mailbox.close()
+
+    def _remove_active_agent(self, agent_id: str, expected: Paglet | None = None) -> None:
+        with self._lock:
+            current = self._agents.get(agent_id)
+            if expected is not None and current is not expected:
+                return
+            self._agents.pop(agent_id, None)
+            mailbox = self._mailboxes.pop(agent_id, None)
+        if mailbox is not None:
+            mailbox.close()
+        for record in self._services.remove_agent(agent_id):
+            self._emit("service-remove", agent_id=agent_id, service_name=record.name)
 
     def _require_agent(self, agent_id: str) -> Paglet:
         with self._lock:
@@ -545,11 +830,15 @@ class Host:
         self,
         agent: Paglet,
         kind: str,
-        target_info: dict[str, str],
+        target_info: dict[str, Any],
         *,
         agent_id: str | None = None,
         clone_of: str | None = None,
+        ticket: TransferTicket | None = None,
     ) -> PagletEnvelope:
+        metadata: dict[str, Any] = {}
+        if ticket is not None:
+            metadata["transfer_ticket"] = ticket.to_wire()
         return PagletEnvelope(
             kind=kind,  # type: ignore[arg-type]
             agent_id=agent_id or agent.agent_id,
@@ -561,6 +850,7 @@ class Host:
             target_host_name=target_info["name"],
             target_host_address=target_info["address"],
             clone_of=clone_of,
+            metadata=metadata,
         )
 
     def _host_info(self, target: str) -> dict[str, str]:
@@ -575,6 +865,7 @@ class Host:
             return {"name": parsed.netloc or url, "address": url}
 
     def _summary(self, agent: Paglet) -> dict[str, Any]:
+        mailbox = self._mailboxes.get(agent.agent_id)
         return {
             "agent_id": agent.agent_id,
             "class_name": qualified_name(agent.__class__),
@@ -582,6 +873,8 @@ class Host:
             "host": self.name,
             "address": self.address,
             "active": True,
+            "mailbox": mailbox.status().to_wire() if mailbox is not None else None,
+            "resources": agent.resources.status(),
         }
 
     def _inactive_summary(self, record: InactiveRecord) -> dict[str, Any]:
@@ -607,6 +900,10 @@ class Host:
                     "address": self.address,
                     "active": True,
                     "state": dataclass_to_wire(agent.state),
+                    "mailbox": self._mailboxes[agent_id].status().to_wire()
+                    if agent_id in self._mailboxes
+                    else None,
+                    "resources": agent.resources.status(),
                 }
             inactive = self._inactive.get(agent_id)
             if inactive is not None:
@@ -754,6 +1051,29 @@ class Host:
         record.queued_messages.extend(messages)
         self._write_inactive_record(record)
 
+    def _emit(
+        self,
+        kind: str,
+        *,
+        agent_id: str | None = None,
+        class_name: str | None = None,
+        message_id: str | None = None,
+        service_name: str | None = None,
+        data: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> ContextEvent:
+        return self._events.emit(
+            kind=kind,
+            host_name=self.name,
+            host_address=self.address,
+            agent_id=agent_id,
+            class_name=class_name,
+            message_id=message_id,
+            service_name=service_name,
+            data=data or {},
+            error=error,
+        )
+
     @staticmethod
     def _safe_host_name(name: str) -> str:
         return "".join(char if char.isalnum() or char in "._-" else "_" for char in name) or "host"
@@ -805,6 +1125,24 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return {"hosts": [ref.to_wire() for ref in host.list_hosts(include_self=True)]}
         if method == "POST" and parts == ["hosts", "join"]:
             return {"hosts": [ref.to_wire() for ref in host.join_mesh(payload)]}
+        if method == "GET" and parts == ["events"]:
+            since = int((query.get("since") or ["0"])[0])
+            limit = int((query.get("limit") or ["100"])[0])
+            return {"events": [event.to_wire() for event in host.list_events(since=since, limit=limit)]}
+        if method == "GET" and parts == ["services"]:
+            name = (query.get("name") or [None])[0]
+            capability = (query.get("capability") or [None])[0]
+            scope = (query.get("scope") or ["local"])[0]
+            if scope == "mesh":
+                records = host._services.lookup_all(name, capability, scope="mesh")
+            else:
+                records = host._services.lookup_all(name, capability)
+            return {
+                "services": [
+                    record.to_wire()
+                    for record in records
+                ]
+            }
         if method == "GET" and parts == ["agents"]:
             state = (query.get("state") or ["active"])[0]
             if state == "all":
@@ -845,10 +1183,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     )
                     return {"result": result}
                 if action == "dispatch":
-                    proxy = host.dispatch(agent_id, payload["target"])
+                    target = TransferTicket.from_wire(payload["ticket"]) if "ticket" in payload else payload["target"]
+                    proxy = host.dispatch(agent_id, target)
                     return {"proxy": proxy.to_wire()}
                 if action == "clone":
-                    proxy = host.clone(agent_id, target=payload.get("target"))
+                    if "ticket" in payload:
+                        proxy = host.clone(agent_id, target=TransferTicket.from_wire(payload["ticket"]))
+                    else:
+                        proxy = host.clone(agent_id, target=payload.get("target"))
                     return {"proxy": proxy.to_wire()}
                 if action == "retract":
                     proxy = host._retract_to(agent_id, payload["target"])
@@ -862,6 +1204,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if action == "dispose":
                     host.dispose(agent_id)
                     return {"ok": True}
+                if action == "services":
+                    record = host.advertise_service(
+                        agent_id,
+                        str(payload["name"]),
+                        capabilities=payload.get("capabilities"),
+                        metadata=payload.get("metadata"),
+                        scope=str(payload.get("scope") or "local"),  # type: ignore[arg-type]
+                        ttl=float(payload["ttl"]) if payload.get("ttl") is not None else None,
+                    )
+                    return {"service": record.to_wire()}
+                if action == "unadvertise-service":
+                    removed = host.unadvertise_service(str(payload["name"]), agent_id=agent_id)
+                    return {"services": [record.to_wire() for record in removed]}
 
         raise HostError(f"No route for {method} {path}")
 

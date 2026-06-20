@@ -10,11 +10,15 @@ from .errors import HostError, NotHandledError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .messages import Message, ReplySet
 from .persistency import DeactivationPolicy, DeactivationRequest
+from .resources import ResourceRegistry
 
 if TYPE_CHECKING:  # pragma: no cover
     from .host import Host
     from .mesh import HostRef
     from .proxy import PagletProxy
+    from .references import PagletProxyRef
+    from .services import ServiceRecord, ServiceScope
+    from .transfer import TransferTicket
 
 
 ACTIVE = 0x1
@@ -42,8 +46,9 @@ StateT = TypeVar("StateT", bound=PagletState)
 class PagletContext:
     """Host-provided environment visible to a running paglet."""
 
-    def __init__(self, host: "Host"):
+    def __init__(self, host: "Host", agent_id: str | None = None):
         self._host = host
+        self._agent_id = agent_id
 
     @property
     def name(self) -> str:
@@ -56,6 +61,10 @@ class PagletContext:
     @property
     def host(self) -> "Host":
         return self._host
+
+    @property
+    def agent_id(self) -> str | None:
+        return self._agent_id
 
     def get_proxy(self, agent_id: str, host_url: str | None = None) -> "PagletProxy | None":
         if host_url is None or host_url.rstrip("/") == self.address.rstrip("/"):
@@ -85,10 +94,10 @@ class PagletContext:
             return self._host.create_remote(host_url, agent_cls, state, init=init)
         return self._host.create(agent_cls, state, init=init)
 
-    def dispatch(self, agent_id: str, target: str) -> "PagletProxy":
+    def dispatch(self, agent_id: str, target: str | "TransferTicket") -> "PagletProxy":
         return self._host.dispatch(agent_id, target)
 
-    def clone(self, agent_id: str, target: str | None = None) -> "PagletProxy":
+    def clone(self, agent_id: str, target: str | "TransferTicket" | None = None) -> "PagletProxy":
         return self._host.clone(agent_id, target=target)
 
     def deactivate(
@@ -116,14 +125,69 @@ class PagletContext:
     def clone_to(self, agent_id: str, name_or_url: str) -> "PagletProxy":
         return self.clone(agent_id, self._host.mesh.resolve_url(name_or_url))
 
-    def send(self, target_agent_id: str, kind: str, args: dict[str, Any] | None = None, *, host_url: str | None = None) -> Any:
+    def send(self, target_agent_id: str, message: Message, *, host_url: str | None = None) -> Any:
         proxy = self.get_proxy(target_agent_id, host_url)
         if proxy is None:
             raise HostError(f"No such local paglet: {target_agent_id}")
-        return proxy.send_message(kind, args or {}, sender=self.address)
+        if message.sender is None:
+            message.sender = self.address
+        return proxy.send(message)
 
     def multicast(self, kind: str | Message, args: dict[str, Any] | None = None, *, exclude: set[str] | None = None) -> ReplySet:
         return self._host.multicast_message(kind, args, exclude=exclude)
+
+    def advertise_service(
+        self,
+        name: str,
+        *,
+        capabilities: list[str] | tuple[str, ...] | None = None,
+        metadata: dict[str, Any] | None = None,
+        scope: "ServiceScope" = "local",
+        ttl: float | None = None,
+        agent_id: str | None = None,
+    ) -> "ServiceRecord":
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("advertise_service requires an attached paglet or explicit agent_id")
+        return self._host.advertise_service(
+            owner_id,
+            name,
+            capabilities=capabilities,
+            metadata=metadata,
+            scope=scope,
+            ttl=ttl,
+        )
+
+    def unadvertise_service(self, name: str, *, agent_id: str | None = None) -> list["ServiceRecord"]:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("unadvertise_service requires an attached paglet or explicit agent_id")
+        return self._host.unadvertise_service(name, agent_id=owner_id)
+
+    def lookup_service(
+        self,
+        name: str,
+        *,
+        capability: str | None = None,
+        scope: "ServiceScope" = "local",
+    ) -> "PagletProxyRef | None":
+        record = self._host.lookup_service(name, capability=capability, scope=scope)
+        return record.proxy if record is not None else None
+
+    def lookup_services(
+        self,
+        name: str | None = None,
+        *,
+        capability: str | None = None,
+        scope: "ServiceScope" = "local",
+    ) -> list["ServiceRecord"]:
+        return self._host.lookup_services(name, capability=capability, scope=scope)
+
+    def resources(self, agent_id: str | None = None) -> ResourceRegistry:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("resources requires an attached paglet or explicit agent_id")
+        return self._host.resources_for(owner_id)
 
 
 class Paglet(Generic[StateT]):
@@ -149,6 +213,7 @@ class Paglet(Generic[StateT]):
         self.state: StateT = state
         self._context: PagletContext | None = None
         self._last_proxy: PagletProxy | None = None
+        self.resources = ResourceRegistry()
 
     @classmethod
     def state_class(cls) -> type[StateT]:
@@ -169,12 +234,12 @@ class Paglet(Generic[StateT]):
         self._context = context
 
     # Convenience operations available from inside lifecycle/message handlers.
-    def dispatch(self, target: str) -> "PagletProxy":
+    def dispatch(self, target: str | "TransferTicket") -> "PagletProxy":
         proxy = self.context.dispatch(self.agent_id, target)
         self._last_proxy = proxy
         return proxy
 
-    def clone(self, target: str | None = None) -> "PagletProxy":
+    def clone(self, target: str | "TransferTicket" | None = None) -> "PagletProxy":
         proxy = self.context.clone(self.agent_id, target)
         self._last_proxy = proxy
         return proxy
@@ -208,12 +273,60 @@ class Paglet(Generic[StateT]):
         self._last_proxy = proxy
         return proxy
 
-    def send(self, target_agent_id: str, kind: str, args: dict[str, Any] | None = None, *, host_url: str | None = None) -> Any:
-        return self.context.send(target_agent_id, kind, args or {}, host_url=host_url)
+    def send(self, target_agent_id: str, message: Message, *, host_url: str | None = None) -> Any:
+        return self.context.send(target_agent_id, message, host_url=host_url)
 
     def multicast(self, kind: str | Message, args: dict[str, Any] | None = None, *, include_self: bool = True) -> ReplySet:
         exclude = None if include_self else {self.agent_id}
         return self.context.multicast(kind, args, exclude=exclude)
+
+    def wait_message(self, timeout: float | None = None) -> bool:
+        return self.context.host.wait_message(self.agent_id, timeout=timeout)
+
+    def notify_message(self) -> None:
+        self.context.host.notify_message(self.agent_id)
+
+    def notify_all_messages(self) -> None:
+        self.context.host.notify_all_messages(self.agent_id)
+
+    def advertise_service(
+        self,
+        name: str,
+        *,
+        capabilities: list[str] | tuple[str, ...] | None = None,
+        metadata: dict[str, Any] | None = None,
+        scope: "ServiceScope" = "local",
+        ttl: float | None = None,
+    ) -> "ServiceRecord":
+        return self.context.advertise_service(
+            name,
+            capabilities=capabilities,
+            metadata=metadata,
+            scope=scope,
+            ttl=ttl,
+            agent_id=self.agent_id,
+        )
+
+    def unadvertise_service(self, name: str) -> list["ServiceRecord"]:
+        return self.context.unadvertise_service(name, agent_id=self.agent_id)
+
+    def lookup_service(
+        self,
+        name: str,
+        *,
+        capability: str | None = None,
+        scope: "ServiceScope" = "local",
+    ) -> "PagletProxyRef | None":
+        return self.context.lookup_service(name, capability=capability, scope=scope)
+
+    def lookup_services(
+        self,
+        name: str | None = None,
+        *,
+        capability: str | None = None,
+        scope: "ServiceScope" = "local",
+    ) -> list["ServiceRecord"]:
+        return self.context.lookup_services(name, capability=capability, scope=scope)
 
     @staticmethod
     def not_handled() -> _NotHandled:

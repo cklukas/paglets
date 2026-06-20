@@ -51,7 +51,7 @@ def main() -> None:
         first = alpha.create(FirstPaglet, FirstState())
         vanilla = alpha.create(VanillaPaglet, VanillaState())
 
-        print(first.send_message("log")[0])
+        print(first.send(Message("log"))[0])
         print(f"vanilla exists with id {vanilla.agent_id} on {vanilla.host_url}")
 
 

@@ -94,20 +94,20 @@ def test_create_and_synchronous_messages_use_dataclass_state(two_hosts):
 
     proxy = alpha.create(TravelAgent, TravelState(), init="seed")
 
-    assert proxy.send_message("remember", {"value": "hello"}) == "remembered:hello"
+    assert proxy.send(Message("remember", {"value": "hello"})) == "remembered:hello"
     state = alpha.get_state(proxy.agent_id, TravelState)
     assert state.last_message == "hello"
     assert state.events == ["created:alpha:seed", "run:alpha"]
 
     with pytest.raises(NotHandledError):
-        proxy.send_message("unknown")
+        proxy.send(Message("unknown"))
 
 
 def test_dispatch_moves_agent_state_between_two_hosts(two_hosts):
     alpha, beta = two_hosts
     proxy = alpha.create(TravelAgent, TravelState(), init="seed")
 
-    remote_proxy_wire = proxy.send_message("go", {"target": beta.address})
+    remote_proxy_wire = proxy.send(Message("go", {"target": beta.address}))
 
     assert remote_proxy_wire["agent_id"] == proxy.agent_id
     assert alpha.get_proxy(proxy.agent_id) is None
@@ -151,7 +151,7 @@ def test_clone_copies_dataclass_state_and_fires_original_and_clone_events(two_ho
 def test_retract_pulls_a_remote_agent_back_to_the_requesting_host(two_hosts):
     alpha, beta = two_hosts
     proxy = alpha.create(TravelAgent, TravelState(), init="seed")
-    proxy.send_message("go", {"target": beta.address})
+    proxy.send(Message("go", {"target": beta.address}))
 
     returned_proxy = alpha.retract(beta.address, proxy.agent_id)
 

@@ -40,12 +40,12 @@ def main() -> None:
             alpha.create(EchoAgent, EchoState(name="three")),
         ]
 
-        future = proxies[0].send_future_message(Message("echo", arg="future"))
+        future = proxies[0].send_future(Message("echo", arg="future"))
         print("future:", future.get_reply(timeout=2))
 
         reply_set = ReplySet(
             [
-                proxy.send_future_message("echo", {"value": "reply-set"})
+                proxy.send_future(Message("echo", {"value": "reply-set"}))
                 for proxy in proxies
             ]
         )

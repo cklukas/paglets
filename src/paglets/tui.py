@@ -16,6 +16,7 @@ from .admin import (
     PagletsAdminClient,
     ServerRef,
     ServerStatus,
+    ServiceSummary,
     TuiConfig,
     can_start_local_server,
     is_local_server_url,
@@ -29,6 +30,7 @@ from .admin import (
     upsert_server_ref,
 )
 from .discovery import AgentClassRecord, discover_agent_classes
+from .messages import Message
 
 
 ALL_SERVERS_KEY = "__all__"
@@ -323,6 +325,8 @@ def create_tui_app(
             self.refresh_interval = interval
             self.server_statuses = {}
             self.agent_cache: dict[str, list[AgentRecord]] = {}
+            self.service_cache: dict[str, list[ServiceSummary]] = {}
+            self.event_cache: dict[str, list[dict[str, Any]]] = {}
             self.host_cache = {}
             self.agent_rows: dict[str, AgentRecord] = {}
             self.selected_server = ALL_SERVERS_KEY
@@ -383,6 +387,8 @@ def create_tui_app(
                     continue
                 try:
                     self.agent_cache[server.name] = self.admin.list_agents(server)
+                    self.service_cache[server.name] = self.admin.list_services(server)
+                    self.event_cache[server.name] = self.admin.list_events(server, limit=5)
                     self.host_cache[server.name] = self.admin.list_hosts(server)
                 except Exception as exc:
                     self.server_statuses[server.name] = self.server_statuses.get(server.name) or ServerStatus(
@@ -502,6 +508,25 @@ def create_tui_app(
                                 f"  {other.name}: {other.code_version} at {other.url}"
                                 for other in mismatches
                             )
+                        services = self.service_cache.get(server.name, [])
+                        lines.append("Services:")
+                        if services:
+                            lines.extend(
+                                f"  {service.name}: {service.agent_id[:12]} "
+                                f"({', '.join(service.capabilities) or '-'})"
+                                for service in services
+                            )
+                        else:
+                            lines.append("  -")
+                        events = self.event_cache.get(server.name, [])
+                        lines.append("Recent events:")
+                        if events:
+                            lines.extend(
+                                f"  #{event.get('event_id')}: {event.get('kind')}"
+                                for event in events[-5:]
+                            )
+                        else:
+                            lines.append("  -")
                     else:
                         lines.extend(["Status: down", f"Error: {status.error}"])
                         if self.server_start_available(server):
@@ -784,11 +809,13 @@ def create_tui_app(
             if not values:
                 return
             try:
-                result = self.admin.send_message(
+                result = self.admin.send(
                     agent,
-                    values["kind"].strip(),
-                    _json_or_empty(values["args"], {}),
-                    arg=_json_or_empty(values["arg"], None),
+                    Message(
+                        values["kind"].strip(),
+                        _json_or_empty(values["args"], {}),
+                        arg=_json_or_empty(values["arg"], None),
+                    ),
                     oneway=values["oneway"].strip().lower() in {"1", "true", "yes", "on"},
                     activate_if_inactive=values["activate_if_inactive"].strip().lower()
                     in {"1", "true", "yes", "on"},

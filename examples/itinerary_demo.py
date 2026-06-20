@@ -108,7 +108,7 @@ def main() -> None:
     with local_hosts("alpha", "beta") as hosts:
         alpha, beta = hosts
         proxy = alpha.create(CirculateAgent, CirculateState(itinerary=build_plan(alpha, beta)))
-        proxy.send_message("start")
+        proxy.send(Message("start"))
 
         found = find_state(hosts, proxy.agent_id)
         if found is None:

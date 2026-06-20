@@ -9,7 +9,7 @@ import subprocess
 import sys
 from time import perf_counter
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from .client import HostClient
 from .errors import RemoteHostError
@@ -60,6 +60,16 @@ class AgentRecord:
     class_name: str
     state_class_name: str
     active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceSummary:
+    server_name: str
+    name: str
+    host_url: str
+    agent_id: str
+    capabilities: tuple[str, ...]
+    scope: str
 
 
 def normalize_server_url(url: str) -> str:
@@ -355,18 +365,15 @@ class PagletsAdminClient:
                 hosts.append(HostRef.from_wire(item))
         return hosts
 
-    def send_message(
+    def send(
         self,
         agent: AgentRecord,
-        kind: str,
-        args: dict[str, Any] | None = None,
+        message: Message,
         *,
-        arg: Any = None,
         oneway: bool = False,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
     ) -> Any:
-        message = Message(kind=kind, args=args or {}, arg=arg)
         payload = {
             "message": message.to_wire(),
             "oneway": oneway,
@@ -378,6 +385,42 @@ class PagletsAdminClient:
             payload,
         )
         return response.get("result")
+
+    def list_services(
+        self,
+        server: ServerRef,
+        *,
+        name: str | None = None,
+        capability: str | None = None,
+        scope: str = "local",
+    ) -> list[ServiceSummary]:
+        query: dict[str, str] = {}
+        if name:
+            query["name"] = name
+        if capability:
+            query["capability"] = capability
+        if scope:
+            query["scope"] = scope
+        suffix = f"?{urlencode(query)}" if query else ""
+        payload = self.client.get_json(f"{server.url}/services{suffix}")
+        services: list[ServiceSummary] = []
+        for item in payload.get("services", []):
+            proxy = item.get("proxy") or {}
+            services.append(
+                ServiceSummary(
+                    server_name=server.name,
+                    name=str(item["name"]),
+                    host_url=str(proxy.get("host_url") or item.get("host_url") or server.url),
+                    agent_id=str(proxy.get("agent_id") or ""),
+                    capabilities=tuple(str(value) for value in item.get("capabilities", [])),
+                    scope=str(item.get("scope") or "local"),
+                )
+            )
+        return services
+
+    def list_events(self, server: ServerRef, *, since: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+        payload = self.client.get_json(f"{server.url}/events?{urlencode({'since': since, 'limit': limit})}")
+        return [dict(item) for item in payload.get("events", [])]
 
     def create_agent(
         self,

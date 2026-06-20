@@ -12,7 +12,10 @@ The runtime intentionally uses a Python-friendly mobility model:
 - lifecycle hooks resume behavior after create, dispatch, clone, retract, or
   activation;
 - deactivation persists inactive paglets to disk until activation;
-- agents communicate through `PagletProxy` and `Message`.
+- agents communicate through `PagletProxy`, `Message`, and per-paglet
+  mailboxes;
+- service discovery, transfer tickets, proxy references, context events, and
+  resource cleanup are first-class framework features.
 
 ## Quick Start
 

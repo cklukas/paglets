@@ -125,8 +125,8 @@ def test_context_helpers_resolve_named_hosts_for_dispatch_and_clone():
 
         hosts = agent.context.available_hosts()
         beta_ref = agent.context.wait_for_host("beta", timeout=0.5)
-        clone_proxy = proxy.send_message("clone_named", {"target": "beta"})
-        moved_proxy = proxy.send_message("dispatch_named", {"target": "beta"})
+        clone_proxy = proxy.send(Message("clone_named", {"target": "beta"}))
+        moved_proxy = proxy.send(Message("dispatch_named", {"target": "beta"}))
     finally:
         beta.stop()
         alpha.stop()

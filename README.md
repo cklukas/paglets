@@ -10,7 +10,7 @@ Aglets was a Java mobile-agent system from the mid-1990s, developed when Java's
 portable bytecode, object serialization, applets, and network APIs made it
 plausible to treat programs as objects that could move between networked hosts.
 An aglet was not just a remote procedure call or a batch job. It was an object
-with identity, state, lifecycle callbacks, a mailbox-like message interface, and
+with identity, state, lifecycle callbacks, a mailbox-backed message interface, and
 a proxy through which other code interacted with it. The original idea was that
 computation could travel to the place where data, services, or users were,
 continue there, and later move again.
@@ -233,7 +233,7 @@ class Traveller(Paglet[TravellerState]):
 Start two hosts in one Python process for local development:
 
 ```python
-from paglets import Host
+from paglets import Host, Message
 
 alpha = Host("alpha", port=8765)
 beta = Host("beta", port=8766)
@@ -241,7 +241,7 @@ alpha.start_background()
 beta.start_background()
 
 proxy = alpha.create(Traveller, TravellerState())
-proxy.send_message("go", {"target": beta.address})
+proxy.send(Message("go", {"target": beta.address}))
 ```
 
 The agent with the same `agent_id` is removed from `alpha`, reconstructed on
@@ -273,12 +273,13 @@ def handle_message(self, message): ... # message event handler
 public control handle, mirroring Aglets' proxy idea:
 
 ```python
-proxy.send_message("kind", {"x": 1})       # synchronous reply
-proxy.send_oneway_message("kind", {...})   # no reply
-future = proxy.send_future_message("kind", {...})
+proxy.send(Message("kind", {"x": 1}))       # synchronous reply
+proxy.send_oneway(Message("kind", {...}))   # no reply
+future = proxy.send_future(Message("kind", {...}))
 future.get_reply(timeout=2)
 remote_proxy = proxy.dispatch(beta.address)
 clone_proxy = proxy.clone(target=beta.address)
+proxy_ref = proxy.ref()
 proxy.deactivate()
 proxy.activate()
 proxy.dispose()
@@ -324,7 +325,7 @@ When activation on message is disabled, normal messages are queued and return a
 queued acknowledgement. Use `no_delay=True` to fail fast instead:
 
 ```python
-proxy.send_message("status", no_delay=True)
+proxy.send(Message("status"), no_delay=True)
 ```
 
 CLI hosts persist inactive paglets under
@@ -347,6 +348,57 @@ For future replies and multicast:
 reply_set = alpha.multicast_message("status")
 for future in reply_set:
     print(future.get_reply())
+```
+
+Normal delivery goes through a per-paglet mailbox. Higher-priority queued
+messages are selected before lower-priority queued messages, FIFO is preserved
+within one priority, and `UNQUEUED_PRIORITY` is the explicit immediate bypass.
+Paglets can coordinate mailbox handlers with:
+
+```python
+self.wait_message(timeout=1.0)
+self.notify_message()
+self.notify_all_messages()
+```
+
+## Services, Tickets, Events, And Resources
+
+Paglets can advertise local or mesh-visible services:
+
+```python
+self.advertise_service("quotes", capabilities=("quote",), scope="mesh")
+service_ref = self.lookup_service("quotes", capability="quote", scope="mesh")
+reply = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
+```
+
+Use `TransferTicket` when dispatch or clone needs target checks or inactive
+arrival:
+
+```python
+from paglets import TransferTicket
+
+ticket = TransferTicket(
+    beta.address,
+    required_capabilities=("agents:create",),
+    expected_code_version=alpha.mesh.code_version,
+    arrival_mode="inactive",
+)
+proxy.dispatch(ticket)
+```
+
+Hosts keep an in-memory context event log and accept listeners:
+
+```python
+host.add_listener(lambda event: print(event.kind, event.agent_id))
+events = host.list_events(since=0, limit=100)
+```
+
+Runtime-only resources can be registered for lifecycle cleanup before dispatch,
+deactivate, retract, or dispose:
+
+```python
+self.resources.track_closeable("socket", sock)
+self.resources.register("temporary-file", lambda: path.unlink(), suppress=True)
 ```
 
 ## Itinerary helpers

@@ -90,15 +90,19 @@ sequenceDiagram
     participant H as Host HTTP API
     participant P as Target Paglet
 
-    C->>X: send_message(kind, args)
+    C->>X: send(Message(...))
     X->>H: POST /agents/{id}/messages
+    H->>H: submit to MessageMailbox
     H->>P: handle_message(Message)
     P-->>H: return value
     H-->>X: JSON result
     X-->>C: result
 ```
 
-Message arguments and replies should be JSON-compatible.
+Message arguments and replies should be JSON-compatible. Normal messages enter
+the per-paglet mailbox, where queued work is ordered by priority and FIFO
+within one priority. `UNQUEUED_PRIORITY` bypasses the queue for explicit
+immediate delivery.
 
 ## Host HTTP API
 
@@ -107,6 +111,8 @@ The host API is intentionally small:
 - `GET /health`
 - `GET /hosts`
 - `POST /hosts/join`
+- `GET /events?since=<id>&limit=<n>`
+- `GET /services`
 - `GET /agents?state=active|inactive|all`
 - `POST /agents`
 - `GET /agents/{id}`
@@ -118,6 +124,8 @@ The host API is intentionally small:
 - `POST /agents/{id}/deactivate`
 - `POST /agents/{id}/activate`
 - `POST /agents/{id}/dispose`
+- `POST /agents/{id}/services`
+- `POST /agents/{id}/unadvertise-service`
 
 There is no authentication layer in this first runtime.
 

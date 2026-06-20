@@ -7,14 +7,17 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .errors import InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError
+from .errors import InvalidAgentError, LifecycleError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError, TransferError
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
     "InvalidAgentError": InvalidAgentError,
+    "LifecycleError": LifecycleError,
     "NotHandledError": NotHandledError,
     "PagletInactiveError": PagletInactiveError,
     "RemoteHostError": RemoteHostError,
+    "ResourceCleanupError": LifecycleError,
+    "TransferError": TransferError,
 }
 
 
@@ -24,13 +27,13 @@ class HostClient:
     def __init__(self, timeout: float = 10.0):
         self.timeout = timeout
 
-    def get_json(self, url: str) -> Any:
-        return self._request("GET", url, None)
+    def get_json(self, url: str, *, timeout: float | None = None) -> Any:
+        return self._request("GET", url, None, timeout=timeout)
 
-    def post_json(self, url: str, payload: dict[str, Any]) -> Any:
-        return self._request("POST", url, payload)
+    def post_json(self, url: str, payload: dict[str, Any], *, timeout: float | None = None) -> Any:
+        return self._request("POST", url, payload, timeout=timeout)
 
-    def _request(self, method: str, url: str, payload: dict[str, Any] | None) -> Any:
+    def _request(self, method: str, url: str, payload: dict[str, Any] | None, *, timeout: float | None = None) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         req = Request(
             url,
@@ -39,7 +42,7 @@ class HostClient:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         try:
-            with urlopen(req, timeout=self.timeout) as response:
+            with urlopen(req, timeout=self.timeout if timeout is None else timeout) as response:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw else None
         except HTTPError as exc:

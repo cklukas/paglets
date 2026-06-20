@@ -51,7 +51,7 @@ def test_deactivation_persists_state_and_activation_restores_it(tmp_path: Path):
     host.start_background()
     try:
         proxy = host.create(DurableAgent, DurableState())
-        proxy.send_message("remember", {"value": "before"})
+        proxy.send(Message("remember", {"value": "before"}))
         inactive_proxy = proxy.deactivate()
         inactive_file = persistence_dir / "inactive" / f"{proxy.agent_id}.json"
 
@@ -83,7 +83,7 @@ def test_paglet_can_deactivate_itself_from_message_handler(tmp_path: Path):
     try:
         proxy = host.create(DurableAgent, DurableState())
 
-        reply = proxy.send_message("self_deactivate")
+        reply = proxy.send(Message("self_deactivate"))
 
         assert reply == {"host_url": host.address, "agent_id": proxy.agent_id}
         assert host.get_proxy(proxy.agent_id) is None
@@ -134,7 +134,7 @@ def test_message_to_inactive_paglet_activates_and_delivers_by_default(tmp_path: 
         proxy = host.create(DurableAgent, DurableState())
         proxy.deactivate()
 
-        result = proxy.send_message("remember", {"value": "after"})
+        result = proxy.send(Message("remember", {"value": "after"}))
 
         assert result == "remembered:after"
         assert host.get_state(proxy.agent_id, DurableState).last_message == "after"
@@ -148,7 +148,7 @@ def test_reserved_deactivate_message_deactivates_paglet(tmp_path: Path):
     try:
         proxy = host.create(DurableAgent, DurableState())
 
-        result = proxy.send_message(DEACTIVATE)
+        result = proxy.send(Message(DEACTIVATE))
 
         assert result == {"deactivated": True, "proxy": {"host_url": host.address, "agent_id": proxy.agent_id}}
         assert host.client.get_json(f"{host.address}/agents/{proxy.agent_id}")["active"] is False
@@ -168,12 +168,12 @@ def test_inactive_message_queue_and_no_delay_failure(tmp_path: Path):
             )
         )
 
-        queued = proxy.send_message("remember", {"value": "queued"})
+        queued = proxy.send(Message("remember", {"value": "queued"}))
 
         assert queued["queued"] is True
         assert isinstance(queued["message_id"], str)
         with pytest.raises(PagletInactiveError):
-            proxy.send_message("remember", {"value": "now"}, no_delay=True)
+            proxy.send(Message("remember", {"value": "now"}), no_delay=True)
 
         proxy.activate()
 

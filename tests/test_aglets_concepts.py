@@ -92,13 +92,13 @@ def test_future_reply_and_reply_set_collect_async_message_results():
         first = host.create(EchoAgent, EchoState(label="first"))
         second = host.create(EchoAgent, EchoState(label="second"))
 
-        future = first.send_future_message("echo", {"value": "one"})
+        future = first.send_future(Message("echo", {"value": "one"}))
         assert future.get_reply(timeout=2) == "alpha:first:one"
 
         replies = ReplySet(
             [
-                first.send_future_message("echo", {"value": "two"}),
-                second.send_future_message("echo", {"value": "two"}),
+                first.send_future(Message("echo", {"value": "two"})),
+                second.send_future(Message("echo", {"value": "two"})),
             ]
         )
         assert replies.wait_for_all_replies(timeout=2)
@@ -166,7 +166,7 @@ def test_itinerary_plan_moves_agent_and_preserves_route_progress():
         plan = ItineraryPlan(destinations=[beta.address, alpha.address, beta.address])
         proxy = alpha.create(RouteAgent, RouteState(itinerary=plan))
 
-        proxy.send_message("start")
+        proxy.send(Message("start"))
 
         final_state = beta.get_state(proxy.agent_id, RouteState)
         assert final_state.itinerary.completed is True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState
+from .context_events import ContextEvent, ContextListener
 from .events import CloneEvent, CreationEvent, MobilityEvent, PagletEvent, PersistencyEvent
 from .host import Host
 from .itinerary import (
@@ -38,12 +39,18 @@ from .messages import (
 )
 from .persistency import DeactivationPolicy, DeactivationRequest
 from .proxy import PagletProxy
-from .errors import PagletInactiveError
+from .references import PagletProxyRef
+from .resources import ResourceCleanupError, ResourceRegistry
+from .services import ServiceRecord, ServiceRegistry
+from .transfer import TransferTicket
+from .errors import PagletInactiveError, TransferError
 
 __all__ = [
     "ACTIVE",
     "CLONE",
     "CloneEvent",
+    "ContextEvent",
+    "ContextListener",
     "CreationEvent",
     "DEACTIVATE",
     "DeactivationPolicy",
@@ -74,14 +81,21 @@ __all__ = [
     "PagletEvent",
     "PagletInactiveError",
     "PagletProxy",
+    "PagletProxyRef",
     "PagletState",
     "PersistencyEvent",
     "REENTRANT_PRIORITY",
     "REQUEST_PRIORITY",
     "REVERT",
     "ReplySet",
+    "ResourceCleanupError",
+    "ResourceRegistry",
     "SYNCHRONOUS",
     "SYSTEM_PRIORITY",
+    "ServiceRecord",
+    "ServiceRegistry",
     "TaskItineraryPlan",
+    "TransferError",
+    "TransferTicket",
     "UNQUEUED_PRIORITY",
 ]

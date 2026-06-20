@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from paglets.admin import AgentRecord, PagletsAdminClient, ServerRef
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
-from paglets import Host
+from paglets import Host, Message
 
 
 def test_admin_client_manages_agents_across_two_hosts():
@@ -33,7 +33,7 @@ def test_admin_client_manages_agents_across_two_hosts():
         agent_id = proxy["agent_id"]
         record = _find(admin.list_agents_all(), agent_id, "alpha")
 
-        assert admin.send_message(record, "remember", {"value": "hello"}) == "remembered:hello"
+        assert admin.send(record, Message("remember", {"value": "hello"})) == "remembered:hello"
         assert admin.get_agent_state(record)["state"]["last_message"] == "hello"
 
         clone = admin.clone(record, beta.address)

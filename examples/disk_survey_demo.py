@@ -52,14 +52,16 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
         parent = self.context.get_proxy(self.state.parent_agent_id, self.state.parent_host_url)
         if parent is None:
             return
-        parent.send_message(
-            "child_result",
-            {
-                "host_name": self.state.target_host_name,
-                "host_url": self.state.target_host_url,
-                "child_agent_id": self.agent_id,
-                "volumes": volumes,
-            },
+        parent.send(
+            Message(
+                "child_result",
+                {
+                    "host_name": self.state.target_host_name,
+                    "host_url": self.state.target_host_url,
+                    "child_agent_id": self.agent_id,
+                    "volumes": volumes,
+                },
+            )
         )
 
     def handle_message(self, message: Message):
@@ -227,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
             state = "online" if host_ref.online else "offline"
             print(f"  - {host_ref.name} -> {host_ref.url} ({state}, version {host_ref.code_version})")
 
-        summary = parent.send_message("survey", {"timeout": args.timeout})
+        summary = parent.send(Message("survey", {"timeout": args.timeout}))
         print("\ndiagnostics:")
         for line in summary["diagnostics"]:
             print(f"  - {line}")

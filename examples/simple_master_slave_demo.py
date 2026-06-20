@@ -37,10 +37,7 @@ class SlaveAgent(ItineraryAgentMixin, Paglet[SlaveState]):
         if proxy is None:
             master = self.context.get_proxy(self.state.master_agent_id, self.state.master_host_url)
             if master is not None:
-                master.send_message(
-                    "result",
-                    {"slave": self.agent_id, "observations": list(self.state.observations)},
-                )
+                master.send(Message("result", {"slave": self.agent_id, "observations": list(self.state.observations)}))
 
 
 @dataclass
@@ -82,9 +79,9 @@ def main() -> None:
         alpha, beta, gamma = hosts
         master = alpha.create(MasterAgent, MasterState())
 
-        slave = master.send_message("go", {"destinations": [beta.address, gamma.address, alpha.address]})
+        slave = master.send(Message("go", {"destinations": [beta.address, gamma.address, alpha.address]}))
         print(f"slave completed at {slave['host_url']} with id {slave['agent_id']}")
-        for slave_id, observations in master.send_message("results").items():
+        for slave_id, observations in master.send(Message("results")).items():
             print(f"{slave_id}:")
             for line in observations:
                 print(f"  - {line}")

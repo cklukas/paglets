@@ -56,7 +56,7 @@ def test_agent_can_self_dispatch_through_chain_that_returns_to_same_host():
             ChainAgent,
             ChainState(itinerary=[beta.address, alpha.address, beta.address]),
         )
-        returned = proxy.send_message("start")
+        returned = proxy.send(Message("start"))
 
         assert returned == {"host_url": beta.address, "agent_id": proxy.agent_id}
         assert alpha.get_proxy(proxy.agent_id) is None

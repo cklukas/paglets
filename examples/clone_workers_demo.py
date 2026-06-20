@@ -70,7 +70,7 @@ def main() -> None:
     beta.start_background()
     try:
         proxy = alpha.create(SumWorkerAgent, SumState(numbers=list(range(1, 11))))
-        reply = proxy.send_message("split", {"target": beta.address})
+        reply = proxy.send(Message("split", {"target": beta.address}))
         time.sleep(0.2)
 
         original_state = alpha.get_state(reply["original"]["agent_id"], SumState)

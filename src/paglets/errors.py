@@ -33,3 +33,7 @@ class NotHandledError(PagletError):
 
 class LifecycleError(PagletError):
     """Raised when a lifecycle operation fails."""
+
+
+class TransferError(PagletError):
+    """Raised when a paglet transfer cannot complete."""

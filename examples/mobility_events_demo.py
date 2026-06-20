@@ -58,7 +58,7 @@ def main() -> None:
         remote = proxy.dispatch(beta.address)
         returned = alpha.retract(beta.address, remote.agent_id)
 
-        print(returned.send_message("history"))
+        print(returned.send(Message("history")))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ def test_default_examples_discovery_finds_paglet_classes():
     assert "examples.start_hello_demo:FirstPaglet" in class_names
     assert "examples.start_hello_demo:VanillaPaglet" in class_names
     assert "examples.mobility_events_demo:MobilityEventsPaglet" in class_names
-    assert "examples.finder_demo:FinderPaglet" in class_names
+    assert "examples.finder_demo:TravellerPaglet" in class_names
     assert "examples.itinerary_demo:CirculateAgent" in class_names
     assert "examples.clone_workers_demo:SumWorkerAgent" in class_names
     assert "examples.simple_master_slave_demo:MasterAgent" in class_names

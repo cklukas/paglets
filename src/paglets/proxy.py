@@ -11,6 +11,8 @@ from .client import HostClient
 from .errors import PagletError
 from .messages import FUTURE, ONEWAY, FutureReply, Message
 from .persistency import DeactivationPolicy, DeactivationRequest
+from .references import PagletProxyRef
+from .transfer import TransferTicket
 
 
 def _agent_url(host_url: str, agent_id: str, suffix: str = "") -> str:
@@ -35,6 +37,9 @@ class PagletProxy:
 
     def to_wire(self) -> dict[str, str]:
         return {"host_url": self.host_url, "agent_id": self.agent_id}
+
+    def ref(self) -> PagletProxyRef:
+        return PagletProxyRef.from_proxy(self)
 
     @classmethod
     def from_wire(cls, payload: dict[str, str], client: HostClient | None = None) -> "PagletProxy":
@@ -80,25 +85,10 @@ class PagletProxy:
     def get_agent_id(self) -> str:
         return self.agent_id
 
-    def get_aglet_id(self) -> str:
-        return self.agent_id
-
     def get_agent_class_name(self) -> str:
         return str(self.info()["class_name"])
 
-    def get_aglet_class_name(self) -> str:
-        return self.get_agent_class_name()
-
-    def send_message(
-        self,
-        kind: str | Message,
-        args: dict[str, Any] | None = None,
-        *,
-        activate_if_inactive: bool = True,
-        no_delay: bool = False,
-        **kwargs: Any,
-    ) -> Any:
-        message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
+    def send(self, message: Message, *, activate_if_inactive: bool = True, no_delay: bool = False) -> Any:
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/messages"),
             {
@@ -109,16 +99,13 @@ class PagletProxy:
         )
         return response.get("result")
 
-    def send_oneway_message(
+    def send_oneway(
         self,
-        kind: str | Message,
-        args: dict[str, Any] | None = None,
+        message: Message,
         *,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
-        **kwargs: Any,
     ) -> None:
-        message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
         message.message_type = ONEWAY
         self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/messages"),
@@ -130,43 +117,36 @@ class PagletProxy:
             },
         )
 
-    def delegate_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
-        self.send_oneway_message(kind, args, **kwargs)
-
-    def send_future_message(
+    def send_future(
         self,
-        kind: str | Message,
-        args: dict[str, Any] | None = None,
+        message: Message,
         *,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
-        **kwargs: Any,
     ) -> FutureReply:
-        message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
         message.message_type = FUTURE
         return FutureReply(
             _EXECUTOR.submit(
-                self.send_message,
+                self.send,
                 message,
                 activate_if_inactive=activate_if_inactive,
                 no_delay=no_delay,
             )
         )
 
-    def send_async_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> FutureReply:
-        return self.send_future_message(kind, args, **kwargs)
-
-    def dispatch(self, target: str) -> "PagletProxy":
+    def dispatch(self, target: str | TransferTicket) -> "PagletProxy":
+        ticket = TransferTicket.from_target(target)
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/dispatch"),
-            {"target": target},
+            {"ticket": ticket.to_wire()},
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def clone(self, target: str | None = None) -> "PagletProxy":
+    def clone(self, target: str | TransferTicket | None = None) -> "PagletProxy":
+        payload = {"target": None} if target is None else {"ticket": TransferTicket.from_target(target).to_wire()}
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/clone"),
-            {"target": target},
+            payload,
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 

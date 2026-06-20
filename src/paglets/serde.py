@@ -79,6 +79,10 @@ def dataclass_from_wire(cls: type, payload: dict[str, Any]) -> Any:
 
 
 def _to_wire_value(value: Any) -> Any:
+    from .references import PagletProxyRef
+
+    if isinstance(value, PagletProxyRef):
+        return value.to_wire()
     if is_dataclass(value) and not isinstance(value, type):
         return dataclass_to_wire(value)
     if isinstance(value, Enum):
@@ -106,10 +110,14 @@ def _to_wire_value(value: Any) -> Any:
 
 
 def _from_wire_value(annotation: Any, value: Any) -> Any:
+    from .references import PagletProxyRef
+
     if value is None:
         return None
     if annotation is Any or annotation is object:
         return value
+    if annotation is PagletProxyRef:
+        return PagletProxyRef.from_wire(value)
 
     origin = get_origin(annotation)
     args = get_args(annotation)

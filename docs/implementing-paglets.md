@@ -66,22 +66,35 @@ def handle_message(self, message: Message):
 Callers use a proxy:
 
 ```python
-reply = proxy.send_message("status")
+reply = proxy.send(Message("status"))
 ```
 
 Supported communication patterns:
 
-- synchronous replies with `send_message`;
-- fire-and-forget delivery with `send_oneway_message`;
-- future-style replies with `send_future_message`;
+- synchronous replies with `send(Message(...))`;
+- fire-and-forget delivery with `send_oneway(Message(...))`;
+- future-style replies with `send_future(Message(...))`;
 - local broadcast through `context.multicast`.
+
+Normal messages are delivered through the target paglet's mailbox. The mailbox
+selects higher-priority queued messages before lower-priority queued messages
+and keeps FIFO order within one priority. Use `UNQUEUED_PRIORITY` only for the
+explicit immediate bypass.
+
+Paglets can coordinate mailbox handlers:
+
+```python
+self.wait_message(timeout=1.0)
+self.notify_message()
+self.notify_all_messages()
+```
 
 Inactive paglets can still receive messages. By default, the host activates the
 paglet and delivers the message. Use `no_delay=True` when the caller wants a
 fast failure instead of activation or queueing:
 
 ```python
-reply = proxy.send_message("status", no_delay=True)
+reply = proxy.send(Message("status"), no_delay=True)
 ```
 
 ## Move Between Hosts
@@ -103,6 +116,21 @@ When hosts are in the mesh, prefer name-based helpers:
 ```python
 target = self.context.wait_for_host("beta", timeout=5.0)
 self.clone_to(target.name)
+```
+
+Use a `TransferTicket` for preflight checks, retries, or inactive arrival:
+
+```python
+from paglets import TransferTicket
+
+self.dispatch(
+    TransferTicket(
+        "beta",
+        required_capabilities=("agents:create",),
+        expected_code_version=self.context.host.mesh.code_version,
+        arrival_mode="inactive",
+    )
+)
 ```
 
 ## Discover Hosts
@@ -161,22 +189,52 @@ message fails immediately instead.
 
 ## Talk To Resident Services
 
-Today, agent-to-agent communication works when the paglet already has a proxy,
-knows an agent ID, or uses an application-specific registry such as the finder
-demo.
+Advertise a service from the owning paglet:
 
 ```python
-service = self.context.get_proxy(service_agent_id, service_host_url)
-quote = service.send_message("quote", {"from": "FRA", "to": "SFO"})
+self.advertise_service(
+    "flight-ticket",
+    capabilities=("quote", "watch"),
+    metadata={"version": 1},
+    scope="mesh",
+)
 ```
 
-A future first-class service registry could make this more direct:
+Look up a local or mesh-visible service. Lookups return a serializable
+`PagletProxyRef`, which can be stored in dataclass state or resolved to a proxy:
 
 ```python
-# Conceptual future API
-self.context.advertise_service("flight-ticket", capabilities=["quote", "watch"])
-ticket_service = self.context.lookup_service("flight-ticket")
+service_ref = self.lookup_service("flight-ticket", capability="quote", scope="mesh")
+if service_ref is not None:
+    quote = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
 ```
+
+## Observe Context Events
+
+Hosts keep a bounded in-memory context event log and deliver events to
+listeners. Events cover create, arrival, dispatch, clone, retract, deactivate,
+activate, dispose, message delivery/failure, service changes, and transfer
+failures.
+
+```python
+host.add_listener(lambda event: print(event.event_id, event.kind))
+events = host.list_events(since=0, limit=100)
+```
+
+The HTTP API exposes the same log at `GET /events?since=<id>&limit=<n>`.
+
+## Clean Up Runtime Resources
+
+Only dataclass state moves or persists. Register transient resources that need
+cleanup before dispatch, deactivate, retract, or dispose:
+
+```python
+self.resources.track_closeable("socket", sock)
+self.resources.register("temp-file", lambda: path.unlink(), suppress=True)
+```
+
+Cleanup failures cancel the lifecycle operation unless that resource was
+registered with `suppress=True`.
 
 ## Keep Imports Stable
 

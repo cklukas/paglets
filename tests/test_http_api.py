@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from paglets import Host
+from paglets import Host, Message
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
 
 
@@ -13,7 +13,7 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
     host.start_background()
     try:
         proxy = host.create(TravelAgent, TravelState(), init="seed")
-        proxy.send_message("remember", {"value": "hello"})
+        proxy.send(Message("remember", {"value": "hello"}))
         health = host.client.get_json(f"{host.address}/health")
         agents = host.client.get_json(f"{host.address}/agents")
         active_state = host.client.get_json(f"{host.address}/agents/{proxy.agent_id}/state")
@@ -35,6 +35,13 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
             "host": "alpha",
             "address": host.address,
             "active": True,
+            "mailbox": {
+                "queued_count": 0,
+                "in_flight_count": 0,
+                "delivered_count": 1,
+                "failed_count": 0,
+            },
+            "resources": {},
         }
     ]
     assert active_state["active"] is True
