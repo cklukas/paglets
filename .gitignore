@@ -23,6 +23,7 @@ env/
 # Build artifacts
 build/
 dist/
+site/
 *.egg-info/
 *.egg
 

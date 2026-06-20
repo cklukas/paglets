@@ -63,6 +63,18 @@ cd paglets
 uv run --with pytest pytest tests -q
 ```
 
+Build or preview the documentation:
+
+```bash
+uv run --extra docs mkdocs build --strict
+uv run --extra docs mkdocs serve
+```
+
+The project documentation is published with GitHub Pages from a GitHub Actions
+artifact, without a separate documentation branch:
+
+<https://cklukas.github.io/paglets/>
+
 Run the demos:
 
 ```bash

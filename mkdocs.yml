@@ -1,0 +1,48 @@
+site_name: paglets
+site_description: Python Aglets-inspired mobile object runtime.
+site_url: https://cklukas.github.io/paglets/
+repo_url: https://github.com/cklukas/paglets
+repo_name: cklukas/paglets
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Implementing Paglets: implementing-paglets.md
+  - Usage Ideas: usage-ideas.md
+  - Internal Workings: internal-workings.md
+  - API Reference: api-reference.md
+  - Glossary: glossary.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_signature_annotations: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+
+copyright: Copyright (c) 2026 by C. Klukas. Licensed under the MIT License.

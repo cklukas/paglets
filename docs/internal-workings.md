@@ -1,0 +1,140 @@
+# Internal Workings
+
+This page describes how the codebase fits together.
+
+## Runtime Model
+
+Paglets move as a transfer envelope:
+
+1. The source host finds the live paglet.
+2. The host serializes the paglet's dataclass state.
+3. The host records the paglet class name and state class name.
+4. The target host imports those classes by name.
+5. The target host reconstructs the paglet and attaches a fresh context.
+6. The target host invokes the appropriate lifecycle hook and then `run()`.
+
+The runtime does not move Python call stacks, threads, sockets, local file
+handles, or arbitrary instance attributes.
+
+## Main Modules
+
+`paglets.agent`
+: Defines `PagletState`, `PagletContext`, `Paglet`, lifecycle hooks, and
+  convenience methods such as `dispatch`, `clone`, `send`, `multicast`,
+  `available_hosts`, `dispatch_to`, and `clone_to`.
+
+`paglets.host`
+: Hosts paglets in memory and exposes the JSON HTTP API. It owns active paglets,
+  inactive envelopes, host properties, mesh state, and lifecycle operations.
+
+`paglets.proxy`
+: Defines `PagletProxy`, the controlled handle used to inspect, message, move,
+  deactivate, activate, or dispose a paglet.
+
+`paglets.messages`
+: Defines `Message`, `FutureReply`, and `ReplySet`.
+
+`paglets.envelope`
+: Defines `PagletEnvelope`, the serialized transfer record used for dispatch,
+  clone, retract, and activation.
+
+`paglets.mesh`
+: Defines `HostRef` and `MeshRegistry`, including version-gated peer discovery,
+  seed-list gossip, multicast beacons, online/offline status, and host-name
+  resolution.
+
+`paglets.admin`
+: Provides a reusable client layer for multi-server administration and TUI
+  configuration.
+
+`paglets.discovery`
+: Implements local TUI-side discovery of importable `Paglet` subclasses.
+
+`paglets.tui`
+: Provides the optional Textual admin console.
+
+## Movement Flow
+
+```mermaid
+sequenceDiagram
+    participant A as Source Host
+    participant P as Paglet
+    participant B as Target Host
+
+    A->>P: on_dispatching/on_cloning
+    A->>A: build PagletEnvelope
+    A->>B: POST /agents { envelope }
+    B->>B: import class + state class
+    B->>B: deserialize dataclass state
+    B->>P: attach PagletContext
+    B->>P: on_arrival/on_clone
+    B->>P: run()
+    B-->>A: proxy wire record
+```
+
+For dispatch and retract, the source host removes the original after successful
+delivery. For clone, the source host keeps the original and the target receives a
+new agent ID.
+
+## Messaging Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant X as PagletProxy
+    participant H as Host HTTP API
+    participant P as Target Paglet
+
+    C->>X: send_message(kind, args)
+    X->>H: POST /agents/{id}/messages
+    H->>P: handle_message(Message)
+    P-->>H: return value
+    H-->>X: JSON result
+    X-->>C: result
+```
+
+Message arguments and replies should be JSON-compatible.
+
+## Host HTTP API
+
+The host API is intentionally small:
+
+- `GET /health`
+- `GET /hosts`
+- `POST /hosts/join`
+- `GET /agents?state=active|inactive|all`
+- `POST /agents`
+- `GET /agents/{id}`
+- `GET /agents/{id}/state`
+- `POST /agents/{id}/messages`
+- `POST /agents/{id}/dispatch`
+- `POST /agents/{id}/clone`
+- `POST /agents/{id}/retract`
+- `POST /agents/{id}/deactivate`
+- `POST /agents/{id}/activate`
+- `POST /agents/{id}/dispose`
+
+There is no authentication layer in this first runtime.
+
+## Mesh Registry
+
+Every host has a `MeshRegistry`. The registry contains the host itself and
+same-version peers discovered through:
+
+- configured seed peers from `--peer`;
+- periodic gossip through `/hosts/join`;
+- optional UDP multicast beacons.
+
+`HostRef.code_version` gates visibility. A host with a different code version is
+ignored by the registry. This keeps name-based dispatch and clone helpers from
+selecting hosts that are likely running incompatible code.
+
+## TUI And Admin Client
+
+The TUI is a client, not a host. It reads a local config file, polls configured
+hosts, displays health/agent/mesh status, and sends admin operations through the
+same HTTP API a normal client would use.
+
+The TUI-side class discovery feature scans local paths/modules for importable
+`Paglet` subclasses. It is a convenience for filling create forms; it does not
+upload code to servers or mutate remote import paths.
