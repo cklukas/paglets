@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import signal
 import sys
 
 from .host import Host
@@ -22,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable UDP multicast mesh beacons",
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
+    parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
     args = parser.parse_args(argv)
 
     host = Host(
@@ -32,7 +34,15 @@ def main(argv: list[str] | None = None) -> int:
         peers=args.peer,
         mesh_multicast=args.mesh_multicast,
         mesh_version=args.mesh_version,
+        persistence_dir=args.persistence_dir,
     )
+
+    def shutdown(_signum, _frame):
+        host.shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
     host.start_background()
     if host.mesh.version_warning:
         print(f"paglets host warning: {host.mesh.version_warning}", file=sys.stderr, flush=True)

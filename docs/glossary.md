@@ -25,8 +25,13 @@ Envelope
   names, dataclass state, source host, target host, and clone metadata.
 
 Host
-: A runtime context that owns active paglets, inactive envelopes, mesh state, and
-  the JSON HTTP API.
+: A runtime context that owns active paglets, durable inactive records, mesh
+  state, and the JSON HTTP API.
+
+Inactive
+: A deactivated paglet stored as a durable record instead of a live Python
+  object. Inactive paglets can be activated explicitly, by policy, or by
+  incoming messages.
 
 HostRef
 : A mesh registry record containing host name, URL, code version, online status,

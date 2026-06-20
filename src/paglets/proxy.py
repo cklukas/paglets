@@ -10,6 +10,7 @@ from .agent import ACTIVE, INACTIVE
 from .client import HostClient
 from .errors import PagletError
 from .messages import FUTURE, ONEWAY, FutureReply, Message
+from .persistency import DeactivationPolicy, DeactivationRequest
 
 
 def _agent_url(host_url: str, agent_id: str, suffix: str = "") -> str:
@@ -88,29 +89,69 @@ class PagletProxy:
     def get_aglet_class_name(self) -> str:
         return self.get_agent_class_name()
 
-    def send_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> Any:
+    def send_message(
+        self,
+        kind: str | Message,
+        args: dict[str, Any] | None = None,
+        *,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/messages"),
-            {"message": message.to_wire()},
+            {
+                "message": message.to_wire(),
+                "activate_if_inactive": activate_if_inactive,
+                "no_delay": no_delay,
+            },
         )
         return response.get("result")
 
-    def send_oneway_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
+    def send_oneway_message(
+        self,
+        kind: str | Message,
+        args: dict[str, Any] | None = None,
+        *,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+        **kwargs: Any,
+    ) -> None:
         message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
         message.message_type = ONEWAY
         self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/messages"),
-            {"message": message.to_wire(), "oneway": True},
+            {
+                "message": message.to_wire(),
+                "oneway": True,
+                "activate_if_inactive": activate_if_inactive,
+                "no_delay": no_delay,
+            },
         )
 
     def delegate_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> None:
         self.send_oneway_message(kind, args, **kwargs)
 
-    def send_future_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> FutureReply:
+    def send_future_message(
+        self,
+        kind: str | Message,
+        args: dict[str, Any] | None = None,
+        *,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+        **kwargs: Any,
+    ) -> FutureReply:
         message = kind if isinstance(kind, Message) else Message(kind=kind, args=args or {}, **kwargs)
         message.message_type = FUTURE
-        return FutureReply(_EXECUTOR.submit(self.send_message, message))
+        return FutureReply(
+            _EXECUTOR.submit(
+                self.send_message,
+                message,
+                activate_if_inactive=activate_if_inactive,
+                no_delay=no_delay,
+            )
+        )
 
     def send_async_message(self, kind: str | Message, args: dict[str, Any] | None = None, **kwargs: Any) -> FutureReply:
         return self.send_future_message(kind, args, **kwargs)
@@ -129,8 +170,25 @@ class PagletProxy:
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def deactivate(self) -> None:
-        self.client.post_json(_agent_url(self.host_url, self.agent_id, "/deactivate"), {})
+    def deactivate(
+        self,
+        *,
+        reason: str = "deactivate",
+        policy: DeactivationPolicy | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "PagletProxy":
+        response = self.client.post_json(
+            _agent_url(self.host_url, self.agent_id, "/deactivate"),
+            {
+                "request": DeactivationRequest(
+                    reason=reason,
+                    source="external",
+                    policy=policy,
+                    metadata=metadata or {},
+                ).to_wire()
+            },
+        )
+        return PagletProxy.from_wire(response["proxy"], self.client)
 
     def activate(self) -> "PagletProxy":
         response = self.client.post_json(_agent_url(self.host_url, self.agent_id, "/activate"), {})

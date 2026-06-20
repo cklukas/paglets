@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import tempfile
 
 import pytest
 
@@ -188,4 +190,5 @@ def _host(name: str, *, version: str = "mesh-test", peers: list[str] | None = No
         mesh_version=version,
         mesh_gossip_interval=0.05,
         mesh_offline_after=0.2,
+        persistence_dir=Path(tempfile.mkdtemp(prefix="paglets-test-")) / name,
     )

@@ -363,9 +363,16 @@ class PagletsAdminClient:
         *,
         arg: Any = None,
         oneway: bool = False,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
     ) -> Any:
         message = Message(kind=kind, args=args or {}, arg=arg)
-        payload = {"message": message.to_wire(), "oneway": oneway}
+        payload = {
+            "message": message.to_wire(),
+            "oneway": oneway,
+            "activate_if_inactive": activate_if_inactive,
+            "no_delay": no_delay,
+        }
         response = self.client.post_json(
             f"{agent.host_url.rstrip('/')}/agents/{agent.agent_id}/messages",
             payload,

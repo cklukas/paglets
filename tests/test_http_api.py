@@ -2,12 +2,14 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from pathlib import Path
+
 from paglets import Host
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
 
 
-def test_host_http_api_lists_agents_and_reports_health():
-    host = Host(name="alpha", host="127.0.0.1", port=free_port())
+def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
     host.start_background()
     try:
         proxy = host.create(TravelAgent, TravelState(), init="seed")

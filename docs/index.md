@@ -11,6 +11,7 @@ The runtime intentionally uses a Python-friendly mobility model:
 - host-to-host transfer uses a JSON HTTP API;
 - lifecycle hooks resume behavior after create, dispatch, clone, retract, or
   activation;
+- deactivation persists inactive paglets to disk until activation;
 - agents communicate through `PagletProxy` and `Message`.
 
 ## Quick Start

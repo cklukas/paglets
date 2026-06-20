@@ -42,3 +42,5 @@ class CloneEvent(PagletEvent):
 @dataclass(frozen=True, slots=True)
 class PersistencyEvent(PagletEvent):
     reason: str = "deactivate"  # deactivate or activate
+    request: Any = None
+    policy: Any = None

@@ -9,6 +9,7 @@ import uuid
 from .errors import HostError, NotHandledError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .messages import Message, ReplySet
+from .persistency import DeactivationPolicy, DeactivationRequest
 
 if TYPE_CHECKING:  # pragma: no cover
     from .host import Host
@@ -89,6 +90,13 @@ class PagletContext:
 
     def clone(self, agent_id: str, target: str | None = None) -> "PagletProxy":
         return self._host.clone(agent_id, target=target)
+
+    def deactivate(
+        self,
+        agent_id: str,
+        request: DeactivationRequest | None = None,
+    ) -> "PagletProxy":
+        return self._host.deactivate(agent_id, request=request)
 
     def available_hosts(self, *, online_only: bool = True, include_self: bool = True) -> list["HostRef"]:
         return self._host.mesh.hosts(online_only=online_only, include_self=include_self)
@@ -181,6 +189,25 @@ class Paglet(Generic[StateT]):
         self._last_proxy = proxy
         return proxy
 
+    def deactivate(
+        self,
+        *,
+        reason: str = "deactivate",
+        policy: DeactivationPolicy | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "PagletProxy":
+        proxy = self.context.deactivate(
+            self.agent_id,
+            DeactivationRequest(
+                reason=reason,
+                source="self",
+                policy=policy,
+                metadata=metadata or {},
+            ),
+        )
+        self._last_proxy = proxy
+        return proxy
+
     def send(self, target_agent_id: str, kind: str, args: dict[str, Any] | None = None, *, host_url: str | None = None) -> Any:
         return self.context.send(target_agent_id, kind, args or {}, host_url=host_url)
 
@@ -222,6 +249,9 @@ class Paglet(Generic[StateT]):
 
     def on_disposing(self, event: PersistencyEvent) -> None:
         pass
+
+    def deactivation_policy(self, request: DeactivationRequest) -> DeactivationPolicy:
+        return request.policy or DeactivationPolicy()
 
     def run(self) -> None:
         pass

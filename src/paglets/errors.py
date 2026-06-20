@@ -23,6 +23,10 @@ class InvalidAgentError(PagletError):
     """Raised when an agent id no longer refers to an active/deactivated paglet."""
 
 
+class PagletInactiveError(PagletError):
+    """Raised when an inactive paglet cannot be activated for an operation."""
+
+
 class NotHandledError(PagletError):
     """Raised when a paglet did not handle a message."""
 

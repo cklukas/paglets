@@ -25,7 +25,8 @@ handles, or arbitrary instance attributes.
 
 `paglets.host`
 : Hosts paglets in memory and exposes the JSON HTTP API. It owns active paglets,
-  inactive envelopes, host properties, mesh state, and lifecycle operations.
+  durable inactive records, host properties, mesh state, and lifecycle
+  operations.
 
 `paglets.proxy`
 : Defines `PagletProxy`, the controlled handle used to inspect, message, move,
@@ -37,6 +38,10 @@ handles, or arbitrary instance attributes.
 `paglets.envelope`
 : Defines `PagletEnvelope`, the serialized transfer record used for dispatch,
   clone, retract, and activation.
+
+`paglets.persistency`
+: Defines `DeactivationPolicy`, `DeactivationRequest`, and the durable inactive
+  record format used by host storage.
 
 `paglets.mesh`
 : Defines `HostRef` and `MeshRegistry`, including version-gated peer discovery,
@@ -115,6 +120,31 @@ The host API is intentionally small:
 - `POST /agents/{id}/dispose`
 
 There is no authentication layer in this first runtime.
+
+## Durable Inactive Records
+
+Deactivation serializes a paglet into an inactive record and removes the live
+object from memory. The default CLI location is:
+
+```text
+~/.paglets/hosts/{host-name}/inactive/{agent-id}.json
+```
+
+Each record contains the `PagletEnvelope`, the chosen `DeactivationPolicy`, the
+deactivation request metadata, and any messages queued while the paglet is
+inactive. Records are written with an atomic replace.
+
+Activation removes the record, reconstructs the paglet from class path and
+dataclass state, calls `on_activation`, invokes `run()`, and then drains queued
+messages. If activation fails, the inactive record is restored.
+
+Messages sent to inactive paglets use the stored policy:
+
+- `activate_on_message=True` activates and delivers immediately.
+- `activate_on_message=False` with queueing enabled stores the message and
+  returns a queued acknowledgement.
+- `no_delay=True` fails fast when the paglet cannot be activated for that
+  message.
 
 ## Mesh Registry
 

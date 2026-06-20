@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from paglets import (
     EXECUTE_ON_ARRIVAL,
@@ -127,9 +128,9 @@ def test_context_multicast_returns_reply_set_for_active_local_agents():
         host.stop()
 
 
-def test_remote_create_and_inactive_proxy_status_are_exposed_over_http():
-    alpha = Host(name="alpha", host="127.0.0.1", port=free_port())
-    beta = Host(name="beta", host="127.0.0.1", port=free_port())
+def test_remote_create_and_inactive_proxy_status_are_exposed_over_http(tmp_path: Path):
+    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    beta = Host(name="beta", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "beta")
     alpha.start_background()
     beta.start_background()
     try:

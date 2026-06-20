@@ -775,6 +775,8 @@ def create_tui_app(
                         ("args", "Args JSON", "{}"),
                         ("arg", "Single arg JSON optional", ""),
                         ("oneway", "Oneway true/false", "false"),
+                        ("activate_if_inactive", "Activate inactive true/false", "true"),
+                        ("no_delay", "No delay true/false", "false"),
                     ],
                     "Send",
                 )
@@ -788,6 +790,9 @@ def create_tui_app(
                     _json_or_empty(values["args"], {}),
                     arg=_json_or_empty(values["arg"], None),
                     oneway=values["oneway"].strip().lower() in {"1", "true", "yes", "on"},
+                    activate_if_inactive=values["activate_if_inactive"].strip().lower()
+                    in {"1", "true", "yes", "on"},
+                    no_delay=values["no_delay"].strip().lower() in {"1", "true", "yes", "on"},
                 )
                 self.last_result = json.dumps(result, indent=2, sort_keys=True)
             except Exception as exc:

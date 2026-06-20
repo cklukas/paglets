@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import is_dataclass
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import threading
+import time
 import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -13,10 +15,11 @@ from urllib.parse import parse_qs, urlparse
 from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState
 from .client import HostClient
 from .envelope import PagletEnvelope
-from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, RemoteHostError
+from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .mesh import HostRef, MeshRegistry
-from .messages import Message, ReplySet
+from .messages import DEACTIVATE, Message, ReplySet
+from .persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord, QueuedMessage
 from .proxy import PagletProxy
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 
@@ -35,6 +38,9 @@ HOST_CAPABILITIES = [
     "hosts:list",
     "hosts:join",
 ]
+
+
+DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
 
 
 class Host:
@@ -58,6 +64,7 @@ class Host:
         mesh_version: str | None = None,
         mesh_gossip_interval: float = 1.0,
         mesh_offline_after: float = 10.0,
+        persistence_dir: str | Path | None = None,
     ):
         self.name = name
         self.bind_host = host
@@ -65,11 +72,19 @@ class Host:
         self.address = f"http://{host}:{port}"
         self.client = client or HostClient()
         self._agents: dict[str, Paglet] = {}
-        self._inactive: dict[str, PagletEnvelope] = {}
+        self.persistence_dir = (
+            Path(persistence_dir).expanduser()
+            if persistence_dir is not None
+            else DEFAULT_PERSISTENCE_ROOT / self._safe_host_name(name)
+        )
+        self._inactive_dir = self.persistence_dir / "inactive"
+        self._inactive: dict[str, InactiveRecord] = {}
         self._properties: dict[str, Any] = {}
         self._lock = threading.RLock()
         self._server: _PagletHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._activation_stop = threading.Event()
+        self._activation_thread: threading.Thread | None = None
         self.mesh = MeshRegistry(
             self,
             enabled=mesh,
@@ -79,6 +94,7 @@ class Host:
             gossip_interval=mesh_gossip_interval,
             offline_after=mesh_offline_after,
         )
+        self._load_inactive_records()
 
     # ------------------------------------------------------------------
     # Server lifecycle
@@ -95,6 +111,9 @@ class Host:
         self._server = server
         self._thread = threading.Thread(target=server.serve_forever, name=f"paglets-{self.name}", daemon=True)
         self._thread.start()
+        self._activation_stop.clear()
+        self._activate_startup_records()
+        self._start_activation_scheduler()
         self.mesh.start()
 
     def serve_forever(self) -> None:
@@ -103,12 +122,18 @@ class Host:
         try:
             self._thread.join()
         except KeyboardInterrupt:  # pragma: no cover - CLI convenience
-            self.stop()
+            self.shutdown()
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
+        self.stop(deactivate_active=True)
+
+    def stop(self, *, deactivate_active: bool = False) -> None:
         server = self._server
         if server is None:
             return
+        self._stop_activation_scheduler()
+        if deactivate_active:
+            self._deactivate_active_for_shutdown()
         self.mesh.stop()
         server.shutdown()
         server.server_close()
@@ -181,7 +206,7 @@ class Host:
         with self._lock:
             agents = [self._summary(agent) for agent in self._agents.values()] if active else []
             if inactive:
-                agents.extend(self._inactive_summary(envelope) for envelope in self._inactive.values())
+                agents.extend(self._inactive_summary(record) for record in self._inactive.values())
             return agents
 
     def health(self) -> dict[str, Any]:
@@ -289,37 +314,102 @@ class Host:
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def deactivate(self, agent_id: str) -> None:
+    def deactivate(
+        self,
+        agent_id: str,
+        request: DeactivationRequest | None = None,
+    ) -> PagletProxy:
         agent = self._require_agent(agent_id)
-        event = PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="deactivate")
+        request = request or DeactivationRequest()
+        policy = agent.deactivation_policy(request)
+        if not isinstance(policy, DeactivationPolicy):
+            raise HostError(f"{agent.__class__.__name__}.deactivation_policy() must return DeactivationPolicy")
+        event = PersistencyEvent(
+            agent_id=agent_id,
+            host_name=self.name,
+            host_address=self.address,
+            reason=request.reason,
+            request=request,
+            policy=policy,
+        )
         agent.on_deactivating(event)
         info = {"name": self.name, "address": self.address}
         envelope = self._make_envelope(agent, "activation", info)
+        record = InactiveRecord(envelope=envelope, policy=policy, request=request)
+        self._write_inactive_record(record)
         with self._lock:
-            self._inactive[agent_id] = envelope
+            self._inactive[agent_id] = record
             self._agents.pop(agent_id, None)
+        return PagletProxy(self.address, agent_id, self.client)
 
     def activate(self, agent_id: str) -> PagletProxy:
         with self._lock:
-            envelope = self._inactive.pop(agent_id, None)
-        if envelope is None:
+            record = self._inactive.pop(agent_id, None)
+        if record is None:
             raise InvalidAgentError(f"No deactivated paglet {agent_id!r} on {self.name}")
-        return self._receive_envelope(envelope)
+        self._delete_inactive_record(agent_id)
+        try:
+            proxy = self._receive_envelope(record.envelope, inactive_record=record)
+        except Exception:
+            self._write_inactive_record(record)
+            with self._lock:
+                self._inactive[agent_id] = record
+            raise
+        self._drain_queued_messages(record)
+        return proxy
 
     def dispose(self, agent_id: str) -> None:
-        agent = self._require_agent(agent_id)
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            inactive = self._inactive.pop(agent_id, None)
+        if agent is None:
+            if inactive is None:
+                raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
+            self._delete_inactive_record(agent_id)
+            return
         event = PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="dispose")
         agent.on_disposing(event)
         with self._lock:
             if self._agents.get(agent_id) is agent:
                 self._agents.pop(agent_id, None)
-            self._inactive.pop(agent_id, None)
+        if inactive is not None:
+            self._delete_inactive_record(agent_id)
 
     # ------------------------------------------------------------------
     # Message/lifecycle internals
     # ------------------------------------------------------------------
-    def deliver_message(self, agent_id: str, message: Message, *, oneway: bool = False) -> Any:
-        agent = self._require_agent(agent_id)
+    def deliver_message(
+        self,
+        agent_id: str,
+        message: Message,
+        *,
+        oneway: bool = False,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+    ) -> Any:
+        if message.kind == DEACTIVATE:
+            proxy = self.deactivate(
+                agent_id,
+                DeactivationRequest.from_wire(message.args.get("request")),
+            )
+            return None if oneway else {"deactivated": True, "proxy": proxy.to_wire()}
+        with self._lock:
+            agent = self._agents.get(agent_id)
+            inactive = self._inactive.get(agent_id)
+        if agent is None:
+            if inactive is None:
+                raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+            if activate_if_inactive and inactive.policy.activate_on_message:
+                self.activate(agent_id)
+                agent = self._require_agent(agent_id)
+            elif no_delay or not inactive.policy.queue_messages_when_inactive:
+                raise PagletInactiveError(f"Paglet {agent_id!r} is inactive on {self.name}")
+            else:
+                inactive.queued_messages.append(QueuedMessage(message=message, oneway=oneway))
+                self._write_inactive_record(inactive)
+                return None if oneway else {"queued": True, "message_id": message.message_id}
+        else:
+            inactive = None
         result = agent.handle_message(message)
         if result is NOT_HANDLED:
             raise NotHandledError(f"{agent.__class__.__name__} did not handle {message.kind!r}")
@@ -361,7 +451,12 @@ class Host:
                 self._agents.pop(agent_id, None)
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def _receive_envelope(self, envelope: PagletEnvelope) -> PagletProxy:
+    def _receive_envelope(
+        self,
+        envelope: PagletEnvelope,
+        *,
+        inactive_record: InactiveRecord | None = None,
+    ) -> PagletProxy:
         agent_cls = resolve_qualified_name(envelope.agent_class_name)
         state_cls = resolve_qualified_name(envelope.state_class_name)
         if not issubclass(agent_cls, Paglet):
@@ -400,7 +495,14 @@ class Host:
             agent.on_clone(event)
             agent.run()
         elif envelope.kind == "activation":
-            event = PersistencyEvent(agent_id=agent.agent_id, host_name=self.name, host_address=self.address, reason="activate")
+            event = PersistencyEvent(
+                agent_id=agent.agent_id,
+                host_name=self.name,
+                host_address=self.address,
+                reason="activate",
+                request=inactive_record.request if inactive_record is not None else None,
+                policy=inactive_record.policy if inactive_record is not None else None,
+            )
             agent.on_activation(event)
             agent.run()
         else:  # pragma: no cover - typing already limits this
@@ -482,14 +584,15 @@ class Host:
             "active": True,
         }
 
-    def _inactive_summary(self, envelope: PagletEnvelope) -> dict[str, Any]:
+    def _inactive_summary(self, record: InactiveRecord) -> dict[str, Any]:
         return {
-            "agent_id": envelope.agent_id,
-            "class_name": envelope.agent_class_name,
-            "state_class_name": envelope.state_class_name,
+            "agent_id": record.envelope.agent_id,
+            "class_name": record.envelope.agent_class_name,
+            "state_class_name": record.envelope.state_class_name,
             "host": self.name,
             "address": self.address,
             "active": False,
+            "deactivated_at": record.deactivated_at,
         }
 
     def _state_payload(self, agent_id: str) -> dict[str, Any]:
@@ -508,15 +611,152 @@ class Host:
             inactive = self._inactive.get(agent_id)
             if inactive is not None:
                 return {
-                    "agent_id": inactive.agent_id,
-                    "class_name": inactive.agent_class_name,
-                    "state_class_name": inactive.state_class_name,
+                    "agent_id": inactive.envelope.agent_id,
+                    "class_name": inactive.envelope.agent_class_name,
+                    "state_class_name": inactive.envelope.state_class_name,
                     "host": self.name,
                     "address": self.address,
                     "active": False,
-                    "state": inactive.state,
+                    "state": inactive.envelope.state,
+                    "deactivation_policy": inactive.policy.to_wire(),
+                    "queued_message_count": len(inactive.queued_messages),
                 }
         raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
+
+    def _load_inactive_records(self) -> None:
+        if not self._inactive_dir.exists():
+            return
+        records: dict[str, InactiveRecord] = {}
+        for path in sorted(self._inactive_dir.glob("*.json")):
+            try:
+                record = InactiveRecord.from_wire(json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+            records[record.agent_id] = record
+        with self._lock:
+            self._inactive.update(records)
+
+    def _write_inactive_record(self, record: InactiveRecord) -> None:
+        self._inactive_dir.mkdir(parents=True, exist_ok=True)
+        path = self._inactive_path(record.agent_id)
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(record.to_wire(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+
+    def _delete_inactive_record(self, agent_id: str) -> None:
+        path = self._inactive_path(agent_id)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+
+    def _inactive_path(self, agent_id: str) -> Path:
+        return self._inactive_dir / f"{agent_id}.json"
+
+    def _activate_startup_records(self) -> None:
+        with self._lock:
+            startup_ids = [
+                agent_id
+                for agent_id, record in self._inactive.items()
+                if record.policy.activate_on_startup
+            ]
+        for agent_id in startup_ids:
+            try:
+                self.activate(agent_id)
+            except PagletError:
+                continue
+
+    def _start_activation_scheduler(self) -> None:
+        if self._activation_thread is not None and self._activation_thread.is_alive():
+            return
+        self._activation_thread = threading.Thread(
+            target=self._activation_scheduler_loop,
+            name=f"paglets-activation-{self.name}",
+            daemon=True,
+        )
+        self._activation_thread.start()
+
+    def _stop_activation_scheduler(self) -> None:
+        self._activation_stop.set()
+        thread = self._activation_thread
+        self._activation_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
+
+    def _activation_scheduler_loop(self) -> None:
+        while not self._activation_stop.wait(self._next_activation_delay()):
+            now = time.time()
+            with self._lock:
+                due_ids = [
+                    agent_id
+                    for agent_id, record in self._inactive.items()
+                    if record.policy.activate_at is not None and record.policy.activate_at <= now
+                ]
+            for agent_id in due_ids:
+                try:
+                    self.activate(agent_id)
+                except PagletError:
+                    continue
+
+    def _next_activation_delay(self) -> float:
+        with self._lock:
+            activate_at_values = [
+                record.policy.activate_at
+                for record in self._inactive.values()
+                if record.policy.activate_at is not None
+            ]
+        if not activate_at_values:
+            return 1.0
+        return max(0.05, min(1.0, min(activate_at_values) - time.time()))
+
+    def _deactivate_active_for_shutdown(self) -> None:
+        with self._lock:
+            agent_ids = list(self._agents)
+        for agent_id in agent_ids:
+            with self._lock:
+                if agent_id not in self._agents:
+                    continue
+            try:
+                self.deactivate(
+                    agent_id,
+                    DeactivationRequest(
+                        reason="shutdown",
+                        source="host",
+                        policy=DeactivationPolicy(activate_on_startup=True),
+                    ),
+                )
+            except PagletError:
+                continue
+
+    def _drain_queued_messages(self, record: InactiveRecord) -> None:
+        for index, queued in enumerate(record.queued_messages):
+            if self.get_proxy(record.agent_id) is None:
+                self._requeue_messages(record.agent_id, record.queued_messages[index:])
+                return
+            try:
+                self.deliver_message(
+                    record.agent_id,
+                    queued.message,
+                    oneway=queued.oneway,
+                    activate_if_inactive=False,
+                    no_delay=True,
+                )
+            except PagletError:
+                continue
+
+    def _requeue_messages(self, agent_id: str, messages: list[QueuedMessage]) -> None:
+        if not messages:
+            return
+        with self._lock:
+            record = self._inactive.get(agent_id)
+        if record is None:
+            return
+        record.queued_messages.extend(messages)
+        self._write_inactive_record(record)
+
+    @staticmethod
+    def _safe_host_name(name: str) -> str:
+        return "".join(char if char.isalnum() or char in "._-" else "_" for char in name) or "host"
 
 
 class _PagletHTTPServer(ThreadingHTTPServer):
@@ -596,7 +836,13 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 action = parts[2]
                 if action == "messages":
                     message = Message.from_wire(payload["message"])
-                    result = host.deliver_message(agent_id, message, oneway=bool(payload.get("oneway", False)))
+                    result = host.deliver_message(
+                        agent_id,
+                        message,
+                        oneway=bool(payload.get("oneway", False)),
+                        activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
+                        no_delay=bool(payload.get("no_delay", False)),
+                    )
                     return {"result": result}
                 if action == "dispatch":
                     proxy = host.dispatch(agent_id, payload["target"])
@@ -608,8 +854,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     proxy = host._retract_to(agent_id, payload["target"])
                     return {"proxy": proxy.to_wire()}
                 if action == "deactivate":
-                    host.deactivate(agent_id)
-                    return {"ok": True}
+                    proxy = host.deactivate(agent_id, DeactivationRequest.from_wire(payload.get("request")))
+                    return {"proxy": proxy.to_wire(), "ok": True}
                 if action == "activate":
                     proxy = host.activate(agent_id)
                     return {"proxy": proxy.to_wire()}

@@ -36,7 +36,9 @@ from .messages import (
     Message,
     ReplySet,
 )
+from .persistency import DeactivationPolicy, DeactivationRequest
 from .proxy import PagletProxy
+from .errors import PagletInactiveError
 
 __all__ = [
     "ACTIVE",
@@ -44,6 +46,8 @@ __all__ = [
     "CloneEvent",
     "CreationEvent",
     "DEACTIVATE",
+    "DeactivationPolicy",
+    "DeactivationRequest",
     "DISPATCH",
     "DISPOSE",
     "EXECUTE_ON_ARRIVAL",
@@ -68,6 +72,7 @@ __all__ = [
     "Paglet",
     "PagletContext",
     "PagletEvent",
+    "PagletInactiveError",
     "PagletProxy",
     "PagletState",
     "PersistencyEvent",

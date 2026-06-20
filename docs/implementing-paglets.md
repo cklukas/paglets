@@ -76,6 +76,14 @@ Supported communication patterns:
 - future-style replies with `send_future_message`;
 - local broadcast through `context.multicast`.
 
+Inactive paglets can still receive messages. By default, the host activates the
+paglet and delivers the message. Use `no_delay=True` when the caller wants a
+fast failure instead of activation or queueing:
+
+```python
+reply = proxy.send_message("status", no_delay=True)
+```
+
 ## Move Between Hosts
 
 Use `dispatch` when the current paglet should move away:
@@ -110,6 +118,46 @@ for host in self.context.available_hosts():
 The registry is version-gated. Hosts with different code versions are ignored by
 the mesh so paglets do not move into a host that probably cannot import the same
 classes.
+
+## Deactivate And Activate
+
+Use `deactivate` when a paglet should leave memory but keep durable state:
+
+```python
+proxy.deactivate()
+proxy.activate()
+```
+
+A paglet can deactivate itself and choose its own inactive policy:
+
+```python
+import time
+from paglets import DeactivationPolicy
+
+
+def handle_message(self, message: Message):
+    if message.kind == "pause":
+        return self.deactivate(
+            policy=DeactivationPolicy(activate_at=time.time() + 3600)
+        ).to_wire()
+    return self.not_handled()
+```
+
+Override `deactivation_policy` when the paglet should decide how external
+deactivation requests behave:
+
+```python
+def deactivation_policy(self, request):
+    return DeactivationPolicy(
+        activate_on_message=False,
+        queue_messages_when_inactive=True,
+        activate_on_startup=request.reason == "shutdown",
+    )
+```
+
+If `activate_on_message` is false and queueing is enabled, normal messages are
+stored with the inactive record and delivered after activation. A `no_delay`
+message fails immediately instead.
 
 ## Talk To Resident Services
 

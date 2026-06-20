@@ -113,10 +113,12 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-
 uv run paglets-host --name gamma --port 8767 --no-mesh-multicast --peer http://127.0.0.1:8765
 ```
 
-`--mesh/--no-mesh` controls the registry, `--peer URL` can be repeated, and
-`--mesh-multicast/--no-mesh-multicast` controls UDP beacons. Version resolution
-uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the current git commit,
-then a package-version fallback. Different versions are ignored by the mesh.
+`--mesh/--no-mesh` controls the registry, `--peer URL` can be repeated,
+`--mesh-multicast/--no-mesh-multicast` controls UDP beacons, and
+`--persistence-dir` overrides the host's durable inactive-paglet directory.
+Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
+current git commit, then a package-version fallback. Different versions are
+ignored by the mesh.
 
 Start the multi-server TUI admin console:
 
@@ -290,6 +292,46 @@ Pull an agent back from another host:
 returned = alpha.retract(beta.address, agent_id)
 ```
 
+## Durable deactivation
+
+Deactivation persists a paglet's transfer envelope to disk and removes the live
+object from memory. Activation reconstructs the paglet, calls `on_activation`,
+and then invokes `run()`:
+
+```python
+import time
+from paglets import DeactivationPolicy
+
+proxy.deactivate()
+proxy.activate()
+
+proxy.deactivate(policy=DeactivationPolicy(activate_at=time.time() + 3600))
+```
+
+By default, a message sent to an inactive paglet activates it and then delivers
+the message. Paglets can choose a stricter policy by overriding
+`deactivation_policy`:
+
+```python
+def deactivation_policy(self, request):
+    return DeactivationPolicy(
+        activate_on_message=False,
+        queue_messages_when_inactive=True,
+    )
+```
+
+When activation on message is disabled, normal messages are queued and return a
+queued acknowledgement. Use `no_delay=True` to fail fast instead:
+
+```python
+proxy.send_message("status", no_delay=True)
+```
+
+CLI hosts persist inactive paglets under
+`~/.paglets/hosts/{host-name}/inactive` by default. On graceful CLI shutdown,
+active paglets are deactivated with a startup-activation policy so they resume
+when the host starts again.
+
 ## Message patterns
 
 `Message` supports both named arguments and Aglets-style single arguments:
@@ -360,6 +402,7 @@ src/paglets/
   messages.py   Message model
   events.py     Lifecycle event dataclasses
   envelope.py   Mobile-state transfer envelope
+  persistency.py Durable deactivation policy and inactive records
   itinerary.py  Serializable itinerary/task helpers
   admin.py      Multi-server admin client/config helpers
   tui.py        Optional Textual TUI admin console
@@ -382,7 +425,6 @@ tests/
 - No authentication/authorization.
 - No code upload: classes must already be importable on every host.
 - No call-stack migration; movement resumes through lifecycle events and `run`.
-- No durable disk persistence yet; deactivation is in-memory.
 - Message arguments and replies are expected to be JSON-compatible.
 
 Those constraints keep the first stub robust and understandable while preserving

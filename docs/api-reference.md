@@ -33,3 +33,7 @@ This page is generated from the Python source using `mkdocstrings`.
 ## Serialization
 
 ::: paglets.serde
+
+## Persistency
+
+::: paglets.persistency

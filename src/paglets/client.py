@@ -7,12 +7,13 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .errors import InvalidAgentError, NotHandledError, PagletError, RemoteHostError
+from .errors import InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
     "InvalidAgentError": InvalidAgentError,
     "NotHandledError": NotHandledError,
+    "PagletInactiveError": PagletInactiveError,
     "RemoteHostError": RemoteHostError,
 }
 
