@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "paglets"
+version = "0.1.0"
+description = "A small Python Aglets-inspired mobile object runtime."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+tui = ["textual>=8.2,<9"]
+
+[project.scripts]
+paglets-host = "paglets.cli:main"
+paglets-tui = "paglets.tui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/paglets"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
