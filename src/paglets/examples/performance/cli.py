@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(summary, indent=2, sort_keys=True))
         else:
-            _print_text(summary)
+            _print_text(summary, verbose=bool(args.verbose or args.debug))
         return 1 if _has_failures(summary) else 0
     except Exception as exc:
         print(f"paglets-perf-test: {exc}", file=sys.stderr)
@@ -60,6 +60,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-memory", action="store_true", help="Skip memory benchmarks")
     parser.add_argument("--no-disk", action="store_true", help="Skip disk benchmarks")
     parser.add_argument("--lock-timeout", type=float, default=DEFAULT_LOCK_TIMEOUT_SECONDS, help="Seconds to wait for local benchmark lock")
+    parser.add_argument("--verbose", action="store_true", help="Print skipped disk targets and cleanup diagnostics")
+    parser.add_argument("--debug", action="store_true", help="Print verbose benchmark diagnostics")
     return parser
 
 
@@ -122,7 +124,7 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
             pass
 
 
-def _print_text(summary: dict[str, Any]) -> None:
+def _print_text(summary: dict[str, Any], *, verbose: bool = False) -> None:
     print(
         f"{'host':<14} {'int/s':>10} {'float/s':>10} {'sha':>10} "
         f"{'multi-int/s':>12} {'mem copy':>10} {'disk wr':>10} {'disk rd':>10} {'err':>3}"
@@ -150,7 +152,7 @@ def _print_text(summary: dict[str, Any]) -> None:
         )
 
     _print_disk_details(summary)
-    _print_errors(summary)
+    _print_errors(summary, verbose=verbose)
 
 
 def _print_disk_details(summary: dict[str, Any]) -> None:
@@ -172,7 +174,7 @@ def _print_disk_details(summary: dict[str, Any]) -> None:
             )
 
 
-def _print_errors(summary: dict[str, Any]) -> None:
+def _print_errors(summary: dict[str, Any], *, verbose: bool = False) -> None:
     lines: list[str] = []
     for host, error in sorted((summary.get("errors") or {}).items()):
         lines.append(f"{host}: {error}")
@@ -188,7 +190,8 @@ def _print_errors(summary: dict[str, Any]) -> None:
             lines.extend(f"{host}: {error}" for error in result.memory.errors)
         if result.disk:
             lines.extend(f"{host}: {error}" for error in result.disk.errors)
-            lines.extend(f"{host}: skipped {skip.path}: {skip.reason}" for skip in result.disk.skipped)
+            if verbose:
+                lines.extend(f"{host}: skipped {skip.path}: {skip.reason}" for skip in result.disk.skipped)
     if lines:
         print("\nnotes:")
         for line in lines:

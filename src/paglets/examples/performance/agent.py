@@ -459,9 +459,9 @@ def discover_disk_targets(paths: list[str] | None = None) -> tuple[list[DiskTarg
     targets: list[DiskTarget] = []
     skipped: list[DiskSkip] = []
     seen: set[str] = set()
+    partitions = _partitions_by_mountpoint()
 
     if paths:
-        partitions = _partitions_by_mountpoint()
         for raw_path in paths:
             path = Path(raw_path).expanduser()
             target = _target_for_explicit_path(path, partitions)
@@ -475,6 +475,9 @@ def discover_disk_targets(paths: list[str] | None = None) -> tuple[list[DiskTarg
             filesystem=str(partition.fstype or ""),
         )
         _append_target(target, targets, skipped, seen, explicit=False, opts=str(partition.opts or ""))
+    for path in _default_writable_disk_dirs():
+        target = _target_for_explicit_path(path, partitions)
+        _append_target(target, targets, skipped, seen, explicit=True)
     return targets, skipped
 
 
@@ -545,12 +548,7 @@ def _append_target(
     opts: str = "",
 ) -> None:
     path = Path(target.path)
-    key = str(path.resolve()) if path.exists() else str(path)
     options = {part.strip().lower() for part in opts.split(",") if part.strip()}
-    if key in seen:
-        skipped.append(DiskSkip(target.path, "duplicate mountpoint", target.device, target.filesystem))
-        return
-    seen.add(key)
     if not path.exists() or not path.is_dir():
         skipped.append(DiskSkip(target.path, "path is not an existing directory", target.device, target.filesystem))
         return
@@ -563,7 +561,35 @@ def _append_target(
     if not os.access(path, os.W_OK | os.X_OK):
         skipped.append(DiskSkip(target.path, "not writable", target.device, target.filesystem))
         return
+    key = _disk_target_key(path)
+    if key in seen:
+        skipped.append(DiskSkip(target.path, "duplicate volume", target.device, target.filesystem))
+        return
+    seen.add(key)
     targets.append(target)
+
+
+def _default_writable_disk_dirs() -> list[Path]:
+    candidates = [
+        Path.home() / ".paglets" / "benchmarks",
+        Path(tempfile.gettempdir()),
+    ]
+    result: list[Path] = []
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if path.is_dir() and os.access(path, os.W_OK | os.X_OK):
+            result.append(path)
+    return result
+
+
+def _disk_target_key(path: Path) -> str:
+    try:
+        return f"dev:{path.stat().st_dev}"
+    except OSError:
+        return f"path:{path.resolve() if path.exists() else path}"
 
 
 def _partitions_by_mountpoint() -> list[DiskTarget]:

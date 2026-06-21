@@ -41,8 +41,10 @@ uv run paglets-perf-test --duration 2 --disk-size 256M
 uv run paglets-perf-test --path /data --json
 ```
 
-Disk benchmarks write temporary files only on writable real volumes, skip
-special or read-only mounts, and clean up afterward. Results are useful for
+Disk benchmarks write temporary files only under writable benchmark directories,
+falling back to `~/.paglets/benchmarks` or the OS temp directory when a volume
+mountpoint itself is not writable. Normal output hides skipped read-only and
+special mounts; use `--verbose` for that detail. Results are useful for
 practical host-to-host comparison, not calibrated hardware certification.
 
 ### Edge And IoT Coordination

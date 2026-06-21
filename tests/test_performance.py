@@ -13,6 +13,8 @@ from paglets.examples.performance.agent import (
     _BENCHMARK_THREAD_LOCK,
     BenchmarkMetric,
     BenchmarkRequest,
+    DiskBenchmarkResult,
+    DiskSkip,
     DiskTarget,
     HostBenchmarkLock,
     HostBenchmarkResult,
@@ -24,7 +26,7 @@ from paglets.examples.performance.agent import (
     parse_size,
     run_host_benchmarks,
 )
-from paglets.examples.performance.cli import main as perf_main
+from paglets.examples.performance.cli import _print_text, main as perf_main
 from paglets.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
@@ -91,15 +93,33 @@ def test_disk_discovery_skips_special_readonly_unwritable_and_duplicate_volumes(
     ]
     monkeypatch.setattr("paglets.examples.performance.agent.psutil.disk_partitions", lambda all=False: partitions)
     monkeypatch.setattr("paglets.examples.performance.agent.os.access", lambda path, mode: Path(path) != unwritable)
+    monkeypatch.setattr("paglets.examples.performance.agent._default_writable_disk_dirs", lambda: [])
 
     targets, skipped = discover_disk_targets([])
 
     assert targets == [DiskTarget(str(real), "/dev/disk1", "apfs")]
     reasons = {item.reason for item in skipped}
-    assert "duplicate mountpoint" in reasons
+    assert "duplicate volume" in reasons
     assert "special filesystem" in reasons
     assert "read-only volume" in reasons
     assert "not writable" in reasons
+
+
+def test_disk_discovery_uses_writable_user_directory_when_mountpoint_is_not_writable(tmp_path, monkeypatch):
+    Partition = namedtuple("Partition", "device mountpoint fstype opts")
+    mount = tmp_path / "System" / "Volumes" / "Data"
+    fallback = mount / "Users" / "klukas" / ".paglets" / "benchmarks"
+    fallback.mkdir(parents=True)
+    partitions = [Partition("/dev/disk3s5", str(mount), "apfs", "rw")]
+
+    monkeypatch.setattr("paglets.examples.performance.agent.psutil.disk_partitions", lambda all=False: partitions)
+    monkeypatch.setattr("paglets.examples.performance.agent._default_writable_disk_dirs", lambda: [fallback])
+    monkeypatch.setattr("paglets.examples.performance.agent.os.access", lambda path, mode: Path(path) == fallback)
+
+    targets, skipped = discover_disk_targets([])
+
+    assert targets == [DiskTarget(str(fallback), "/dev/disk3s5", "apfs")]
+    assert any(skip.path == str(mount) and skip.reason == "not writable" for skip in skipped)
 
 
 def test_disk_benchmark_uses_target_temp_directory_and_cleans_up(tmp_path):
@@ -112,6 +132,27 @@ def test_disk_benchmark_uses_target_temp_directory_and_cleans_up(tmp_path):
     assert result.read_bytes_per_second > 0
     assert result.metadata_files_per_second > 0
     assert list(tmp_path.glob("paglets-bench-*")) == []
+
+
+def test_text_output_hides_skipped_disks_unless_verbose(capsys):
+    host_result = HostBenchmarkResult(
+        host_name="alpha",
+        host_url="http://127.0.0.1:1",
+        platform="test",
+        python_version="3.x",
+        disk=DiskBenchmarkResult(skipped=[DiskSkip("/", "read-only volume")]),
+    )
+    summary = {
+        "results": {"alpha": {"host_url": host_result.host_url, "result": dataclass_to_wire(host_result)}},
+        "errors": {},
+        "cleanup_errors": {},
+    }
+
+    _print_text(summary)
+    assert "skipped /" not in capsys.readouterr().out
+
+    _print_text(summary, verbose=True)
+    assert "skipped /: read-only volume" in capsys.readouterr().out
 
 
 def test_host_benchmark_lock_serializes_local_workers():

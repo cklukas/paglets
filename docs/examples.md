@@ -183,11 +183,18 @@ The default run includes all categories:
 Disk benchmarks are intentionally bounded:
 
 - only writable real volumes are selected by default;
+- when a mountpoint is not directly writable, the benchmark also tries
+  per-user writable directories such as `~/.paglets/benchmarks` and the OS temp
+  directory on that same volume;
 - special, pseudo, read-only, duplicate, missing, and unwritable volumes are
   skipped;
 - each tested volume gets a temporary benchmark directory;
 - temporary files are cleaned up afterward;
 - a volume is skipped if free space is less than twice the requested test size.
+
+Normal text output hides skipped read-only, special, and duplicate targets. Use
+`--verbose` or `--debug` when you want to inspect those skipped targets. JSON
+output always includes the full skipped-target list.
 
 These numbers are practical comparison data for a paglets mesh. They are not
 calibrated hardware certification results.
@@ -208,6 +215,28 @@ uv run paglets-perf-test --duration 2 --disk-size 256M
 uv run paglets-perf-test --path /data --path /scratch
 uv run paglets-perf-test --no-disk
 uv run paglets-perf-test --workers 4
+uv run paglets-perf-test --verbose
+```
+
+Example with two local hosts running in separate terminals:
+
+```bash
+uv run paglets-host --name alpha --port 8765 --mesh-version dev
+uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+```
+
+Then run the benchmark from the repository checkout:
+
+```text
+klukas@mac-studio paglets % uv run paglets-perf-test
+host                int/s    float/s        sha  multi-int/s   mem copy    disk wr    disk rd err
+alpha               17.2M      19.8M     2.1G/s       140.2M    30.6G/s     3.7G/s    16.0G/s   0
+beta                17.2M      20.0M     2.2G/s       147.6M    31.0G/s     3.4G/s    15.7G/s   0
+
+disks:
+host           path                                  size      write       read   metadata
+alpha          /Users/klukas/.paglets/benchmark    128.0M     3.7G/s    16.0G/s      9130/s
+beta           /Users/klukas/.paglets/benchmark    128.0M     3.4G/s    15.7G/s      9301/s
 ```
 
 Important options:
@@ -222,6 +251,8 @@ Important options:
 | `--no-memory` | Skip memory tests. |
 | `--no-disk` | Skip disk I/O tests. |
 | `--lock-timeout` | Seconds to wait for another local benchmark run to finish. |
+| `--verbose` | Print skipped disk targets and cleanup diagnostics. |
+| `--debug` | Same diagnostic output as `--verbose`. |
 
 ### Agent Flow
 

@@ -229,9 +229,11 @@ uv run paglets-perf-test --duration 2 --disk-size 256M
 host, but it does not talk to a resident service. It creates a parent benchmark
 paglet and clones workers to all online same-version mesh hosts. Each worker
 runs CPU, memory, and bounded disk I/O tests locally, then reports results back
-to the parent. Disk tests use temporary files on writable real volumes and clean
-them up afterward. Use `--path /some/mount` to limit disk tests, or `--no-disk`
-to skip disk I/O.
+to the parent. Disk tests use temporary files under writable benchmark
+directories, preferring `~/.paglets/benchmarks` and the OS temp directory when a
+volume mountpoint itself is not writable. Use `--path /some/mount` to limit disk
+tests, `--no-disk` to skip disk I/O, or `--verbose` to show skipped read-only
+and special volumes.
 
 Run a parent/child clone survey example:
 
