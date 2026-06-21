@@ -21,6 +21,7 @@ DEFAULT_GOSSIP_INTERVAL_SECONDS = 2.0
 DEFAULT_SAMPLE_TTL_SECONDS = 20.0
 DEFAULT_PEER_BATCH_SIZE = 8
 DEFAULT_SYNC_BATCH_SIZE = 64
+MESH_INFO_LOOP_ERROR_KEY = "mesh-info-loop"
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +253,9 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
                 self._gossip_once()
             except Exception as exc:  # pragma: no cover - background diagnostics
                 with self.locked_state() as state:
-                    state.errors["mesh-info-loop"] = str(exc)
+                    state.errors[MESH_INFO_LOOP_ERROR_KEY] = str(exc)
+            else:
+                self._clear_error_keys(MESH_INFO_LOOP_ERROR_KEY)
 
     def _gossip_once(self) -> None:
         self._refresh_local_snapshot(force=False)
@@ -276,9 +279,9 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
                     no_delay=True,
                 )
             except Exception as exc:
-                with self.locked_state() as state:
-                    state.errors[handle.record.host_name or handle.record.host_url] = str(exc)
+                self._record_peer_error(handle.record, str(exc))
                 continue
+            self._clear_error_keys(*_service_record_error_keys(handle.record))
             for snapshot in reply.snapshots:
                 self._merge_snapshot(snapshot)
         self._prune_snapshots()
@@ -366,7 +369,26 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
             if existing.observed_at >= snapshot.observed_at:
                 return False
         self.state.snapshots[key] = dataclass_to_wire(snapshot)
+        for error_key in _snapshot_error_keys(snapshot):
+            self.state.errors.pop(error_key, None)
         return True
+
+    def _record_peer_error(self, record: Any, error: str) -> None:
+        keys = _service_record_error_keys(record)
+        if not keys:
+            keys = ["unknown-peer"]
+        with self.locked_state() as state:
+            for key in keys:
+                state.errors.pop(key, None)
+            state.errors[keys[0]] = error
+
+    def _clear_error_keys(self, *keys: str) -> None:
+        clean_keys = [key for key in keys if key]
+        if not clean_keys:
+            return
+        with self.locked_state() as state:
+            for key in clean_keys:
+                state.errors.pop(key, None)
 
     def _snapshots(self, *, max_age: float, fresh_only: bool) -> list[MeshHostSnapshot]:
         now = time.time()
@@ -408,3 +430,23 @@ def _target_score(snapshot: MeshHostSnapshot) -> float:
     memory_score = snapshot.memory_percent / 100.0 if snapshot.memory_total_bytes else 1.0
     disk_score = snapshot.work_percent_used / 100.0 if snapshot.work_total_bytes else 1.0
     return round(load_score + cpu_score + memory_score + disk_score, 6)
+
+
+def _service_record_error_keys(record: Any) -> list[str]:
+    keys: list[str] = []
+    _append_error_key(keys, getattr(record, "host_name", ""))
+    _append_error_key(keys, getattr(record, "host_url", ""))
+    return keys
+
+
+def _snapshot_error_keys(snapshot: MeshHostSnapshot) -> list[str]:
+    keys: list[str] = []
+    _append_error_key(keys, snapshot.host_name)
+    _append_error_key(keys, snapshot.host_url)
+    return keys
+
+
+def _append_error_key(keys: list[str], value: str) -> None:
+    key = str(value or "").rstrip("/")
+    if key and key not in keys:
+        keys.append(key)

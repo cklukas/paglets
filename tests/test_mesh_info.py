@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 from paglets import Host, PagletContext, ServiceScope
 from paglets.examples.mesh_info import (
@@ -14,6 +15,7 @@ from paglets.examples.mesh_info import (
     SYNC_MESH_INFO,
     LandscapeRequest,
     MeshHostSnapshot,
+    MeshInfoAgent,
     MeshInfoSyncRequest,
     SnapshotRequest,
     TargetSelectionRequest,
@@ -114,6 +116,37 @@ def test_mesh_info_target_selection_filters_stale_and_overloaded_hosts(tmp_path:
         assert reply.rejected["busy"].startswith("load per cpu")
     finally:
         host.stop()
+
+
+def test_mesh_info_clears_peer_error_when_fresh_snapshot_arrives():
+    agent = MeshInfoAgent()
+    with agent.locked_state() as state:
+        state.errors["windows"] = "timed out"
+        state.errors["http://192.168.86.28:8765"] = "connection reset"
+
+    merged = agent._merge_snapshot(
+        MeshHostSnapshot(
+            host_name="windows",
+            host_url="http://192.168.86.28:8765",
+            code_version="test",
+            observed_at=time.time(),
+        )
+    )
+
+    assert merged is True
+    assert "windows" not in agent.state.errors
+    assert "http://192.168.86.28:8765" not in agent.state.errors
+
+
+def test_mesh_info_peer_error_uses_stable_host_key_and_replaces_old_url_key():
+    agent = MeshInfoAgent()
+    record = SimpleNamespace(host_name="windows", host_url="http://192.168.86.28:8765")
+    with agent.locked_state() as state:
+        state.errors["http://192.168.86.28:8765"] = "old error"
+
+    agent._record_peer_error(record, "timed out")
+
+    assert agent.state.errors == {"windows": "timed out"}
 
 
 def _launch_config(tmp_path: Path):
