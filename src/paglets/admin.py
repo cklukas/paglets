@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import socket
 import subprocess
 import sys
 from time import perf_counter
@@ -13,7 +14,7 @@ from urllib.parse import urlencode, urlparse
 
 from .client import HostClient
 from .errors import RemoteHostError
-from .mesh import HostRef
+from .mesh import HostRef, MESH_MULTICAST_GROUP, MESH_MULTICAST_PORT, decode_mesh_beacon
 from .messages import Message
 from .runtime_values import ServiceScope, enum_from_wire, require_enum
 
@@ -104,6 +105,30 @@ def is_local_server_url(url: str) -> bool:
     parsed = urlparse(normalize_server_url(url))
     host = (parsed.hostname or "").lower()
     return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def detect_lan_host() -> str:
+    """Return the local IPv4 address used for default-route traffic."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            address = sock.getsockname()[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            if family != socket.AF_INET:
+                continue
+            address = sockaddr[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+    return "127.0.0.1"
 
 
 def can_start_local_server(server: ServerRef) -> bool:
@@ -260,6 +285,178 @@ def save_tui_config(
             "modules": list(config.agent_discovery.modules),
         }
     config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def register_running_server(
+    name: str,
+    url: str,
+    path: Path | str = DEFAULT_CONFIG_PATH,
+    *,
+    enabled: bool = True,
+) -> ServerRef:
+    server = ServerRef(
+        name=name,
+        url=normalize_server_url(url),
+        enabled=enabled,
+        local_start=is_local_server_url(url),
+    )
+    config_path = Path(path)
+    if config_path.exists():
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"{config_path} must contain a JSON object")
+    else:
+        payload = {}
+    existing = _server_refs_from_payload(payload, config_path) if "servers" in payload else []
+    payload["servers"] = [_server_ref_payload(item) for item in upsert_server_ref(existing, server)]
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return server
+
+
+def select_reachable_entry_server(
+    servers: list[ServerRef],
+    *,
+    entry_name: str | None,
+    client: HostClient,
+    config_path: Path | str = DEFAULT_CONFIG_PATH,
+    timeout: float = 1.0,
+) -> ServerRef:
+    candidates = servers if entry_name is None else [server for server in servers if server.name == entry_name]
+    if entry_name is not None and not candidates:
+        raise ValueError(
+            f"No server named {entry_name!r} in config; pass --server {entry_name}=URL or update {config_path}"
+        )
+    if entry_name is None:
+        candidates = [server for server in candidates if server.enabled]
+
+    entry_candidates = _entry_server_candidates(candidates)
+    if entry_name is None:
+        entry_candidates.extend(_ambient_entry_candidates(candidates))
+    tried: list[str] = []
+    for candidate in _dedupe_servers(entry_candidates):
+        tried.append(candidate.url)
+        try:
+            health = client.get_json(f"{candidate.url.rstrip('/')}/health", timeout=timeout)
+        except Exception:
+            continue
+        return ServerRef(
+            name=str(health.get("name") or candidate.name),
+            url=normalize_server_url(str(health.get("address") or candidate.url)),
+            enabled=candidate.enabled,
+            local_start=candidate.local_start,
+        )
+    tried_text = ", ".join(tried) if tried else "none"
+    raise ValueError(f"No reachable entry server found; tried {tried_text}")
+
+
+def _entry_server_candidates(servers: list[ServerRef]) -> list[ServerRef]:
+    candidates: list[ServerRef] = []
+    for server in servers:
+        candidates.append(server)
+        parsed = urlparse(normalize_server_url(server.url))
+        if not is_local_server_url(server.url) or parsed.port is None:
+            continue
+        lan_host = detect_lan_host()
+        if lan_host.startswith("127."):
+            continue
+        candidates.append(
+            ServerRef(
+                name=server.name,
+                url=f"{parsed.scheme or 'http'}://{lan_host}:{parsed.port}",
+                enabled=server.enabled,
+                local_start=False,
+            )
+        )
+    return candidates
+
+
+def _ambient_entry_candidates(servers: list[ServerRef]) -> list[ServerRef]:
+    ports = {8765}
+    for server in servers:
+        try:
+            parsed = urlparse(normalize_server_url(server.url))
+        except ValueError:
+            continue
+        if parsed.port is not None:
+            ports.add(parsed.port)
+
+    candidates: list[ServerRef] = []
+    lan_host = detect_lan_host()
+    for port in sorted(ports):
+        candidates.append(
+            ServerRef("local", f"http://127.0.0.1:{port}", enabled=True, local_start=True)
+        )
+        if not lan_host.startswith("127."):
+            candidates.append(
+                ServerRef("local-lan", f"http://{lan_host}:{port}", enabled=True, local_start=False)
+            )
+    candidates.extend(discover_mesh_entry_servers(timeout=0.75))
+    return candidates
+
+
+def discover_mesh_entry_servers(*, timeout: float = 0.75) -> list[ServerRef]:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", MESH_MULTICAST_PORT))
+        group = socket.inet_aton(MESH_MULTICAST_GROUP)
+        sock.setsockopt(
+            socket.IPPROTO_IP,
+            socket.IP_ADD_MEMBERSHIP,
+            group + socket.inet_aton("0.0.0.0"),
+        )
+        sock.settimeout(0.1)
+    except OSError:
+        return []
+
+    discovered: list[ServerRef] = []
+    deadline = perf_counter() + max(0.0, timeout)
+    with sock:
+        while perf_counter() < deadline:
+            try:
+                data, _addr = sock.recvfrom(65535)
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            ref = decode_mesh_beacon(data)
+            if ref is None or not ref.online:
+                continue
+            discovered.append(ServerRef(ref.name, ref.url, enabled=True, local_start=False))
+    return _dedupe_servers(discovered)
+
+
+def _dedupe_servers(servers: list[ServerRef]) -> list[ServerRef]:
+    result: list[ServerRef] = []
+    seen: set[str] = set()
+    for server in servers:
+        try:
+            key = normalize_server_url(server.url).rstrip("/")
+        except ValueError:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            ServerRef(
+                name=server.name,
+                url=key,
+                enabled=server.enabled,
+                local_start=server.local_start,
+            )
+        )
+    return result
+
+
+def _server_ref_payload(server: ServerRef) -> dict[str, Any]:
+    normalized_url = normalize_server_url(server.url)
+    return {
+        "name": server.name,
+        "url": normalized_url,
+        "enabled": server.enabled,
+        "local_start": bool(server.local_start or is_local_server_url(normalized_url)) and is_local_server_url(normalized_url),
+    }
 
 
 def add_server_ref(servers: list[ServerRef], server: ServerRef) -> list[ServerRef]:

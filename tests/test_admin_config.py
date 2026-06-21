@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import paglets.admin as admin_module
 from paglets.admin import (
     AgentDiscoveryConfig,
     ServerRef,
@@ -20,9 +21,11 @@ from paglets.admin import (
     local_server_command,
     normalize_discovery_path,
     parse_server_arg,
+    register_running_server,
     remove_server_ref,
     save_server_config,
     save_tui_config,
+    select_reachable_entry_server,
     upsert_server_ref,
 )
 
@@ -53,6 +56,103 @@ def test_server_config_rejects_duplicate_names_and_supports_upsert():
     assert upsert_server_ref(servers, ServerRef("alpha", "http://127.0.0.1:9000")) == [
         ServerRef("alpha", "http://127.0.0.1:9000")
     ]
+
+
+def test_register_running_server_upserts_actual_runtime_url_and_preserves_config(tmp_path):
+    config_path = tmp_path / "servers.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agent_discovery": {"paths": [str(tmp_path / "agents")], "modules": ["tests.test_paglets_core"]},
+                "servers": [{"name": "alpha", "url": "http://127.0.0.1:8765", "enabled": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    server = register_running_server("alpha", "http://192.168.86.38:8765", config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+    assert server == ServerRef("alpha", "http://192.168.86.38:8765", True, False)
+    assert payload["agent_discovery"] == {"paths": [str(tmp_path / "agents")], "modules": ["tests.test_paglets_core"]}
+    assert load_server_config(config_path) == [ServerRef("alpha", "http://192.168.86.38:8765", True, False)]
+
+
+def test_select_reachable_entry_server_falls_back_from_loopback_to_lan(monkeypatch):
+    monkeypatch.setattr(admin_module, "detect_lan_host", lambda: "192.168.86.38")
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            calls.append(url)
+            if "127.0.0.1" in url:
+                raise OSError("connection refused")
+            return {
+                "name": "mac-studio",
+                "address": "http://192.168.86.38:8765",
+                "code_version": "dev",
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+
+    selected = select_reachable_entry_server(
+        [ServerRef("alpha", "http://127.0.0.1:8765")],
+        entry_name=None,
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    assert calls == ["http://127.0.0.1:8765/health", "http://192.168.86.38:8765/health"]
+    assert selected == ServerRef("mac-studio", "http://192.168.86.38:8765", True, False)
+
+
+def test_select_reachable_entry_server_ignores_stale_config_ip_and_uses_ambient_lan(monkeypatch):
+    monkeypatch.setattr(admin_module, "detect_lan_host", lambda: "192.168.86.38")
+    monkeypatch.setattr(admin_module, "discover_mesh_entry_servers", lambda timeout=0.75: [])
+    calls: list[str] = []
+
+    class FakeClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            calls.append(url)
+            if url == "http://192.168.86.38:8765/health":
+                return {
+                    "name": "mac-studio",
+                    "address": "http://192.168.86.38:8765",
+                    "code_version": "dev",
+                    "active_count": 0,
+                    "inactive_count": 0,
+                }
+            raise OSError("stale")
+
+    selected = select_reachable_entry_server(
+        [ServerRef("old", "http://192.168.86.99:8765")],
+        entry_name=None,
+        client=FakeClient(),  # type: ignore[arg-type]
+    )
+
+    assert "http://192.168.86.99:8765/health" in calls
+    assert "http://192.168.86.38:8765/health" in calls
+    assert selected == ServerRef("mac-studio", "http://192.168.86.38:8765", True, False)
+
+
+def test_select_reachable_entry_server_uses_ambient_lan_without_config(monkeypatch):
+    monkeypatch.setattr(admin_module, "detect_lan_host", lambda: "192.168.86.38")
+    monkeypatch.setattr(admin_module, "discover_mesh_entry_servers", lambda timeout=0.75: [])
+
+    class FakeClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            if url == "http://192.168.86.38:8765/health":
+                return {
+                    "name": "mac-studio",
+                    "address": "http://192.168.86.38:8765",
+                    "code_version": "dev",
+                    "active_count": 0,
+                    "inactive_count": 0,
+                }
+            raise OSError("not here")
+
+    selected = select_reachable_entry_server([], entry_name=None, client=FakeClient())  # type: ignore[arg-type]
+
+    assert selected == ServerRef("mac-studio", "http://192.168.86.38:8765", True, False)
 
 
 def test_parse_server_arg_normalizes_name_url_pair():

@@ -8,7 +8,15 @@ import sys
 import time
 from typing import Any
 
-from ...admin import DEFAULT_CONFIG_PATH, PagletsAdminClient, ServerRef, load_server_config, parse_server_arg, upsert_server_ref
+from ...admin import (
+    DEFAULT_CONFIG_PATH,
+    PagletsAdminClient,
+    ServerRef,
+    load_server_config,
+    parse_server_arg,
+    select_reachable_entry_server,
+    upsert_server_ref,
+)
 from ...client import HostClient
 from ...messages import Message
 from ...proxy import PagletProxy
@@ -73,23 +81,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
-    candidates = servers if entry_name is None else [server for server in servers if server.name == entry_name]
-    if entry_name is not None and not candidates:
-        raise ValueError(f"No server named {entry_name!r} in config; pass --server {entry_name}=URL or update {DEFAULT_CONFIG_PATH}")
-    if entry_name is None:
-        candidates = [server for server in candidates if server.enabled]
-    if not candidates:
-        raise ValueError(f"No enabled servers configured in {DEFAULT_CONFIG_PATH}; pass --server NAME=URL")
-
-    errors: list[str] = []
-    for server in candidates:
-        try:
-            client.get_json(f"{server.url.rstrip('/')}/health", timeout=2.0)
-            return server
-        except Exception as exc:
-            errors.append(f"{server.name}: {exc}")
-    details = "; ".join(errors) if errors else "none reachable"
-    raise ValueError(f"No reachable entry server found ({details})")
+    return select_reachable_entry_server(
+        servers,
+        entry_name=entry_name,
+        client=client,
+        config_path=DEFAULT_CONFIG_PATH,
+    )
 
 
 def _operation_request(args: argparse.Namespace):

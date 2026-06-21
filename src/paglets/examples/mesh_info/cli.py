@@ -7,7 +7,14 @@ import json
 import sys
 import time
 
-from ...admin import DEFAULT_CONFIG_PATH, ServerRef, load_server_config, parse_server_arg, upsert_server_ref
+from ...admin import (
+    DEFAULT_CONFIG_PATH,
+    ServerRef,
+    load_server_config,
+    parse_server_arg,
+    select_reachable_entry_server,
+    upsert_server_ref,
+)
 from ...client import HostClient
 from ...runtime_values import ServiceScope
 from ...services import ServiceHandle, ServiceRecord
@@ -79,21 +86,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
-    candidates = servers if entry_name is None else [server for server in servers if server.name == entry_name]
-    if entry_name is not None and not candidates:
-        raise ValueError(f"No server named {entry_name!r} in config; pass --server {entry_name}=URL")
-    if entry_name is None:
-        candidates = [server for server in candidates if server.enabled]
-    if not candidates:
-        raise ValueError(f"No enabled servers configured in {DEFAULT_CONFIG_PATH}; pass --server NAME=URL")
-    errors: list[str] = []
-    for server in candidates:
-        try:
-            client.get_json(f"{server.url.rstrip('/')}/health", timeout=2.0)
-            return server
-        except Exception as exc:
-            errors.append(f"{server.name}: {exc}")
-    raise ValueError(f"No reachable entry server found ({'; '.join(errors)})")
+    return select_reachable_entry_server(
+        servers,
+        entry_name=entry_name,
+        client=client,
+        config_path=DEFAULT_CONFIG_PATH,
+    )
 
 
 def _mesh_info_handle(entry: ServerRef, client: HostClient) -> ServiceHandle:

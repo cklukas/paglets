@@ -77,6 +77,13 @@ The command-line examples use `~/.paglets/servers.json` to choose one entry
 host. You only need `--server NAME=URL` for one-off runs or before saving a
 server config. The entry host is just the bootstrap point; mesh-aware examples
 still discover and use online same-version mesh hosts automatically.
+`paglets-host` updates that config with its actual runtime URL after binding,
+including `--bind-public` LAN URLs. If an older config still points at
+`127.0.0.1` while the host is bound to a LAN address, the example CLIs try the
+current LAN address on the same port. Dead configured URLs are treated as
+hints; the CLIs continue through current local/LAN candidates and mesh
+multicast discovery before reporting that no entry host is reachable. If the
+config is empty or every saved URL is stale, discovery still runs.
 
 ```bash
 uv run paglets-sysinfo [--server alpha=http://127.0.0.1:8765] [--entry alpha] df

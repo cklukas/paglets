@@ -9,6 +9,7 @@ import signal
 import sys
 
 from . import git_update
+from .admin import register_running_server
 from .errors import PagletError
 from .host import Host
 from .runtime_values import LaunchConfigSyncAction
@@ -91,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     host.start_background()
+    try:
+        register_running_server(host.name, host.address)
+    except Exception as exc:
+        print(f"paglets host warning: could not update server config: {exc}", file=sys.stderr, flush=True)
     if host.mesh.version_warning:
         print(f"paglets host warning: {host.mesh.version_warning}", file=sys.stderr, flush=True)
     print(

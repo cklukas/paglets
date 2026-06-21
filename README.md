@@ -213,6 +213,15 @@ first bound address is the mesh URL. `--persistence-dir` overrides the host's
 durable inactive-paglet directory.
 `--persistent-storage-quota 10M` controls the per-class managed persistent
 storage quota.
+After binding, `paglets-host` updates `~/.paglets/servers.json` with the
+actual runtime URL, so example CLIs such as `paglets-mesh-info` and
+`paglets-pi-compute` do not keep using a stale loopback entry. If an older
+config still points at `127.0.0.1` while the host is bound to a LAN address,
+the CLIs also try the current LAN address on the same port. Dead configured
+URLs are treated as hints; the CLIs continue through current local/LAN
+candidates and mesh multicast discovery before reporting that no entry host is
+reachable. If the config is empty or every saved URL is stale, discovery still
+runs.
 Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
 current git commit, then a package-version fallback. Different versions are
 ignored by the mesh.
