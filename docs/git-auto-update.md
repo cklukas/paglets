@@ -78,7 +78,12 @@ flowchart TD
 
 The lock path is `.git/paglets-auto-update.lock`. It prevents multiple paglets
 host processes that share one checkout from running `git pull` or `uv sync`
-concurrently.
+concurrently. The lock directory contains an `owner` file with the updater PID
+and timestamp. If a previous host crashed and left a lock behind, the next
+update removes it when the owner PID is no longer running. Locks with missing
+or malformed owner data are only removed after a short grace period, so a
+second host does not delete a lock that another process has just created. A
+lock held by a live process is waited on until the normal lock timeout.
 
 ## Mesh Broadcast Flow
 

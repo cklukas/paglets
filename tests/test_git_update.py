@@ -2,10 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import threading
 import time
+
+import pytest
 
 from paglets import git_update
 
@@ -97,6 +100,60 @@ def test_git_update_blocks_restart_when_uv_sync_fails(tmp_path: Path, monkeypatc
     assert result.restart_required is False
     assert result.uv_sync_run is True
     assert result.error == "sync failed"
+
+
+def test_git_update_lock_removes_stale_dead_owner(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    lock_path = repo / ".git" / git_update.GIT_UPDATE_LOCK_NAME
+    lock_path.mkdir()
+    (lock_path / "owner").write_text(f"pid=123456789\ntime={time.time()}\n", encoding="utf-8")
+    monkeypatch.setattr(git_update.psutil, "pid_exists", lambda _pid: False)
+
+    with git_update.GitUpdateLock(repo, timeout=0.1):
+        owner = (lock_path / "owner").read_text(encoding="utf-8")
+        assert f"pid={os.getpid()}" in owner
+
+    assert not lock_path.exists()
+
+
+def test_git_update_lock_keeps_fresh_unknown_owner(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    lock_path = repo / ".git" / git_update.GIT_UPDATE_LOCK_NAME
+    lock_path.mkdir()
+
+    with pytest.raises(git_update.GitUpdateError, match="Timed out waiting"):
+        git_update.GitUpdateLock(repo, timeout=0.0).acquire()
+
+    assert lock_path.exists()
+
+
+def test_git_update_lock_removes_old_unknown_owner(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    lock_path = repo / ".git" / git_update.GIT_UPDATE_LOCK_NAME
+    lock_path.mkdir()
+    old_time = time.time() - git_update.GIT_UPDATE_STALE_LOCK_GRACE_SECONDS - 1.0
+    os.utime(lock_path, (old_time, old_time))
+
+    with git_update.GitUpdateLock(repo, timeout=0.1):
+        assert (lock_path / "owner").exists()
+
+    assert not lock_path.exists()
+
+
+def test_git_update_lock_waits_for_live_owner(tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    lock_path = repo / ".git" / git_update.GIT_UPDATE_LOCK_NAME
+    lock_path.mkdir()
+    (lock_path / "owner").write_text(f"pid={os.getpid()}\ntime={time.time()}\n", encoding="utf-8")
+
+    with pytest.raises(git_update.GitUpdateError, match="live process"):
+        git_update.GitUpdateLock(repo, timeout=0.0).acquire()
+
+    assert lock_path.exists()
 
 
 def test_git_update_lock_serializes_pull_calls(tmp_path: Path, monkeypatch):

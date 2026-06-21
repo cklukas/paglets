@@ -11,10 +11,14 @@ import subprocess
 import time
 from typing import Any
 
+import psutil
+
 
 GIT_COMMAND_TIMEOUT_SECONDS = 300.0
 UV_SYNC_TIMEOUT_SECONDS = 600.0
 GIT_UPDATE_LOCK_TIMEOUT_SECONDS = 300.0
+GIT_UPDATE_LOCK_RETRY_SECONDS = 0.05
+GIT_UPDATE_STALE_LOCK_GRACE_SECONDS = 5.0
 GIT_UPDATE_LOCK_NAME = "paglets-auto-update.lock"
 
 _GIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{4,64}$")
@@ -69,6 +73,12 @@ class GitUpdateError(RuntimeError):
     """Raised when git auto-update cannot inspect or update a checkout."""
 
 
+@dataclass(frozen=True, slots=True)
+class _LockOwner:
+    pid: int | None = None
+    timestamp: float | None = None
+
+
 class GitUpdateLock:
     """Cross-platform lock backed by atomic directory creation under .git."""
 
@@ -94,9 +104,14 @@ class GitUpdateLock:
                 self._write_owner_file()
                 return
             except FileExistsError:
+                if self._remove_stale_lock_if_needed():
+                    continue
                 if time.monotonic() >= deadline:
-                    raise GitUpdateError(f"Timed out waiting for git update lock at {self.path}") from None
-                time.sleep(0.05)
+                    raise GitUpdateError(
+                        f"Timed out waiting for git update lock at {self.path}; "
+                        f"{self._lock_description()}"
+                    ) from None
+                time.sleep(GIT_UPDATE_LOCK_RETRY_SECONDS)
 
     def release(self) -> None:
         if not self._acquired:
@@ -111,6 +126,76 @@ class GitUpdateLock:
             (self.path / "owner").write_text(f"pid={os.getpid()}\ntime={time.time()}\n", encoding="utf-8")
         except OSError:
             pass
+
+    def _remove_stale_lock_if_needed(self) -> bool:
+        owner = self._read_owner()
+        if owner.pid is not None and self._pid_matches_owner(owner):
+            return False
+        age = self._lock_age_seconds(owner)
+        if owner.pid is None and age < GIT_UPDATE_STALE_LOCK_GRACE_SECONDS:
+            return False
+        try:
+            shutil.rmtree(self.path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+
+    def _read_owner(self) -> _LockOwner:
+        try:
+            text = (self.path / "owner").read_text(encoding="utf-8")
+        except OSError:
+            return _LockOwner()
+        values: dict[str, str] = {}
+        for line in text.splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip()
+        try:
+            pid = int(values["pid"]) if values.get("pid") else None
+        except ValueError:
+            pid = None
+        try:
+            timestamp = float(values["time"]) if values.get("time") else None
+        except ValueError:
+            timestamp = None
+        return _LockOwner(pid=pid, timestamp=timestamp)
+
+    def _pid_matches_owner(self, owner: _LockOwner) -> bool:
+        pid = owner.pid
+        if pid is None or pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        if not psutil.pid_exists(pid):
+            return False
+        if owner.timestamp is not None:
+            try:
+                create_time = psutil.Process(pid).create_time()
+            except (psutil.Error, OSError):
+                return True
+            if create_time > owner.timestamp + 1.0:
+                return False
+        return True
+
+    def _lock_age_seconds(self, owner: _LockOwner) -> float:
+        timestamp = owner.timestamp
+        if timestamp is None:
+            try:
+                timestamp = self.path.stat().st_mtime
+            except OSError:
+                return GIT_UPDATE_STALE_LOCK_GRACE_SECONDS
+        return max(0.0, time.time() - timestamp)
+
+    def _lock_description(self) -> str:
+        owner = self._read_owner()
+        if owner.pid is None:
+            return "lock owner is unknown"
+        if self._pid_matches_owner(owner):
+            return f"lock is held by live process pid={owner.pid}"
+        return f"lock owner pid={owner.pid} is no longer running"
 
 
 def find_repo_root(start: Path | str | None = None) -> Path:
