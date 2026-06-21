@@ -19,6 +19,7 @@ from paglets.examples.performance.agent import (
     HostBenchmarkLock,
     HostBenchmarkResult,
     PerformanceBenchmarkAgent,
+    PerformanceBenchmarkState,
     benchmark_cpu,
     benchmark_disk_target,
     benchmark_memory,
@@ -256,7 +257,7 @@ def test_paglets_perf_test_json_collects_mesh_with_server_override(tmp_path, cap
         alpha.stop()
 
 
-def test_benchmark_child_failure_records_error_for_one_host(tmp_path, monkeypatch):
+def test_benchmark_child_failure_records_error_for_one_host(tmp_path):
     alpha = Host(
         "alpha",
         host="127.0.0.1",
@@ -275,37 +276,41 @@ def test_benchmark_child_failure_records_error_for_one_host(tmp_path, monkeypatc
         persistence_dir=tmp_path / "beta",
     )
 
-    def fake_run(request: BenchmarkRequest, *, host_name: str, host_url: str) -> HostBenchmarkResult:
-        if host_name == "beta":
-            raise RuntimeError("forced benchmark failure")
-        return HostBenchmarkResult(
-            host_name=host_name,
-            host_url=host_url,
-            platform="test",
-            python_version="3.x",
-            cpu=None,
-            memory=None,
-            disk=None,
-        )
-
-    monkeypatch.setattr("paglets.examples.performance.agent.run_host_benchmarks", fake_run)
     alpha.start_background()
     beta.start_background()
     try:
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
-        proxy = alpha.create(PerformanceBenchmarkAgent)
-        summary = proxy.send(
+        state = PerformanceBenchmarkState(pending_hosts=["alpha", "beta"])
+        proxy = alpha.create(PerformanceBenchmarkAgent, state)
+        proxy.send(
             Message(
-                "collect",
+                "child_result",
                 {
-                    "request": dataclass_to_wire(
-                        BenchmarkRequest(include_cpu=False, include_memory=False, include_disk=False)
+                    "host_name": "alpha",
+                    "host_url": alpha.address,
+                    "result": dataclass_to_wire(
+                        HostBenchmarkResult(
+                            host_name="alpha",
+                            host_url=alpha.address,
+                            platform="test",
+                            python_version="3.x",
+                        )
                     ),
-                    "timeout": 3.0,
                 },
             )
         )
+        proxy.send(
+            Message(
+                "child_result",
+                {
+                    "host_name": "beta",
+                    "host_url": beta.address,
+                    "error": "forced benchmark failure",
+                },
+            )
+        )
+        summary = proxy.send(Message("summary"))
 
         assert set(summary["results"]) == {"alpha"}
         assert summary["errors"] == {"beta": "forced benchmark failure"}

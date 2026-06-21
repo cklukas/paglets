@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 from paglets import Host, Message
 from paglets.admin import ServerRef, save_server_config
@@ -17,6 +18,8 @@ from paglets.examples.compute import (
     pi_decimal,
     pi_decimal_digits,
 )
+from paglets.examples.compute.agent import _host_worker_slots
+from paglets.examples.mesh_info import MeshHostSnapshot, TargetCandidate
 from paglets.examples.compute.cli import main as pi_main
 from paglets.serde import dataclass_to_wire
 from paglets.startup import load_launch_config, sync_launch_config
@@ -33,25 +36,15 @@ def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):
     host.start_background()
     try:
         proxy = host.create(PiComputeCoordinatorAgent, PiComputeState())
-        summary = proxy.send(
-            Message(
-                "start",
-                {
-                    "request": dataclass_to_wire(
-                        PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
-                    )
-                },
-            )
+        summary = _run_compute(
+            proxy,
+            PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0),
         )
 
         assert summary["done"] is True
         assert summary["pi"] == "3.14159265"
         assert summary["decimal_digits"] == "14159265"
-        assert not [
-            agent
-            for agent in host.list_agents()
-            if agent["class_name"] == "paglets.examples.compute.agent:PiBatchWorkerAgent"
-        ]
+        _wait_until(lambda: not _pi_workers(host))
     finally:
         host.stop()
 
@@ -86,19 +79,48 @@ def test_pi_compute_summary_exposes_partial_digits():
     assert summary.decimal_digits == "1415"
 
 
+def test_pi_compute_counts_free_host_slots(tmp_path: Path):
+    host = _host("alpha", tmp_path / "alpha")
+    host.start_background()
+    try:
+        request = PiComputeRequest(
+            start=0,
+            digits=80,
+            batch_size=1,
+            max_load_per_cpu=1.0,
+            max_cpu_percent=100.0,
+            max_workers_per_host=3,
+        )
+        snapshot = _snapshot(host, cpu_count=8, load=3.1)
+        assert _host_worker_slots(snapshot, request) == 3
+    finally:
+        host.stop()
+
+
+def test_pi_compute_busy_hosts_have_no_slots_before_fallback(tmp_path: Path):
+    host = _host("alpha", tmp_path / "alpha")
+    host.start_background()
+    try:
+        request = PiComputeRequest(start=0, digits=32, batch_size=1, max_load_per_cpu=0.5, max_cpu_percent=20.0)
+        snapshot = _snapshot(host, cpu_count=4, load=4.0, cpu_percent=100.0)
+        assert _host_worker_slots(snapshot, request) == 0
+    finally:
+        host.stop()
+
+
 def test_skipped_batch_results_are_requeued(tmp_path: Path):
     host = _host("alpha", tmp_path / "alpha")
     host.start_background()
     try:
-        proxy = host.create(PiComputeCoordinatorAgent, PiComputeState())
-        state = host.get_state(proxy.agent_id, PiComputeState)
         batch = PiBatchRequest("terms:0:1", 0, 1)
-        state.in_flight[batch.batch_id] = {
+        initial_state = PiComputeState()
+        initial_state.in_flight[batch.batch_id] = {
             "agent_id": "worker",
             "host_name": "alpha",
             "host_url": host.address,
             "batch": dataclass_to_wire(batch),
         }
+        proxy = host.create(PiComputeCoordinatorAgent, initial_state)
 
         proxy.send(
             Message(
@@ -117,6 +139,7 @@ def test_skipped_batch_results_are_requeued(tmp_path: Path):
             )
         )
 
+        state = host.get_state(proxy.agent_id, PiComputeState)
         assert state.skipped_count == 1
         assert state.pending_batches == [dataclass_to_wire(batch)]
         assert state.in_flight == {}
@@ -203,3 +226,45 @@ def _host(name: str, persistence_dir: Path, *, launch_config=None) -> Host:
         persistence_dir=persistence_dir,
         launch_config=launch_config,
     )
+
+
+def _snapshot(host: Host, *, cpu_count: int, load: float, cpu_percent: float = 25.0) -> MeshHostSnapshot:
+    return MeshHostSnapshot(
+        host_name=host.name,
+        host_url=host.address.rstrip("/"),
+        code_version="test",
+        observed_at=time.time(),
+        cpu_count_logical=cpu_count,
+        cpu_percent=cpu_percent,
+        load_average=[load],
+        load_per_cpu=load / cpu_count,
+        memory_available_bytes=1024**3,
+        work_free_bytes=1024**3,
+    )
+
+
+def _pi_workers(host: Host) -> list[dict]:
+    return [
+        agent
+        for agent in host.list_agents()
+        if agent["class_name"] == "paglets.examples.compute.agent:PiBatchWorkerAgent"
+    ]
+
+
+def _run_compute(proxy, request: PiComputeRequest) -> dict:
+    proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
+    summary: dict = {}
+    while True:
+        reply = proxy.send(Message("drain", {"after_digits": 0, "wait_timeout": 0.5}))
+        summary = dict(reply.get("summary") or {})
+        if reply.get("done"):
+            return summary
+
+
+def _wait_until(predicate, *, timeout: float = 3.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    assert predicate()

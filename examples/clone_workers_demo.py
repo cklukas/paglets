@@ -8,6 +8,11 @@ import time
 
 from paglets import Host, Message, Paglet, PagletState
 
+try:
+    from .support import run_importable_main
+except ImportError:  # pragma: no cover - direct script execution
+    from support import run_importable_main
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -84,4 +89,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_importable_main("examples.clone_workers_demo")

@@ -30,6 +30,7 @@ class PiComputeRequest:
     digits: int = 16
     batch_size: int = 1
     max_in_flight: int = 0
+    max_workers_per_host: int = 0
     timeout: float = 60.0
     max_load_per_cpu: float = 1.0
     max_cpu_percent: float = 90.0
@@ -100,6 +101,7 @@ class PiBatchWorkerState(PagletState):
     max_cpu_percent: float = 90.0
     min_memory_available_bytes: int = 0
     min_work_free_bytes: int = 0
+    ignore_load_limits: bool = False
 
 
 class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
@@ -132,10 +134,8 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         return self.not_handled()
 
     def start_job(self, request: PiComputeRequest) -> dict[str, Any]:
-        request = _normalize_request(request)
-        self._prepare_job(request)
-        self._run_job(request)
-        return dataclass_to_wire(self.summary())
+        reply = self.start_async(request)
+        return reply["summary"]
 
     def start_async(self, request: PiComputeRequest) -> dict[str, Any]:
         request = _normalize_request(request)
@@ -202,69 +202,84 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     def _launch_available_batches(self, request: PiComputeRequest) -> None:
         targets = self._select_targets(request)
+        with self.locked_state() as state:
+            in_flight_count = len(state.in_flight)
+            has_in_flight = in_flight_count > 0
+        fallback_minimum = False
+        slots_by_host = _slots_by_host(targets, request)
+        if (not targets or sum(slots_by_host.values()) <= 0) and not has_in_flight:
+            targets = self._select_targets(request, ignore_load_limits=True, limit=1)
+            slots_by_host = {target.snapshot.host_url.rstrip("/"): 1 for target in targets[:1]}
+            fallback_minimum = bool(targets)
         if not targets:
             return
-        target_limit = request.max_in_flight if request.max_in_flight > 0 else len(targets)
+
+        target_limit = request.max_in_flight if request.max_in_flight > 0 else max(1, sum(slots_by_host.values()))
+        if fallback_minimum:
+            target_limit = min(target_limit, 1)
         with self.locked_state() as state:
-            busy_hosts = {str(item.get("host_url") or "") for item in state.in_flight.values()}
+            in_flight_by_host = _in_flight_by_host(state.in_flight)
             capacity = max(0, target_limit - len(state.in_flight))
         if capacity <= 0:
             return
 
         for target in targets:
             snapshot = target.snapshot
-            if snapshot.host_url in busy_hosts:
-                continue
-            with self.locked_state() as state:
-                if not state.pending_batches or len(state.in_flight) >= target_limit:
-                    return
-                batch_wire = state.pending_batches.pop(0)
-                batch = dataclass_from_wire(PiBatchRequest, batch_wire)
-                worker_id = f"pi-worker-{uuid.uuid4().hex}"
-                state.in_flight[batch.batch_id] = {
-                    "agent_id": worker_id,
-                    "host_name": snapshot.host_name,
-                    "host_url": snapshot.host_url,
-                    "started_at": time.time(),
-                    "batch": batch_wire,
-                }
-            worker_state = PiBatchWorkerState(
-                batch=dataclass_to_wire(batch),
-                parent_host_url=self.context.address,
-                parent_agent_id=self.agent_id,
-                max_load_per_cpu=request.max_load_per_cpu,
-                max_cpu_percent=request.max_cpu_percent,
-                min_memory_available_bytes=request.min_memory_available_bytes,
-                min_work_free_bytes=request.min_work_free_bytes,
-            )
-            try:
-                self.context.host.create_remote(
-                    snapshot.host_url,
-                    PiBatchWorkerAgent,
-                    worker_state,
-                    agent_id=worker_id,
-                )
-            except Exception as exc:
+            host_url = snapshot.host_url.rstrip("/")
+            host_slots = slots_by_host.get(host_url, 0)
+            while capacity > 0 and in_flight_by_host.get(host_url, 0) < host_slots:
                 with self.locked_state() as state:
-                    state.in_flight.pop(batch.batch_id, None)
-                    state.pending_batches.insert(0, batch_wire)
-                    state.errors[snapshot.host_name or snapshot.host_url] = str(exc)
-                self.notify_all_state_changed()
-                return
-            busy_hosts.add(snapshot.host_url)
-            capacity -= 1
-            if capacity <= 0:
-                return
+                    if not state.pending_batches or len(state.in_flight) >= target_limit:
+                        return
+                    batch_wire = state.pending_batches.pop(0)
+                    batch = dataclass_from_wire(PiBatchRequest, batch_wire)
+                    worker_id = f"pi-worker-{uuid.uuid4().hex}"
+                    state.in_flight[batch.batch_id] = {
+                        "agent_id": worker_id,
+                        "host_name": snapshot.host_name,
+                        "host_url": host_url,
+                        "started_at": time.time(),
+                        "batch": batch_wire,
+                        "ignore_load_limits": fallback_minimum,
+                    }
+                worker_state = PiBatchWorkerState(
+                    batch=dataclass_to_wire(batch),
+                    parent_host_url=self.context.address,
+                    parent_agent_id=self.agent_id,
+                    max_load_per_cpu=request.max_load_per_cpu,
+                    max_cpu_percent=request.max_cpu_percent,
+                    min_memory_available_bytes=request.min_memory_available_bytes,
+                    min_work_free_bytes=request.min_work_free_bytes,
+                    ignore_load_limits=fallback_minimum,
+                )
+                try:
+                    self.context.host.create_remote(
+                        host_url,
+                        PiBatchWorkerAgent,
+                        worker_state,
+                        agent_id=worker_id,
+                    )
+                except Exception as exc:
+                    with self.locked_state() as state:
+                        state.in_flight.pop(batch.batch_id, None)
+                        state.pending_batches.insert(0, batch_wire)
+                        state.errors[snapshot.host_name or host_url] = str(exc)
+                    self.notify_all_state_changed()
+                    return
+                in_flight_by_host[host_url] = in_flight_by_host.get(host_url, 0) + 1
+                capacity -= 1
+                if fallback_minimum or capacity <= 0:
+                    return
 
-    def _select_targets(self, request: PiComputeRequest):
+    def _select_targets(self, request: PiComputeRequest, *, ignore_load_limits: bool = False, limit: int | None = None):
         try:
             service = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
             reply = service.call(
                 SELECT_TARGETS,
                 TargetSelectionRequest(
-                    limit=max(1, request.max_in_flight or 64),
-                    max_load_per_cpu=request.max_load_per_cpu,
-                    max_cpu_percent=request.max_cpu_percent,
+                    limit=max(1, limit if limit is not None else request.max_in_flight or 64),
+                    max_load_per_cpu=0.0 if ignore_load_limits else request.max_load_per_cpu,
+                    max_cpu_percent=-1.0 if ignore_load_limits else request.max_cpu_percent,
                     min_memory_available_bytes=request.min_memory_available_bytes,
                     min_work_free_bytes=request.min_work_free_bytes,
                     include_self=True,
@@ -467,9 +482,17 @@ class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
         snapshot = reply.snapshot
         if snapshot is None:
             return "mesh-info returned no snapshot"
-        if self.state.max_load_per_cpu > 0 and snapshot.load_per_cpu > self.state.max_load_per_cpu:
+        if (
+            not self.state.ignore_load_limits
+            and self.state.max_load_per_cpu > 0
+            and snapshot.load_per_cpu > self.state.max_load_per_cpu
+        ):
             return f"load per cpu {snapshot.load_per_cpu:.2f} > {self.state.max_load_per_cpu:.2f}"
-        if self.state.max_cpu_percent >= 0 and snapshot.cpu_percent > self.state.max_cpu_percent:
+        if (
+            not self.state.ignore_load_limits
+            and self.state.max_cpu_percent >= 0
+            and snapshot.cpu_percent > self.state.max_cpu_percent
+        ):
             return f"cpu {snapshot.cpu_percent:.1f}% > {self.state.max_cpu_percent:.1f}%"
         if self.state.min_memory_available_bytes > 0 and snapshot.memory_available_bytes < self.state.min_memory_available_bytes:
             return "available memory below minimum"
@@ -549,6 +572,48 @@ def _available_decimal_digits(request: PiComputeRequest, completed_terms: int) -
     return min(request.digits, available_after_start)
 
 
+def _slots_by_host(targets: list[Any], request: PiComputeRequest) -> dict[str, int]:
+    slots: dict[str, int] = {}
+    for target in targets:
+        host_url = target.snapshot.host_url.rstrip("/")
+        slots[host_url] = _host_worker_slots(target.snapshot, request)
+    return slots
+
+
+def _host_worker_slots(snapshot: Any, request: PiComputeRequest) -> int:
+    cpu_count = max(1, int(snapshot.cpu_count_logical or 0))
+    if request.max_load_per_cpu <= 0:
+        slots = cpu_count
+    else:
+        target_load = max(0.0, float(request.max_load_per_cpu)) * cpu_count
+        free_load = target_load - _snapshot_load_value(snapshot, cpu_count)
+        slots = 0 if free_load <= 0 else max(1, int(math.floor(free_load)))
+    if request.max_workers_per_host > 0:
+        slots = min(slots, request.max_workers_per_host)
+    return max(0, slots)
+
+
+def _snapshot_load_value(snapshot: Any, cpu_count: int) -> float:
+    load_average = list(getattr(snapshot, "load_average", []) or [])
+    if load_average:
+        return max(0.0, float(load_average[0]))
+    load_per_cpu = float(getattr(snapshot, "load_per_cpu", 0.0) or 0.0)
+    if load_per_cpu > 0:
+        return max(0.0, load_per_cpu * cpu_count)
+    cpu_percent = float(getattr(snapshot, "cpu_percent", 0.0) or 0.0)
+    return max(0.0, (cpu_percent / 100.0) * cpu_count)
+
+
+def _in_flight_by_host(in_flight: dict[str, dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in in_flight.values():
+        host_url = str(item.get("host_url") or "").rstrip("/")
+        if not host_url:
+            continue
+        counts[host_url] = counts.get(host_url, 0) + 1
+    return counts
+
+
 def _format_pi_decimal(
     p: int,
     q: int,
@@ -576,6 +641,7 @@ def _normalize_request(request: PiComputeRequest) -> PiComputeRequest:
         digits=digits,
         batch_size=max(1, int(request.batch_size)),
         max_in_flight=max(0, int(request.max_in_flight)),
+        max_workers_per_host=max(0, int(request.max_workers_per_host)),
         timeout=max(0.1, float(request.timeout)),
         max_load_per_cpu=float(request.max_load_per_cpu),
         max_cpu_percent=float(request.max_cpu_percent),

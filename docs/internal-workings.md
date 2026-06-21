@@ -6,8 +6,8 @@ This page describes how the codebase fits together.
 
 Paglets move as a transfer envelope:
 
-1. The source host finds the live paglet.
-2. The host serializes the paglet's dataclass state.
+1. The source host finds the active child-process record.
+2. The host asks the child for fresh dataclass state.
 3. The host records the paglet class name and state class name.
 4. The target host imports those classes by name.
 5. The target host reconstructs the paglet and attaches a fresh context.
@@ -24,9 +24,15 @@ handles, or arbitrary instance attributes.
   `available_hosts`, `dispatch_to`, and `clone_to`.
 
 `paglets.host`
-: Hosts paglets in memory and exposes the JSON HTTP API. It owns active paglets,
-  durable inactive records, host properties, mesh state, and lifecycle
-  operations.
+: Supervises active paglet child processes and exposes the JSON HTTP API. It
+  owns durable inactive records, host properties, mesh state, service records,
+  storage, placement, and lifecycle operations.
+
+`paglets.process_runtime`
+: Implements the parent/child process protocol for active paglets. The parent
+  starts children with `multiprocessing.get_context("spawn")`, talks to each
+  child over a private `Pipe`, routes child host calls back to `Host`, and
+  caches the latest serialized state.
 
 `paglets.proxy`
 : Defines `PagletProxy`, the controlled handle used to inspect, message, move,
@@ -93,16 +99,23 @@ sequenceDiagram
     C->>X: send(Message(...))
     X->>H: POST /agents/{id}/messages
     H->>H: submit to MessageMailbox
-    H->>P: handle_message(Message)
+    H->>P: pipe request: message
+    P->>P: handle_message(Message)
     P-->>H: return value
     H-->>X: JSON result
     X-->>C: result
 ```
 
 Message arguments and replies should be JSON-compatible. Normal messages enter
-the per-paglet mailbox, where queued work is ordered by priority and FIFO
-within one priority. `UNQUEUED_PRIORITY` bypasses the queue for explicit
-immediate delivery.
+the per-paglet host mailbox, where queued work is ordered by priority and FIFO
+within one priority. The mailbox submits at most one normal message to a child
+at a time. `UNQUEUED_PRIORITY` bypasses the queue on the host side, but the
+child runtime still processes lifecycle/message commands serially.
+
+Child processes can also send host calls over the same pipe. These calls cover
+context operations such as service lookup, storage reads and writes, remote
+paglet creation, dispatch, clone, deactivate, dispose, mesh status, and event
+emission. No extra TCP or UDP ports are opened for parent/child IPC.
 
 ## State And Handler Concurrency
 
@@ -112,17 +125,52 @@ critical section, and `@state_locked` wraps short helper methods. The host also
 uses the paglet lock when it serializes active state for transfer envelopes and
 state inspection.
 
-The runtime does not lock whole message handlers automatically. A handler may
-wait for another message, clone workers, or call remote proxies; locking that
-entire body would block follow-up messages and can deadlock collector-style
-agents. The intended pattern is to copy or update shared state in short locked
-sections, then release the lock before long-running work.
+The child runtime processes one lifecycle or message command at a time. A
+handler that waits for later `child_result` messages would block those messages,
+so distributed parent/worker paglets should return after launching work and
+expose a `drain` or `summary` message that callers can poll. Long-running local
+work should run in a background thread or a separate worker paglet. The intended
+state pattern is still to copy or update shared state in short locked sections,
+then release the lock before sleeping, doing I/O, or calling remote proxies.
 
-Normal mailbox delivery uses `Paglet.MAILBOX_WORKERS`, which defaults to `4`.
-Set `MAILBOX_WORKERS = 1` on a paglet class for actor-style queued message
-serialization. `UNQUEUED_PRIORITY` messages bypass the queue worker limit, and
-background threads are outside mailbox scheduling, so explicit state locking is
-still the general safety mechanism.
+`Paglet.MAILBOX_WORKERS` is ignored by the process runtime. Parallelism is
+achieved by creating multiple paglet instances, which gives each active instance
+its own Python process. Background threads inside one paglet process are outside
+message scheduling, so explicit state locking is still required when they share
+mutable state with message handlers.
+
+## Process Isolation
+
+Every active paglet is constructed in a child Python process. The process title
+and `multiprocessing.Process.name` use:
+
+```text
+paglet:{host_name}:{short_class_name}:{agent_id}
+```
+
+The host does not catch `BaseException` from paglet code as a recoverable
+handler error. Normal `Exception` subclasses are returned as message errors and
+the child remains alive. `SystemExit`, `KeyboardInterrupt`, `os._exit`, native
+crashes, and process termination close the pipe; the parent marks the paglet
+crashed, removes its active service records, fails pending messages with
+`PagletCrashedError`, and keeps the last cached state visible through state
+endpoints until the paglet is disposed.
+
+Because `spawn` re-imports classes in the child, paglet classes and their state
+classes must live in importable modules. Script-local or REPL classes under
+`__main__` are rejected during creation or transfer.
+
+The benefits are isolation and true process-level CPU parallelism. A paglet can
+call `sys.exit()`, crash native code, or spin a CPU core without directly
+terminating the host process or unrelated paglets. Multiple worker paglets on
+one host can run on multiple cores because they are separate Python processes.
+
+The costs are stricter importability and more overhead. Creating a paglet now
+starts a process and establishes IPC, so very small tasks should be batched.
+Paglet instance attributes remain process-local and transient. A parent paglet
+cannot synchronously wait inside one message handler for result messages that
+must be delivered back to that same parent; collectors should use the
+start/drain pattern described in the examples.
 
 ## Host HTTP API
 
@@ -221,8 +269,8 @@ Hosts own two filesystem areas below their persistence root:
 
 The `work` tree is per active paglet instance. It is cleared on host startup,
 and a source instance's work directory is cleared on dispatch, retract, or
-dispose. Deactivation does not clear work in the same process, but a restart
-does.
+dispose. Deactivation keeps work while the same host runtime remains up, but a
+restart clears it.
 
 The `storage` tree is per paglet class and survives restart, deactivation,
 dispatch, and dispose. `ManagedStorage` resolves all API paths under its root
@@ -232,8 +280,8 @@ to writes performed through the managed storage API.
 
 ## Durable Inactive Records
 
-Deactivation serializes a paglet into an inactive record and removes the live
-object from memory. The default CLI location is:
+Deactivation serializes a paglet into an inactive record and stops the active
+child process. The default CLI location is:
 
 ```text
 ~/.paglets/hosts/{host-name}/inactive/{agent-id}.json

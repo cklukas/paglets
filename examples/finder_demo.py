@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from paglets import Host, Message, Paglet, PagletState, ServiceScope
 
 try:
-    from .support import local_hosts
+    from .support import local_hosts, run_importable_main
 except ImportError:  # pragma: no cover - direct script execution
-    from support import local_hosts
+    from support import local_hosts, run_importable_main
 
 
 @dataclass
@@ -64,4 +64,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_importable_main("examples.finder_demo")

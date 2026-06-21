@@ -155,6 +155,7 @@ class PerformanceBenchmarkState(PagletState):
     parent_agent_id: str = ""
     target_host_name: str = ""
     target_host_url: str = ""
+    deadline: float = 0.0
     pending_hosts: list[str] = field(default_factory=list)
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
@@ -234,10 +235,15 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
                 state.request = dict(message.args.get("request") or {})
                 state.timeout = float(message.args.get("timeout", 120.0))
             return self.collect()
+        if message.kind == "drain":
+            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "child_result":
             return self.record_child_result(message.args)
         if message.kind == "summary":
+            self._expire_timed_out_hosts()
             return self.summary()
+        if message.kind == "cleanup":
+            return self.cleanup_children()
         return self.not_handled()
 
     def collect(self) -> dict[str, Any]:
@@ -249,8 +255,9 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
             state.results = {}
             state.errors = {}
             state.cleanup_errors = {}
+            state.child_proxies = {}
             timeout = state.timeout
-        child_proxies: dict[str, Any] = {}
+            state.deadline = time.monotonic() + max(0.0, timeout)
         hosts = self.context.available_hosts(online_only=True, include_self=True)
 
         for host in hosts:
@@ -260,7 +267,9 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
                 state.target_host_name = host.name
                 state.target_host_url = host.url
             try:
-                child_proxies[host.name] = self.clone_to(host.name)
+                child = self.clone_to(host.name)
+                with self.locked_state() as state:
+                    state.child_proxies[host.name] = child.to_wire()
             except Exception as exc:
                 with self.locked_state() as state:
                     state.pending_hosts = [name for name in state.pending_hosts if name != host.name]
@@ -271,30 +280,22 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
                     state.target_host_name = ""
                     state.target_host_url = ""
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self.locked_state() as state:
-                if not state.pending_hosts:
-                    break
-            time.sleep(0.05)
-
-        with self.locked_state() as state:
-            completed_hosts = set(state.results) | set(state.errors)
-            for host_name in list(state.pending_hosts):
-                state.errors[host_name] = "timed out waiting for benchmark result"
-                state.pending_hosts = [name for name in state.pending_hosts if name != host_name]
-
-        for host_name in completed_hosts:
-            proxy = child_proxies.get(host_name)
-            if proxy is None:
-                continue
-            try:
-                proxy.dispose()
-            except Exception as exc:
-                with self.locked_state() as state:
-                    state.cleanup_errors[host_name] = str(exc)
-
         return self.summary()
+
+    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
+        self._expire_timed_out_hosts()
+
+        def ready(state: PerformanceBenchmarkState) -> bool:
+            return not state.pending_hosts
+
+        timeout = max(0.0, wait_timeout)
+        with self.locked_state() as state:
+            if state.deadline > 0:
+                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
+        self.wait_state(ready, timeout=timeout)
+        self._expire_timed_out_hosts()
+        summary = self.summary()
+        return {"done": not summary["pending_hosts"], "summary": summary}
 
     def _run_child(self) -> None:
         with self.locked_state() as state:
@@ -323,8 +324,14 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
             }
 
         parent = self.context.get_proxy(parent_agent_id, parent_host_url)
-        if parent is not None:
-            parent.send(Message("child_result", payload))
+        try:
+            if parent is not None:
+                parent.send(Message("child_result", payload))
+        finally:
+            try:
+                self.context.host.dispose(self.agent_id)
+            except Exception:
+                pass
 
     @state_locked
     def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -345,7 +352,30 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
             "results": dict(self.state.results),
             "errors": dict(self.state.errors),
             "cleanup_errors": dict(self.state.cleanup_errors),
+            "pending_hosts": list(self.state.pending_hosts),
         }
+
+    def cleanup_children(self) -> dict[str, Any]:
+        with self.locked_state() as state:
+            children = {host_name: dict(proxy) for host_name, proxy in state.child_proxies.items()}
+        for host_name, proxy_wire in children.items():
+            try:
+                from ...proxy import PagletProxy
+
+                PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
+            except Exception as exc:
+                with self.locked_state() as state:
+                    state.cleanup_errors[host_name] = str(exc)
+        return self.summary()
+
+    def _expire_timed_out_hosts(self) -> None:
+        with self.locked_state() as state:
+            if not state.pending_hosts or state.deadline <= 0 or time.monotonic() < state.deadline:
+                return
+            for host_name in list(state.pending_hosts):
+                state.errors[host_name] = "timed out waiting for benchmark result"
+            state.pending_hosts = []
+        self.notify_all_state_changed()
 
 
 def parse_size(value: str) -> int:

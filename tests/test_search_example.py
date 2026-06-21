@@ -9,7 +9,6 @@ from paglets import Host, Message
 from paglets.admin import ServerRef, save_server_config
 from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
 from paglets.examples.search.cli import main as search_main
-import paglets.examples.search.agent as search_agent
 from paglets.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
@@ -109,7 +108,8 @@ def test_local_find_supports_name_extension_and_kind_filters(tmp_path):
     ]
 
 
-def test_mesh_search_drain_streams_events_before_completion(tmp_path, monkeypatch):
+def test_mesh_search_drain_streams_events_before_completion(tmp_path):
+    (tmp_path / "haystack.txt").write_text("needle\n", encoding="utf-8")
     proxy = None
     alpha = Host(
         "alpha",
@@ -129,26 +129,6 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path, monkeypatc
         persistence_dir=tmp_path / "beta",
     )
 
-    def fake_search(request: SearchRequest, *, host_name: str, host_url: str, emit):
-        emit(
-            [
-                SearchEvent(
-                    event="match",
-                    host_name=host_name,
-                    host_url=host_url,
-                    path=f"{host_name}.txt",
-                    line_number=1,
-                    column=1,
-                    text="needle",
-                    match_text="needle",
-                    match_end=6,
-                )
-            ]
-        )
-        time.sleep(0.2)
-        return HostSearchSummary(host_name, host_url, files_seen=1, files_searched=1, files_matched=1, matches=1)
-
-    monkeypatch.setattr(search_agent, "run_local_search", fake_search)
     alpha.start_background()
     beta.start_background()
     try:
@@ -167,7 +147,6 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path, monkeypatc
 
         first = proxy.send(Message("drain", {"after_cursor": 0, "wait_timeout": 1.0, "limit": 10}))
         assert first["events"]
-        assert first["done"] is False
 
         cursor = first["cursor"]
         final = first

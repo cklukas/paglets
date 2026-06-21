@@ -48,8 +48,36 @@ This first implementation intentionally uses **one approach**:
 - only a dataclass state object moves between hosts;
 - runtime fields on the agent instance are transient;
 - hosts communicate with a tiny JSON HTTP API;
+- every active paglet instance runs in its own child Python process;
 - migration works equally across different machines or between two host processes
   on the same Mac using different ports.
+
+The host process is a supervisor/router. It owns HTTP, mesh discovery,
+inactive records, service registration, placement, storage, and child process
+lifecycle. Paglet code runs only in child processes created with Python's
+`spawn` start method, so paglet classes must be importable by
+`module:qualname`; classes defined in `__main__`, a REPL, or stdin are rejected.
+Each child has one message/lifecycle command in flight at a time. CPU
+parallelism comes from creating multiple paglet instances, not multiple
+threads inside one active paglet mailbox.
+
+This has deliberate tradeoffs:
+
+- `sys.exit()`, `os._exit()`, native crashes, runaway globals, and CPU-bound
+  loops are isolated to one paglet child instead of killing the host or other
+  paglets.
+- Multiple worker paglets on one host use multiple Python processes, so
+  CPU-heavy examples can use multiple cores despite the GIL.
+- The host keeps the public API proxy-based: callers never receive direct
+  object references to live paglet instances.
+- Paglet classes and state classes must live in importable modules. REPL,
+  stdin, notebook, and script-local `__main__` classes are not valid active
+  paglets.
+- Message handling is actor-style serial per paglet. A parent paglet that
+  starts children should return quickly and expose `drain` or `summary` instead
+  of blocking while waiting for child result messages.
+- Process startup and IPC add overhead compared with in-memory objects, so
+  tiny high-frequency tasks should be batched.
 
 The Aglets source in `aglets-git/src/` informed the names and
 shape of this API: `Paglet`, `Host`/context, `PagletProxy`, `Message`, mobility
@@ -87,6 +115,11 @@ uv run python examples/clone_workers_demo.py
 uv run python examples/simple_master_slave_demo.py
 uv run python examples/disk_survey_demo.py
 ```
+
+Those demo scripts are safe to run directly because their `__main__` blocks
+re-import the module as `examples.<name>` before creating paglets. For your own
+paglets, put classes in importable modules rather than defining them only in a
+script entry point.
 
 Run a standalone host process:
 
@@ -288,15 +321,19 @@ Compute decimal Pi digits across eligible hosts:
 
 ```bash
 uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --json
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
 ```
 
 The coordinator stays on the entry host, asks local `mesh-info` for ranked
-targets, creates short-lived worker paglets for Chudnovsky term batches,
-receives partial-sum results by message, combines them, and appends normal
-decimal output such as `3.1415926535897932` as reliable digit batches become
-available. Use `--json` when a script needs the final machine-readable summary
-instead of live terminal output.
+targets, expands each host into approximate free load slots, creates
+short-lived worker paglets for Chudnovsky term batches, receives partial-sum
+results by message, combines them, and appends normal decimal output such as
+`3.1415926535897932` as reliable digit batches become available. Use
+`--max-workers-per-host` to cap per-host parallelism, `--max-in-flight` to cap
+global parallelism, and `--json` when a script needs the final
+machine-readable summary instead of live terminal output. If all hosts are over
+the load/CPU thresholds and no batch is running, the coordinator still launches
+one fallback worker so the job can make minimum progress.
 
 The optional `--server` flag selects only that initial entry host; target
 selection across the mesh remains automatic.
@@ -382,7 +419,7 @@ def on_reverting(self, event): ...     # before a remote host retracts it back
 def on_cloning(self, event): ...       # original before clone state is captured
 def on_clone(self, event): ...         # clone after arriving/being created
 def on_cloned(self, event): ...        # original after clone succeeds
-def on_deactivating(self, event): ...  # before in-memory deactivation
+def on_deactivating(self, event): ...  # before inactive-record persistence
 def on_activation(self, event): ...    # after activation
 def on_disposing(self, event): ...     # before disposal
 def run(self): ...                     # after create, arrival, clone, activation
@@ -417,9 +454,9 @@ returned = alpha.retract(beta.address, agent_id)
 
 ## Durable deactivation
 
-Deactivation persists a paglet's transfer envelope to disk and removes the live
-object from memory. Activation reconstructs the paglet, calls `on_activation`,
-and then invokes `run()`:
+Deactivation persists a paglet's transfer envelope to disk and removes the
+active child process. Activation starts a new child process, reconstructs the
+paglet, calls `on_activation`, and then invokes `run()`:
 
 ```python
 import time
@@ -484,7 +521,9 @@ self.notify_message()
 self.notify_all_messages()
 ```
 
-Handlers can run concurrently. Protect shared dataclass state with short locked
+One paglet child handles one message or lifecycle command at a time. `run()` may
+still start background threads, and those threads can update state while the
+child later handles messages. Protect shared dataclass state with short locked
 sections:
 
 ```python
@@ -494,10 +533,10 @@ with self.locked_state() as state:
 ```
 
 Use `with self.locked():` for other agent-local critical sections, or
-`@state_locked` for small helper methods. `Paglet.MAILBOX_WORKERS` defaults to
-`4`; set `MAILBOX_WORKERS = 1` on simple agents that want queued
-`handle_message` calls serialized. Background threads and unqueued messages
-still need explicit state locking when they share mutable state.
+`@state_locked` for small helper methods. `Paglet.MAILBOX_WORKERS` is ignored by
+the process runtime; all queued `handle_message` calls are actor-style serial
+inside one paglet process. Background threads and unqueued messages still need
+explicit state locking when they share mutable state.
 
 ## Services, Tickets, Events, And Resources
 

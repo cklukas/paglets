@@ -86,8 +86,8 @@ local or lab meshes, not untrusted networks.
 5. Requests are ordinary paglet messages, but payloads and replies are typed
    dataclasses.
 6. The `paglets-sysinfo` CLI creates a short-lived collector paglet that clones
-   to mesh hosts, calls each host's local `server-info` service, and prints an
-   aggregate result.
+   to mesh hosts, calls each host's local `server-info` service, polls `drain`,
+   and prints an aggregate result.
 7. After the idle timeout, the provider deactivates while the service remains
    discoverable for later calls.
 
@@ -241,20 +241,25 @@ the coordinator.
 
 ```bash
 uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --json
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
 ```
 
 The optional `--server` value only selects the entry host when no saved
 `~/.paglets/servers.json` entry is available. The coordinator stays on that
 entry host, partitions the requested digit range into the required Chudnovsky
-terms, asks local `mesh-info` for eligible targets across the mesh, creates
-short-lived `PiBatchWorkerAgent` instances remotely, and receives
-`batch_result` messages. In text mode the CLI starts the coordinator
-asynchronously, long-polls for newly reliable decimal digits, and appends them
-to the terminal as batches complete. Use `--json` for a final summary object
-instead of live output. Workers re-check local load before computing; if a host
-has become busy, the worker reports `skipped`, the coordinator requeues that
-batch, and the worker disposes itself.
+terms, asks local `mesh-info` for eligible targets across the mesh, expands
+each host into approximate free load slots, creates short-lived
+`PiBatchWorkerAgent` instances remotely, and receives `batch_result` messages.
+The free-slot estimate is based on `cpu_count * --max-load-per-cpu - load_1m`,
+optionally capped by `--max-workers-per-host`; `--max-in-flight` caps the whole
+job. In text mode the CLI starts the coordinator asynchronously, long-polls for
+newly reliable decimal digits, and appends them to the terminal as batches
+complete. Use `--json` for a final summary object instead of live output.
+Workers re-check local load before computing; if a host has become busy, the
+worker reports `skipped`, the coordinator requeues that batch, and the worker
+disposes itself. If all hosts are above the load/CPU thresholds and no batch is
+running, the coordinator sends one fallback worker anyway so a long job still
+makes minimum progress.
 
 Programmatic use:
 
@@ -286,9 +291,9 @@ from paglets.examples.performance import PerformanceBenchmarkAgent
 
 The CLI creates one parent benchmark agent on the entry host. The parent clones
 children to online same-version mesh hosts. Each child runs benchmarks locally
-and sends one result back to the parent. Parent result bookkeeping uses the
-paglet state lock, but the actual benchmark work and remote calls happen
-outside that lock.
+and sends one result back to the parent. The CLI polls the parent with `drain`
+until all hosts have replied. Parent result bookkeeping uses the paglet state
+lock, but the actual benchmark work and remote calls happen outside that lock.
 
 ### Benchmarks
 
@@ -389,13 +394,15 @@ on different hosts:
 6. A host-local benchmark lock prevents two benchmark children on the same
    server from running expensive tests at the same time.
 7. Each child reports `HostBenchmarkResult` or an error to the parent.
-8. The parent returns a summary with `results`, `errors`, and non-fatal
+8. The parent wakes any `drain` call waiting for completion.
+9. The CLI returns a summary with `results`, `errors`, and non-fatal
    `cleanup_errors`.
 
-The lock has two layers: an in-process `threading.Lock` and a best-effort OS
-file lock in the system temp directory. That is enough to serialize benchmark
-runs from multiple paglets hosts started by the same user on the same machine,
-while still allowing different physical hosts to work in parallel.
+The lock has two layers: a process-local `threading.Lock` for threads inside one
+benchmark child, and a best-effort OS file lock in the system temp directory.
+The OS file lock is the important cross-process guard in the process-isolated
+runtime; it serializes benchmark paglets started by the same user on the same
+machine while still allowing different physical hosts to work in parallel.
 
 ### Programmatic Use
 
@@ -514,6 +521,9 @@ Inside a host, incoming paglet messages already invoke `handle_message()`
 through the mailbox. There is no need for a paglet to busy-poll its mailbox.
 The search parent uses `wait_state()` so a `drain` request sleeps efficiently
 until a child message adds more events, all hosts finish, or the timeout elapses.
+This start/drain shape is important because active paglets process one message
+at a time in their child process. A parent message handler should not block
+waiting for child result messages that must be delivered to that same parent.
 
 The parent handles these messages:
 
@@ -660,6 +670,11 @@ uv run python examples/clone_workers_demo.py
 uv run python examples/itinerary_demo.py
 uv run python examples/message_patterns_demo.py
 ```
+
+The bundled scripts re-import themselves as `examples.<module>` before creating
+paglets, so their classes are importable by spawned child processes. For your
+own examples, keep paglet classes in importable modules and let the script entry
+point only call into that module.
 
 Use packaged examples when you want installed CLI commands or importable example
 agents. Use source-tree demos when you want compact scripts that illustrate one

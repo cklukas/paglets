@@ -25,6 +25,17 @@ class Traveller(Paglet[TravellerState]):
 State values must be JSON-compatible after dataclass serialization. That keeps
 movement between hosts explicit and inspectable.
 
+Active paglets run in child Python processes started with the `spawn` method.
+Both the paglet class and the state class must be importable by module path, for
+example `myapp.agents:Traveller`. Classes defined in `__main__`, a REPL, stdin,
+or a throwaway script cannot be started as paglets because the child process
+cannot re-import them.
+
+Process isolation means a crash or `sys.exit()` in one paglet does not directly
+kill the host or other paglets, and multiple worker paglets can use multiple CPU
+cores. It also means paglet startup is heavier than constructing an in-memory
+object, so prefer coarser batches for very small units of work.
+
 ## Implement Lifecycle Hooks
 
 Override only the lifecycle hooks you need:
@@ -118,9 +129,9 @@ reply = proxy.send(Message("status"), no_delay=True)
 
 ## Protect Shared State
 
-A paglet can receive several normal messages at the same time. `run()` may also
-start background threads. When two code paths read or write the dataclass state,
-protect that short critical section with the paglet lock:
+A paglet child handles one lifecycle or message command at a time. `run()` may
+also start background threads. When two code paths read or write the dataclass
+state, protect that short critical section with the paglet lock:
 
 ```python
 with self.locked_state() as state:
@@ -152,18 +163,20 @@ Keep locks around short state reads and writes only. Do not hold them while
 waiting for another message, sleeping, calling a remote proxy, doing disk I/O,
 or running a long computation.
 
-Agents that prefer simple actor-style message handling can set
-`MAILBOX_WORKERS = 1`:
+`Paglet.MAILBOX_WORKERS` is ignored by the process runtime. Queued
+`handle_message` calls are actor-style serial inside one paglet process.
+Parallel CPU work should be split into multiple paglet instances, not multiple
+message workers in the same instance.
 
-```python
-class Counter(Paglet[CounterState]):
-    State = CounterState
-    MAILBOX_WORKERS = 1
-```
+Do not make a parent message handler block while waiting for child paglets to
+send result messages back to that same parent. The parent cannot process those
+messages until the current handler returns. Use this pattern instead:
 
-That serializes queued `handle_message` calls for that paglet. It does not
-serialize background threads, lifecycle hooks, or `UNQUEUED_PRIORITY` messages,
-so shared state should still use `locked_state()` when consistency matters.
+1. A `start` or `collect` message stores request state, creates/clones workers,
+   and returns quickly.
+2. Workers run in their own paglet processes and send `child_result` messages.
+3. The parent records results, calls `notify_all_state_changed()`, and exposes a
+   `drain` or `summary` message for clients to poll.
 
 ## Move Between Hosts
 
@@ -217,7 +230,8 @@ classes.
 
 ## Deactivate And Activate
 
-Use `deactivate` when a paglet should leave memory but keep durable state:
+Use `deactivate` when a paglet should stop its active child process but keep
+durable state:
 
 ```python
 proxy.deactivate()
@@ -354,7 +368,7 @@ path.write_text("intermediate", encoding="utf-8")
 
 The host clears all work directories on startup. It also clears an instance's
 work directory on dispatch, retract, or dispose. Deactivation keeps the work
-directory in the same process, but a restart clears it.
+directory while the same host runtime remains up, but a restart clears it.
 
 Use `persistent_storage()` for small class-level state that should survive host
 restart:
@@ -385,7 +399,16 @@ targets = mesh_info.call(SELECT_TARGETS, TargetSelectionRequest(limit=2, max_loa
 
 For distributed compute, keep the coordinator's accumulated job state on one
 host and create short-lived worker paglets remotely. Workers should report
-results by message and dispose themselves after sending the result.
+results by message and dispose themselves after sending the result. The
+coordinator should return from its launch message quickly and use `drain` or
+`summary` for progress, because it cannot handle worker result messages while a
+previous message handler is still running. For
+CPU-style batch work, treat a selected host as several placement slots instead
+of only one target: estimate slots from `cpu_count * target_load_per_cpu -
+load_1m`, subtract already in-flight workers on that host, and optionally cap
+the result with a per-host limit. Keep one small fallback worker available when
+all hosts are above the load threshold so long-running jobs still make minimum
+progress.
 
 ## Keep Imports Stable
 

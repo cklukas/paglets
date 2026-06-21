@@ -26,6 +26,14 @@ class MeshAgent(Paglet[MeshState]):
         self.state.events.append(f"run:{self.context.name}")
 
     def handle_message(self, message: Message):
+        if message.kind == "hosts":
+            return [host.to_wire() for host in self.context.available_hosts()]
+        if message.kind == "wait_host":
+            return self.context.wait_for_host(message.args["target"], timeout=0.5).to_wire()
+        if message.kind == "is_online":
+            return self.context.is_host_online(message.args["target"])
+        if message.kind == "wait_missing":
+            return self.context.wait_for_host(message.args["target"], timeout=0.1, interval=0.02).to_wire()
         if message.kind == "dispatch_named":
             return self.dispatch_to(message.args["target"]).to_wire()
         if message.kind == "clone_named":
@@ -121,10 +129,9 @@ def test_context_helpers_resolve_named_hosts_for_dispatch_and_clone():
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
         proxy = alpha.create(MeshAgent, MeshState())
-        agent = alpha._agents[proxy.agent_id]
 
-        hosts = agent.context.available_hosts()
-        beta_ref = agent.context.wait_for_host("beta", timeout=0.5)
+        hosts = [HostRef.from_wire(item) for item in proxy.send(Message("hosts"))]
+        beta_ref = HostRef.from_wire(proxy.send(Message("wait_host", {"target": "beta"})))
         clone_proxy = proxy.send(Message("clone_named", {"target": "beta"}))
         moved_proxy = proxy.send(Message("dispatch_named", {"target": "beta"}))
     finally:
@@ -146,13 +153,12 @@ def test_wait_for_host_times_out_for_offline_peer():
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
         proxy = alpha.create(MeshAgent, MeshState())
-        agent = alpha._agents[proxy.agent_id]
         beta.stop()
         alpha.mesh.gossip_once()
 
-        assert agent.context.is_host_online("beta") is False
+        assert proxy.send(Message("is_online", {"target": "beta"})) is False
         with pytest.raises(HostError):
-            agent.context.wait_for_host("beta", timeout=0.1, interval=0.02)
+            proxy.send(Message("wait_missing", {"target": "beta"}))
     finally:
         alpha.stop()
 

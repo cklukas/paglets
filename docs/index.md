@@ -7,15 +7,21 @@ and proxy-based control.
 The runtime intentionally uses a Python-friendly mobility model:
 
 - all hosts already have the same code importable;
+- every active paglet instance runs in its own child Python process;
 - only dataclass state moves between hosts;
 - host-to-host transfer uses a JSON HTTP API;
 - lifecycle hooks resume behavior after create, dispatch, clone, retract, or
   activation;
 - deactivation persists inactive paglets to disk until activation;
-- agents communicate through `PagletProxy`, `Message`, and per-paglet
-  mailboxes;
+- agents communicate through `PagletProxy`, `Message`, and per-paglet serial
+  child-process mailboxes;
 - service discovery, transfer tickets, proxy references, context events, and
   resource cleanup are first-class framework features.
+
+The process-per-paglet model isolates crashes and CPU-heavy work from the host
+and from other paglets, and it gives worker paglets real multi-core parallelism.
+The tradeoff is stricter importability, process startup overhead, and
+actor-style serial message handling inside each individual paglet.
 
 ## Quick Start
 

@@ -9,8 +9,10 @@ from urllib.request import Request, urlopen
 
 from .errors import (
     InvalidAgentError,
+    HostError,
     LifecycleError,
     NotHandledError,
+    PagletCrashedError,
     PagletError,
     PagletInactiveError,
     RemoteHostError,
@@ -23,8 +25,10 @@ from .storage import StorageQuotaError
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
     "InvalidAgentError": InvalidAgentError,
+    "HostError": HostError,
     "LifecycleError": LifecycleError,
     "NotHandledError": NotHandledError,
+    "PagletCrashedError": PagletCrashedError,
     "PagletInactiveError": PagletInactiveError,
     "RemoteHostError": RemoteHostError,
     "ResourceCleanupError": LifecycleError,

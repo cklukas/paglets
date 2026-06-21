@@ -157,9 +157,9 @@ def test_remote_create_and_inactive_proxy_status_are_exposed_over_http(tmp_path:
         alpha.stop()
 
 
-def test_itinerary_plan_moves_agent_and_preserves_route_progress():
-    alpha = Host(name="alpha", host="127.0.0.1", port=free_port())
-    beta = Host(name="beta", host="127.0.0.1", port=free_port())
+def test_itinerary_plan_moves_agent_and_preserves_route_progress(tmp_path: Path):
+    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    beta = Host(name="beta", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "beta")
     alpha.start_background()
     beta.start_background()
     try:

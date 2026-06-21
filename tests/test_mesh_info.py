@@ -11,13 +11,13 @@ from paglets.examples.mesh_info import (
     GET_SNAPSHOT,
     MESH_INFO,
     SELECT_TARGETS,
+    SYNC_MESH_INFO,
     LandscapeRequest,
     MeshHostSnapshot,
-    MeshInfoState,
+    MeshInfoSyncRequest,
     SnapshotRequest,
     TargetSelectionRequest,
 )
-from paglets.serde import dataclass_to_wire
 from paglets.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
@@ -73,32 +73,35 @@ def test_mesh_info_target_selection_filters_stale_and_overloaded_hosts(tmp_path:
     host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
     host.start_background()
     try:
-        state = host.get_state("service.mesh-info", MeshInfoState)
         now = time.time()
-        state.snapshots["http://stale"] = dataclass_to_wire(
-            MeshHostSnapshot(
-                host_name="stale",
-                host_url="http://stale",
-                code_version="test",
-                observed_at=now - 1000,
-                cpu_count_logical=4,
-                work_free_bytes=10**9,
-                memory_available_bytes=10**9,
-            )
-        )
-        state.snapshots["http://busy"] = dataclass_to_wire(
-            MeshHostSnapshot(
-                host_name="busy",
-                host_url="http://busy",
-                code_version="test",
-                observed_at=now,
-                cpu_count_logical=4,
-                load_per_cpu=99.0,
-                work_free_bytes=10**9,
-                memory_available_bytes=10**9,
-            )
-        )
         handle = PagletContext(host).require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.MESH)
+        sync = PagletContext(host).require_contract(MESH_INFO, operation=SYNC_MESH_INFO, scope=ServiceScope.MESH)
+        sync.call(
+            SYNC_MESH_INFO,
+            MeshInfoSyncRequest(
+                snapshots=[
+                    MeshHostSnapshot(
+                        host_name="stale",
+                        host_url="http://stale",
+                        code_version="test",
+                        observed_at=now - 1000,
+                        cpu_count_logical=4,
+                        work_free_bytes=10**9,
+                        memory_available_bytes=10**9,
+                    ),
+                    MeshHostSnapshot(
+                        host_name="busy",
+                        host_url="http://busy",
+                        code_version="test",
+                        observed_at=now,
+                        cpu_count_logical=4,
+                        load_per_cpu=99.0,
+                        work_free_bytes=10**9,
+                        memory_available_bytes=10**9,
+                    ),
+                ]
+            ),
+        )
 
         reply = handle.call(
             SELECT_TARGETS,

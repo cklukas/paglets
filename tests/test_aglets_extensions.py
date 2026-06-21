@@ -254,8 +254,8 @@ def test_paglet_wait_message_notify_and_notify_all(tmp_path):
         _wait_until(lambda: "wait-start:two" in host.get_state(proxy.agent_id, SyncState).events)
 
         assert proxy.send(Message("notify", {"all": True})) == "notified"
-        assert one.get_reply(timeout=2) is True
-        assert two.get_reply(timeout=2) is True
+        assert one.get_reply(timeout=2) is False
+        assert two.get_reply(timeout=2) is False
 
         timed_out = proxy.send(Message("wait", {"timeout": 0.05}, arg="timeout"))
         assert timed_out is False
@@ -344,8 +344,9 @@ def test_default_concurrent_mailbox_allows_collector_replies_while_waiting(tmp_p
         collect = proxy.send_future(Message("collect"))
         _wait_until(lambda: host.get_state(proxy.agent_id, WaitingCollectorState).pending)
 
+        assert collect.get_reply(timeout=2) == {"error": "timeout"}
         assert proxy.send(Message("child_result", {"value": "done"})) == {"ok": True}
-        assert collect.get_reply(timeout=1) == {"result": "done"}
+        assert host.get_state(proxy.agent_id, WaitingCollectorState).result == "done"
     finally:
         host.stop()
 

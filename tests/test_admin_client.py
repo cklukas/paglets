@@ -2,14 +2,30 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from pathlib import Path
+
 from paglets.admin import AgentRecord, PagletsAdminClient, ServerRef
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
 from paglets import Host, Message
 
 
-def test_admin_client_manages_agents_across_two_hosts():
-    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), mesh=False, mesh_multicast=False)
-    beta = Host(name="beta", host="127.0.0.1", port=free_port(), mesh=False, mesh_multicast=False)
+def test_admin_client_manages_agents_across_two_hosts(tmp_path: Path):
+    alpha = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    beta = Host(
+        name="beta",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "beta",
+    )
     alpha.start_background()
     beta.start_background()
     try:

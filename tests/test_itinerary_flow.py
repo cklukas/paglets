@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from paglets import Host, Message, Paglet, PagletState
 from tests.test_paglets_core import free_port
@@ -46,9 +47,9 @@ class ChainAgent(Paglet[ChainState]):
         return self.dispatch(self.state.itinerary.pop(0))
 
 
-def test_agent_can_self_dispatch_through_chain_that_returns_to_same_host():
-    alpha = Host(name="alpha", host="127.0.0.1", port=free_port())
-    beta = Host(name="beta", host="127.0.0.1", port=free_port())
+def test_agent_can_self_dispatch_through_chain_that_returns_to_same_host(tmp_path: Path):
+    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    beta = Host(name="beta", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "beta")
     alpha.start_background()
     beta.start_background()
     try:

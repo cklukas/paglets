@@ -10,6 +10,10 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.host
 
+## Process Runtime
+
+::: paglets.process_runtime
+
 ## Proxies
 
 ::: paglets.proxy
@@ -33,6 +37,10 @@ This page is generated from the Python source using `mkdocstrings`.
 ## Runtime Values
 
 ::: paglets.runtime_values
+
+## Errors
+
+::: paglets.errors
 
 ## Resident Services
 

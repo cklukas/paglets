@@ -35,6 +35,10 @@ class PagletInactiveError(PagletError):
     """Raised when an inactive paglet cannot be activated for an operation."""
 
 
+class PagletCrashedError(PagletError):
+    """Raised when an isolated paglet process exits unexpectedly."""
+
+
 class NotHandledError(PagletError):
     """Raised when a paglet did not handle a message."""
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import threading
 import time
 from typing import Any
 
@@ -274,6 +275,7 @@ class SystemInfoCollectorState(PagletState):
     parent_agent_id: str = ""
     target_host_name: str = ""
     target_host_url: str = ""
+    deadline: float = 0.0
     pending_hosts: list[str] = field(default_factory=list)
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
@@ -288,7 +290,12 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
         with self.locked_state() as state:
             is_child = state.role == "child"
         if is_child:
-            self._run_child()
+            thread = threading.Thread(
+                target=self._run_child,
+                name=f"paglets-sysinfo-{self.context.name}",
+                daemon=True,
+            )
+            thread.start()
 
     def handle_message(self, message: Message):
         if message.kind == "collect":
@@ -297,9 +304,12 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
                 state.request = dict(message.args.get("request") or {})
                 state.timeout = float(message.args.get("timeout", 5.0))
             return self.collect()
+        if message.kind == "drain":
+            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "child_result":
             return self.record_child_result(message.args)
         if message.kind == "summary":
+            self._expire_timed_out_hosts()
             return self.summary()
         return self.not_handled()
 
@@ -312,6 +322,7 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
             state.results = {}
             state.errors = {}
             timeout = state.timeout
+            state.deadline = time.monotonic() + max(0.0, timeout)
         hosts = self.context.available_hosts(online_only=True, include_self=True)
 
         for host in hosts:
@@ -332,19 +343,22 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
                     state.target_host_name = ""
                     state.target_host_url = ""
 
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self.locked_state() as state:
-                if not state.pending_hosts:
-                    break
-            time.sleep(0.05)
-
-        with self.locked_state() as state:
-            timed_out_hosts = list(state.pending_hosts)
-            for host_name in timed_out_hosts:
-                state.errors[host_name] = "timed out waiting for server-info result"
-                state.pending_hosts = [name for name in state.pending_hosts if name != host_name]
         return self.summary()
+
+    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
+        self._expire_timed_out_hosts()
+
+        def ready(state: SystemInfoCollectorState) -> bool:
+            return not state.pending_hosts
+
+        timeout = max(0.0, wait_timeout)
+        with self.locked_state() as state:
+            if state.deadline > 0:
+                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
+        self.wait_state(ready, timeout=timeout)
+        self._expire_timed_out_hosts()
+        summary = self.summary()
+        return {"done": not summary["pending_hosts"], "summary": summary}
 
     def _run_child(self) -> None:
         with self.locked_state() as state:
@@ -372,8 +386,14 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
             }
 
         parent = self.context.get_proxy(parent_agent_id, parent_host_url)
-        if parent is not None:
-            parent.send(Message("child_result", payload))
+        try:
+            if parent is not None:
+                parent.send(Message("child_result", payload))
+        finally:
+            try:
+                self.context.host.dispose(self.agent_id)
+            except Exception:
+                pass
 
     @state_locked
     def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -386,6 +406,7 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
                 "host_url": str(payload.get("host_url") or ""),
                 "result": dict(payload.get("result") or {}),
             }
+        self.notify_all_state_changed()
         return {"ok": True}
 
     @state_locked
@@ -394,7 +415,17 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
             "operation": self.state.operation,
             "results": dict(self.state.results),
             "errors": dict(self.state.errors),
+            "pending_hosts": list(self.state.pending_hosts),
         }
+
+    def _expire_timed_out_hosts(self) -> None:
+        with self.locked_state() as state:
+            if not state.pending_hosts or state.deadline <= 0 or time.monotonic() < state.deadline:
+                return
+            for host_name in list(state.pending_hosts):
+                state.errors[host_name] = "timed out waiting for server-info result"
+            state.pending_hosts = []
+        self.notify_all_state_changed()
 
 
 def collect_gpu_info() -> tuple[list[GpuInfo], str | None]:

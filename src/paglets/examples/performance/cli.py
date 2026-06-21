@@ -108,7 +108,7 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
     try:
-        return proxy.send(
+        proxy.send(
             Message(
                 "collect",
                 {
@@ -117,7 +117,17 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
                 },
             )
         )
+        summary: dict[str, Any] = {}
+        while True:
+            reply = proxy.send(Message("drain", {"wait_timeout": 0.5}))
+            summary = dict(reply.get("summary") or {})
+            if reply.get("done"):
+                return summary
     finally:
+        try:
+            proxy.send(Message("cleanup"))
+        except Exception:
+            pass
         try:
             proxy.dispose()
         except Exception:

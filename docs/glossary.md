@@ -33,12 +33,12 @@ Envelope
   names, dataclass state, source host, target host, and clone metadata.
 
 Host
-: A runtime context that owns active paglets, durable inactive records, mesh
-  state, and the JSON HTTP API.
+: A runtime context that supervises active paglet processes, durable inactive
+  records, mesh state, and the JSON HTTP API.
 
 Inactive
-: A deactivated paglet stored as a durable record instead of a live Python
-  object. Inactive paglets can be activated explicitly, by policy, or by
+: A deactivated paglet stored as a durable record instead of an active child
+  process. Inactive paglets can be activated explicitly, by policy, or by
   incoming messages.
 
 HostRef
@@ -59,8 +59,13 @@ Message
 
 MessageMailbox
 : The per-active-paglet queue used for normal message delivery. It orders queued
-  work by priority and FIFO order within one priority. The per-paglet worker
-  count is controlled by `Paglet.MAILBOX_WORKERS`.
+  work by priority and FIFO order within one priority. The process runtime sends
+  at most one queued message at a time to a paglet child process.
+
+Paglet Process
+: The child Python process that runs one active paglet instance. The host
+  supervises it, communicates with it over a private pipe, and reports abnormal
+  exits as `PagletCrashedError`.
 
 Mesh
 : The same-version host registry built from seed-list gossip and optional

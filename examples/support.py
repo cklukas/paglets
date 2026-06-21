@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import importlib
+from pathlib import Path
 import socket
+import sys
+import tempfile
 from typing import Iterator
 
 from paglets import Host
@@ -15,13 +19,26 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def run_importable_main(module_name: str) -> int | None:
+    """Run a demo through its package module so paglet classes are importable."""
+
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    module = importlib.import_module(module_name)
+    return module.main()
+
+
 @contextmanager
 def local_hosts(
     *names: str,
     mesh: bool = False,
     mesh_version: str = "examples-local",
     mesh_multicast: bool = False,
+    persistence_root: str | Path | None = None,
 ) -> Iterator[list[Host]]:
+    tmpdir = tempfile.TemporaryDirectory(prefix="paglets-examples-") if persistence_root is None else None
+    root = Path(tmpdir.name if tmpdir is not None else persistence_root).expanduser()
     hosts = [
         Host(
             name,
@@ -29,6 +46,7 @@ def local_hosts(
             mesh=mesh,
             mesh_version=mesh_version,
             mesh_multicast=mesh_multicast,
+            persistence_dir=root / name,
         )
         for name in names
     ]
@@ -45,3 +63,5 @@ def local_hosts(
     finally:
         for host in reversed(hosts):
             host.stop()
+        if tmpdir is not None:
+            tmpdir.cleanup()

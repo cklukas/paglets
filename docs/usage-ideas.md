@@ -8,6 +8,14 @@ the paglet identity, dataclass state, and behavior class reference.
 For simple CRUD calls, public APIs, auth-heavy business operations, or short
 request/response actions, a normal HTTP API is usually the better tool.
 
+The process-isolated runtime shifts the tradeoff further toward coarse,
+stateful, location-aware work. Each active paglet is a child Python process, so
+crashes and CPU-bound loops are isolated and multiple worker paglets can use
+multiple cores. The cost is process startup, pipe IPC, and the requirement that
+all paglet classes be importable by module path on every target host. Very tiny
+high-frequency calls are usually better batched or implemented as a resident
+service operation.
+
 ## Good Fits
 
 ### Infrastructure Inspection

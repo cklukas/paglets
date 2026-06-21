@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
             digits=max(0, args.digits),
             batch_size=max(1, args.batch_size),
             max_in_flight=max(0, args.max_in_flight),
+            max_workers_per_host=max(0, args.max_workers_per_host),
             timeout=max(0.1, args.timeout),
             max_load_per_cpu=float(args.max_load_per_cpu),
             max_cpu_percent=float(args.max_cpu_percent),
@@ -53,7 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", type=int, default=0, help="Zero-based decimal digit position after the point")
     parser.add_argument("--digits", type=int, default=16, help="Number of decimal digits to compute")
     parser.add_argument("--batch-size", type=int, default=1, help="Chudnovsky terms per worker batch")
-    parser.add_argument("--max-in-flight", type=int, default=0, help="Global in-flight batch cap; 0 uses target count")
+    parser.add_argument("--max-in-flight", type=int, default=0, help="Global in-flight batch cap; 0 uses free load slots")
+    parser.add_argument("--max-workers-per-host", type=int, default=0, help="Per-host worker cap; 0 uses free load slots")
     parser.add_argument("--timeout", type=float, default=60.0, help="Seconds to wait for the whole job")
     parser.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
     parser.add_argument("--max-cpu-percent", type=float, default=90.0, help="Maximum sampled CPU percent")
@@ -84,7 +86,13 @@ def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, cl
 def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
     proxy = _create_coordinator(entry, client=client)
     try:
-        return proxy.send(Message("start", {"request": dataclass_to_wire(request)}))
+        proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
+        summary: dict = {}
+        while True:
+            reply = proxy.send(Message("drain", {"after_digits": 0, "wait_timeout": 0.5}))
+            summary = dict(reply.get("summary") or {})
+            if reply.get("done"):
+                return summary
     finally:
         _cleanup_coordinator(proxy)
 

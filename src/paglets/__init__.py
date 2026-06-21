@@ -56,7 +56,7 @@ from .services import (
 from .storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES, ManagedStorage, StorageQuotaError, StorageStatus
 from .startup import AutoStartSpec, LaunchConfig, StartupAgentConfig, load_launch_config, sync_launch_config
 from .transfer import TransferTicket
-from .errors import PagletInactiveError, TransferError
+from .errors import PagletCrashedError, PagletInactiveError, TransferError
 
 __all__ = [
     "ACTIVE",
@@ -98,6 +98,7 @@ __all__ = [
     "Message",
     "ONEWAY",
     "Paglet",
+    "PagletCrashedError",
     "PagletContext",
     "PagletEvent",
     "PagletInactiveError",

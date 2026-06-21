@@ -6,15 +6,16 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 import shutil
+import threading
 import time
 from typing import Any
 
 from paglets import Message, Paglet, PagletState
 
 try:
-    from .support import local_hosts
+    from .support import local_hosts, run_importable_main
 except ImportError:  # pragma: no cover - direct script execution
-    from support import local_hosts
+    from support import local_hosts, run_importable_main
 
 
 @dataclass
@@ -30,6 +31,7 @@ class DiskSurveyState(PagletState):
     errors: dict[str, str] = field(default_factory=dict)
     diagnostics: list[str] = field(default_factory=list)
     parent_wait_timeout: float = 5.0
+    deadline: float = 0.0
 
 
 class DiskSurveyPaglet(Paglet[DiskSurveyState]):
@@ -40,6 +42,14 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
     def run(self):
         if self.state.role != "child":
             return
+        thread = threading.Thread(
+            target=self._run_child,
+            name=f"paglets-disk-survey-{self.context.name}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_child(self):
         volumes = collect_volume_usage()
         try:
             self.context.wait_for_host(
@@ -52,17 +62,23 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
         parent = self.context.get_proxy(self.state.parent_agent_id, self.state.parent_host_url)
         if parent is None:
             return
-        parent.send(
-            Message(
-                "child_result",
-                {
-                    "host_name": self.state.target_host_name,
-                    "host_url": self.state.target_host_url,
-                    "child_agent_id": self.agent_id,
-                    "volumes": volumes,
-                },
+        try:
+            parent.send(
+                Message(
+                    "child_result",
+                    {
+                        "host_name": self.state.target_host_name,
+                        "host_url": self.state.target_host_url,
+                        "child_agent_id": self.agent_id,
+                        "volumes": volumes,
+                    },
+                )
             )
-        )
+        finally:
+            try:
+                self.context.host.dispose(self.agent_id)
+            except Exception:
+                pass
 
     def handle_message(self, message: Message):
         if message.kind == "survey":
@@ -70,8 +86,13 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
             return self.start_survey(timeout)
         if message.kind == "child_result":
             return self.record_child_result(message.args)
+        if message.kind == "drain":
+            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "summary":
+            self._expire_timed_out_hosts()
             return self.summary()
+        if message.kind == "cleanup":
+            return self.cleanup_children()
         return self.not_handled()
 
     def start_survey(self, timeout: float) -> dict[str, Any]:
@@ -85,6 +106,7 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
         self.state.child_proxies = {}
         self.state.findings = {}
         self.state.errors = {}
+        self.state.deadline = time.monotonic() + max(0.0, timeout)
         self.state.diagnostics = [
             f"{self.context.name} mesh knows {len(all_hosts)} same-version host(s); {len(hosts)} online",
         ]
@@ -113,16 +135,21 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
                 self.state.target_host_name = ""
                 self.state.target_host_url = ""
 
-        deadline = time.monotonic() + timeout
-        while self.state.pending_hosts and time.monotonic() < deadline:
-            time.sleep(0.05)
-
-        for host_name in list(self.state.pending_hosts):
-            self.state.errors[host_name] = "timed out waiting for child result"
-            self.state.diagnostics.append(f"child result from {host_name} timed out")
-            self.state.pending_hosts.remove(host_name)
-
         return self.summary()
+
+    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
+        self._expire_timed_out_hosts()
+
+        def ready(state: DiskSurveyState) -> bool:
+            return not state.pending_hosts
+
+        timeout = max(0.0, wait_timeout)
+        if self.state.deadline > 0:
+            timeout = min(timeout, max(0.0, self.state.deadline - time.monotonic()))
+        self.wait_state(ready, timeout=timeout)
+        self._expire_timed_out_hosts()
+        summary = self.summary()
+        return {"done": not summary["pending"], "summary": summary}
 
     def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         host_name = str(payload["host_name"])
@@ -132,6 +159,7 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
         self.state.diagnostics.append(
             f"received {len(volumes)} volume finding(s) from {host_name} via child {payload.get('child_agent_id')}"
         )
+        self.notify_all_state_changed()
         return {"ok": True}
 
     def summary(self) -> dict[str, Any]:
@@ -140,7 +168,27 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
             "findings": dict(self.state.findings),
             "errors": dict(self.state.errors),
             "children": dict(self.state.child_proxies),
+            "pending": list(self.state.pending_hosts),
         }
+
+    def cleanup_children(self) -> dict[str, Any]:
+        for host_name, proxy_wire in list(self.state.child_proxies.items()):
+            try:
+                from paglets import PagletProxy
+
+                PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
+            except Exception as exc:
+                self.state.errors[f"cleanup:{host_name}"] = str(exc)
+        return self.summary()
+
+    def _expire_timed_out_hosts(self) -> None:
+        if not self.state.pending_hosts or self.state.deadline <= 0 or time.monotonic() < self.state.deadline:
+            return
+        for host_name in list(self.state.pending_hosts):
+            self.state.errors[host_name] = "timed out waiting for child result"
+            self.state.diagnostics.append(f"child result from {host_name} timed out")
+            self.state.pending_hosts.remove(host_name)
+        self.notify_all_state_changed()
 
 
 def collect_volume_usage() -> list[dict[str, Any]]:
@@ -229,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
             state = "online" if host_ref.online else "offline"
             print(f"  - {host_ref.name} -> {host_ref.url} ({state}, version {host_ref.code_version})")
 
-        summary = parent.send(Message("survey", {"timeout": args.timeout}))
+        summary = run_survey(parent, timeout=args.timeout)
         print("\ndiagnostics:")
         for line in summary["diagnostics"]:
             print(f"  - {line}")
@@ -250,5 +298,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def run_survey(parent, *, timeout: float) -> dict[str, Any]:
+    parent.send(Message("survey", {"timeout": timeout}))
+    summary: dict[str, Any] = {}
+    while True:
+        reply = parent.send(Message("drain", {"wait_timeout": 0.5}))
+        summary = dict(reply.get("summary") or {})
+        if reply.get("done"):
+            return summary
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_importable_main("examples.disk_survey_demo"))
