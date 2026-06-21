@@ -18,9 +18,14 @@ from paglets.examples.compute import (
     pi_decimal,
     pi_decimal_digits,
 )
-from paglets.examples.compute.agent import _host_worker_slots
-from paglets.examples.mesh_info import MeshHostSnapshot, TargetCandidate
+from paglets.examples.compute.agent import (
+    _decode_bigint,
+    _encode_bigint,
+    _host_worker_slots,
+    _int_to_decimal_string,
+)
 from paglets.examples.compute.cli import main as pi_main
+from paglets.examples.mesh_info import MeshHostSnapshot
 from paglets.serde import dataclass_to_wire
 from paglets.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
@@ -29,6 +34,23 @@ from tests.test_paglets_core import free_port
 def test_pi_decimal_digits_are_deterministic():
     assert pi_decimal(0, 16) == "3.1415926535897932"
     assert pi_decimal_digits(0, 16) == "1415926535897932"
+
+
+def test_large_decimal_formatting_avoids_python_int_string_limit():
+    text = pi_decimal(0, 4310)
+
+    assert text.startswith("3.1415926535897932")
+    assert len(text) == 4312
+
+
+def test_bigint_wire_helpers_avoid_python_decimal_string_limit():
+    decimal_text = "1" + ("0" * 5000)
+    value = _decode_bigint(decimal_text)
+    encoded = _encode_bigint(-value)
+
+    assert encoded.startswith("-0x")
+    assert _decode_bigint(encoded) == -value
+    assert _int_to_decimal_string(value) == decimal_text
 
 
 def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):

@@ -261,6 +261,12 @@ disposes itself. If all hosts are above the load/CPU thresholds and no batch is
 running, the coordinator sends one fallback worker anyway so a long job still
 makes minimum progress.
 
+The worker result payloads encode large Chudnovsky partial integers in
+hexadecimal internally. The coordinator combines those integer terms and
+renders user-facing output with chunked decimal conversion, so the terminal
+still shows normal `3.1415...` Pi text and large jobs do not trip Python's
+default decimal integer string conversion limit.
+
 Programmatic use:
 
 ```python

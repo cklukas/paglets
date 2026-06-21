@@ -335,6 +335,11 @@ machine-readable summary instead of live terminal output. If all hosts are over
 the load/CPU thresholds and no batch is running, the coordinator still launches
 one fallback worker so the job can make minimum progress.
 
+Worker messages encode the large Chudnovsky partial integers in hexadecimal
+internally, and the coordinator renders final Pi text with chunked decimal
+conversion. This keeps the CLI output as ordinary `3.1415...` text while
+avoiding Python's default guard for huge decimal integer string conversions.
+
 The optional `--server` flag selects only that initial entry host; target
 selection across the mesh remains automatic.
 

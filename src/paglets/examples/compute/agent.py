@@ -22,6 +22,8 @@ CHUDNOVSKY_A = 13591409
 CHUDNOVSKY_B = 545140134
 CHUDNOVSKY_C = 640320
 CHUDNOVSKY_C3_OVER_24 = CHUDNOVSKY_C**3 // 24
+DECIMAL_CHUNK_DIGITS = 9
+DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,9 +447,9 @@ class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
                     host_url=self.context.address,
                     status="ok",
                     worker_agent_id=self.agent_id,
-                    p=str(p),
-                    q=str(q),
-                    t=str(t),
+                    p=_encode_bigint(p),
+                    q=_encode_bigint(q),
+                    t=_encode_bigint(t),
                     duration_seconds=time.perf_counter() - started,
                 )
         except Exception as exc:
@@ -548,11 +550,53 @@ def _combine_parts(left: tuple[int, int, int], right: tuple[int, int, int]) -> t
 def _combine_result_parts(results: list[PiBatchResult]) -> tuple[int, int, int]:
     combined: tuple[int, int, int] | None = None
     for result in sorted(results, key=lambda item: item.term_start):
-        part = (int(result.p), int(result.q), int(result.t))
+        part = (_decode_bigint(result.p), _decode_bigint(result.q), _decode_bigint(result.t))
         combined = part if combined is None else _combine_parts(combined, part)
     if combined is None:
         raise ValueError("no Pi term results to combine")
     return combined
+
+
+def _encode_bigint(value: int) -> str:
+    return hex(value)
+
+
+def _decode_bigint(value: str) -> int:
+    text = value.strip()
+    if text.lower().startswith(("0x", "+0x", "-0x")):
+        return int(text, 16)
+    return _parse_decimal_bigint(text)
+
+
+def _parse_decimal_bigint(value: str) -> int:
+    if not value:
+        raise ValueError("empty integer")
+    sign = 1
+    digits = value
+    if value[0] in "+-":
+        sign = -1 if value[0] == "-" else 1
+        digits = value[1:]
+    if not digits or not digits.isdecimal():
+        raise ValueError(f"invalid integer: {value!r}")
+    number = 0
+    for index in range(0, len(digits), DECIMAL_CHUNK_DIGITS):
+        chunk = digits[index : index + DECIMAL_CHUNK_DIGITS]
+        number = number * (10 ** len(chunk)) + int(chunk)
+    return sign * number
+
+
+def _int_to_decimal_string(value: int) -> str:
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+    chunks: list[int] = []
+    while value:
+        value, chunk = divmod(value, DECIMAL_CHUNK_BASE)
+        chunks.append(chunk)
+    head = str(chunks[-1])
+    tail = "".join(f"{chunk:0{DECIMAL_CHUNK_DIGITS}d}" for chunk in reversed(chunks[:-1]))
+    return f"{sign}{head}{tail}"
 
 
 def _contiguous_result_pieces(results: list[PiBatchResult]) -> list[PiBatchResult]:
@@ -627,7 +671,7 @@ def _format_pi_decimal(
     sqrt_value = math.isqrt(10005 * 10 ** (2 * precision_digits))
     pi_scaled = (q * 426880 * sqrt_value) // t
     integer_part = pi_scaled // scale
-    fractional = str(pi_scaled % scale).zfill(precision_digits)
+    fractional = _int_to_decimal_string(pi_scaled % scale).zfill(precision_digits)
     requested = fractional[start : start + digits]
     displayed_fractional = fractional[: start + digits]
     return f"{integer_part}.{displayed_fractional}", requested
