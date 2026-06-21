@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 import math
 import threading
@@ -12,7 +13,7 @@ import uuid
 from ...agent import Paglet, PagletState, state_locked
 from ...errors import InvalidAgentError
 from ...messages import Message
-from ...serde import dataclass_from_wire, dataclass_to_wire
+from ...serde import dataclass_from_wire, dataclass_to_wire, qualified_name
 from ...runtime_values import ServiceScope
 from ..mesh_info import GET_SNAPSHOT, MESH_INFO, SELECT_TARGETS, SnapshotRequest, TargetSelectionRequest
 
@@ -27,6 +28,7 @@ DECIMAL_CHUNK_DIGITS = 9
 DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
 DEFAULT_STREAM_CHUNK_DIGITS = 8192
 DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
+MAX_PARALLEL_WORKER_LAUNCHES = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +321,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         if capacity <= 0:
             return
 
+        launches: list[dict[str, Any]] = []
         for target in targets:
             snapshot = target.snapshot
             host_url = snapshot.host_url.rstrip("/")
@@ -326,6 +329,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             while capacity > 0 and in_flight_by_host.get(host_url, 0) < host_slots:
                 with self.locked_state() as state:
                     if not state.pending_batches or len(state.in_flight) >= target_limit:
+                        self._launch_worker_specs(launches)
                         return
                     batch_wire = state.pending_batches.pop(0)
                     batch = dataclass_from_wire(PiBatchRequest, batch_wire)
@@ -348,24 +352,60 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                     min_work_free_bytes=request.min_work_free_bytes,
                     ignore_load_limits=fallback_minimum,
                 )
-                try:
-                    self.context.host.create_remote(
-                        host_url,
-                        PiBatchWorkerAgent,
-                        worker_state,
-                        agent_id=worker_id,
-                    )
-                except Exception as exc:
-                    with self.locked_state() as state:
-                        state.in_flight.pop(batch.batch_id, None)
-                        state.pending_batches.insert(0, batch_wire)
-                        state.errors[snapshot.host_name or host_url] = str(exc)
-                    self.notify_all_state_changed()
-                    return
+                launches.append(
+                    {
+                        "host_url": host_url,
+                        "host_name": snapshot.host_name,
+                        "worker_id": worker_id,
+                        "worker_state": worker_state,
+                        "batch_id": batch.batch_id,
+                        "batch_wire": batch_wire,
+                    }
+                )
                 in_flight_by_host[host_url] = in_flight_by_host.get(host_url, 0) + 1
                 capacity -= 1
                 if fallback_minimum or capacity <= 0:
+                    self._launch_worker_specs(launches)
                     return
+        self._launch_worker_specs(launches)
+
+    def _launch_worker_specs(self, launches: list[dict[str, Any]]) -> None:
+        if not launches:
+            return
+        max_workers = min(len(launches), MAX_PARALLEL_WORKER_LAUNCHES)
+        if max_workers <= 1:
+            for spec in launches:
+                self._launch_worker_spec(spec)
+            return
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="paglets-pi-launch") as executor:
+            futures = {executor.submit(self._launch_worker_spec, spec): spec for spec in launches}
+            for future in as_completed(futures):
+                future.result()
+
+    def _launch_worker_spec(self, spec: dict[str, Any]) -> None:
+        try:
+            self._create_worker_paglet(
+                str(spec["host_url"]),
+                spec["worker_state"],
+                str(spec["worker_id"]),
+            )
+        except Exception as exc:
+            with self.locked_state() as state:
+                state.in_flight.pop(str(spec["batch_id"]), None)
+                state.pending_batches.insert(0, dict(spec["batch_wire"]))
+                state.errors[str(spec.get("host_name") or spec["host_url"])] = str(exc)
+            self.notify_all_state_changed()
+
+    def _create_worker_paglet(self, host_url: str, worker_state: PiBatchWorkerState, worker_id: str) -> None:
+        self.context.host.client.post_json(
+            f"{host_url.rstrip('/')}/agents",
+            {
+                "agent_class_name": qualified_name(PiBatchWorkerAgent),
+                "state_class_name": qualified_name(PiBatchWorkerState),
+                "state": dataclass_to_wire(worker_state),
+                "agent_id": worker_id,
+            },
+        )
 
     def _select_targets(self, request: PiComputeRequest, *, ignore_load_limits: bool = False, limit: int | None = None):
         try:

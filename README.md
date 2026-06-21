@@ -308,9 +308,10 @@ uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-
 
 The coordinator stays on the entry host, asks local `mesh-info` for ranked
 targets, expands each host into approximate free load slots, creates
-short-lived worker paglets for Chudnovsky term batches, receives partial-sum
-results by message, and lets the CLI format and append normal decimal output
-such as `3.1415926535897932` as reliable digit batches become available. Use
+short-lived worker paglets for Chudnovsky term batches, fills available worker
+slots with parallel create requests, receives partial-sum results by message,
+and lets the CLI format and append normal decimal output such as
+`3.1415926535897932` as reliable digit batches become available. Use
 `--max-workers-per-host` to cap per-host parallelism, `--max-in-flight` to cap
 global parallelism, and `--json` when a script needs the final
 machine-readable summary instead of live terminal output. Text streaming uses a

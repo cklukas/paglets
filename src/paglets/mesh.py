@@ -272,7 +272,11 @@ class MeshRegistry:
                 f"ignoring mesh peer {ref.name} at {ref.url}: "
                 f"version {ref.code_version!r} != {self.code_version!r}"
             )
-            self._host.request_peer_git_update(ref.url)
+            self._host.request_peer_git_update(
+                ref.url,
+                validate_health=True,
+                report_unreachable=False,
+            )
             return None
         if ref.url.rstrip("/") == self._host.address.rstrip("/"):
             return self.refresh_self()

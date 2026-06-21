@@ -596,14 +596,24 @@ class Host:
             self._store_git_update_status(status)
         return status
 
-    def broadcast_git_update(self, targets: list[str] | None = None) -> list[dict[str, Any]]:
+    def broadcast_git_update(
+        self,
+        targets: list[str] | None = None,
+        *,
+        validate_targets: bool = False,
+        report_unreachable: bool = True,
+    ) -> list[dict[str, Any]]:
         if not self.auto_update_from_git:
             return []
         urls = set(targets or [])
         urls.update(self.mesh.peer_urls(include_known=True))
         responses: list[dict[str, Any]] = []
         for url in sorted(urls):
-            response = self.request_peer_git_update(url)
+            response = self.request_peer_git_update(
+                url,
+                validate_health=validate_targets,
+                report_unreachable=report_unreachable,
+            )
             if response is not None:
                 responses.append(response)
         return responses
@@ -615,8 +625,30 @@ class Host:
         target_hash: str | None = None,
         health: dict[str, Any] | None = None,
         throttle: bool = True,
+        validate_health: bool = False,
+        report_unreachable: bool = True,
     ) -> dict[str, Any] | None:
         if not self.auto_update_from_git:
+            return None
+        normalized = url.rstrip("/")
+        if validate_health and health is None:
+            try:
+                probed = self.client.get_json(
+                    f"{normalized}/health",
+                    timeout=AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                if report_unreachable:
+                    failure = {"ok": False, "status": "unreachable", "error": str(exc), "url": normalized}
+                    self._report_git_update_failure(normalized, failure)
+                    return failure
+                return None
+            if not isinstance(probed, dict):
+                failure = {"ok": False, "status": "invalid-health", "error": f"unexpected health {probed!r}", "url": normalized}
+                self._report_git_update_failure(normalized, failure)
+                return failure
+            health = probed
+        if health is not None and health.get("auto_update_from_git") is False:
             return None
         try:
             normalized = HostRef.from_wire(

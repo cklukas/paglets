@@ -180,6 +180,34 @@ def test_version_mismatch_peers_trigger_git_update_hook(monkeypatch):
     assert calls[0][1]["health"]["code_version"] == "mesh-a"
 
 
+def test_version_mismatch_beacon_validates_git_update_target(monkeypatch):
+    host = _host("alpha", version="mesh-a")
+    ref = HostRef(
+        name="beta",
+        url="http://127.0.0.1:50423",
+        code_version="mesh-b",
+        online=True,
+        last_seen=time.time(),
+        active_count=0,
+        inactive_count=0,
+    )
+    calls = []
+
+    def fake_request(url, **kwargs):
+        calls.append((url, kwargs))
+        return None
+
+    monkeypatch.setattr(host, "request_peer_git_update", fake_request)
+
+    assert host.mesh.register(ref) is None
+    assert calls == [
+        (
+            "http://127.0.0.1:50423",
+            {"validate_health": True, "report_unreachable": False},
+        )
+    ]
+
+
 def test_context_helpers_resolve_named_hosts_for_dispatch_and_clone():
     alpha = _host("alpha")
     beta = _host("beta", peers=[alpha.address])

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from ipaddress import ip_address
 import os
 from pathlib import Path, PureWindowsPath
 import shutil
 import signal
 import sys
 import threading
+from urllib.parse import urlparse
 
 from . import git_update
 from .admin import discover_lan_entry_servers, discover_mesh_entry_servers
@@ -104,7 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     if args.auto_update_from_git:
-        host.broadcast_git_update(targets=_auto_update_discovery_targets(host.port))
+        host.broadcast_git_update(
+            targets=_auto_update_discovery_targets(host.port),
+            validate_targets=True,
+            report_unreachable=False,
+        )
     host.serve_forever()
     restart_scheduled = bool(getattr(host, "_auto_update_restart_scheduled", False))
     if restart_scheduled and not restart_requested.is_set():
@@ -121,7 +127,22 @@ def main(argv: list[str] | None = None) -> int:
 def _auto_update_discovery_targets(port: int) -> list[str]:
     discovered = discover_mesh_entry_servers(timeout=1.0)
     discovered.extend(discover_lan_entry_servers(ports={port}, timeout=0.25))
-    return [server.url for server in discovered]
+    return [server.url for server in discovered if _auto_update_discovery_target_allowed(server.url, port)]
+
+
+def _auto_update_discovery_target_allowed(url: str, port: int) -> bool:
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+    except ValueError:
+        return False
+    host = parsed.hostname or ""
+    try:
+        is_loopback = ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.casefold() in {"localhost"}
+    if not is_loopback:
+        return True
+    return parsed.port == int(port)
 
 
 def _parser() -> argparse.ArgumentParser:

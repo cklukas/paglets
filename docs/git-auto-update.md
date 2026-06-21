@@ -218,6 +218,9 @@ machine.
 - Commit or stash local edits before enabling auto-update.
 - Push commits before broadcasting them to other hosts.
 - Keep `uv` installed on hosts; dependency sync uses `uv sync`.
+- Startup broadcasts validate discovered targets before sending update
+  requests and suppress unreachable-target noise. Stale loopback beacons on
+  random ports, for example from short-lived local test hosts, are ignored.
 - Runtime auto-update restarts print `git auto-update restart requested;
   restarting` before re-execing. If that line appears without a new host, check
   that `uv` is on `PATH`.

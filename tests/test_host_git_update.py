@@ -10,6 +10,7 @@ import pytest
 from paglets import Host
 from paglets.admin import ServerRef
 from paglets import cli as host_cli
+from paglets.errors import RemoteHostError
 from paglets import git_update
 from paglets.runtime_values import LaunchConfigSyncAction
 from paglets.startup import LaunchConfig, LaunchConfigSyncResult
@@ -26,7 +27,10 @@ def test_auto_update_discovery_targets_use_mesh_and_lan_discovery(monkeypatch):
     monkeypatch.setattr(
         host_cli,
         "discover_mesh_entry_servers",
-        lambda timeout=1.0: [ServerRef("mesh", "http://192.168.86.28:8765")],
+        lambda timeout=1.0: [
+            ServerRef("mesh", "http://192.168.86.28:8765"),
+            ServerRef("stale-loopback", "http://127.0.0.1:56659"),
+        ],
     )
     monkeypatch.setattr(
         host_cli,
@@ -68,6 +72,8 @@ def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path
     class RestartRequested(RuntimeError):
         pass
 
+    broadcast_calls = []
+
     class FakeMesh:
         code_version = head
         version_warning = None
@@ -83,7 +89,8 @@ def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path
         def start_background(self):
             return None
 
-        def broadcast_git_update(self, targets=None):
+        def broadcast_git_update(self, targets=None, **kwargs):
+            broadcast_calls.append((targets, kwargs))
             return []
 
         def serve_forever(self):
@@ -121,6 +128,7 @@ def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path
         host_cli.main(["--name", "windows", "--port", "8765", "--auto-update-from-git"])
 
     assert restart_threads == ["MainThread"]
+    assert broadcast_calls == [([], {"validate_targets": True, "report_unreachable": False})]
     assert "git auto-update restart requested; restarting" in capsys.readouterr().err
 
 
@@ -268,6 +276,90 @@ def test_requesting_host_reports_remote_update_failure(tmp_path: Path, monkeypat
     assert messages
     assert "git push" in messages[0]
     assert "fatal: bad object" in messages[0]
+
+
+def test_request_peer_git_update_skips_unreachable_validated_target(tmp_path: Path):
+    old_head = "a" * 40
+    messages: list[str] = []
+    host = _host(tmp_path, auto_update=True, process_start_head=old_head, reporter=messages.append)
+
+    class UnreachableClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            raise RemoteHostError(f"Could not reach {url}")
+
+        def post_json(self, url: str, payload: dict, *, timeout: float | None = None):
+            raise AssertionError("unreachable targets must not receive git-update POSTs")
+
+    host.client = UnreachableClient()  # type: ignore[assignment]
+
+    response = host.request_peer_git_update(
+        "http://127.0.0.1:50423",
+        validate_health=True,
+        report_unreachable=False,
+        throttle=False,
+    )
+
+    assert response is None
+    assert messages == []
+
+
+def test_request_peer_git_update_skips_validated_self_target(tmp_path: Path):
+    old_head = "a" * 40
+    host = _host(tmp_path, auto_update=True, process_start_head=old_head)
+
+    class SelfClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            return {
+                "name": host.name,
+                "address": host.address,
+                "code_version": host.mesh.code_version,
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+
+        def post_json(self, url: str, payload: dict, *, timeout: float | None = None):
+            raise AssertionError("self targets must not receive git-update POSTs")
+
+    host.client = SelfClient()  # type: ignore[assignment]
+
+    response = host.request_peer_git_update(
+        "http://127.0.0.1:50423",
+        validate_health=True,
+        throttle=False,
+    )
+
+    assert response is None
+
+
+def test_request_peer_git_update_skips_validated_disabled_target(tmp_path: Path):
+    old_head = "a" * 40
+    messages: list[str] = []
+    host = _host(tmp_path, auto_update=True, process_start_head=old_head, reporter=messages.append)
+
+    class DisabledClient:
+        def get_json(self, url: str, *, timeout: float | None = None):
+            return {
+                "name": "disabled",
+                "address": "http://127.0.0.1:50423",
+                "code_version": "older",
+                "active_count": 0,
+                "inactive_count": 0,
+                "auto_update_from_git": False,
+            }
+
+        def post_json(self, url: str, payload: dict, *, timeout: float | None = None):
+            raise AssertionError("disabled targets must not receive git-update POSTs")
+
+    host.client = DisabledClient()  # type: ignore[assignment]
+
+    response = host.request_peer_git_update(
+        "http://127.0.0.1:50423",
+        validate_health=True,
+        throttle=False,
+    )
+
+    assert response is None
+    assert messages == []
 
 
 def _host(

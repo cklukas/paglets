@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 import time
 
 from paglets import Host, Message
@@ -254,6 +255,43 @@ def test_pi_digits_can_be_formatted_from_drained_results_locally():
     )
 
     assert pi_decimal_digits_from_results(request, [result], after_digits=0, digits=4) == "1415"
+
+
+def test_pi_worker_launch_specs_run_in_parallel(monkeypatch):
+    agent = PiComputeCoordinatorAgent(PiComputeState())
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_create(_host_url, _worker_state, _worker_id):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            barrier.wait(timeout=1.0)
+        finally:
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(agent, "_create_worker_paglet", fake_create)
+    specs = [
+        {
+            "host_url": "http://127.0.0.1:1",
+            "host_name": "alpha",
+            "worker_id": f"worker-{index}",
+            "worker_state": PiBatchWorkerState(),
+            "batch_id": f"terms:{index}:1",
+            "batch_wire": dataclass_to_wire(PiBatchRequest(f"terms:{index}:1", index, 1)),
+        }
+        for index in range(2)
+    ]
+
+    agent._launch_worker_specs(specs)
+
+    assert max_active == 2
 
 
 def test_pi_compute_counts_free_host_slots(tmp_path: Path):
