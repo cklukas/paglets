@@ -13,6 +13,7 @@ from paglets.examples.compute import (
     PiComputeCoordinatorAgent,
     PiComputeRequest,
     PiComputeState,
+    chudnovsky_binary_split,
     pi_decimal,
     pi_decimal_digits,
 )
@@ -53,6 +54,36 @@ def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):
         ]
     finally:
         host.stop()
+
+
+def test_pi_compute_summary_exposes_partial_digits():
+    request = PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        pending_batches=[dataclass_to_wire(PiBatchRequest("terms:1:1", 1, 1))],
+    )
+    p, q, t = chudnovsky_binary_split(0, 1)
+    state.results["terms:0:1"] = dataclass_to_wire(
+        PiBatchResult(
+            batch_id="terms:0:1",
+            term_start=0,
+            term_count=1,
+            host_name="alpha",
+            host_url="http://127.0.0.1:1",
+            status="ok",
+            p=str(p),
+            q=str(q),
+            t=str(t),
+        )
+    )
+
+    summary = PiComputeCoordinatorAgent(state).summary()
+
+    assert summary.done is False
+    assert summary.completed_terms == 1
+    assert summary.available_digits == 4
+    assert summary.pi == "3.1415"
+    assert summary.decimal_digits == "1415"
 
 
 def test_skipped_batch_results_are_requeued(tmp_path: Path):
@@ -122,6 +153,36 @@ def test_pi_compute_cli_json_output(tmp_path: Path, capsys):
         assert payload["pi"] == "3.1415"
         assert payload["decimal_digits"] == "1415"
         assert payload["done"] is True
+    finally:
+        host.stop()
+
+
+def test_pi_compute_cli_streams_text_output(tmp_path: Path, capsys):
+    launch_config = _launch_config(tmp_path)
+    host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
+    host.start_background()
+    try:
+        config_path = tmp_path / "servers.json"
+        save_server_config([ServerRef("alpha", host.address)], config_path)
+
+        result = pi_main(
+            [
+                "--config",
+                str(config_path),
+                "--timeout",
+                "5",
+                "--digits",
+                "8",
+                "--batch-size",
+                "1",
+                "--max-cpu-percent",
+                "100",
+            ]
+        )
+
+        assert result == 0
+        output = capsys.readouterr().out
+        assert output.splitlines()[0] == "3.14159265"
     finally:
         host.stop()
 

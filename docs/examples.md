@@ -249,9 +249,12 @@ The optional `--server` value only selects the entry host when no saved
 entry host, partitions the requested digit range into the required Chudnovsky
 terms, asks local `mesh-info` for eligible targets across the mesh, creates
 short-lived `PiBatchWorkerAgent` instances remotely, and receives
-`batch_result` messages. Workers re-check local load before computing; if a
-host has become busy, the worker reports `skipped`, the coordinator requeues
-that batch, and the worker disposes itself.
+`batch_result` messages. In text mode the CLI starts the coordinator
+asynchronously, long-polls for newly reliable decimal digits, and appends them
+to the terminal as batches complete. Use `--json` for a final summary object
+instead of live output. Workers re-check local load before computing; if a host
+has become busy, the worker reports `skipped`, the coordinator requeues that
+batch, and the worker disposes itself.
 
 Programmatic use:
 

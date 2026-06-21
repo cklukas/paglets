@@ -34,11 +34,11 @@ def main(argv: list[str] | None = None) -> int:
             min_memory_available_bytes=max(0, int(args.min_memory)),
             min_work_free_bytes=max(0, int(args.min_work_free)),
         )
-        summary = _run(entry, request, client=client)
         if args.json:
+            summary = _run(entry, request, client=client)
             print(json.dumps(summary, indent=2, sort_keys=True))
         else:
-            _print_summary(summary)
+            summary = _run_stream(entry, request, client=client)
         return 0 if summary.get("done") and not summary.get("errors") else 1
     except Exception as exc:
         print(f"paglets-pi-compute: {exc}", file=sys.stderr)
@@ -82,6 +82,38 @@ def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, cl
 
 
 def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
+    proxy = _create_coordinator(entry, client=client)
+    try:
+        return proxy.send(Message("start", {"request": dataclass_to_wire(request)}))
+    finally:
+        _cleanup_coordinator(proxy)
+
+
+def _run_stream(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
+    proxy = _create_coordinator(entry, client=client)
+    summary: dict = {}
+    cursor = 0
+    try:
+        proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
+        _print_stream_header(request)
+        while True:
+            reply = proxy.send(Message("drain", {"after_digits": cursor, "wait_timeout": 0.5}))
+            summary = dict(reply.get("summary") or {})
+            decimal_digits = str(summary.get("decimal_digits") or "")
+            if len(decimal_digits) > cursor:
+                sys.stdout.write(decimal_digits[cursor:])
+                sys.stdout.flush()
+                cursor = len(decimal_digits)
+            if reply.get("done"):
+                break
+        sys.stdout.write("\n")
+        _print_status(summary)
+        return summary
+    finally:
+        _cleanup_coordinator(proxy)
+
+
+def _create_coordinator(entry: ServerRef, *, client: HostClient) -> PagletProxy:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
@@ -89,18 +121,26 @@ def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> 
         "paglets.examples.compute.agent:PiComputeState",
         {},
     )
-    proxy = PagletProxy.from_wire(proxy_wire, client)
+    return PagletProxy.from_wire(proxy_wire, client)
+
+
+def _cleanup_coordinator(proxy: PagletProxy) -> None:
     try:
-        return proxy.send(Message("start", {"request": dataclass_to_wire(request)}))
-    finally:
-        try:
-            proxy.send(Message("cleanup"))
-        except Exception:
-            pass
-        try:
-            proxy.dispose()
-        except Exception:
-            pass
+        proxy.send(Message("cleanup"))
+    except Exception:
+        pass
+    try:
+        proxy.dispose()
+    except Exception:
+        pass
+
+
+def _print_stream_header(request: PiComputeRequest) -> None:
+    if request.start == 0:
+        sys.stdout.write("3.")
+    else:
+        sys.stdout.write(f"pi decimal digits [{request.start}:{request.start + request.digits}]\n")
+    sys.stdout.flush()
 
 
 def _print_summary(summary: dict) -> None:
@@ -113,6 +153,10 @@ def _print_summary(summary: dict) -> None:
         print(summary.get("decimal_digits", ""))
         if summary.get("pi"):
             print(f"prefix: {summary['pi']}")
+    _print_status(summary)
+
+
+def _print_status(summary: dict) -> None:
     if summary.get("skipped_count"):
         print(f"skipped batches requeued: {summary['skipped_count']}")
     if summary.get("errors"):

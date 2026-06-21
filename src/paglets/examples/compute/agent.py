@@ -67,6 +67,8 @@ class PiComputeSummary:
     decimal_digits: str
     pi: str
     terms: int
+    completed_terms: int
+    available_digits: int
     done: bool
     pending: int
     in_flight: int
@@ -105,10 +107,22 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     State = PiComputeState
 
+    def __init__(self, state: PiComputeState | None = None, *, agent_id: str | None = None):
+        super().__init__(state=state, agent_id=agent_id)
+        self._job_thread: threading.Thread | None = None
+
     def handle_message(self, message: Message):
         if message.kind == "start":
             request_wire = dict(message.args.get("request") or message.args)
             return self.start_job(dataclass_from_wire(PiComputeRequest, request_wire))
+        if message.kind == "start_async":
+            request_wire = dict(message.args.get("request") or message.args)
+            return self.start_async(dataclass_from_wire(PiComputeRequest, request_wire))
+        if message.kind == "drain":
+            return self.drain(
+                after_digits=int(message.args.get("after_digits", 0)),
+                wait_timeout=float(message.args.get("wait_timeout", 0.5)),
+            )
         if message.kind == "batch_result":
             return self.record_batch_result(message.args)
         if message.kind == "summary":
@@ -119,6 +133,41 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     def start_job(self, request: PiComputeRequest) -> dict[str, Any]:
         request = _normalize_request(request)
+        self._prepare_job(request)
+        self._run_job(request)
+        return dataclass_to_wire(self.summary())
+
+    def start_async(self, request: PiComputeRequest) -> dict[str, Any]:
+        request = _normalize_request(request)
+        with self.locked():
+            if self._job_thread is not None and self._job_thread.is_alive():
+                return {"started": False, "summary": dataclass_to_wire(self.summary())}
+            self._prepare_job(request)
+            self._job_thread = threading.Thread(
+                target=self._run_job,
+                args=(request,),
+                name=f"paglets-pi-coordinator-{self.context.name}",
+                daemon=True,
+            )
+            self._job_thread.start()
+        return {"started": True, "summary": dataclass_to_wire(self.summary())}
+
+    def drain(self, *, after_digits: int, wait_timeout: float) -> dict[str, Any]:
+        after_digits = max(0, int(after_digits))
+        timeout = max(0.0, float(wait_timeout))
+
+        def ready(state: PiComputeState) -> bool:
+            summary = self._summary_from_state(state)
+            return summary.done or bool(summary.errors) or summary.available_digits > after_digits
+
+        self.wait_state(ready, timeout=timeout)
+        summary = self.summary()
+        return {
+            "summary": dataclass_to_wire(summary),
+            "done": summary.done or bool(summary.errors),
+        }
+
+    def _prepare_job(self, request: PiComputeRequest) -> None:
         batches = _make_batches(request)
         with self.locked_state() as state:
             state.request = dataclass_to_wire(request)
@@ -130,7 +179,9 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             state.skipped_count = 0
             state.done = False
             state.started_at = time.time()
+        self.notify_all_state_changed()
 
+    def _run_job(self, request: PiComputeRequest) -> None:
         deadline = time.monotonic() + request.timeout
         while True:
             with self.locked_state() as state:
@@ -147,7 +198,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             )
         with self.locked_state() as state:
             state.done = not state.pending_batches and not state.in_flight and not state.errors
-        return dataclass_to_wire(self.summary())
+        self.notify_all_state_changed()
 
     def _launch_available_batches(self, request: PiComputeRequest) -> None:
         targets = self._select_targets(request)
@@ -262,38 +313,47 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     @state_locked
     def summary(self) -> PiComputeSummary:
-        request = dataclass_from_wire(PiComputeRequest, self.state.request) if self.state.request else PiComputeRequest()
-        results = {
-            batch_id: dataclass_from_wire(PiBatchResult, wire)
-            for batch_id, wire in self.state.results.items()
-        }
+        return self._summary_from_state(self.state)
+
+    @staticmethod
+    def _summary_from_state(state: PiComputeState) -> PiComputeSummary:
+        request = dataclass_from_wire(PiComputeRequest, state.request) if state.request else PiComputeRequest()
+        results = {batch_id: dataclass_from_wire(PiBatchResult, wire) for batch_id, wire in state.results.items()}
         pieces = [result for result in sorted(results.values(), key=lambda item: item.term_start) if result.status == "ok"]
+        contiguous_pieces = _contiguous_result_pieces(pieces)
+        total_terms = _terms_for_request(request)
+        completed_terms = sum(piece.term_count for piece in contiguous_pieces)
+        available_digits = _available_decimal_digits(request, completed_terms)
         decimal_digits = ""
         pi_text = ""
-        if pieces and not self.state.pending_batches and not self.state.in_flight and not self.state.errors:
-            precision_digits = _precision_digits(request)
-            p, q, t = _combine_result_parts(pieces)
+        if completed_terms > 0 and available_digits > 0:
+            p, q, t = _combine_result_parts(contiguous_pieces)
             pi_text, decimal_digits = _format_pi_decimal(
                 p,
                 q,
                 t,
                 start=request.start,
-                digits=request.digits,
-                precision_digits=precision_digits,
+                digits=available_digits,
+                precision_digits=max(
+                    CHUDNOVSKY_GUARD_DIGITS + 1,
+                    request.start + available_digits + CHUDNOVSKY_GUARD_DIGITS,
+                ),
             )
         return PiComputeSummary(
             start=request.start,
             digits=request.digits,
             decimal_digits=decimal_digits,
             pi=pi_text,
-            terms=_terms_for_request(request),
-            done=bool(self.state.done),
-            pending=len(self.state.pending_batches),
-            in_flight=len(self.state.in_flight),
-            skipped_count=self.state.skipped_count,
-            results=dict(self.state.results),
-            errors=dict(self.state.errors),
-            cleanup_errors=dict(self.state.cleanup_errors),
+            terms=total_terms,
+            completed_terms=completed_terms,
+            available_digits=available_digits,
+            done=bool(state.done),
+            pending=len(state.pending_batches),
+            in_flight=len(state.in_flight),
+            skipped_count=state.skipped_count,
+            results=dict(state.results),
+            errors=dict(state.errors),
+            cleanup_errors=dict(state.cleanup_errors),
         )
 
     def cleanup_workers(self) -> PiComputeSummary:
@@ -470,6 +530,23 @@ def _combine_result_parts(results: list[PiBatchResult]) -> tuple[int, int, int]:
     if combined is None:
         raise ValueError("no Pi term results to combine")
     return combined
+
+
+def _contiguous_result_pieces(results: list[PiBatchResult]) -> list[PiBatchResult]:
+    contiguous: list[PiBatchResult] = []
+    next_term = 0
+    for result in sorted(results, key=lambda item: item.term_start):
+        if result.term_start != next_term:
+            break
+        contiguous.append(result)
+        next_term += result.term_count
+    return contiguous
+
+
+def _available_decimal_digits(request: PiComputeRequest, completed_terms: int) -> int:
+    reliable_digits = completed_terms * CHUDNOVSKY_DIGITS_PER_TERM - CHUDNOVSKY_GUARD_DIGITS
+    available_after_start = max(0, reliable_digits - request.start)
+    return min(request.digits, available_after_start)
 
 
 def _format_pi_decimal(

@@ -293,8 +293,10 @@ uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --m
 
 The coordinator stays on the entry host, asks local `mesh-info` for ranked
 targets, creates short-lived worker paglets for Chudnovsky term batches,
-receives partial-sum results by message, combines them, and prints normal
-decimal output such as `3.1415926535897932`.
+receives partial-sum results by message, combines them, and appends normal
+decimal output such as `3.1415926535897932` as reliable digit batches become
+available. Use `--json` when a script needs the final machine-readable summary
+instead of live terminal output.
 
 The optional `--server` flag selects only that initial entry host; target
 selection across the mesh remains automatic.
