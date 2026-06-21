@@ -19,6 +19,9 @@ from paglets.examples.compute import (
     PiComputeCoordinatorAgent,
     PiComputeRequest,
     PiComputeState,
+    PiPostProcessAgent,
+    PiPostProcessState,
+    PiPostProcessSummary,
     chudnovsky_binary_split,
     pi_decimal,
     pi_decimal_digits,
@@ -578,6 +581,111 @@ def test_pi_compute_cli_streams_text_output(tmp_path: Path, capsys, monkeypatch)
         assert output.splitlines()[0] == "3.14159265"
     finally:
         host.stop()
+
+
+def test_pi_compute_summary_uses_postprocessor_when_available(monkeypatch):
+    request = PiComputeRequest(start=0, digits=8, batch_size=1)
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        done=True,
+        results={
+            "terms:0:1": dataclass_to_wire(
+                PiBatchResult(
+                    batch_id="terms:0:1",
+                    term_start=0,
+                    term_count=1,
+                    host_name="alpha",
+                    host_url="http://127.0.0.1:1",
+                    status="ok",
+                    p=str(chudnovsky_binary_split(0, 1)[0]),
+                    q=str(chudnovsky_binary_split(0, 1)[1]),
+                    t=str(chudnovsky_binary_split(0, 1)[2]),
+                )
+            )
+        },
+    )
+    agent = PiComputeCoordinatorAgent(state)
+    agent._context = SimpleNamespace()
+
+    def _pp_summary():
+        return PiPostProcessSummary(
+            request=dataclass_to_wire(request),
+            completed_terms=1,
+            available_digits=4,
+            done=True,
+        )
+
+    def _pp_format(req):
+        return {"pi": "3.1415", "decimal_digits": "1415"}
+
+    monkeypatch.setattr(agent, "_postprocessor_summary", lambda: _pp_summary())
+    monkeypatch.setattr(agent, "_postprocess_format", lambda req: _pp_format(req))
+
+    summary = agent.summary()
+    assert summary.pi == "3.1415"
+    assert summary.decimal_digits == "1415"
+    assert summary.completed_terms == 1
+
+
+def test_post_process_agent_merges_results_in_order():
+    state = PiPostProcessState()
+    postproc = PiPostProcessAgent(state)
+    postproc.handle_message(Message("configure", dataclass_to_wire(PiComputeRequest(digits=8))))
+    term0 = chudnovsky_binary_split(0, 1)
+    term1 = chudnovsky_binary_split(1, 2)
+
+    postproc.handle_message(
+        Message(
+            "add_result",
+            dataclass_to_wire(
+                PiBatchResult(
+                    batch_id="terms:0:1",
+                    term_start=0,
+                    term_count=1,
+                    host_name="alpha",
+                    host_url="http://127.0.0.1:1",
+                    status="ok",
+                    p=_encode_bigint(term0[0]),
+                    q=_encode_bigint(term0[1]),
+                    t=_encode_bigint(term0[2]),
+                )
+            ),
+        )
+    )
+    postproc.handle_message(
+        Message(
+            "add_result",
+            dataclass_to_wire(
+                PiBatchResult(
+                    batch_id="terms:1:1",
+                    term_start=1,
+                    term_count=1,
+                    host_name="alpha",
+                    host_url="http://127.0.0.1:1",
+                    status="ok",
+                    p=_encode_bigint(term1[0]),
+                    q=_encode_bigint(term1[1]),
+                    t=_encode_bigint(term1[2]),
+                )
+            ),
+        )
+    )
+
+    summary = postproc.handle_message(Message("pp_summary"))
+    summary = PiPostProcessSummary(
+        request=summary["request"],
+        completed_terms=int(summary["completed_terms"]),
+        available_digits=int(summary["available_digits"]),
+        done=bool(summary["done"]),
+    )
+    formatted = postproc.handle_message(
+        Message("format", {"start": 0, "digits": 4})
+    )
+
+    assert summary.done
+    assert summary.completed_terms == 2
+    assert summary.available_digits >= 8
+    assert str(formatted["pi"]).startswith("3.1415")
 
 
 def _launch_config(tmp_path: Path):

@@ -309,27 +309,27 @@ uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-
 The coordinator stays on the entry host, asks local `mesh-info` for ranked
 targets, treats approximate free load slots as additional launch capacity, creates
 short-lived worker paglets for Chudnovsky term batches, fills available worker
-slots with parallel create requests, receives partial-sum results by message,
-and lets the CLI format and append normal decimal output such as
-`3.1415926535897932` as reliable digit batches become available. Use
-`--max-workers-per-host` to cap per-host parallelism, `--max-in-flight` to cap
-global parallelism, and `--json` when a script needs the final
+slots with parallel create requests, receives partial-sum results by message, and
+delegates incremental decimal merge/formatting to a `PiPostProcessAgent` running on
+the entry host.
+
+Use `--max-workers-per-host` to cap per-host parallelism, `--max-in-flight` to
+cap global parallelism, and `--json` when a script needs the final
 machine-readable summary instead of live terminal output. Text streaming uses a
-compact drain call that first refills worker slots, then returns only new
-partial-sum parts and progress counters. Decimal formatting happens in the CLI
-process, so the coordinator remains responsive to worker result messages and
-new launches. Increase `--stream-chunk-size` when larger terminal bursts are
-useful. By default there is no whole-job timeout; use `--timeout SECONDS` only
-when a run should be bounded, and increase `--request-timeout` if an
-exceptionally large coordinator response needs longer than the default HTTP
-request window. If all hosts are over the load/CPU thresholds and no batch is
-running, the coordinator still launches one fallback worker so the job can make
-minimum progress.
+compact `drain_stream` call that first refills worker slots, then returns new
+decimal fragments and compact progress counters, so worker scheduling stays
+decoupled from formatting. Increase `--stream-chunk-size` when larger terminal
+bursts are useful. By default there is no whole-job timeout; use `--timeout
+SECONDS` only when a run should be bounded, and increase `--request-timeout` if an
+exceptionally large coordinator response needs longer than the default HTTP request
+window. If all hosts are over the load/CPU thresholds and no batch is running, the
+coordinator still launches one fallback worker so the job can make minimum
+progress.
 
 Worker messages encode the large Chudnovsky partial integers in hexadecimal
-internally. Text streaming renders Pi in the CLI with chunked decimal
-conversion. This keeps the output as ordinary `3.1415...` text while avoiding
-Python's default guard for huge decimal integer string conversions.
+internally. The coordinator forwards finalized term fragments to the post-processor
+for incremental merge and decimal rendering, so output remains normal `3.1415...`
+text without forcing huge string conversions in a single place.
 
 Use optional `--entry HOSTNAME` to select a discovered initial entry host;
 target selection across the mesh remains automatic.

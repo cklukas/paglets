@@ -36,6 +36,7 @@ DECIMAL_CHUNK_DIGITS = 9
 DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
 DEFAULT_STREAM_CHUNK_DIGITS = 8192
 DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
+POSTPROCESSOR_STREAM_CHUNK_DIGITS = 8192
 MAX_PARALLEL_WORKER_LAUNCHES = 32
 TARGET_SELECTION_TIMEOUT_SECONDS = 1.0
 
@@ -129,6 +130,7 @@ class PiComputeState(PagletState):
     skipped_count: int = 0
     done: bool = False
     started_at: float = 0.0
+    postprocessor_agent_id: str = ""
 
 
 @dataclass
@@ -143,6 +145,212 @@ class PiBatchWorkerState(PagletState):
     ignore_load_limits: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class PiPostProcessStreamRequest:
+    after_digits: int = 0
+    max_digits: int = POSTPROCESSOR_STREAM_CHUNK_DIGITS
+
+
+@dataclass(frozen=True, slots=True)
+class PiPostProcessSummary:
+    request: dict[str, Any]
+    completed_terms: int
+    available_digits: int
+    done: bool
+
+
+@dataclass
+class PiPostProcessState(PagletState):
+    request: dict[str, Any] = field(default_factory=dict)
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    by_term: dict[str, str] = field(default_factory=dict)
+    combined_term_count: int = 0
+    combined_p: str = ""
+    combined_q: str = ""
+    combined_t: str = ""
+
+
+class PiPostProcessAgent(Paglet[PiPostProcessState]):
+    """Combine batch term segments and format decimal digits for the coordinator."""
+
+    State = PiPostProcessState
+
+    def handle_message(self, message: Message):
+        if message.kind == "configure":
+            request_wire = dict(message.args)
+            return self._configure(dataclass_from_wire(PiComputeRequest, request_wire))
+        if message.kind == "add_result":
+            result_wire = dict(message.args.get("result") or message.args)
+            return self._add_result(dataclass_from_wire(PiBatchResult, result_wire))
+        if message.kind == "pp_summary":
+            return dataclass_to_wire(self._summary())
+        if message.kind == "drain":
+            request_wire = dict(message.args)
+            request = PiPostProcessStreamRequest(
+                after_digits=request_wire.get("after_digits", 0),
+                max_digits=request_wire.get("max_digits", POSTPROCESSOR_STREAM_CHUNK_DIGITS),
+            )
+            return self._drain(request)
+        if message.kind == "format":
+            request_wire = dict(message.args)
+            request = PiPostProcessStreamRequest(
+                after_digits=request_wire.get("start", 0),
+                max_digits=request_wire.get("digits", 0),
+            )
+            return self._format_range(request.after_digits, request.max_digits)
+        if message.kind == "done":
+            return self._mark_done()
+        return self.not_handled()
+
+    def _configure(self, request: PiComputeRequest) -> dict[str, Any]:
+        with self.locked():
+            self.state.request = dataclass_to_wire(request)
+            self.state.results = {}
+            self.state.by_term = {}
+            self.state.combined_term_count = 0
+            self.state.combined_p = ""
+            self.state.combined_q = ""
+            self.state.combined_t = ""
+        return {"ok": True}
+
+    def _mark_done(self) -> dict[str, Any]:
+        return {"ok": True}
+
+    def _add_result(self, result: PiBatchResult) -> dict[str, Any]:
+        if result.status != "ok":
+            return {"ok": True}
+        batch_id = str(result.batch_id)
+        with self.locked():
+            if batch_id in self.state.results:
+                return {"ok": True}
+            if result.term_start < 0 or result.term_count <= 0:
+                return {"ok": True}
+            wire = dataclass_to_wire(result)
+            self.state.results[batch_id] = wire
+            self.state.by_term[str(int(result.term_start))] = batch_id
+            self._merge_contiguous_results()
+        return {"ok": True}
+
+    def _summary(self) -> PiPostProcessSummary:
+        with self.locked():
+            request = dataclass_from_wire(PiComputeRequest, self.state.request) if self.state.request else PiComputeRequest()
+            return PiPostProcessSummary(
+                request=self.state.request,
+                completed_terms=int(self.state.combined_term_count),
+                available_digits=_available_decimal_digits(request, self.state.combined_term_count),
+                done=_available_decimal_digits(request, self.state.combined_term_count) >= request.digits,
+            )
+
+    def _drain(self, request: PiPostProcessStreamRequest) -> dict[str, Any]:
+        with self.locked():
+            current_request = dataclass_from_wire(PiComputeRequest, self.state.request) if self.state.request else PiComputeRequest()
+            available_digits = _available_decimal_digits(current_request, self.state.combined_term_count)
+            after_digits = max(0, int(request.after_digits))
+            if available_digits <= after_digits:
+                return {
+                    "new_decimal_digits": "",
+                    "cursor": after_digits,
+                    "available_digits": available_digits,
+                }
+            max_digits = int(request.max_digits)
+            needed = available_digits - after_digits
+            if max_digits > 0:
+                needed = min(needed, max_digits)
+            digits = self._format_digits(current_request, after_digits, needed)
+            cursor = after_digits + len(digits)
+            return {"new_decimal_digits": digits, "cursor": cursor, "available_digits": available_digits}
+
+    def _format_range(self, start: int, digits: int) -> dict[str, Any]:
+        with self.locked():
+            current_request = dataclass_from_wire(PiComputeRequest, self.state.request) if self.state.request else PiComputeRequest()
+            available_digits = _available_decimal_digits(current_request, self.state.combined_term_count)
+            if available_digits <= 0:
+                return {"pi": "3.", "decimal_digits": ""}
+            start = max(0, int(start))
+            digits = max(0, int(digits))
+            p, q, t = self._combined_cached_values()
+            precision_digits = max(
+                CHUDNOVSKY_GUARD_DIGITS + 1,
+                start + digits + CHUDNOVSKY_GUARD_DIGITS,
+            )
+            pi_text, decimal_digits = _format_pi_decimal(
+                p,
+                q,
+                t,
+                start=start,
+                digits=min(digits, available_digits),
+                precision_digits=precision_digits,
+            )
+            return {
+                "pi": pi_text,
+                "decimal_digits": decimal_digits,
+                "available_digits": available_digits,
+            }
+
+    def _format_digits(self, request: PiComputeRequest, after_digits: int, max_digits: int) -> str:
+        if max_digits <= 0:
+            return ""
+        p, q, t = self._combined_cached_values()
+        start = request.start + after_digits
+        if request.digits <= 0:
+            return ""
+        precision_digits = max(
+            CHUDNOVSKY_GUARD_DIGITS + 1,
+            start + max_digits + CHUDNOVSKY_GUARD_DIGITS,
+        )
+        return _format_pi_decimal(
+            p,
+            q,
+            t,
+            start=start,
+            digits=max_digits,
+            precision_digits=precision_digits,
+        )[1]
+
+    def _combined_cached_values(self) -> tuple[int, int, int]:
+        if not self.state.combined_p or not self.state.combined_q or not self.state.combined_t:
+            p, q, t = chudnovsky_binary_split(0, 1)
+        else:
+            p, q, t = (
+                _decode_bigint(self.state.combined_p),
+                _decode_bigint(self.state.combined_q),
+                _decode_bigint(self.state.combined_t),
+            )
+        return p, q, t
+
+    def _merge_contiguous_results(self) -> None:
+        request = dataclass_from_wire(PiComputeRequest, self.state.request) if self.state.request else PiComputeRequest()
+        _ = request
+        while True:
+            next_wire = self.state.results.get(self.state.by_term.get(str(self.state.combined_term_count), ""))
+            if next_wire is None:
+                break
+            result = dataclass_from_wire(PiBatchResult, next_wire)
+            next_wire_id = str(result.batch_id)
+            self.state.results.pop(next_wire_id, None)
+            self.state.by_term.pop(str(self.state.combined_term_count), None)
+            if result.term_start != self.state.combined_term_count:
+                self.state.results[next_wire_id] = dataclass_to_wire(result)
+                self.state.by_term[str(result.term_start)] = next_wire_id
+                break
+            part = (_decode_bigint(result.p), _decode_bigint(result.q), _decode_bigint(result.t))
+            if self.state.combined_term_count == 0 and not self.state.combined_p:
+                self.state.combined_p, self.state.combined_q, self.state.combined_t = (
+                    result.p,
+                    result.q,
+                    result.t,
+                )
+            else:
+                existing = (
+                    _decode_bigint(self.state.combined_p),
+                    _decode_bigint(self.state.combined_q),
+                    _decode_bigint(self.state.combined_t),
+                )
+                merged = _combine_parts(existing, part)
+                self.state.combined_p = _encode_bigint(merged[0])
+                self.state.combined_q = _encode_bigint(merged[1])
+                self.state.combined_t = _encode_bigint(merged[2])
+            self.state.combined_term_count += result.term_count
 class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
     """Coordinate short-lived Chudnovsky Pi workers across the mesh."""
 
@@ -237,6 +445,21 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         self._launch_from_current_state()
         with self.locked_state() as state:
             progress = self._progress_from_state(state)
+        reply = self._postprocessor_drain(after_digits, max_digits)
+        if reply is not None:
+            decimal_digits = str(reply.get("new_decimal_digits") or "")
+            cursor = int(reply.get("cursor") or after_digits + len(decimal_digits))
+            summary = self._compact_summary_from_progress(progress)
+            if "available_digits" in reply:
+                summary["available_digits"] = int(reply.get("available_digits") or summary["available_digits"])
+            done = bool(progress.errors) or bool(progress.done and summary["available_digits"] <= cursor)
+            return {
+                "new_decimal_digits": decimal_digits,
+                "cursor": cursor,
+                "summary": summary,
+                "done": done,
+            }
+
         decimal_digits = ""
         if progress.completed_terms > 0 and progress.available_digits > after_digits:
             available = progress.available_digits - after_digits
@@ -279,6 +502,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
     def _prepare_job(self, request: PiComputeRequest) -> None:
         batches = _make_batches(request)
         with self.locked_state() as state:
+            self._cleanup_postprocessor_locked(state)
             state.request = dataclass_to_wire(request)
             state.pending_batches = [dataclass_to_wire(batch) for batch in batches]
             state.in_flight = {}
@@ -292,6 +516,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     def _run_job(self, request: PiComputeRequest) -> None:
         deadline = time.monotonic() + request.timeout if request.timeout > 0 else None
+        self._ensure_postprocessor(request)
         while True:
             with self.locked_state() as state:
                 complete = not state.pending_batches and not state.in_flight
@@ -308,6 +533,135 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         with self.locked_state() as state:
             state.done = not state.pending_batches and not state.in_flight and not state.errors
         self.notify_all_state_changed()
+
+    def _ensure_postprocessor(self, request: PiComputeRequest) -> None:
+        if self._context is None:
+            return
+        proxy = self._postprocessor_proxy()
+        if proxy is not None:
+            try:
+                proxy.send(Message("configure", dataclass_to_wire(request)), no_delay=True)
+                return
+            except Exception:
+                self._cleanup_postprocessor_locked()
+
+        self._create_postprocessor(request)
+
+    def _create_postprocessor(self, request: PiComputeRequest) -> None:
+        if self._context is None:
+            return
+        worker_id = f"pi-pp-{uuid.uuid4().hex}"
+        proxy = None
+        try:
+            proxy = self.context.create_paglet(PiPostProcessAgent, PiPostProcessState(), agent_id=worker_id)
+            with self.locked_state() as state:
+                state.postprocessor_agent_id = worker_id
+            proxy.send(Message("configure", dataclass_to_wire(request)), no_delay=True)
+        except Exception:
+            self._cleanup_postprocessor_locked()
+            if proxy is not None:
+                try:
+                    proxy.dispose()
+                except Exception:
+                    pass
+
+    def _postprocessor_proxy(self) -> Any | None:
+        if self._context is None:
+            return None
+        with self.locked_state() as state:
+            agent_id = state.postprocessor_agent_id
+        if not agent_id:
+            return None
+        try:
+            return self.context.get_proxy(agent_id, self.context.address)
+        except Exception:
+            self._cleanup_postprocessor_locked()
+            return None
+
+    def _postprocessor_summary(self) -> PiPostProcessSummary | None:
+        proxy = self._postprocessor_proxy()
+        if proxy is None:
+            return None
+        try:
+            reply = proxy.send(Message("pp_summary"))
+            return dataclass_from_wire(PiPostProcessSummary, reply)
+        except Exception:
+            self._cleanup_postprocessor_locked()
+            return None
+
+    def _postprocessor_drain(self, after_digits: int, max_digits: int) -> dict[str, Any] | None:
+        proxy = self._postprocessor_proxy()
+        if proxy is None:
+            return None
+        try:
+            return dict(
+                proxy.send(
+                    Message(
+                        "drain",
+                        {"after_digits": after_digits, "max_digits": max_digits},
+                    )
+                )
+            )
+        except Exception:
+            self._cleanup_postprocessor_locked()
+            return None
+
+    def _postprocess_send_result(self, result: PiBatchResult) -> None:
+        proxy = self._postprocessor_proxy()
+        if proxy is None:
+            return
+        try:
+            proxy.send_oneway(Message("add_result", dataclass_to_wire(result)), no_delay=True)
+        except Exception:
+            self._cleanup_postprocessor_locked()
+
+    def _postprocess_format(self, request: PiComputeRequest) -> dict[str, Any] | None:
+        if request.digits <= 0:
+            return {"pi": "", "decimal_digits": ""}
+        proxy = self._postprocessor_proxy()
+        if proxy is None:
+            return None
+        try:
+            return dict(
+                proxy.send(
+                    Message(
+                        "format",
+                        {
+                            "start": request.start,
+                            "digits": request.digits,
+                        },
+                    )
+                )
+            )
+        except Exception:
+            self._cleanup_postprocessor_locked()
+            return None
+
+    def _cleanup_postprocessor_locked(self, state: PiComputeState | None = None) -> None:
+        if self._context is None:
+            old_agent_id = None
+            if state is not None:
+                state.postprocessor_agent_id = ""
+            return
+        if state is None:
+            with self.locked_state() as current_state:
+                old_agent_id = str(current_state.postprocessor_agent_id)
+                current_state.postprocessor_agent_id = ""
+        else:
+            old_agent_id = str(state.postprocessor_agent_id)
+            state.postprocessor_agent_id = ""
+
+        if not old_agent_id:
+            return
+        try:
+            proxy = self.context.get_proxy(old_agent_id, self.context.address)
+            if proxy is not None:
+                proxy.dispose()
+        except Exception:
+            pass
+
+    def _cleanup_postprocessor(self) -> None:
+        self._cleanup_postprocessor_locked()
 
     def _launch_available_batches(self, request: PiComputeRequest) -> None:
         with self._launch_lock:
@@ -561,6 +915,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     def record_batch_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = dataclass_from_wire(PiBatchResult, payload)
+        postprocess_result = False
         with self.locked_state() as state:
             in_flight = state.in_flight.pop(result.batch_id, None)
             if result.status == "skipped":
@@ -573,9 +928,12 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 state.pending_batches.append(batch_wire)
             elif result.status == "ok":
                 state.results[result.batch_id] = dataclass_to_wire(result)
+                postprocess_result = True
             else:
                 state.errors[result.batch_id] = result.error or result.status
         self.notify_all_state_changed()
+        if postprocess_result:
+            self._postprocess_send_result(result)
         return {"ok": True}
 
     def _timeout_remaining(self) -> None:
@@ -592,13 +950,65 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         self._cleanup_worker_records(cleanup)
         self.notify_all_state_changed()
 
-    @state_locked
     def summary(self) -> PiComputeSummary:
-        return self._summary_from_state(self.state)
+        with self.locked_state() as state:
+            state_request_wire = dict(state.request)
+            state_results = dict(state.results)
+            state_errors = dict(state.errors)
+            state_cleanup_errors = dict(state.cleanup_errors)
+            state_done = bool(state.done)
+            state_skipped_count = int(state.skipped_count)
+            progress = PiComputeCoordinatorAgent._progress_from_state(state)
 
-    @staticmethod
-    def _summary_from_state(state: PiComputeState) -> PiComputeSummary:
-        progress = PiComputeCoordinatorAgent._progress_from_state(state)
+        return self._summary_from_state(
+            request_wire=state_request_wire,
+            progress=progress,
+            results=state_results,
+            done=state_done,
+            skipped_count=state_skipped_count,
+            errors=state_errors,
+            cleanup_errors=state_cleanup_errors,
+        )
+
+    def _summary_from_state(
+        self,
+        *,
+        request_wire: dict[str, Any],
+        progress: _PiComputeProgress,
+        results: dict[str, dict[str, Any]],
+        done: bool,
+        skipped_count: int,
+        errors: dict[str, str],
+        cleanup_errors: dict[str, str],
+    ) -> PiComputeSummary:
+        request = dataclass_from_wire(PiComputeRequest, request_wire) if request_wire else PiComputeRequest()
+        pp_summary = self._postprocessor_summary()
+        if pp_summary is not None:
+            request = dataclass_from_wire(PiComputeRequest, pp_summary.request) if pp_summary.request else progress.request
+            available_digits = int(pp_summary.available_digits)
+            decimal_digits = ""
+            pi_text = ""
+            if request.digits > 0 and progress.done and available_digits > 0:
+                reply = self._postprocess_format(request)
+                if reply is not None:
+                    pi_text = str(reply.get("pi") or "")
+                    decimal_digits = str(reply.get("decimal_digits") or "")
+            return PiComputeSummary(
+                start=request.start,
+                digits=request.digits,
+                decimal_digits=decimal_digits,
+                pi=pi_text,
+                terms=progress.total_terms,
+                completed_terms=int(pp_summary.completed_terms),
+                available_digits=available_digits,
+                done=done,
+                pending=progress.pending,
+                in_flight=progress.in_flight,
+                skipped_count=skipped_count,
+                results=results,
+                errors=errors,
+                cleanup_errors=cleanup_errors,
+            )
         decimal_digits = ""
         pi_text = ""
         if progress.completed_terms > 0 and progress.available_digits > 0:
@@ -622,13 +1032,13 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             terms=progress.total_terms,
             completed_terms=progress.completed_terms,
             available_digits=progress.available_digits,
-            done=progress.done,
+            done=done,
             pending=progress.pending,
             in_flight=progress.in_flight,
-            skipped_count=progress.skipped_count,
-            results=dict(state.results),
-            errors=progress.errors,
-            cleanup_errors=progress.cleanup_errors,
+            skipped_count=skipped_count,
+            results=results,
+            errors=errors,
+            cleanup_errors=cleanup_errors,
         )
 
     @staticmethod
@@ -712,6 +1122,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             cleanup = [dict(item) for item in state.in_flight.values()]
             state.in_flight = {}
         self._cleanup_worker_records(cleanup)
+        self._cleanup_postprocessor()
         return self.summary()
 
     def _cleanup_worker_records(self, records: list[dict[str, Any]]) -> None:

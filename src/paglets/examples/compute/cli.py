@@ -15,7 +15,7 @@ from ...client import HostClient
 from ...messages import Message
 from ...proxy import PagletProxy
 from ...serde import dataclass_to_wire
-from .agent import DEFAULT_RESULT_DRAIN_BATCH_SIZE, DEFAULT_STREAM_CHUNK_DIGITS, PiBatchResult, PiComputeRequest, PiResultDrainRequest, pi_decimal_digits_from_results
+from .agent import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
 
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -115,8 +115,6 @@ def _run_stream(
     proxy = _create_coordinator(entry, client=client)
     summary: dict = {}
     cursor = 0
-    result_pieces: list[PiBatchResult] = []
-    known_batch_ids: set[str] = set()
     stream_chunk_size = max(0, int(stream_chunk_size))
     try:
         proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
@@ -124,35 +122,19 @@ def _run_stream(
         while True:
             reply = proxy.send(
                 Message(
-                    "drain_results",
+                    "drain_stream",
                     {
-                        "request": dataclass_to_wire(
-                            PiResultDrainRequest(
-                                known_batch_ids=sorted(known_batch_ids),
-                                wait_timeout=0.5,
-                                max_results=DEFAULT_RESULT_DRAIN_BATCH_SIZE,
-                            )
-                        )
-                    },
+                        "after_digits": cursor,
+                        "wait_timeout": 0.5,
+                        "max_digits": stream_chunk_size,
+                    }
                 )
             )
             summary = dict(reply.get("summary") or {})
-            for item in reply.get("results") or []:
-                result = PiBatchResult(**dict(item))
-                if result.batch_id not in known_batch_ids:
-                    known_batch_ids.add(result.batch_id)
-                    result_pieces.append(result)
-            available_digits = max(0, int(summary.get("available_digits") or 0))
-            if available_digits > cursor:
-                new_decimal_digits = pi_decimal_digits_from_results(
-                    request,
-                    result_pieces,
-                    after_digits=cursor,
-                    digits=available_digits - cursor,
-                )
-                if new_decimal_digits:
-                    _write_stream_digits(new_decimal_digits, stream_chunk_size=stream_chunk_size)
-                    cursor += len(new_decimal_digits)
+            new_decimal_digits = str(reply.get("new_decimal_digits") or "")
+            if new_decimal_digits:
+                _write_stream_digits(new_decimal_digits, stream_chunk_size=stream_chunk_size)
+                cursor = max(cursor, int(reply.get("cursor") or 0))
             if reply.get("done"):
                 break
         sys.stdout.write("\n")

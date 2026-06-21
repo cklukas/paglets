@@ -269,14 +269,16 @@ Worker creation requests are issued in parallel so process-spawn overhead does
 not keep free slots empty. The free-slot estimate is based on `cpu_count *
 --max-load-per-cpu - load_1m`; existing in-flight workers are added back before
 new launches are capped by `--max-workers-per-host`. `--max-in-flight` caps the
-whole job. In text mode the CLI starts the
-coordinator asynchronously, long-polls for new batch results, formats newly
-reliable decimal digits locally in the CLI process, and appends them to the
-terminal as batches complete. The result drain call first refills worker slots,
-then returns only new Chudnovsky partial-sum parts and compact progress
-counters. It does not format decimal output in the coordinator and does not
-return the full accumulated summary, so result messages from workers are not
-blocked by terminal formatting. Increase
+whole job. A dedicated `PiPostProcessAgent` runs on the entry host for each
+active job; it incrementally merges finalized term fragments and performs
+`drain`/`format` work so the coordinator can focus on scheduling and state
+tracking.
+
+In text mode the CLI starts the coordinator asynchronously, long-polls with
+`drain_stream`, and appends each returned decimal fragment to the terminal.
+`drain_stream` first refills worker slots, then returns compact progress counters
+and new text only; it does not return the full raw term history, keeping messages
+small while preserving `3.1415...` output. Increase
 `--stream-chunk-size` when larger terminal bursts are useful. Use `--json` for a
 final summary object instead of live output. The default job timeout is disabled
 so long calculations can run to completion; add `--timeout SECONDS` when a run
@@ -289,11 +291,11 @@ the coordinator sends one fallback worker anyway so a long job still makes
 minimum progress.
 
 The worker result payloads encode large Chudnovsky partial integers in
-hexadecimal internally. The coordinator combines those integer terms for final
-JSON summaries; text-mode streaming formats them in the CLI process with
-chunked decimal conversion, so the terminal still shows normal `3.1415...` Pi
-text and large jobs do not trip Python's default decimal integer string
-conversion limit.
+hexadecimal internally. The coordinator forwards only finalized `ok` term fragments
+to the post-processor for incremental merge; the post-processor formats digits
+on demand. This keeps scheduling messages compact and avoids expensive terminal-side
+recombination while still producing normal `3.1415...` output and avoiding Python
+integer string conversion limits for very large jobs.
 
 Programmatic use:
 
