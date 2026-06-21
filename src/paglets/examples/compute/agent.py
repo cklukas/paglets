@@ -375,7 +375,6 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 state.results[result.batch_id] = dataclass_to_wire(result)
             else:
                 state.errors[result.batch_id] = result.error or result.status
-        self._cleanup_completed_worker(result)
         self.notify_all_state_changed()
         return {"ok": True}
 
@@ -521,30 +520,28 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 with self.locked_state() as state:
                     state.cleanup_errors[host_name] = str(exc)
 
-    def _cleanup_completed_worker(self, result: PiBatchResult) -> None:
-        if not result.worker_agent_id:
-            return
-        try:
-            proxy = self.context.get_proxy(result.worker_agent_id, result.host_url)
-            if proxy is not None:
-                proxy.dispose()
-        except Exception as exc:
-            if _is_missing_worker_error(exc):
-                return
-            with self.locked_state() as state:
-                state.cleanup_errors[result.host_name or result.host_url] = str(exc)
-
-
 class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
     """Compute one Chudnovsky term range and report it to a coordinator."""
 
     State = PiBatchWorkerState
 
+    def __init__(self, state: PiBatchWorkerState | None = None, *, agent_id: str | None = None):
+        super().__init__(state=state, agent_id=agent_id)
+        self._worker_thread: threading.Thread | None = None
+
     def run(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
         thread = threading.Thread(
             target=self._run_batch,
             name=f"paglets-pi-worker-{self.context.name}",
             daemon=True,
+        )
+        self._worker_thread = thread
+        self.resources.register(
+            "pi-worker-thread",
+            lambda thread=thread: _join_worker_thread(thread),
+            suppress=True,
         )
         thread.start()
 
@@ -596,7 +593,9 @@ class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
         try:
             parent = self.context.get_proxy(self.state.parent_agent_id, self.state.parent_host_url)
             if parent is not None:
-                parent.send(Message("batch_result", dataclass_to_wire(result)))
+                parent.send_oneway(Message("batch_result", dataclass_to_wire(result)), no_delay=True)
+        except Exception:
+            pass
         finally:
             try:
                 self.context.host.dispose(self.agent_id)
@@ -792,6 +791,13 @@ def _deadline_expired(deadline: float | None) -> bool:
 
 def _is_missing_worker_error(exc: Exception) -> bool:
     return isinstance(exc, InvalidAgentError) and str(exc).startswith("No paglet ")
+
+
+def _join_worker_thread(thread: threading.Thread) -> None:
+    if thread is threading.current_thread():
+        return
+    if thread.is_alive():
+        thread.join(timeout=1.0)
 
 
 def _format_pi_decimal(

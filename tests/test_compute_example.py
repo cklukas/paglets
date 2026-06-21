@@ -12,6 +12,8 @@ from paglets.errors import InvalidAgentError
 from paglets.examples.compute import (
     PiBatchRequest,
     PiBatchResult,
+    PiBatchWorkerAgent,
+    PiBatchWorkerState,
     PiComputeCoordinatorAgent,
     PiComputeRequest,
     PiComputeState,
@@ -88,6 +90,25 @@ def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):
         assert summary["done"] is True
         assert summary["pi"] == "3.14159265"
         assert summary["decimal_digits"] == "14159265"
+        _wait_until(lambda: not _pi_workers(host))
+    finally:
+        host.stop()
+
+
+def test_pi_worker_self_disposes_when_parent_report_fails(tmp_path: Path):
+    host = _host("alpha", tmp_path / "alpha")
+    host.start_background()
+    try:
+        host.create(
+            PiBatchWorkerAgent,
+            PiBatchWorkerState(
+                batch=dataclass_to_wire(PiBatchRequest("terms:0:1", 0, 1)),
+                parent_host_url="http://127.0.0.1:1",
+                parent_agent_id="missing-parent",
+                ignore_load_limits=True,
+            ),
+        )
+
         _wait_until(lambda: not _pi_workers(host))
     finally:
         host.stop()
