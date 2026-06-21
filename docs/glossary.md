@@ -59,7 +59,8 @@ Message
 
 MessageMailbox
 : The per-active-paglet queue used for normal message delivery. It orders queued
-  work by priority and FIFO order within one priority.
+  work by priority and FIFO order within one priority. The per-paglet worker
+  count is controlled by `Paglet.MAILBOX_WORKERS`.
 
 Mesh
 : The same-version host registry built from seed-list gossip and optional
@@ -114,6 +115,10 @@ ServerInfoAgent
 State
 : The dataclass object that moves with a paglet. Ordinary instance attributes
   are transient.
+
+State Lock
+: The reentrant per-paglet lock used by `locked_state()`, `locked()`, and
+  `@state_locked` to protect short shared-state critical sections.
 
 TransferTicket
 : Transfer options for dispatch or clone, including destination, retry policy,

@@ -141,7 +141,9 @@ The collector is `SystemInfoCollectorAgent`. It is not a resident service:
 6. The parent returns a summary with `results` and `errors`.
 
 This pattern keeps collection logic mobile while the service itself stays local
-to each host.
+to each host. The parent protects `pending_hosts`, `results`, and `errors` with
+short `locked_state()` and `@state_locked` sections because child replies can
+arrive while the parent is still waiting.
 
 ### GPU And Process Notes
 
@@ -167,7 +169,9 @@ from paglets.examples.performance import PerformanceBenchmarkAgent
 
 The CLI creates one parent benchmark agent on the entry host. The parent clones
 children to online same-version mesh hosts. Each child runs benchmarks locally
-and sends one result back to the parent.
+and sends one result back to the parent. Parent result bookkeeping uses the
+paglet state lock, but the actual benchmark work and remote calls happen
+outside that lock.
 
 ### Benchmarks
 

@@ -417,6 +417,21 @@ self.notify_message()
 self.notify_all_messages()
 ```
 
+Handlers can run concurrently. Protect shared dataclass state with short locked
+sections:
+
+```python
+with self.locked_state() as state:
+    state.completed += 1
+    state.results.append(result)
+```
+
+Use `with self.locked():` for other agent-local critical sections, or
+`@state_locked` for small helper methods. `Paglet.MAILBOX_WORKERS` defaults to
+`4`; set `MAILBOX_WORKERS = 1` on simple agents that want queued
+`handle_message` calls serialized. Background threads and unqueued messages
+still need explicit state locking when they share mutable state.
+
 ## Services, Tickets, Events, And Resources
 
 Paglets can advertise local or mesh-visible services through typed contracts.

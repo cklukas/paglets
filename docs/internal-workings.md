@@ -104,6 +104,26 @@ the per-paglet mailbox, where queued work is ordered by priority and FIFO
 within one priority. `UNQUEUED_PRIORITY` bypasses the queue for explicit
 immediate delivery.
 
+## State And Handler Concurrency
+
+Each active paglet owns a reentrant lock. `Paglet.locked_state()` yields the
+dataclass state under that lock, `Paglet.locked()` protects any agent-local
+critical section, and `@state_locked` wraps short helper methods. The host also
+uses the paglet lock when it serializes active state for transfer envelopes and
+state inspection.
+
+The runtime does not lock whole message handlers automatically. A handler may
+wait for another message, clone workers, or call remote proxies; locking that
+entire body would block follow-up messages and can deadlock collector-style
+agents. The intended pattern is to copy or update shared state in short locked
+sections, then release the lock before long-running work.
+
+Normal mailbox delivery uses `Paglet.MAILBOX_WORKERS`, which defaults to `4`.
+Set `MAILBOX_WORKERS = 1` on a paglet class for actor-style queued message
+serialization. `UNQUEUED_PRIORITY` messages bypass the queue worker limit, and
+background threads are outside mailbox scheduling, so explicit state locking is
+still the general safety mechanism.
+
 ## Host HTTP API
 
 The host API is intentionally small:

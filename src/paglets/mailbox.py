@@ -32,6 +32,8 @@ class MessageMailbox:
     """Priority mailbox for one paglet."""
 
     def __init__(self, agent_id: str, handler: Callable[[Message, bool], Any], *, max_workers: int = 4):
+        if max_workers < 1:
+            raise ValueError("max_workers must be at least 1")
         self.agent_id = agent_id
         self._handler = handler
         self._max_workers = max_workers

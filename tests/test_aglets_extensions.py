@@ -17,6 +17,7 @@ from paglets import (
     PagletState,
     TransferError,
     TransferTicket,
+    state_locked,
 )
 from paglets.errors import LifecycleError
 from paglets.mailbox import MessageMailbox
@@ -79,6 +80,91 @@ class BasicAgent(Paglet[BasicState]):
     def handle_message(self, message: Message):
         if message.kind == "ping":
             return "pong"
+        return self.not_handled()
+
+
+@dataclass
+class LockingState(PagletState):
+    count: int = 0
+    active: int = 0
+    max_active: int = 0
+    events: list[str] = field(default_factory=list)
+
+
+class LockingAgent(Paglet[LockingState]):
+    State = LockingState
+
+    def increment_many(self, amount: int) -> None:
+        for _ in range(amount):
+            with self.locked_state() as state:
+                current = state.count
+                time.sleep(0)
+                state.count = current + 1
+
+    @state_locked
+    def decorated_increment(self, label: str) -> int:
+        self.state.active += 1
+        self.state.max_active = max(self.state.max_active, self.state.active)
+        current = self.state.count
+        time.sleep(0.02)
+        self.state.count = current + 1
+        self.state.events.append(label)
+        self.state.active -= 1
+        return self.state.count
+
+    @state_locked
+    def decorated_failure(self) -> None:
+        raise RuntimeError("boom")
+
+
+@dataclass
+class SingleWorkerState(PagletState):
+    started: list[str] = field(default_factory=list)
+    finished: list[str] = field(default_factory=list)
+
+
+class SingleWorkerAgent(Paglet[SingleWorkerState]):
+    State = SingleWorkerState
+    MAILBOX_WORKERS = 1
+
+    def handle_message(self, message: Message):
+        if message.kind == "hold":
+            label = str(message.get_arg())
+            with self.locked_state() as state:
+                state.started.append(label)
+            time.sleep(float(message.args.get("delay", 0.0)))
+            with self.locked_state() as state:
+                state.finished.append(label)
+            return label
+        return self.not_handled()
+
+
+@dataclass
+class WaitingCollectorState(PagletState):
+    pending: bool = False
+    result: str = ""
+
+
+class WaitingCollectorAgent(Paglet[WaitingCollectorState]):
+    State = WaitingCollectorState
+
+    def handle_message(self, message: Message):
+        if message.kind == "collect":
+            with self.locked_state() as state:
+                state.pending = True
+                state.result = ""
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with self.locked_state() as state:
+                    if not state.pending:
+                        return {"result": state.result}
+                time.sleep(0.02)
+            return {"error": "timeout"}
+        if message.kind == "child_result":
+            with self.locked_state() as state:
+                state.result = str(message.args["value"])
+                state.pending = False
+            return {"ok": True}
         return self.not_handled()
 
 
@@ -173,6 +259,86 @@ def test_paglet_wait_message_notify_and_notify_all(tmp_path):
 
         timed_out = proxy.send(Message("wait", {"timeout": 0.05}, arg="timeout"))
         assert timed_out is False
+    finally:
+        host.stop()
+
+
+def test_locked_state_serializes_concurrent_dataclass_access():
+    agent = LockingAgent(LockingState())
+    threads = [threading.Thread(target=agent.increment_many, args=(100,)) for _ in range(8)]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert agent.state.count == 800
+
+
+def test_state_locked_decorator_serializes_methods_and_preserves_exceptions():
+    agent = LockingAgent(LockingState())
+    results: list[int] = []
+    threads = [
+        threading.Thread(target=lambda label=label: results.append(agent.decorated_increment(label)))
+        for label in ("one", "two")
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert sorted(results) == [1, 2]
+    assert agent.state.count == 2
+    assert agent.state.max_active == 1
+    assert sorted(agent.state.events) == ["one", "two"]
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.decorated_failure()
+
+
+def test_paglet_mailbox_workers_class_setting_limits_concurrent_handlers(tmp_path):
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        proxy = host.create(SingleWorkerAgent, SingleWorkerState())
+        first = proxy.send_future(Message("hold", {"delay": 0.3}, arg="one"))
+        _wait_until(lambda: host.get_state(proxy.agent_id, SingleWorkerState).started == ["one"])
+        second = proxy.send_future(Message("hold", {"delay": 0.0}, arg="two"))
+        time.sleep(0.05)
+
+        assert host.get_state(proxy.agent_id, SingleWorkerState).started == ["one"]
+        assert first.get_reply(timeout=1) == "one"
+        assert second.get_reply(timeout=1) == "two"
+        assert host.get_state(proxy.agent_id, SingleWorkerState).started == ["one", "two"]
+        assert host.get_state(proxy.agent_id, SingleWorkerState).finished == ["one", "two"]
+    finally:
+        host.stop()
+
+
+def test_default_concurrent_mailbox_allows_collector_replies_while_waiting(tmp_path):
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        proxy = host.create(WaitingCollectorAgent, WaitingCollectorState())
+        collect = proxy.send_future(Message("collect"))
+        _wait_until(lambda: host.get_state(proxy.agent_id, WaitingCollectorState).pending)
+
+        assert proxy.send(Message("child_result", {"value": "done"})) == {"ok": True}
+        assert collect.get_reply(timeout=1) == {"result": "done"}
     finally:
         host.stop()
 

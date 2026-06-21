@@ -2,7 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState
+from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletState, state_locked
 from .context_events import ContextEvent, ContextListener
 from .events import CloneEvent, CreationEvent, MobilityEvent, PagletEvent, PersistencyEvent
 from .host import Host
@@ -118,5 +118,6 @@ __all__ = [
     "TransferTicket",
     "UNQUEUED_PRIORITY",
     "load_launch_config",
+    "state_locked",
     "sync_launch_config",
 ]

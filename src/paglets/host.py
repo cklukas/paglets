@@ -803,9 +803,16 @@ class Host:
 
     def _register(self, agent: Paglet) -> None:
         agent._attach(PagletContext(self, agent.agent_id))
+        try:
+            mailbox_workers = int(getattr(agent, "MAILBOX_WORKERS", 4))
+        except (TypeError, ValueError) as exc:
+            raise HostError(f"{agent.__class__.__name__}.MAILBOX_WORKERS must be an integer") from exc
+        if mailbox_workers < 1:
+            raise HostError(f"{agent.__class__.__name__}.MAILBOX_WORKERS must be at least 1")
         mailbox = MessageMailbox(
             agent.agent_id,
             lambda message, oneway, agent_id=agent.agent_id: self._deliver_active_message(agent_id, message, oneway=oneway),
+            max_workers=mailbox_workers,
         )
         with self._lock:
             old_mailbox = self._mailboxes.pop(agent.agent_id, None)
@@ -846,12 +853,14 @@ class Host:
         metadata: dict[str, Any] = {}
         if ticket is not None:
             metadata["transfer_ticket"] = ticket.to_wire()
+        with agent.locked_state() as state:
+            state_payload = dataclass_to_wire(state)
         return PagletEnvelope(
             kind=kind,  # type: ignore[arg-type]
             agent_id=agent_id or agent.agent_id,
             agent_class_name=qualified_name(agent.__class__),
             state_class_name=qualified_name(agent.state_class()),
-            state=dataclass_to_wire(agent.state),
+            state=state_payload,
             source_host_name=self.name,
             source_host_address=self.address,
             target_host_name=target_info["name"],
@@ -898,33 +907,34 @@ class Host:
     def _state_payload(self, agent_id: str) -> dict[str, Any]:
         with self._lock:
             agent = self._agents.get(agent_id)
-            if agent is not None:
-                return {
-                    "agent_id": agent.agent_id,
-                    "class_name": qualified_name(agent.__class__),
-                    "state_class_name": qualified_name(agent.state_class()),
-                    "host": self.name,
-                    "address": self.address,
-                    "active": True,
-                    "state": dataclass_to_wire(agent.state),
-                    "mailbox": self._mailboxes[agent_id].status().to_wire()
-                    if agent_id in self._mailboxes
-                    else None,
-                    "resources": agent.resources.status(),
-                }
+            mailbox = self._mailboxes.get(agent_id)
             inactive = self._inactive.get(agent_id)
-            if inactive is not None:
-                return {
-                    "agent_id": inactive.envelope.agent_id,
-                    "class_name": inactive.envelope.agent_class_name,
-                    "state_class_name": inactive.envelope.state_class_name,
-                    "host": self.name,
-                    "address": self.address,
-                    "active": False,
-                    "state": inactive.envelope.state,
-                    "deactivation_policy": inactive.policy.to_wire(),
-                    "queued_message_count": len(inactive.queued_messages),
-                }
+        if agent is not None:
+            with agent.locked_state() as state:
+                state_payload = dataclass_to_wire(state)
+            return {
+                "agent_id": agent.agent_id,
+                "class_name": qualified_name(agent.__class__),
+                "state_class_name": qualified_name(agent.state_class()),
+                "host": self.name,
+                "address": self.address,
+                "active": True,
+                "state": state_payload,
+                "mailbox": mailbox.status().to_wire() if mailbox is not None else None,
+                "resources": agent.resources.status(),
+            }
+        if inactive is not None:
+            return {
+                "agent_id": inactive.envelope.agent_id,
+                "class_name": inactive.envelope.agent_class_name,
+                "state_class_name": inactive.envelope.state_class_name,
+                "host": self.name,
+                "address": self.address,
+                "active": False,
+                "state": inactive.envelope.state,
+                "deactivation_policy": inactive.policy.to_wire(),
+                "queued_message_count": len(inactive.queued_messages),
+            }
         raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
 
     def _load_inactive_records(self) -> None:

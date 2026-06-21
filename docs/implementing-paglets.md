@@ -97,6 +97,55 @@ fast failure instead of activation or queueing:
 reply = proxy.send(Message("status"), no_delay=True)
 ```
 
+## Protect Shared State
+
+A paglet can receive several normal messages at the same time. `run()` may also
+start background threads. When two code paths read or write the dataclass state,
+protect that short critical section with the paglet lock:
+
+```python
+with self.locked_state() as state:
+    state.completed += 1
+    state.results.append(result)
+```
+
+Use `locked()` for transient instance attributes that must be updated together
+with other agent-local data:
+
+```python
+with self.locked():
+    self._last_seen = time.monotonic()
+    self.state.touched += 1
+```
+
+For small helper methods, `@state_locked` keeps the handler readable:
+
+```python
+from paglets import state_locked
+
+
+@state_locked
+def remember_result(self, result):
+    self.state.results.append(result)
+```
+
+Keep locks around short state reads and writes only. Do not hold them while
+waiting for another message, sleeping, calling a remote proxy, doing disk I/O,
+or running a long computation.
+
+Agents that prefer simple actor-style message handling can set
+`MAILBOX_WORKERS = 1`:
+
+```python
+class Counter(Paglet[CounterState]):
+    State = CounterState
+    MAILBOX_WORKERS = 1
+```
+
+That serializes queued `handle_message` calls for that paglet. It does not
+serialize background threads, lifecycle hooks, or `UNQUEUED_PRIORITY` messages,
+so shared state should still use `locked_state()` when consistency matters.
+
 ## Move Between Hosts
 
 Use `dispatch` when the current paglet should move away:

@@ -2,8 +2,12 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import is_dataclass
-from typing import Any, ClassVar, Generic, TypeVar, TYPE_CHECKING
+from functools import wraps
+import threading
+from typing import Any, ClassVar, Concatenate, Generic, ParamSpec, TypeVar, TYPE_CHECKING
 import uuid
 
 from .errors import HostError, NotHandledError
@@ -41,6 +45,20 @@ NOT_HANDLED = _NotHandled()
 
 
 StateT = TypeVar("StateT", bound=PagletState)
+PagletT = TypeVar("PagletT", bound="Paglet[Any]")
+P = ParamSpec("P")
+ReturnT = TypeVar("ReturnT")
+
+
+def state_locked(method: Callable[Concatenate[PagletT, P], ReturnT]) -> Callable[Concatenate[PagletT, P], ReturnT]:
+    """Run a paglet method under the paglet's reentrant state lock."""
+
+    @wraps(method)
+    def wrapper(self: PagletT, *args: P.args, **kwargs: P.kwargs) -> ReturnT:
+        with self.locked():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class PagletContext:
@@ -268,6 +286,7 @@ class Paglet(Generic[StateT]):
     State: ClassVar[type[StateT]]
     ACTIVE: ClassVar[int] = ACTIVE
     INACTIVE: ClassVar[int] = INACTIVE
+    MAILBOX_WORKERS: ClassVar[int] = 4
 
     def __init__(self, state: StateT | None = None, *, agent_id: str | None = None):
         state_cls = self.state_class()
@@ -277,6 +296,7 @@ class Paglet(Generic[StateT]):
             raise HostError(f"{self.__class__.__name__}.State must be a dataclass state object")
         self.agent_id = agent_id or uuid.uuid4().hex
         self.state: StateT = state
+        self._state_lock = threading.RLock()
         self._context: PagletContext | None = None
         self._last_proxy: PagletProxy | None = None
         self.resources = ResourceRegistry()
@@ -298,6 +318,20 @@ class Paglet(Generic[StateT]):
 
     def _attach(self, context: PagletContext) -> None:
         self._context = context
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Enter the paglet's reentrant lock for agent-local critical sections."""
+
+        with self._state_lock:
+            yield
+
+    @contextmanager
+    def locked_state(self) -> Iterator[StateT]:
+        """Yield this paglet's dataclass state under the paglet lock."""
+
+        with self._state_lock:
+            yield self.state
 
     # Convenience operations available from inside lifecycle/message handlers.
     def dispatch(self, target: str | "TransferTicket") -> "PagletProxy":

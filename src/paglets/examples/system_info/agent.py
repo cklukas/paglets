@@ -13,7 +13,7 @@ from typing import Any
 
 import psutil
 
-from ...agent import Paglet, PagletState
+from ...agent import Paglet, PagletState, state_locked
 from ...messages import Message
 from ...serde import dataclass_from_wire
 from ...services import EmptyPayload, ServiceContract, ServiceOperation
@@ -279,14 +279,17 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
     State = SystemInfoCollectorState
 
     def run(self):
-        if self.state.role == "child":
+        with self.locked_state() as state:
+            is_child = state.role == "child"
+        if is_child:
             self._run_child()
 
     def handle_message(self, message: Message):
         if message.kind == "collect":
-            self.state.operation = str(message.args["operation"])
-            self.state.request = dict(message.args.get("request") or {})
-            self.state.timeout = float(message.args.get("timeout", 5.0))
+            with self.locked_state() as state:
+                state.operation = str(message.args["operation"])
+                state.request = dict(message.args.get("request") or {})
+                state.timeout = float(message.args.get("timeout", 5.0))
             return self.collect()
         if message.kind == "child_result":
             return self.record_child_result(message.args)
@@ -295,60 +298,78 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
         return self.not_handled()
 
     def collect(self) -> dict[str, Any]:
-        self.state.role = "parent"
-        self.state.parent_host_url = self.context.address
-        self.state.parent_agent_id = self.agent_id
-        self.state.pending_hosts = []
-        self.state.results = {}
-        self.state.errors = {}
+        with self.locked_state() as state:
+            state.role = "parent"
+            state.parent_host_url = self.context.address
+            state.parent_agent_id = self.agent_id
+            state.pending_hosts = []
+            state.results = {}
+            state.errors = {}
+            timeout = state.timeout
         hosts = self.context.available_hosts(online_only=True, include_self=True)
 
         for host in hosts:
-            self.state.pending_hosts.append(host.name)
+            with self.locked_state() as state:
+                state.pending_hosts.append(host.name)
+                state.role = "child"
+                state.target_host_name = host.name
+                state.target_host_url = host.url
             try:
-                self.state.role = "child"
-                self.state.target_host_name = host.name
-                self.state.target_host_url = host.url
                 self.clone_to(host.name)
             except Exception as exc:
-                self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host.name]
-                self.state.errors[host.name] = str(exc)
+                with self.locked_state() as state:
+                    state.pending_hosts = [name for name in state.pending_hosts if name != host.name]
+                    state.errors[host.name] = str(exc)
             finally:
-                self.state.role = "parent"
-                self.state.target_host_name = ""
-                self.state.target_host_url = ""
+                with self.locked_state() as state:
+                    state.role = "parent"
+                    state.target_host_name = ""
+                    state.target_host_url = ""
 
-        deadline = time.monotonic() + self.state.timeout
-        while self.state.pending_hosts and time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self.locked_state() as state:
+                if not state.pending_hosts:
+                    break
             time.sleep(0.05)
 
-        for host_name in list(self.state.pending_hosts):
-            self.state.errors[host_name] = "timed out waiting for server-info result"
-            self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host_name]
+        with self.locked_state() as state:
+            timed_out_hosts = list(state.pending_hosts)
+            for host_name in timed_out_hosts:
+                state.errors[host_name] = "timed out waiting for server-info result"
+                state.pending_hosts = [name for name in state.pending_hosts if name != host_name]
         return self.summary()
 
     def _run_child(self) -> None:
-        operation = _operation_for_name(self.state.operation)
+        with self.locked_state() as state:
+            operation_name = state.operation
+            request_wire = dict(state.request)
+            target_host_name = state.target_host_name
+            target_host_url = state.target_host_url
+            parent_agent_id = state.parent_agent_id
+            parent_host_url = state.parent_host_url
+        operation = _operation_for_name(operation_name)
         try:
-            request = dataclass_from_wire(operation.request_type, self.state.request)
+            request = dataclass_from_wire(operation.request_type, request_wire)
             service = self.require_contract(SERVER_INFO, operation=operation, scope="local")
             reply = service.call(operation, request)
             payload = {
-                "host_name": self.state.target_host_name,
-                "host_url": self.state.target_host_url,
+                "host_name": target_host_name,
+                "host_url": target_host_url,
                 "result": operation.encode_reply(reply),
             }
         except Exception as exc:
             payload = {
-                "host_name": self.state.target_host_name,
-                "host_url": self.state.target_host_url,
+                "host_name": target_host_name,
+                "host_url": target_host_url,
                 "error": str(exc),
             }
 
-        parent = self.context.get_proxy(self.state.parent_agent_id, self.state.parent_host_url)
+        parent = self.context.get_proxy(parent_agent_id, parent_host_url)
         if parent is not None:
             parent.send(Message("child_result", payload))
 
+    @state_locked
     def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         host_name = str(payload["host_name"])
         self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host_name]
@@ -361,6 +382,7 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
             }
         return {"ok": True}
 
+    @state_locked
     def summary(self) -> dict[str, Any]:
         return {
             "operation": self.state.operation,
