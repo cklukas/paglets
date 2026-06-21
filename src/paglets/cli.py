@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path, PureWindowsPath
+import shutil
 import signal
 import sys
+import threading
 
 from . import git_update
 from .admin import discover_lan_entry_servers, discover_mesh_entry_servers
@@ -21,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     reexec_args = list(argv) if argv is not None else sys.argv[1:]
+    restart_requested = threading.Event()
     git_repo_root: Path | None = None
     git_process_start_head = ""
 
@@ -82,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
         auto_update_from_git=args.auto_update_from_git,
         git_repo_root=git_repo_root,
         git_process_start_head=git_process_start_head,
-        auto_update_restart_callback=lambda: _reexec(reexec_args),
+        auto_update_restart_callback=restart_requested.set,
         auto_update_reporter=lambda message: print(f"paglets host auto-update: {message}", file=sys.stderr, flush=True),
     )
 
@@ -103,6 +106,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.auto_update_from_git:
         host.broadcast_git_update(targets=_auto_update_discovery_targets(host.port))
     host.serve_forever()
+    restart_scheduled = bool(getattr(host, "_auto_update_restart_scheduled", False))
+    if restart_scheduled and not restart_requested.is_set():
+        restart_requested.wait(timeout=5.0)
+    if restart_requested.is_set():
+        print("paglets-host: git auto-update restart requested; restarting", file=sys.stderr, flush=True)
+        _reexec(reexec_args)
+    if restart_scheduled:
+        print("paglets-host: git auto-update restart was scheduled but no restart callback ran", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -165,19 +177,38 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _reexec(argv: list[str]) -> None:
-    os.execv(sys.executable, _reexec_argv(argv))
+    executable, reexec_argv = _reexec_command(argv)
+    os.execvp(executable, reexec_argv)
 
 
-def _reexec_argv(
+def _reexec_command(
+    argv: list[str],
+    *,
+    uv_executable: str | None = None,
+    executable: str | None = None,
+    windows: bool | None = None,
+) -> tuple[str, list[str]]:
+    uv = uv_executable if uv_executable is not None else shutil.which("uv")
+    if uv:
+        exec_path = uv if uv_executable is not None else "uv"
+        return exec_path, [_argv0(exec_path, windows=windows), "run", "python", "-m", "paglets.cli", *argv]
+    executable = executable or sys.executable
+    return executable, _python_reexec_argv(argv, executable=executable, windows=windows)
+
+
+def _python_reexec_argv(
     argv: list[str],
     *,
     executable: str | None = None,
     windows: bool | None = None,
 ) -> list[str]:
     executable = executable or sys.executable
+    return [_argv0(executable, windows=windows), "-m", "paglets.cli", *argv]
+
+
+def _argv0(executable: str, *, windows: bool | None = None) -> str:
     windows = os.name == "nt" if windows is None else windows
-    executable_arg = PureWindowsPath(executable).name if windows else executable
-    return [executable_arg, "-m", "paglets.cli", *argv]
+    return PureWindowsPath(executable).name if windows else executable
 
 
 def _print_git_update_failure(result: git_update.GitUpdateResult) -> None:

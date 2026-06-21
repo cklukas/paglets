@@ -5,10 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 import threading
 
+import pytest
+
 from paglets import Host
 from paglets.admin import ServerRef
 from paglets import cli as host_cli
 from paglets import git_update
+from paglets.runtime_values import LaunchConfigSyncAction
+from paglets.startup import LaunchConfig, LaunchConfigSyncResult
 from tests.test_paglets_core import free_port
 
 
@@ -36,14 +40,88 @@ def test_auto_update_discovery_targets_use_mesh_and_lan_discovery(monkeypatch):
     ]
 
 
-def test_windows_reexec_argv_does_not_put_spaced_path_in_argv0():
-    argv = host_cli._reexec_argv(
+def test_windows_python_reexec_argv_does_not_put_spaced_path_in_argv0():
+    argv = host_cli._python_reexec_argv(
         ["--name", "windows", "--bind-public"],
         executable=r"C:\Users\Christian Klukas\git\paglets\.venv\Scripts\python.exe",
         windows=True,
     )
 
     assert argv == ["python.exe", "-m", "paglets.cli", "--name", "windows", "--bind-public"]
+
+
+def test_reexec_command_prefers_uv_run_python_on_windows():
+    executable, argv = host_cli._reexec_command(
+        ["--name", "windows", "--bind-public"],
+        uv_executable=r"C:\Program Files\uv\uv.exe",
+        windows=True,
+    )
+
+    assert executable == r"C:\Program Files\uv\uv.exe"
+    assert argv == ["uv.exe", "run", "python", "-m", "paglets.cli", "--name", "windows", "--bind-public"]
+
+
+def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path, monkeypatch, capsys):
+    head = "a" * 40
+    restart_threads: list[str] = []
+
+    class RestartRequested(RuntimeError):
+        pass
+
+    class FakeMesh:
+        code_version = head
+        version_warning = None
+
+    class FakeHost:
+        def __init__(self, *args, **kwargs):
+            self.name = kwargs["name"]
+            self.address = "http://127.0.0.1:8765"
+            self.port = int(kwargs["port"])
+            self.mesh = FakeMesh()
+            self._restart_callback = kwargs["auto_update_restart_callback"]
+
+        def start_background(self):
+            return None
+
+        def broadcast_git_update(self, targets=None):
+            return []
+
+        def serve_forever(self):
+            self._restart_callback()
+
+    def fake_reexec(_argv):
+        restart_threads.append(threading.current_thread().name)
+        raise RestartRequested()
+
+    monkeypatch.setattr(host_cli.git_update, "find_repo_root", lambda _start: tmp_path)
+    monkeypatch.setattr(host_cli.git_update, "current_head", lambda _repo: head)
+    monkeypatch.setattr(
+        host_cli.git_update,
+        "update_checkout",
+        lambda repo, *, process_start_head: git_update.GitUpdateResult(
+            ok=True,
+            status="current",
+            repo_root=str(repo),
+            before_head=head,
+            after_head=head,
+            process_start_head=process_start_head,
+        ),
+    )
+    monkeypatch.setattr(
+        host_cli,
+        "sync_launch_config",
+        lambda path, **kwargs: LaunchConfigSyncResult(LaunchConfigSyncAction.UNCHANGED, Path(path), "up to date"),
+    )
+    monkeypatch.setattr(host_cli, "load_launch_config", lambda _path: LaunchConfig())
+    monkeypatch.setattr(host_cli, "Host", FakeHost)
+    monkeypatch.setattr(host_cli, "_auto_update_discovery_targets", lambda _port: [])
+    monkeypatch.setattr(host_cli, "_reexec", fake_reexec)
+
+    with pytest.raises(RestartRequested):
+        host_cli.main(["--name", "windows", "--port", "8765", "--auto-update-from-git"])
+
+    assert restart_threads == ["MainThread"]
+    assert "git auto-update restart requested; restarting" in capsys.readouterr().err
 
 
 def test_host_cli_cancels_auto_update_when_checkout_is_dirty(tmp_path: Path, monkeypatch, capsys):

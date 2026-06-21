@@ -109,7 +109,8 @@ sequenceDiagram
         Remote->>Remote: git pull
         Remote->>Remote: uv sync if process-start HEAD is stale
         Remote-->>Local: update ok, restart scheduled if needed
-        Remote->>Remote: graceful shutdown + re-exec
+        Remote->>Remote: graceful shutdown
+        Remote->>Remote: CLI main thread re-execs through uv
     else target hash missing
         Remote-->>Local: target-missing error
         Local->>Dev: print "commit may not have been pushed"
@@ -151,6 +152,14 @@ The second host still restarts when the shared checkout already moved before it
 got the lock. Restart decisions compare the current checkout `HEAD` with each
 process's own `process_start_head`, not only with whether that process ran a
 successful pull.
+
+Runtime update requests restart slightly differently from startup updates. A
+background update thread may request shutdown, but it does not call `exec`
+itself. The foreground CLI thread sees the restart request after the HTTP host
+has shut down and then re-execs the same command via `uv run python -m
+paglets.cli ...`. This avoids Windows-specific failures caused by replacing the
+process from a worker thread or by reusing a Python executable path that `uv
+sync` just recreated.
 
 ## Runtime API
 
@@ -209,5 +218,8 @@ machine.
 - Commit or stash local edits before enabling auto-update.
 - Push commits before broadcasting them to other hosts.
 - Keep `uv` installed on hosts; dependency sync uses `uv sync`.
+- Runtime auto-update restarts print `git auto-update restart requested;
+  restarting` before re-execing. If that line appears without a new host, check
+  that `uv` is on `PATH`.
 - Use a process supervisor only if you want extra resilience. The default
   behavior is self re-exec with the same command-line arguments.

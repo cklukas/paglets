@@ -718,6 +718,7 @@ class Host:
         time.sleep(self._auto_update_restart_delay)
         callback = self._auto_update_restart_callback
         try:
+            self._report_auto_update("restart scheduled; shutting down host for re-exec")
             self.shutdown()
         finally:
             if callback is not None:
