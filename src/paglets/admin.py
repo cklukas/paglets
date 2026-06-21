@@ -15,6 +15,7 @@ from .client import HostClient
 from .errors import RemoteHostError
 from .mesh import HostRef
 from .messages import Message
+from .runtime_values import ServiceScope, enum_from_wire, require_enum
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".paglets" / "servers.json"
@@ -69,7 +70,7 @@ class ServiceSummary:
     host_url: str
     agent_id: str
     capabilities: tuple[str, ...]
-    scope: str
+    scope: ServiceScope
 
 
 def normalize_server_url(url: str) -> str:
@@ -392,15 +393,16 @@ class PagletsAdminClient:
         *,
         name: str | None = None,
         capability: str | None = None,
-        scope: str = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list[ServiceSummary]:
+        require_enum(scope, ServiceScope, "scope")
         query: dict[str, str] = {}
         if name:
             query["name"] = name
         if capability:
             query["capability"] = capability
         if scope:
-            query["scope"] = scope
+            query["scope"] = scope.value
         suffix = f"?{urlencode(query)}" if query else ""
         payload = self.client.get_json(f"{server.url}/services{suffix}")
         services: list[ServiceSummary] = []
@@ -413,7 +415,7 @@ class PagletsAdminClient:
                     host_url=str(proxy.get("host_url") or item.get("host_url") or server.url),
                     agent_id=str(proxy.get("agent_id") or ""),
                     capabilities=tuple(str(value) for value in item.get("capabilities", [])),
-                    scope=str(item.get("scope") or "local"),
+                    scope=enum_from_wire(item.get("scope") or ServiceScope.LOCAL.value, ServiceScope, "scope"),
                 )
             )
         return services

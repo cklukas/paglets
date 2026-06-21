@@ -2,7 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import is_dataclass, replace
+from dataclasses import dataclass, field, is_dataclass, replace
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +16,7 @@ from .agent import ACTIVE, INACTIVE, NOT_HANDLED, Paglet, PagletContext, PagletS
 from .client import HostClient
 from .context_events import ContextEvent, ContextEventLog, ContextListener
 from .envelope import PagletEnvelope
-from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError, TransferError
+from .errors import HostError, InvalidAgentError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError, ServiceNotFoundError, TransferError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .mailbox import MessageMailbox
 from .mesh import HostRef, MeshRegistry
@@ -24,10 +24,24 @@ from .messages import DEACTIVATE, UNQUEUED_PRIORITY, Message, ReplySet
 from .persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord, QueuedMessage
 from .proxy import PagletProxy
 from .references import PagletProxyRef
+from .resident import (
+    DEFAULT_SERVICE_LEASE_TTL_SECONDS,
+    RESIDENT_SERVICE_METADATA_KEY,
+    ServiceLease,
+)
 from .resources import ResourceRegistry
+from .runtime_values import (
+    ArrivalMode,
+    EnvelopeKind,
+    LaunchConfigSyncAction,
+    ResidentLifecycle,
+    ServiceScope,
+    enum_from_wire,
+    require_enum,
+)
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
-from .services import ServiceRecord, ServiceRegistry, ServiceScope
-from .startup import LaunchConfig, LaunchConfigSyncResult, resolve_startup_agent
+from .services import ServiceContract, ServiceHandle, ServiceRecord, ServiceRegistry
+from .startup import LaunchConfig, LaunchConfigSyncResult, ResolvedResidentService, resolve_resident_service, resolve_startup_agent
 from .transfer import TransferTicket
 
 
@@ -53,6 +67,23 @@ HOST_CAPABILITIES = [
 
 
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
+
+
+@dataclass(slots=True)
+class _ManagedResidentService:
+    agent_cls: type[Paglet]
+    state_class: type[PagletState]
+    state_wire: dict[str, Any]
+    agent_id: str
+    contract: ServiceContract
+    scope: ServiceScope
+    lifecycle: ResidentLifecycle
+    idle_timeout: float
+    singleton: bool = True
+    init: Any = None
+    in_flight: int = 0
+    leases: dict[str, float] = field(default_factory=dict)
+    last_used: float = field(default_factory=time.time)
 
 
 class Host:
@@ -95,6 +126,8 @@ class Host:
         self._inactive_dir = self.persistence_dir / "inactive"
         self._inactive: dict[str, InactiveRecord] = {}
         self._services = ServiceRegistry()
+        self._resident_services: dict[str, _ManagedResidentService] = {}
+        self._resident_activation_locks: dict[str, threading.Lock] = {}
         self._events = ContextEventLog()
         self._properties: dict[str, Any] = {}
         self.launch_config = launch_config
@@ -133,6 +166,7 @@ class Host:
         self._activation_stop.clear()
         self._emit_launch_config_sync_result()
         self._activate_startup_records()
+        self._start_resident_services()
         self._start_launch_agents()
         self._start_activation_scheduler()
         self.mesh.start()
@@ -272,17 +306,22 @@ class Host:
         *,
         capabilities: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
-        scope: ServiceScope = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
     ) -> ServiceRecord:
+        require_enum(scope, ServiceScope, "scope")
         self._require_agent(agent_id)
+        existing = self._services.record(name, agent_id)
+        merged_metadata = dict(metadata or {})
+        if existing is not None and RESIDENT_SERVICE_METADATA_KEY in existing.metadata:
+            merged_metadata[RESIDENT_SERVICE_METADATA_KEY] = existing.metadata[RESIDENT_SERVICE_METADATA_KEY]
         record = self._services.advertise(
             host_name=self.name,
             host_url=self.address,
             name=name,
             proxy=PagletProxyRef(self.address, agent_id),
             capabilities=capabilities,
-            metadata=metadata,
+            metadata=merged_metadata,
             scope=scope,
             ttl=ttl,
         )
@@ -300,8 +339,9 @@ class Host:
         name: str,
         *,
         capability: str | None = None,
-        scope: ServiceScope = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> ServiceRecord | None:
+        require_enum(scope, ServiceScope, "scope")
         matches = self.lookup_services(name, capability=capability, scope=scope)
         return matches[0] if matches else None
 
@@ -310,10 +350,11 @@ class Host:
         name: str | None = None,
         *,
         capability: str | None = None,
-        scope: ServiceScope = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list[ServiceRecord]:
+        require_enum(scope, ServiceScope, "scope")
         records = self._services.lookup_all(name, capability)
-        if scope == "mesh":
+        if scope is ServiceScope.MESH:
             records.extend(self._lookup_mesh_services(name=name, capability=capability))
         return records
 
@@ -376,7 +417,7 @@ class Host:
         )
         agent.on_dispatching(event)
         self._cleanup_agent_resources(agent, reason="dispatch")
-        envelope = self._make_envelope(agent, "dispatch", target_info, ticket=ticket)
+        envelope = self._make_envelope(agent, EnvelopeKind.DISPATCH, target_info, ticket=ticket)
         response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         self._remove_active_agent(agent_id, agent)
         self._emit("dispatch", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"target": target_info})
@@ -399,7 +440,14 @@ class Host:
             target_host_address=target_info["address"],
         )
         agent.on_cloning(cloning_event)
-        envelope = self._make_envelope(agent, "clone", target_info, agent_id=clone_id, clone_of=agent_id, ticket=ticket)
+        envelope = self._make_envelope(
+            agent,
+            EnvelopeKind.CLONE,
+            target_info,
+            agent_id=clone_id,
+            clone_of=agent_id,
+            ticket=ticket,
+        )
         response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         cloned_event = CloneEvent(
             agent_id=agent_id,
@@ -449,7 +497,7 @@ class Host:
         agent.on_deactivating(event)
         self._cleanup_agent_resources(agent, reason="deactivate")
         info = {"name": self.name, "address": self.address}
-        envelope = self._make_envelope(agent, "activation", info)
+        envelope = self._make_envelope(agent, EnvelopeKind.ACTIVATION, info)
         record = InactiveRecord(envelope=envelope, policy=policy, request=request)
         self._write_inactive_record(record)
         with self._lock:
@@ -515,18 +563,22 @@ class Host:
         with self._lock:
             agent = self._agents.get(agent_id)
             inactive = self._inactive.get(agent_id)
+            is_resident_service = agent_id in self._resident_services
         if agent is None:
-            if inactive is None:
-                raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
-            if activate_if_inactive and inactive.policy.activate_on_message:
-                self.activate(agent_id)
-            elif no_delay or not inactive.policy.queue_messages_when_inactive:
-                raise PagletInactiveError(f"Paglet {agent_id!r} is inactive on {self.name}")
+            if is_resident_service and activate_if_inactive:
+                self._ensure_resident_service_active(agent_id)
             else:
-                inactive.queued_messages.append(QueuedMessage(message=message, oneway=oneway))
-                self._write_inactive_record(inactive)
-                self._emit("message-queued", agent_id=agent_id, message_id=message.message_id)
-                return None if oneway else {"queued": True, "message_id": message.message_id}
+                if inactive is None:
+                    raise InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+                if activate_if_inactive and inactive.policy.activate_on_message:
+                    self.activate(agent_id)
+                elif no_delay or not inactive.policy.queue_messages_when_inactive:
+                    raise PagletInactiveError(f"Paglet {agent_id!r} is inactive on {self.name}")
+                else:
+                    inactive.queued_messages.append(QueuedMessage(message=message, oneway=oneway))
+                    self._write_inactive_record(inactive)
+                    self._emit("message-queued", agent_id=agent_id, message_id=message.message_id)
+                    return None if oneway else {"queued": True, "message_id": message.message_id}
         with self._lock:
             mailbox = self._mailboxes.get(agent_id)
         if mailbox is None:
@@ -545,17 +597,21 @@ class Host:
             error = InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
             self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
             raise error
+        self._begin_resident_service_call(agent_id)
         try:
-            result = agent.handle_message(message)
-        except Exception as exc:
-            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(exc))
-            raise
-        if result is NOT_HANDLED:
-            error = NotHandledError(f"{agent.__class__.__name__} did not handle {message.kind!r}")
-            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
-            raise error
-        self._emit("message-delivered", agent_id=agent_id, message_id=message.message_id)
-        return None if oneway else result
+            try:
+                result = agent.handle_message(message)
+            except Exception as exc:
+                self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(exc))
+                raise
+            if result is NOT_HANDLED:
+                error = NotHandledError(f"{agent.__class__.__name__} did not handle {message.kind!r}")
+                self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
+                raise error
+            self._emit("message-delivered", agent_id=agent_id, message_id=message.message_id)
+            return None if oneway else result
+        finally:
+            self._end_resident_service_call(agent_id)
 
     def multicast_message(
         self,
@@ -609,7 +665,7 @@ class Host:
         )
         agent.on_reverting(event)
         self._cleanup_agent_resources(agent, reason="retract")
-        envelope = self._make_envelope(agent, "retract", target_info)
+        envelope = self._make_envelope(agent, EnvelopeKind.RETRACT, target_info)
         response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
         self._remove_active_agent(agent_id, agent)
         self._emit("retract", agent_id=agent_id, class_name=qualified_name(agent.__class__), data={"target": target_info})
@@ -621,7 +677,7 @@ class Host:
         *,
         inactive_record: InactiveRecord | None = None,
     ) -> PagletProxy:
-        if inactive_record is None and self._arrival_mode(envelope) == "inactive":
+        if inactive_record is None and self._arrival_mode(envelope) is ArrivalMode.INACTIVE:
             record = self._inactive_arrival_record(envelope)
             self._write_inactive_record(record)
             with self._lock:
@@ -630,7 +686,7 @@ class Host:
                 "arrival",
                 agent_id=record.agent_id,
                 class_name=record.envelope.agent_class_name,
-                data={"active": False, "kind": envelope.kind},
+                data={"active": False, "kind": envelope.kind.value},
             )
             return PagletProxy(self.address, record.agent_id, self.client)
 
@@ -644,7 +700,7 @@ class Host:
         agent = agent_cls(state=state, agent_id=envelope.agent_id)
         self._register(agent)
 
-        if envelope.kind in ("dispatch", "retract"):
+        if envelope.kind in (EnvelopeKind.DISPATCH, EnvelopeKind.RETRACT):
             event = MobilityEvent(
                 agent_id=agent.agent_id,
                 host_name=self.name,
@@ -653,12 +709,12 @@ class Host:
                 source_host_address=envelope.source_host_address,
                 target_host_name=self.name,
                 target_host_address=self.address,
-                reason=envelope.kind,
+                reason=envelope.kind.value,
             )
             agent.on_arrival(event)
             agent.run()
-            self._emit("arrival", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__), data={"kind": envelope.kind})
-        elif envelope.kind == "clone":
+            self._emit("arrival", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__), data={"kind": envelope.kind.value})
+        elif envelope.kind is EnvelopeKind.CLONE:
             event = CloneEvent(
                 agent_id=agent.agent_id,
                 host_name=self.name,
@@ -673,7 +729,7 @@ class Host:
             agent.on_clone(event)
             agent.run()
             self._emit("clone", agent_id=agent.agent_id, class_name=qualified_name(agent.__class__), data={"source_agent_id": envelope.clone_of})
-        elif envelope.kind == "activation":
+        elif envelope.kind is EnvelopeKind.ACTIVATION:
             event = PersistencyEvent(
                 agent_id=agent.agent_id,
                 host_name=self.name,
@@ -698,6 +754,293 @@ class Host:
             raise HostError(f"{payload['state_class_name']} is not a dataclass state")
         state = dataclass_from_wire(state_cls, payload.get("state") or {})
         return self.create(agent_cls, state, init=payload.get("init"), agent_id=payload.get("agent_id"))
+
+    def _start_resident_services(self) -> None:
+        config = self.launch_config
+        if config is None:
+            return
+        for resident_service in config.resident_services:
+            if not resident_service.enabled:
+                self._emit(
+                    "resident-service-skip",
+                    agent_id=resident_service.agent_id,
+                    data={"reason": "disabled", "use": resident_service.use, "class": resident_service.class_name},
+                )
+                continue
+            try:
+                resolved = resolve_resident_service(resident_service)
+                self._declare_resident_service(resolved)
+            except Exception as exc:
+                self._emit(
+                    "resident-service-failed",
+                    agent_id=resident_service.agent_id,
+                    data={
+                        "use": resident_service.use,
+                        "class": resident_service.class_name,
+                        "error": str(exc),
+                    },
+                )
+
+    def _declare_resident_service(self, resolved: ResolvedResidentService) -> None:
+        contract = resolved.spec.contract
+        managed = _ManagedResidentService(
+            agent_cls=resolved.agent_cls,
+            state_class=resolved.agent_cls.state_class(),
+            state_wire=dataclass_to_wire(resolved.state),
+            agent_id=resolved.agent_id,
+            contract=contract,
+            scope=resolved.scope,
+            lifecycle=resolved.lifecycle,
+            idle_timeout=resolved.idle_timeout,
+            singleton=resolved.singleton,
+            init=resolved.init,
+        )
+        with self._lock:
+            self._resident_services[resolved.agent_id] = managed
+        record = self._services.advertise(
+            host_name=self.name,
+            host_url=self.address,
+            name=contract.name,
+            proxy=PagletProxyRef(self.address, resolved.agent_id),
+            capabilities=contract.capabilities,
+            metadata=self._resident_service_metadata(managed),
+            scope=resolved.scope,
+        )
+        self._emit(
+            "resident-service-declare",
+            agent_id=resolved.agent_id,
+            class_name=qualified_name(resolved.agent_cls),
+            service_name=contract.name,
+            data=record.to_wire(),
+        )
+        self._emit("service-advertise", agent_id=resolved.agent_id, service_name=contract.name, data=record.to_wire())
+        if resolved.lifecycle is ResidentLifecycle.EAGER:
+            self._ensure_resident_service_active(resolved.agent_id)
+
+    def _ensure_resident_service_active(self, agent_id: str) -> PagletProxy:
+        lock = self._resident_activation_lock(agent_id)
+        with lock:
+            with self._lock:
+                if agent_id in self._agents:
+                    return PagletProxy(self.address, agent_id, self.client)
+                managed = self._resident_services.get(agent_id)
+                inactive = self._inactive.get(agent_id)
+            if managed is None:
+                raise InvalidAgentError(f"No managed resident service {agent_id!r} on {self.name}")
+            if inactive is not None:
+                proxy = self.activate(agent_id)
+                self._mark_resident_service_used(agent_id)
+                self._emit(
+                    "resident-service-activate",
+                    agent_id=agent_id,
+                    class_name=qualified_name(managed.agent_cls),
+                    service_name=managed.contract.name,
+                    data={"lifecycle": managed.lifecycle.value},
+                )
+                return proxy
+
+            state = dataclass_from_wire(managed.state_class, managed.state_wire)
+            proxy = self.create(managed.agent_cls, state, init=managed.init, agent_id=agent_id)
+            self._mark_resident_service_used(agent_id)
+            self._emit(
+                "resident-service-create",
+                agent_id=agent_id,
+                class_name=qualified_name(managed.agent_cls),
+                service_name=managed.contract.name,
+                data={"lifecycle": managed.lifecycle.value},
+            )
+            return proxy
+
+    def lease_service_handle(
+        self,
+        handle: ServiceHandle,
+        *,
+        ttl: float = DEFAULT_SERVICE_LEASE_TTL_SECONDS,
+    ) -> ServiceLease:
+        record = handle.record
+        host_url = record.host_url or record.proxy.host_url
+        if host_url.rstrip("/") == self.address.rstrip("/"):
+            payload = self.acquire_resident_service_lease(record.proxy.agent_id, record.name, ttl=ttl)
+        else:
+            payload = self.client.post_json(
+                f"{host_url.rstrip('/')}/services/leases",
+                {
+                    "agent_id": record.proxy.agent_id,
+                    "service_name": record.name,
+                    "ttl": ttl,
+                },
+            )
+        return ServiceLease(
+            handle=handle,
+            lease_id=str(payload["lease_id"]),
+            host_url=host_url,
+            expires_at=float(payload["expires_at"]),
+            client=self.client,
+        )
+
+    def acquire_resident_service_lease(self, agent_id: str, service_name: str, *, ttl: float) -> dict[str, Any]:
+        ttl = DEFAULT_SERVICE_LEASE_TTL_SECONDS if ttl is None else float(ttl)
+        if ttl <= 0:
+            raise HostError("service lease ttl must be positive")
+        lease_id = uuid.uuid4().hex
+        now = time.time()
+        expires_at = now + ttl
+        with self._lock:
+            managed = self._resident_services.get(agent_id)
+            if managed is None or managed.contract.name != service_name:
+                raise ServiceNotFoundError(f"No managed resident service {service_name!r} for agent {agent_id!r}")
+            managed.leases[lease_id] = expires_at
+            managed.last_used = now
+        try:
+            self._ensure_resident_service_active(agent_id)
+        except Exception:
+            with self._lock:
+                managed = self._resident_services.get(agent_id)
+                if managed is not None:
+                    managed.leases.pop(lease_id, None)
+            raise
+        self._emit(
+            "service-lease-acquire",
+            agent_id=agent_id,
+            service_name=service_name,
+            data={"lease_id": lease_id, "expires_at": expires_at, "ttl": ttl},
+        )
+        return {"lease_id": lease_id, "expires_at": expires_at}
+
+    def release_resident_service_lease(self, lease_id: str) -> dict[str, bool]:
+        released = False
+        agent_id = None
+        service_name = None
+        with self._lock:
+            for managed in self._resident_services.values():
+                if lease_id in managed.leases:
+                    managed.leases.pop(lease_id, None)
+                    managed.last_used = time.time()
+                    agent_id = managed.agent_id
+                    service_name = managed.contract.name
+                    released = True
+                    break
+        if released:
+            self._emit(
+                "service-lease-release",
+                agent_id=agent_id,
+                service_name=service_name,
+                data={"lease_id": lease_id},
+            )
+        return {"released": released}
+
+    def _resident_activation_lock(self, agent_id: str) -> threading.Lock:
+        with self._lock:
+            lock = self._resident_activation_locks.get(agent_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._resident_activation_locks[agent_id] = lock
+            return lock
+
+    def _resident_service_metadata(self, managed: _ManagedResidentService) -> dict[str, Any]:
+        metadata = managed.contract.advertise_metadata()
+        metadata[RESIDENT_SERVICE_METADATA_KEY] = {
+            "agent_id": managed.agent_id,
+            "agent_class_name": qualified_name(managed.agent_cls),
+            "lifecycle": managed.lifecycle.value,
+            "idle_timeout": managed.idle_timeout,
+        }
+        return metadata
+
+    def _is_resident_service_record(self, record: ServiceRecord) -> bool:
+        return RESIDENT_SERVICE_METADATA_KEY in record.metadata
+
+    def _begin_resident_service_call(self, agent_id: str) -> None:
+        with self._lock:
+            managed = self._resident_services.get(agent_id)
+            if managed is not None:
+                managed.in_flight += 1
+
+    def _end_resident_service_call(self, agent_id: str) -> None:
+        with self._lock:
+            managed = self._resident_services.get(agent_id)
+            if managed is not None:
+                managed.in_flight = max(0, managed.in_flight - 1)
+                managed.last_used = time.time()
+
+    def _mark_resident_service_used(self, agent_id: str) -> None:
+        with self._lock:
+            managed = self._resident_services.get(agent_id)
+            if managed is not None:
+                managed.last_used = time.time()
+
+    def _resident_service_shutdown_policy(self, agent_id: str) -> DeactivationPolicy:
+        with self._lock:
+            managed = self._resident_services.get(agent_id)
+        return DeactivationPolicy(activate_on_startup=managed is None or managed.lifecycle is ResidentLifecycle.EAGER)
+
+    def _resident_maintenance(self, now: float) -> None:
+        expired_leases: list[tuple[str, str, str]] = []
+        due_agent_ids: list[str] = []
+        with self._lock:
+            for managed in self._resident_services.values():
+                for lease_id, expires_at in list(managed.leases.items()):
+                    if expires_at <= now:
+                        managed.leases.pop(lease_id, None)
+                        expired_leases.append((managed.agent_id, managed.contract.name, lease_id))
+                if (
+                    managed.lifecycle is ResidentLifecycle.LAZY
+                    and managed.agent_id in self._agents
+                    and managed.in_flight == 0
+                    and not managed.leases
+                    and now - managed.last_used >= managed.idle_timeout
+                ):
+                    due_agent_ids.append(managed.agent_id)
+
+        for agent_id, service_name, lease_id in expired_leases:
+            self._emit(
+                "service-lease-expire",
+                agent_id=agent_id,
+                service_name=service_name,
+                data={"lease_id": lease_id},
+            )
+
+        for agent_id in due_agent_ids:
+            with self._lock:
+                managed = self._resident_services.get(agent_id)
+                still_due = (
+                    managed is not None
+                    and managed.lifecycle is ResidentLifecycle.LAZY
+                    and agent_id in self._agents
+                    and managed.in_flight == 0
+                    and not managed.leases
+                    and now - managed.last_used >= managed.idle_timeout
+                )
+            if not still_due or managed is None:
+                continue
+            try:
+                self.deactivate(
+                    agent_id,
+                    DeactivationRequest(
+                        reason="resident-service-idle",
+                        source="resident-service-manager",
+                        policy=DeactivationPolicy(
+                            activate_on_message=True,
+                            queue_messages_when_inactive=True,
+                            activate_on_startup=False,
+                        ),
+                    ),
+                )
+                self._emit(
+                    "resident-service-idle-deactivate",
+                    agent_id=agent_id,
+                    class_name=qualified_name(managed.agent_cls),
+                    service_name=managed.contract.name,
+                    data={"idle_timeout": managed.idle_timeout},
+                )
+            except PagletError as exc:
+                self._emit(
+                    "resident-service-failed",
+                    agent_id=agent_id,
+                    class_name=qualified_name(managed.agent_cls),
+                    service_name=managed.contract.name,
+                    error=str(exc),
+                )
 
     def _prepare_ticket(self, target: str | TransferTicket) -> TransferTicket:
         ticket = TransferTicket.from_target(target)
@@ -762,15 +1105,19 @@ class Host:
     def _cleanup_agent_resources(self, agent: Paglet, *, reason: str) -> None:
         agent.resources.cleanup(reason=reason)
 
-    def _arrival_mode(self, envelope: PagletEnvelope) -> str:
+    def _arrival_mode(self, envelope: PagletEnvelope) -> ArrivalMode:
         ticket = envelope.metadata.get("transfer_ticket")
         if isinstance(ticket, dict):
-            return str(ticket.get("arrival_mode") or "activate")
-        return "activate"
+            return enum_from_wire(
+                ticket.get("arrival_mode") or ArrivalMode.ACTIVATE.value,
+                ArrivalMode,
+                "arrival_mode",
+            )
+        return ArrivalMode.ACTIVATE
 
     def _inactive_arrival_record(self, envelope: PagletEnvelope) -> InactiveRecord:
         activation_envelope = PagletEnvelope(
-            kind="activation",
+            kind=EnvelopeKind.ACTIVATION,
             agent_id=envelope.agent_id,
             agent_class_name=envelope.agent_class_name,
             state_class_name=envelope.state_class_name,
@@ -786,9 +1133,9 @@ class Host:
             envelope=activation_envelope,
             policy=DeactivationPolicy(),
             request=DeactivationRequest(
-                reason=f"{envelope.kind}-arrival",
+                reason=f"{envelope.kind.value}-arrival",
                 source="transfer",
-                metadata={"arrival_mode": "inactive"},
+                metadata={"arrival_mode": ArrivalMode.INACTIVE.value},
             ),
         )
 
@@ -830,7 +1177,7 @@ class Host:
             mailbox = self._mailboxes.pop(agent_id, None)
         if mailbox is not None:
             mailbox.close()
-        for record in self._services.remove_agent(agent_id):
+        for record in self._services.remove_agent(agent_id, keep=self._is_resident_service_record):
             self._emit("service-remove", agent_id=agent_id, service_name=record.name)
 
     def _require_agent(self, agent_id: str) -> Paglet:
@@ -843,7 +1190,7 @@ class Host:
     def _make_envelope(
         self,
         agent: Paglet,
-        kind: str,
+        kind: EnvelopeKind,
         target_info: dict[str, Any],
         *,
         agent_id: str | None = None,
@@ -856,7 +1203,7 @@ class Host:
         with agent.locked_state() as state:
             state_payload = dataclass_to_wire(state)
         return PagletEnvelope(
-            kind=kind,  # type: ignore[arg-type]
+            kind=kind,
             agent_id=agent_id or agent.agent_id,
             agent_class_name=qualified_name(agent.__class__),
             state_class_name=qualified_name(agent.state_class()),
@@ -984,9 +1331,9 @@ class Host:
         result = self.launch_config_sync_result
         if result is None:
             return
-        if result.action == "copied":
+        if result.action is LaunchConfigSyncAction.COPIED:
             self._emit("launch-config-copy", data={"path": str(result.path), "message": result.message})
-        elif result.action == "updated":
+        elif result.action is LaunchConfigSyncAction.UPDATED:
             self._emit(
                 "launch-config-update",
                 data={
@@ -1072,6 +1419,7 @@ class Host:
     def _activation_scheduler_loop(self) -> None:
         while not self._activation_stop.wait(self._next_activation_delay()):
             now = time.time()
+            self._resident_maintenance(now)
             with self._lock:
                 due_ids = [
                     agent_id
@@ -1108,7 +1456,7 @@ class Host:
                     DeactivationRequest(
                         reason="shutdown",
                         source="host",
-                        policy=DeactivationPolicy(activate_on_startup=True),
+                        policy=self._resident_service_shutdown_policy(agent_id),
                     ),
                 )
             except PagletError:
@@ -1221,9 +1569,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if method == "GET" and parts == ["services"]:
             name = (query.get("name") or [None])[0]
             capability = (query.get("capability") or [None])[0]
-            scope = (query.get("scope") or ["local"])[0]
-            if scope == "mesh":
-                records = host._services.lookup_all(name, capability, scope="mesh")
+            scope = enum_from_wire((query.get("scope") or [ServiceScope.LOCAL.value])[0], ServiceScope, "scope")
+            if scope is ServiceScope.MESH:
+                records = host._services.lookup_all(name, capability, scope=ServiceScope.MESH)
             else:
                 records = host._services.lookup_all(name, capability)
             return {
@@ -1232,6 +1580,14 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     for record in records
                 ]
             }
+        if method == "POST" and parts == ["services", "leases"]:
+            return host.acquire_resident_service_lease(
+                str(payload["agent_id"]),
+                str(payload["service_name"]),
+                ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)),
+            )
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["services", "leases"] and parts[3] == "release":
+            return host.release_resident_service_lease(parts[2])
         if method == "GET" and parts == ["agents"]:
             state = (query.get("state") or ["active"])[0]
             if state == "all":
@@ -1299,7 +1655,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                         str(payload["name"]),
                         capabilities=payload.get("capabilities"),
                         metadata=payload.get("metadata"),
-                        scope=str(payload.get("scope") or "local"),  # type: ignore[arg-type]
+                        scope=enum_from_wire(
+                            payload.get("scope") or ServiceScope.LOCAL.value,
+                            ServiceScope,
+                            "scope",
+                        ),
                         ttl=float(payload["ttl"]) if payload.get("ttl") is not None else None,
                     )
                     return {"service": record.to_wire()}

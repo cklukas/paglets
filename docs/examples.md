@@ -23,19 +23,22 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-
 ```
 
 On first start, `paglets-host` copies the bundled demo launch config to
-`~/.paglets/launch.toml`. The bundled config starts the packaged `server-info`
-example service:
+`~/.paglets/launch.toml`. The bundled config declares the packaged
+`server-info` example service lazily:
 
 ```toml
 [launch]
 demo_config_id = "paglets-default-launch"
-demo_config_version = "2"
+demo_config_version = "3"
 
-[[startup_agents]]
+[[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
 enabled = true
 agent_id = "service.server-info"
 singleton = true
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
 state = { service_scope = "mesh" }
 ```
 
@@ -54,14 +57,18 @@ local or lab meshes, not untrusted networks.
 
 `server-info` demonstrates the resident-service pattern:
 
-1. A host starts `ServerInfoAgent` from launch config.
-2. The agent advertises a typed service contract named `server-info`.
+1. A host declares `ServerInfoAgent` from launch config.
+2. The host advertises a typed service contract named `server-info` before the
+   provider is active.
 3. A caller discovers that contract locally or across the mesh.
-4. Requests are ordinary paglet messages, but payloads and replies are typed
+4. The first call starts or activates the provider agent.
+5. Requests are ordinary paglet messages, but payloads and replies are typed
    dataclasses.
-5. The `paglets-sysinfo` CLI creates a short-lived collector paglet that clones
+6. The `paglets-sysinfo` CLI creates a short-lived collector paglet that clones
    to mesh hosts, calls each host's local `server-info` service, and prints an
    aggregate result.
+7. After the idle timeout, the provider deactivates while the service remains
+   discoverable for later calls.
 
 ### Contract And Operations
 
@@ -107,7 +114,10 @@ return SERVER_INFO.route(
 Consumer code can call the typed service directly:
 
 ```python
-service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh")
+from paglets import ServiceScope
+from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
+
+service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
 reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 ```
 
@@ -136,7 +146,8 @@ The collector is `SystemInfoCollectorAgent`. It is not a resident service:
 2. The collector calls `available_hosts(online_only=True, include_self=True)`.
 3. It clones itself to each host.
 4. Each child clone resolves the local `SERVER_INFO` contract and calls the
-   requested operation with `scope="local"`.
+   requested operation with `scope=ServiceScope.LOCAL`, starting lazy providers
+   on demand.
 5. Each child sends a `child_result` message back to the parent.
 6. The parent returns a summary with `results` and `errors`.
 

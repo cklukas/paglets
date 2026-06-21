@@ -5,15 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, is_dataclass
 import time
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, TypeVar
 
 from .errors import SerializationError, ServiceContractError, ServiceNotFoundError
 from .messages import Message
 from .references import PagletProxyRef
+from .runtime_values import ServiceScope, enum_from_wire, require_enum
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 
 
-ServiceScope = Literal["local", "mesh"]
 CONTRACT_METADATA_KEY = "paglets.service_contract"
 _ROUTE_DEFAULT_UNSET = object()
 
@@ -222,11 +222,14 @@ class ServiceRecord:
     proxy: PagletProxyRef
     capabilities: tuple[str, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
-    scope: ServiceScope = "local"
+    scope: ServiceScope = ServiceScope.LOCAL
     host_name: str = ""
     host_url: str = ""
     advertised_at: float = field(default_factory=time.time)
     expires_at: float | None = None
+
+    def __post_init__(self) -> None:
+        require_enum(self.scope, ServiceScope, "scope")
 
     @property
     def expired(self) -> bool:
@@ -243,7 +246,7 @@ class ServiceRecord:
             "proxy": self.proxy.to_wire(),
             "capabilities": list(self.capabilities),
             "metadata": self.metadata,
-            "scope": self.scope,
+            "scope": self.scope.value,
             "host_name": self.host_name,
             "host_url": self.host_url,
             "advertised_at": self.advertised_at,
@@ -257,7 +260,7 @@ class ServiceRecord:
             proxy=PagletProxyRef.from_wire(payload["proxy"]),
             capabilities=tuple(str(item) for item in payload.get("capabilities", [])),
             metadata=dict(payload.get("metadata") or {}),
-            scope=str(payload.get("scope") or "local"),  # type: ignore[arg-type]
+            scope=enum_from_wire(payload.get("scope") or ServiceScope.LOCAL.value, ServiceScope, "scope"),
             host_name=str(payload.get("host_name") or ""),
             host_url=str(payload.get("host_url") or ""),
             advertised_at=float(payload.get("advertised_at", time.time())),
@@ -278,9 +281,10 @@ class ServiceRegistry:
         proxy: PagletProxyRef,
         capabilities: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
-        scope: ServiceScope = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
     ) -> ServiceRecord:
+        require_enum(scope, ServiceScope, "scope")
         record = ServiceRecord(
             name=name,
             proxy=proxy,
@@ -301,10 +305,21 @@ class ServiceRegistry:
                 removed.append(self._records.pop(key))
         return removed
 
-    def remove_agent(self, agent_id: str) -> list[ServiceRecord]:
+    def record(self, name: str, agent_id: str) -> ServiceRecord | None:
+        self._expire()
+        return self._records.get((name, agent_id))
+
+    def remove_agent(
+        self,
+        agent_id: str,
+        *,
+        keep: Callable[[ServiceRecord], bool] | None = None,
+    ) -> list[ServiceRecord]:
         removed: list[ServiceRecord] = []
         for key, record in list(self._records.items()):
             if record.proxy.agent_id == agent_id:
+                if keep is not None and keep(record):
+                    continue
                 removed.append(self._records.pop(key))
         return removed
 
@@ -319,6 +334,8 @@ class ServiceRegistry:
         capability: str | None = None,
         scope: ServiceScope | None = None,
     ) -> list[ServiceRecord]:
+        if scope is not None:
+            require_enum(scope, ServiceScope, "scope")
         self._expire()
         return [
             record

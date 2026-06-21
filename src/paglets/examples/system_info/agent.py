@@ -15,9 +15,10 @@ import psutil
 
 from ...agent import Paglet, PagletState, state_locked
 from ...messages import Message
+from ...resident import ResidentServiceSpec
+from ...runtime_values import ResidentLifecycle, ServiceScope
 from ...serde import dataclass_from_wire
 from ...services import EmptyPayload, ServiceContract, ServiceOperation
-from ...startup import AutoStartSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,22 +132,27 @@ SERVER_INFO = ServiceContract(
 
 @dataclass
 class ServerInfoState(PagletState):
-    service_scope: str = "mesh"
+    service_scope: ServiceScope = ServiceScope.MESH
 
 
 class ServerInfoAgent(Paglet[ServerInfoState]):
     """Resident service agent that reports local host system information."""
 
     State = ServerInfoState
-    AUTO_START = AutoStartSpec(
-        alias="server-info",
-        agent_id="service.server-info",
-        singleton=True,
-        state={"service_scope": "mesh"},
+    RESIDENT_SERVICES = (
+        ResidentServiceSpec(
+            contract=SERVER_INFO,
+            scope=ServiceScope.MESH,
+            lifecycle=ResidentLifecycle.LAZY,
+            idle_timeout=30.0,
+            agent_id="service.server-info",
+            singleton=True,
+            state={"service_scope": ServiceScope.MESH.value},
+        ),
     )
 
     def on_creation(self, event):
-        self.advertise_contract(SERVER_INFO, scope=self.state.service_scope)  # type: ignore[arg-type]
+        self.advertise_contract(SERVER_INFO, scope=self.state.service_scope)
 
     def handle_message(self, message: Message):
         return SERVER_INFO.route(
@@ -351,7 +357,7 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
         operation = _operation_for_name(operation_name)
         try:
             request = dataclass_from_wire(operation.request_type, request_wire)
-            service = self.require_contract(SERVER_INFO, operation=operation, scope="local")
+            service = self.require_contract(SERVER_INFO, operation=operation, scope=ServiceScope.LOCAL)
             reply = service.call(operation, request)
             payload = {
                 "host_name": target_host_name,

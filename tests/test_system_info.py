@@ -7,7 +7,7 @@ from pathlib import Path
 
 import psutil
 
-from paglets import Host, PagletContext
+from paglets import Host, PagletContext, ServiceScope
 from paglets.admin import ServerRef, save_server_config
 from paglets.examples.system_info import (
     GET_DISK,
@@ -38,7 +38,7 @@ def test_server_info_contract_returns_load_disk_and_process_data(tmp_path):
     host.start_background()
     try:
         context = PagletContext(host)
-        load = context.require_contract(SERVER_INFO, operation=GET_LOAD, scope="mesh").call(
+        load = context.require_contract(SERVER_INFO, operation=GET_LOAD, scope=ServiceScope.MESH).call(
             GET_LOAD,
             LoadRequest(include_gpu=True),
         )
@@ -46,7 +46,7 @@ def test_server_info_contract_returns_load_disk_and_process_data(tmp_path):
         assert load.memory_total_bytes > 0
         assert isinstance(load.gpu_available, bool)
 
-        disk = context.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh").call(
+        disk = context.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH).call(
             GET_DISK,
             DiskRequest(paths=[str(tmp_path)], all_volumes=False),
         )
@@ -54,7 +54,7 @@ def test_server_info_contract_returns_load_disk_and_process_data(tmp_path):
         assert disk.volumes[0].total_bytes > 0
 
         process_name = psutil.Process().name()
-        processes = context.require_contract(SERVER_INFO, operation=LIST_PROCESSES, scope="mesh").call(
+        processes = context.require_contract(SERVER_INFO, operation=LIST_PROCESSES, scope=ServiceScope.MESH).call(
             LIST_PROCESSES,
             ProcessListRequest(query=process_name, limit=10),
         )

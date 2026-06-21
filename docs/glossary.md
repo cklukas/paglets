@@ -51,8 +51,8 @@ Itinerary
 
 LaunchConfig
 : The `~/.paglets/launch.toml` startup configuration read by `paglets-host`.
-  The bundled demo config starts the packaged example `server-info` service by
-  default.
+  The bundled demo config declares the packaged example `server-info` service
+  as lazy by default.
 
 Message
 : A JSON-compatible command delivered to a paglet's `handle_message` method.
@@ -91,6 +91,17 @@ ResourceRegistry
 : Runtime-only cleanup registry owned by a paglet. Cleanup runs before
   dispatch, deactivate, retract, or dispose.
 
+Runtime Value Enum
+: A closed runtime value represented by a Python enum, such as
+  `ServiceScope`, `ResidentLifecycle`, `ArrivalMode`, `EnvelopeKind`, or
+  `LaunchConfigSyncAction`. Python APIs require these enum values. TOML, JSON,
+  and HTTP wire formats store strings and convert them at the boundary.
+
+ResidentService
+: A launch-config managed service declaration. Lazy resident services are
+  discoverable before the provider is active and start on first use; eager
+  resident services activate immediately.
+
 ServiceContract
 : An importable typed service definition containing a service name, exact
   version, and typed operations. Providers advertise it; callers look it up to
@@ -99,6 +110,10 @@ ServiceContract
 ServiceHandle
 : A resolved typed client for a `ServiceContract`. It wraps a discovered
   `ServiceRecord`, sends normal paglet messages, and decodes typed replies.
+
+ServiceLease
+: A TTL-backed handle that keeps a lazy managed resident service active across
+  multiple calls until released or expired.
 
 ServiceOperation
 : A typed operation within a `ServiceContract`, including the stable wire
@@ -110,7 +125,8 @@ ServiceRecord
 
 ServerInfoAgent
 : The packaged example resident service agent advertised as `server-info`. It
-  reports load, memory, disk usage, process matches, and host summary data.
+  starts lazily on first use and reports load, memory, disk usage, process
+  matches, and host summary data.
 
 State
 : The dataclass object that moves with a paglet. Ordinary instance attributes

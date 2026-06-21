@@ -21,6 +21,7 @@ from paglets import (
     ServiceNotFoundError,
     ServiceOperation,
     ServiceRecord,
+    ServiceScope,
 )
 from tests.test_paglets_core import free_port
 
@@ -75,7 +76,7 @@ class TicketAgent(Paglet[TicketState]):
     State = TicketState
 
     def on_creation(self, event):
-        self.advertise_contract(FLIGHT_TICKETS, scope="mesh", metadata={"provider": "test"})
+        self.advertise_contract(FLIGHT_TICKETS, scope=ServiceScope.MESH, metadata={"provider": "test"})
         self.state.advertised = True
 
     def quote(self, request: QuoteRequest) -> QuoteReply:
@@ -104,7 +105,7 @@ class ClientAgent(Paglet[ClientState]):
 
     def handle_message(self, message: Message):
         if message.kind == "quote":
-            tickets = self.require_contract(FLIGHT_TICKETS, operation=QUOTE, scope="mesh")
+            tickets = self.require_contract(FLIGHT_TICKETS, operation=QUOTE, scope=ServiceScope.MESH)
             reply = tickets.call(
                 QUOTE,
                 QuoteRequest(
@@ -118,7 +119,7 @@ class ClientAgent(Paglet[ClientState]):
             self.state.last_currency = reply.currency
             return {"price": reply.price, "currency": reply.currency}
         if message.kind == "ping-service":
-            tickets = self.require_contract(FLIGHT_TICKETS, operation=PING, scope="mesh")
+            tickets = self.require_contract(FLIGHT_TICKETS, operation=PING, scope=ServiceScope.MESH)
             return tickets.call(PING) == EmptyPayload()
         return self.not_handled()
 
@@ -127,7 +128,7 @@ class LegacyServiceAgent(Paglet[TicketState]):
     State = TicketState
 
     def on_creation(self, event):
-        self.advertise_service("quotes", capabilities=("quote",), scope="mesh")
+        self.advertise_service("quotes", capabilities=("quote",), scope=ServiceScope.MESH)
 
 
 class BrokenTicketAgent(Paglet[TicketState]):
@@ -215,12 +216,12 @@ def test_typed_contract_discovers_and_calls_mesh_service(tmp_path):
         assert client.send(Message("ping-service")) is True
 
         context = PagletContext(alpha)
-        handle = context.lookup_contract(FLIGHT_TICKETS, operation=QUOTE, scope="mesh")
+        handle = context.lookup_contract(FLIGHT_TICKETS, operation=QUOTE, scope=ServiceScope.MESH)
         assert handle is not None
         assert handle.record.metadata["provider"] == "test"
-        assert context.lookup_contract(FLIGHT_TICKETS_V2, operation=QUOTE, scope="mesh") is None
+        assert context.lookup_contract(FLIGHT_TICKETS_V2, operation=QUOTE, scope=ServiceScope.MESH) is None
         with pytest.raises(ServiceNotFoundError):
-            context.require_contract(FLIGHT_TICKETS_V2, operation=QUOTE, scope="mesh")
+            context.require_contract(FLIGHT_TICKETS_V2, operation=QUOTE, scope=ServiceScope.MESH)
     finally:
         beta.stop()
         alpha.stop()

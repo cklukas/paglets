@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-
-EnvelopeKind = Literal["dispatch", "clone", "retract", "activation"]
+from .runtime_values import EnvelopeKind, enum_from_wire, require_enum
 
 
 @dataclass(slots=True)
@@ -25,9 +24,12 @@ class PagletEnvelope:
     clone_of: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        require_enum(self.kind, EnvelopeKind, "kind")
+
     def to_wire(self) -> dict[str, Any]:
         return {
-            "kind": self.kind,
+            "kind": self.kind.value,
             "agent_id": self.agent_id,
             "agent_class_name": self.agent_class_name,
             "state_class_name": self.state_class_name,
@@ -43,7 +45,7 @@ class PagletEnvelope:
     @classmethod
     def from_wire(cls, payload: dict[str, Any]) -> "PagletEnvelope":
         return cls(
-            kind=payload["kind"],
+            kind=enum_from_wire(payload["kind"], EnvelopeKind, "kind"),
             agent_id=payload["agent_id"],
             agent_class_name=payload["agent_class_name"],
             state_class_name=payload["state_class_name"],

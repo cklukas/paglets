@@ -96,19 +96,23 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765
 ```
 
 On first start, `paglets-host` copies the bundled demo launch config to
-`~/.paglets/launch.toml`. That config starts the packaged example
-`server-info` service agent on each host:
+`~/.paglets/launch.toml`. That config declares the packaged example
+`server-info` service on each host. It is lazy by default: callers can discover
+it immediately, and the provider agent is created on first use:
 
 ```toml
 [launch]
 demo_config_id = "paglets-default-launch"
-demo_config_version = "2"
+demo_config_version = "3"
 
-[[startup_agents]]
+[[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
 enabled = true
 agent_id = "service.server-info"
 singleton = true
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
 state = { service_scope = "mesh" }
 ```
 
@@ -214,8 +218,9 @@ uv run paglets-sysinfo plist python --limit 10
 `paglets-sysinfo` uses the first enabled reachable server in
 `~/.paglets/servers.json` as the entry host, then creates a collector paglet
 there. The collector clones to all online mesh hosts, calls each local
-`server-info` service, and prints the aggregate result. For one-off use, pass
-`--server alpha=http://127.0.0.1:8765`; for scripts, add `--json`.
+`server-info` service, starts lazy providers on demand, and prints the aggregate
+result. For one-off use, pass `--server alpha=http://127.0.0.1:8765`; for
+scripts, add `--json`.
 
 Run a mesh-wide benchmark with a mobile agent:
 
@@ -387,7 +392,8 @@ proxy.send(Message("status"), no_delay=True)
 CLI hosts persist inactive paglets under
 `~/.paglets/hosts/{host-name}/inactive` by default. On graceful CLI shutdown,
 active paglets are deactivated with a startup-activation policy so they resume
-when the host starts again.
+when the host starts again. Lazy managed resident services are the exception:
+they remain discoverable but stay inactive until first use.
 
 ## Message patterns
 
@@ -435,30 +441,46 @@ still need explicit state locking when they share mutable state.
 ## Services, Tickets, Events, And Resources
 
 Paglets can advertise local or mesh-visible services through typed contracts.
-The packaged example `server-info` service is one example; it advertises a typed
-contract that callers can discover and invoke:
+The packaged example `server-info` service is one example. It is declared as a
+lazy resident service by launch config, advertises a typed contract before the
+provider is active, and starts on first use:
 
 ```python
+from paglets import ServiceScope
 from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
 
-service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh")
+service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
 reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
+```
+
+Use a lease when a lazy resident service should stay active across several
+calls:
+
+```python
+with self.lease_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH) as service:
+    first = service.call(GET_DISK, DiskRequest(paths=["/"]))
+    second = service.call(GET_DISK, DiskRequest(paths=["/data"]))
 ```
 
 Use `TransferTicket` when dispatch or clone needs target checks or inactive
 arrival:
 
 ```python
-from paglets import TransferTicket
+from paglets import ArrivalMode, TransferTicket
 
 ticket = TransferTicket(
     beta.address,
     required_capabilities=("agents:create",),
     expected_code_version=alpha.mesh.code_version,
-    arrival_mode="inactive",
+    arrival_mode=ArrivalMode.INACTIVE,
 )
 proxy.dispatch(ticket)
 ```
+
+Python APIs use enum values such as `ServiceScope.MESH` and
+`ArrivalMode.INACTIVE` for closed runtime domains. Config and wire formats still
+store plain strings, for example TOML `scope = "mesh"`, and the runtime converts
+them at the boundary.
 
 Hosts keep an in-memory context event log and accept listeners:
 
@@ -528,6 +550,7 @@ src/paglets/
   messages.py   Message model
   events.py     Lifecycle event dataclasses
   envelope.py   Mobile-state transfer envelope
+  runtime_values.py Closed runtime enums for scopes, lifecycles, and transfer modes
   persistency.py Durable deactivation policy and inactive records
   itinerary.py  Serializable itinerary/task helpers
   admin.py      Multi-server admin client/config helpers

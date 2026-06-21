@@ -170,14 +170,14 @@ self.clone_to(target.name)
 Use a `TransferTicket` for preflight checks, retries, or inactive arrival:
 
 ```python
-from paglets import TransferTicket
+from paglets import ArrivalMode, TransferTicket
 
 self.dispatch(
     TransferTicket(
         "beta",
         required_capabilities=("agents:create",),
         expected_code_version=self.context.host.mesh.code_version,
-        arrival_mode="inactive",
+        arrival_mode=ArrivalMode.INACTIVE,
     )
 )
 ```
@@ -239,15 +239,16 @@ message fails immediately instead.
 ## Talk To Resident Services
 
 Prefer typed service contracts for resident services. The packaged example
-`server-info` service is a ready-made example: each host starts it from launch
-config, it advertises the `SERVER_INFO` contract, and callers receive typed
-dataclass replies:
+`server-info` service is a ready-made example: each host declares it from launch
+config, callers can discover the `SERVER_INFO` contract immediately, and the
+provider agent starts lazily on first use:
 
 ```python
+from paglets import ServiceScope
 from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
 
 
-service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh")
+service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
 reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 ```
 
@@ -256,12 +257,41 @@ dataclasses in an importable module shared by provider and caller. The provider
 uses `advertise_contract`, routes with `contract.route(...)`, and the caller
 uses `require_contract` or `lookup_contract`.
 
+Managed resident services are declared in launch config:
+
+```toml
+[[resident_services]]
+class = "myapp.services.ticket_agent:TicketServiceAgent"
+agent_id = "service.ticket"
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
+```
+
+Use `lifecycle = "lazy"` when the service only needs to run while requests are
+active. Use `lifecycle = "eager"` for continuous monitors or services that must
+keep live local resources open. Lazy services deactivate after their idle
+timeout, but their service record stays discoverable and a later call activates
+them again.
+
+TOML and JSON store these closed values as strings because those formats do not
+have enums. Python code uses enum values such as `ServiceScope.MESH`;
+configuration loading converts strings like `scope = "mesh"` at the boundary.
+
+Use a lease when several calls should keep a lazy provider active:
+
+```python
+with self.lease_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH) as service:
+    first = service.call(GET_DISK, DiskRequest(paths=["/"]))
+    second = service.call(GET_DISK, DiskRequest(paths=["/data"]))
+```
+
 The lower-level string API remains available when a fully typed contract is not
 needed. `lookup_service` returns a serializable `PagletProxyRef`, which can be
 stored in dataclass state or resolved to a proxy:
 
 ```python
-service_ref = self.lookup_service("flight-ticket", capability="quote", scope="mesh")
+service_ref = self.lookup_service("flight-ticket", capability="quote", scope=ServiceScope.MESH)
 if service_ref is not None:
     reply = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
 ```

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paglets import Host, Message, Paglet, PagletState
+from paglets import Host, Message, Paglet, PagletState, ServiceScope
 
 try:
     from .support import local_hosts
@@ -41,13 +41,13 @@ class TravellerPaglet(Paglet[TravellerState]):
             self.state.name,
             capabilities=("travel",),
             metadata={"host": self.context.name},
-            scope="mesh",
+            scope=ServiceScope.MESH,
         )
         self.state.registrations.append(f"{self.state.name}@{self.context.name}")
 
 
 def lookup_traveller(host: Host, name: str = "Traveller") -> dict[str, str] | None:
-    record = host.lookup_service(name, capability="travel", scope="mesh")
+    record = host.lookup_service(name, capability="travel", scope=ServiceScope.MESH)
     return record.proxy.to_wire() if record is not None else None
 
 

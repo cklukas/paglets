@@ -26,6 +26,14 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.services
 
+## Runtime Values
+
+::: paglets.runtime_values
+
+## Resident Services
+
+::: paglets.resident
+
 ## Startup
 
 ::: paglets.startup

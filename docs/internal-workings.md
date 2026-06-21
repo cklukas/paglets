@@ -133,6 +133,8 @@ The host API is intentionally small:
 - `POST /hosts/join`
 - `GET /events?since=<id>&limit=<n>`
 - `GET /services`
+- `POST /services/leases`
+- `POST /services/leases/{lease-id}/release`
 - `GET /agents?state=active|inactive|all`
 - `POST /agents`
 - `GET /agents/{id}`
@@ -149,19 +151,28 @@ The host API is intentionally small:
 
 There is no authentication layer in this first runtime.
 
-## Launch Config And Autostart
+## Launch Config, Autostart, And Resident Services
 
 `paglets-host` loads `~/.paglets/launch.toml` by default. On first start it
-copies the bundled demo launch config, which starts the packaged example
-`server-info` service:
+copies the bundled demo launch config, which declares the packaged example
+`server-info` service as a lazy managed resident service:
 
 ```toml
-[[startup_agents]]
+[[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
+enabled = true
 agent_id = "service.server-info"
 singleton = true
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
 state = { service_scope = "mesh" }
 ```
+
+Launch config is an external TOML format, so lifecycle and scope values are
+stored as strings. The loader converts them to `ResidentLifecycle` and
+`ServiceScope` enum values before runtime code sees them. Python APIs require
+the enum values directly.
 
 If a later package version includes a different bundled demo config version,
 interactive starts ask before replacing the user file. The previous file is
@@ -170,10 +181,23 @@ starts never block; they keep the existing file and print a warning. Operators
 can use `--yes`, `--no-sync-launch-config`, or set `sync_demo_config = false`
 in `[launch]`.
 
-Startup agents run after the HTTP server is bound and durable startup records
-are activated, but before mesh gossip starts. Singleton entries with a fixed
-agent ID skip an already active paglet and activate an inactive matching record
-instead of creating a duplicate.
+`startup_agents` are ordinary always-started agents. They run after the HTTP
+server is bound and durable startup records are activated, but before mesh
+gossip starts. Singleton entries with a fixed agent ID skip an already active
+paglet and activate an inactive matching record instead of creating a duplicate.
+
+`resident_services` are managed service declarations. Lazy resident services
+are registered in the service registry at host start without constructing the
+provider paglet. First message delivery to the service agent ID creates or
+activates the provider, then routes the message normally. Eager resident
+services use the same declaration format with `lifecycle = "eager"` and are
+activated immediately.
+
+The host tracks in-flight calls, TTL-backed service leases, and last-used time
+for managed services. A lazy active provider is deactivated after
+`idle_timeout` when there are no in-flight calls and no active leases. The
+managed service record stays discoverable, so a later call can activate it
+again.
 
 ## Durable Inactive Records
 

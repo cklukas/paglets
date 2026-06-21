@@ -259,11 +259,13 @@ advertise local or mesh-visible services, and mobile paglets can discover them
 by service contract:
 
 ```python
+from paglets import ServiceScope
+
 QUOTE = ServiceOperation("quote", QuoteRequest, QuoteReply)
 FLIGHT_TICKETS = ServiceContract("flight-ticket", operations=(QUOTE,), version="1")
 
-self.advertise_contract(FLIGHT_TICKETS, scope="mesh")
-tickets = self.require_contract(FLIGHT_TICKETS, operation=QUOTE, scope="mesh")
+self.advertise_contract(FLIGHT_TICKETS, scope=ServiceScope.MESH)
+tickets = self.require_contract(FLIGHT_TICKETS, operation=QUOTE, scope=ServiceScope.MESH)
 reply = tickets.call(QUOTE, QuoteRequest("FRA", "SFO"))
 ```
 
@@ -271,3 +273,5 @@ The stable wire identifiers are still strings, but they are declared once in a
 shared importable contract instead of repeated across agents. The contract also
 defines dataclass request and reply schemas, so callers get a typed handle while
 the runtime keeps the existing JSON message and service registry model.
+Closed runtime values such as service scope are enums in Python APIs; TOML and
+JSON keep string values and are converted at the boundary.

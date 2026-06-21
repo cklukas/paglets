@@ -33,8 +33,9 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-
 ```
 
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
-demo config. The default launch config starts the packaged example
-`server-info` service agent, so mesh-wide commands can query local system state:
+demo config. The default launch config declares the packaged example
+`server-info` service lazily, so mesh-wide commands can query local system state
+and start providers only when needed:
 
 ```bash
 uv run paglets-sysinfo df

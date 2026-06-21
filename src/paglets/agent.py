@@ -15,13 +15,15 @@ from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .messages import Message, ReplySet
 from .persistency import DeactivationPolicy, DeactivationRequest
 from .resources import ResourceRegistry
+from .runtime_values import ServiceScope
 
 if TYPE_CHECKING:  # pragma: no cover
     from .host import Host
     from .mesh import HostRef
     from .proxy import PagletProxy
     from .references import PagletProxyRef
-    from .services import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord, ServiceScope
+    from .resident import ServiceLease
+    from .services import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord
     from .transfer import TransferTicket
 
 
@@ -160,7 +162,7 @@ class PagletContext:
         *,
         capabilities: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         agent_id: str | None = None,
     ) -> "ServiceRecord":
@@ -187,7 +189,7 @@ class PagletContext:
         name: str,
         *,
         capability: str | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "PagletProxyRef | None":
         record = self._host.lookup_service(name, capability=capability, scope=scope)
         return record.proxy if record is not None else None
@@ -197,7 +199,7 @@ class PagletContext:
         name: str | None = None,
         *,
         capability: str | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list["ServiceRecord"]:
         return self._host.lookup_services(name, capability=capability, scope=scope)
 
@@ -205,7 +207,7 @@ class PagletContext:
         self,
         contract: "ServiceContract",
         *,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         metadata: dict[str, Any] | None = None,
         agent_id: str | None = None,
@@ -227,7 +229,7 @@ class PagletContext:
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "ServiceHandle | None":
         handles = self.lookup_contracts(contract, operation=operation, scope=scope)
         return handles[0] if handles else None
@@ -237,7 +239,7 @@ class PagletContext:
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list["ServiceHandle"]:
         from .services import ServiceHandle
 
@@ -255,7 +257,7 @@ class PagletContext:
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "ServiceHandle":
         from .services import ServiceNotFoundError
 
@@ -266,6 +268,24 @@ class PagletContext:
                 f"No service contract {contract.name!r} version {contract.version!r}{operation_text} found in {scope} scope"
             )
         return handle
+
+    def lease_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: ServiceScope = ServiceScope.LOCAL,
+        ttl: float = 60.0,
+    ) -> "ServiceLease":
+        handle = self.require_contract(contract, operation=operation, scope=scope)
+        lease = self._host.lease_service_handle(handle, ttl=ttl)
+        if self._agent_id is not None:
+            self._host.resources_for(self._agent_id).register(
+                f"service-lease:{lease.lease_id}",
+                lease.release,
+                suppress=True,
+            )
+        return lease
 
     def resources(self, agent_id: str | None = None) -> ResourceRegistry:
         owner_id = agent_id or self._agent_id
@@ -395,7 +415,7 @@ class Paglet(Generic[StateT]):
         *,
         capabilities: list[str] | tuple[str, ...] | None = None,
         metadata: dict[str, Any] | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
     ) -> "ServiceRecord":
         return self.context.advertise_service(
@@ -415,7 +435,7 @@ class Paglet(Generic[StateT]):
         name: str,
         *,
         capability: str | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "PagletProxyRef | None":
         return self.context.lookup_service(name, capability=capability, scope=scope)
 
@@ -424,7 +444,7 @@ class Paglet(Generic[StateT]):
         name: str | None = None,
         *,
         capability: str | None = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list["ServiceRecord"]:
         return self.context.lookup_services(name, capability=capability, scope=scope)
 
@@ -432,7 +452,7 @@ class Paglet(Generic[StateT]):
         self,
         contract: "ServiceContract",
         *,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> "ServiceRecord":
@@ -449,7 +469,7 @@ class Paglet(Generic[StateT]):
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "ServiceHandle | None":
         return self.context.lookup_contract(contract, operation=operation, scope=scope)
 
@@ -458,7 +478,7 @@ class Paglet(Generic[StateT]):
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> list["ServiceHandle"]:
         return self.context.lookup_contracts(contract, operation=operation, scope=scope)
 
@@ -467,9 +487,19 @@ class Paglet(Generic[StateT]):
         contract: "ServiceContract",
         *,
         operation: "ServiceOperation[Any, Any] | None" = None,
-        scope: "ServiceScope" = "local",
+        scope: ServiceScope = ServiceScope.LOCAL,
     ) -> "ServiceHandle":
         return self.context.require_contract(contract, operation=operation, scope=scope)
+
+    def lease_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: ServiceScope = ServiceScope.LOCAL,
+        ttl: float = 60.0,
+    ) -> "ServiceLease":
+        return self.context.lease_contract(contract, operation=operation, scope=scope, ttl=ttl)
 
     @staticmethod
     def not_handled() -> _NotHandled:

@@ -15,6 +15,8 @@ from paglets import (
     Paglet,
     PagletProxyRef,
     PagletState,
+    ServiceScope,
+    ArrivalMode,
     TransferError,
     TransferTicket,
     state_locked,
@@ -57,7 +59,7 @@ class ServiceAgent(Paglet[ServiceState]):
     State = ServiceState
 
     def on_creation(self, event):
-        self.advertise_service("quotes", capabilities=("quote", "price"), metadata={"version": 1}, scope="mesh")
+        self.advertise_service("quotes", capabilities=("quote", "price"), metadata={"version": 1}, scope=ServiceScope.MESH)
         self.state.advertised = True
 
     def handle_message(self, message: Message):
@@ -370,7 +372,7 @@ def test_service_registry_local_ttl_capability_and_mesh_lookup(tmp_path):
         assert local is not None
         assert local.proxy.agent_id == proxy.agent_id
 
-        mesh = alpha.lookup_service("quotes", capability="price", scope="mesh")
+        mesh = alpha.lookup_service("quotes", capability="price", scope=ServiceScope.MESH)
         assert mesh is not None
         assert mesh.proxy.resolve(alpha.client).send(Message("ping")) == "pong"
 
@@ -411,7 +413,7 @@ def test_transfer_ticket_preflight_failure_preserves_source_and_inactive_arrival
             proxy.dispatch(TransferTicket(beta.address, required_capabilities=("missing",)))
         assert alpha.get_proxy(proxy.agent_id) is not None
 
-        inactive_proxy = proxy.dispatch(TransferTicket(beta.address, arrival_mode="inactive"))
+        inactive_proxy = proxy.dispatch(TransferTicket(beta.address, arrival_mode=ArrivalMode.INACTIVE))
         assert inactive_proxy.agent_id == proxy.agent_id
         assert alpha.get_proxy(proxy.agent_id) is None
         assert beta.get_proxy(proxy.agent_id) is None

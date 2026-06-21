@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
-
-ArrivalMode = Literal["activate", "inactive"]
+from .runtime_values import ArrivalMode, enum_from_wire, require_enum
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +18,10 @@ class TransferTicket:
     retry_interval: float = 0.25
     required_capabilities: tuple[str, ...] = ()
     expected_code_version: str | None = None
-    arrival_mode: ArrivalMode = "activate"
+    arrival_mode: ArrivalMode = ArrivalMode.ACTIVATE
+
+    def __post_init__(self) -> None:
+        require_enum(self.arrival_mode, ArrivalMode, "arrival_mode")
 
     @classmethod
     def from_target(cls, target: str | "TransferTicket") -> "TransferTicket":
@@ -40,7 +42,11 @@ class TransferTicket:
                 if payload.get("expected_code_version") is not None
                 else None
             ),
-            arrival_mode=str(payload.get("arrival_mode") or "activate"),  # type: ignore[arg-type]
+            arrival_mode=enum_from_wire(
+                payload.get("arrival_mode") or ArrivalMode.ACTIVATE.value,
+                ArrivalMode,
+                "arrival_mode",
+            ),
         )
 
     def to_wire(self) -> dict[str, Any]:
@@ -51,5 +57,5 @@ class TransferTicket:
             "retry_interval": self.retry_interval,
             "required_capabilities": list(self.required_capabilities),
             "expected_code_version": self.expected_code_version,
-            "arrival_mode": self.arrival_mode,
+            "arrival_mode": self.arrival_mode.value,
         }

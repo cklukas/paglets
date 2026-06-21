@@ -40,7 +40,9 @@ from .messages import (
 from .persistency import DeactivationPolicy, DeactivationRequest
 from .proxy import PagletProxy
 from .references import PagletProxyRef
+from .resident import ResidentServiceSpec, ServiceLease
 from .resources import ResourceCleanupError, ResourceRegistry
+from .runtime_values import ArrivalMode, EnvelopeKind, LaunchConfigSyncAction, ResidentLifecycle, ServiceScope
 from .services import (
     EmptyPayload,
     ServiceContract,
@@ -58,6 +60,7 @@ from .errors import PagletInactiveError, TransferError
 __all__ = [
     "ACTIVE",
     "AutoStartSpec",
+    "ArrivalMode",
     "CLONE",
     "CloneEvent",
     "ContextEvent",
@@ -73,6 +76,7 @@ __all__ = [
     "EXECUTE_ON_DISPATCH",
     "EXECUTE_ON_REVERTING",
     "EmptyPayload",
+    "EnvelopeKind",
     "FUTURE",
     "FutureReply",
     "Host",
@@ -82,6 +86,7 @@ __all__ = [
     "ItineraryPlan",
     "ItineraryTask",
     "LaunchConfig",
+    "LaunchConfigSyncAction",
     "MAX_PRIORITY",
     "MIN_PRIORITY",
     "MobilityEvent",
@@ -103,7 +108,11 @@ __all__ = [
     "ReplySet",
     "ResourceCleanupError",
     "ResourceRegistry",
+    "ResidentServiceSpec",
+    "ResidentLifecycle",
     "SYNCHRONOUS",
+    "ServiceLease",
+    "ServiceScope",
     "SYSTEM_PRIORITY",
     "ServiceContract",
     "ServiceContractError",
