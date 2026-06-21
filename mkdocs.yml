@@ -15,6 +15,7 @@ theme:
 nav:
   - Home: index.md
   - Implementing Paglets: implementing-paglets.md
+  - Example Agents: examples.md
   - Usage Ideas: usage-ideas.md
   - Internal Workings: internal-workings.md
   - API Reference: api-reference.md

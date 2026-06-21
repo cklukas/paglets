@@ -66,6 +66,9 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
 - [Implementing Paglets](implementing-paglets.md): how to write paglet classes,
   state objects, lifecycle hooks, message handlers, movement, and mesh-aware
   behavior.
+- [Example Agents](examples.md): detailed explanations of packaged example
+  agents, including `server-info`, `paglets-sysinfo`, and
+  `paglets-perf-test`.
 - [Usage Ideas](usage-ideas.md): practical scenarios where mobile state and
   agent-to-agent communication are a useful fit.
 - [Internal Workings](internal-workings.md): how the runtime is structured and
