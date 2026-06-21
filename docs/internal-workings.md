@@ -316,6 +316,16 @@ same-version peers discovered through:
 ignored by the registry. This keeps name-based dispatch and clone helpers from
 selecting hosts that are likely running incompatible code.
 
+## Git Auto-Update
+
+`paglets-host --auto-update-from-git` is documented in detail in
+[Git Auto-Update](git-auto-update.md). Internally, the host records its
+process-start git hash, serializes `git status`, `git fetch`, `git pull`, and
+`uv sync` through `.git/paglets-auto-update.lock`, stores the latest update
+result in `/health`, and exposes `POST /admin/git-update` only for opted-in
+hosts. Normal mesh version gating still protects dispatch and clone selection;
+the update endpoint is a separate trusted-network maintenance path.
+
 ## TUI And Admin Client
 
 The TUI is a client, not a host. It reads a local config file, polls configured

@@ -120,6 +120,29 @@ def test_version_mismatch_peers_are_ignored():
     assert beta.mesh.lookup("alpha") is None
 
 
+def test_version_mismatch_peers_trigger_git_update_hook(monkeypatch):
+    alpha = _host("alpha", version="mesh-a")
+    beta = _host("beta", version="mesh-b", peers=[alpha.address])
+    calls = []
+
+    def fake_request(url, **kwargs):
+        calls.append((url, kwargs))
+        return None
+
+    monkeypatch.setattr(beta, "request_peer_git_update", fake_request)
+    alpha.start_background()
+    beta.start_background()
+    try:
+        beta.mesh.gossip_once()
+    finally:
+        beta.stop()
+        alpha.stop()
+
+    assert calls
+    assert calls[0][0] == alpha.address
+    assert calls[0][1]["health"]["code_version"] == "mesh-a"
+
+
 def test_context_helpers_resolve_named_hosts_for_dispatch_and_clone():
     alpha = _host("alpha")
     beta = _host("beta", peers=[alpha.address])

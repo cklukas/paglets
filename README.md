@@ -193,6 +193,16 @@ Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
 current git commit, then a package-version fallback. Different versions are
 ignored by the mesh.
 
+For trusted lab meshes where every host runs from a git checkout, add
+`--auto-update-from-git` to `paglets-host`. The checkout must be clean; if
+`git status --porcelain` reports uncommitted or untracked files, startup is
+cancelled before any fetch or pull runs. Clean hosts serialize `git fetch`,
+`git pull`, `uv sync`, and self-restart through a checkout-local lock, then
+broadcast their commit to peer hosts. See the dedicated
+[Git Auto-Update](docs/git-auto-update.md) guide for the full flow, failure
+modes, and diagrams. This endpoint is unauthenticated; use it only on trusted
+networks.
+
 Start the multi-server TUI admin console:
 
 ```bash

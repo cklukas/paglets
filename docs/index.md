@@ -78,6 +78,9 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
 - [Example Agents](examples.md): detailed explanations of packaged example
   agents, including `server-info`, `mesh-info`, Pi compute, and
   `paglets-perf-test`.
+- [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,
+  synchronize dependencies, broadcast commit hashes, and restart from updated
+  code.
 - [Usage Ideas](usage-ideas.md): practical scenarios where mobile state and
   agent-to-agent communication are a useful fit.
 - [Internal Workings](internal-workings.md): how the runtime is structured and

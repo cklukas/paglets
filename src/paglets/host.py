@@ -10,9 +10,10 @@ import shutil
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from . import git_update
 from .agent import ACTIVE, INACTIVE, Paglet, PagletState
 from .client import HostClient
 from .context_events import ContextEvent, ContextEventLog, ContextListener
@@ -65,9 +66,13 @@ HOST_CAPABILITIES = [
     "services:list",
     "services:mesh",
     "transfer:tickets",
+    "admin:git-update",
 ]
 
 SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS = 0.5
+AUTO_UPDATE_REQUEST_INTERVAL_SECONDS = 10.0
+AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS = 10.0
+AUTO_UPDATE_RESTART_DELAY_SECONDS = 0.2
 
 
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
@@ -115,6 +120,12 @@ class Host:
         persistent_storage_quota_bytes: int | None = DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES,
         launch_config: LaunchConfig | None = None,
         launch_config_sync_result: LaunchConfigSyncResult | None = None,
+        auto_update_from_git: bool = False,
+        git_repo_root: str | Path | None = None,
+        git_process_start_head: str | None = None,
+        auto_update_restart_callback: Callable[[], None] | None = None,
+        auto_update_reporter: Callable[[str], None] | None = None,
+        auto_update_restart_delay: float = AUTO_UPDATE_RESTART_DELAY_SECONDS,
     ):
         self.name = name
         self.bind_host = host
@@ -145,6 +156,20 @@ class Host:
         self._thread: threading.Thread | None = None
         self._activation_stop = threading.Event()
         self._activation_thread: threading.Thread | None = None
+        self.auto_update_from_git = bool(auto_update_from_git)
+        self.git_repo_root = Path(git_repo_root).resolve() if git_repo_root is not None else None
+        self.git_process_start_head = git_process_start_head or ""
+        self._git_update_status: dict[str, Any] | None = None
+        self._auto_update_restart_callback = auto_update_restart_callback
+        self._auto_update_reporter = auto_update_reporter
+        self._auto_update_restart_delay = max(0.0, float(auto_update_restart_delay))
+        self._auto_update_restart_scheduled = False
+        self._auto_update_request_times: dict[str, float] = {}
+        if self.auto_update_from_git:
+            if self.git_repo_root is None:
+                self.git_repo_root = git_update.find_repo_root(Path.cwd())
+            if not self.git_process_start_head:
+                self.git_process_start_head = git_update.current_head(self.git_repo_root)
         self.mesh = MeshRegistry(
             self,
             enabled=mesh,
@@ -318,7 +343,7 @@ class Host:
         with self._lock:
             active_count = sum(1 for record in self._agents.values() if record.ready and not record.crashed)
             inactive_count = len(self._inactive)
-        return {
+        payload = {
             "name": self.name,
             "address": self.address,
             "active_count": active_count,
@@ -326,6 +351,8 @@ class Host:
             "code_version": self.mesh.code_version,
             "capabilities": list(HOST_CAPABILITIES),
         }
+        payload.update(self._git_update_health())
+        return payload
 
     def list_hosts(self, *, online_only: bool = False, include_self: bool = True) -> list[HostRef]:
         return self.mesh.hosts(online_only=online_only, include_self=include_self)
@@ -333,6 +360,190 @@ class Host:
     def join_mesh(self, payload: dict[str, Any]) -> list[HostRef]:
         self.mesh.register_wire(payload)
         return self.mesh.hosts(include_self=True)
+
+    def handle_git_update_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.auto_update_from_git or self.git_repo_root is None:
+            status = {
+                "ok": False,
+                "status": "disabled",
+                "error": "git auto-update is disabled for this host",
+                "target_hash": str(payload.get("target_hash") or ""),
+            }
+            self._store_git_update_status(status)
+            return status
+
+        target_hash = str(payload.get("target_hash") or "").strip()
+        source_name = str(payload.get("source_name") or "")
+        source_url = str(payload.get("source_url") or "")
+        result = git_update.update_checkout(
+            self.git_repo_root,
+            process_start_head=self.git_process_start_head,
+            target_hash=target_hash,
+        )
+        status = result.to_wire()
+        status.update(
+            {
+                "source_name": source_name,
+                "source_url": source_url,
+                "restart_scheduled": False,
+            }
+        )
+        self._store_git_update_status(status)
+        if result.restart_required:
+            status["restart_scheduled"] = self._schedule_auto_update_restart()
+            self._store_git_update_status(status)
+        return status
+
+    def broadcast_git_update(self, targets: list[str] | None = None) -> list[dict[str, Any]]:
+        if not self.auto_update_from_git:
+            return []
+        urls = set(targets or [])
+        urls.update(self.mesh.peer_urls(include_known=True))
+        responses: list[dict[str, Any]] = []
+        for url in sorted(urls):
+            response = self.request_peer_git_update(url)
+            if response is not None:
+                responses.append(response)
+        return responses
+
+    def request_peer_git_update(
+        self,
+        url: str,
+        *,
+        target_hash: str | None = None,
+        health: dict[str, Any] | None = None,
+        throttle: bool = True,
+    ) -> dict[str, Any] | None:
+        if not self.auto_update_from_git:
+            return None
+        try:
+            normalized = HostRef.from_wire(
+                {
+                    "name": health.get("name", url) if health else url,
+                    "url": health.get("address", url) if health else url,
+                    "code_version": health.get("code_version", self.mesh.code_version) if health else self.mesh.code_version,
+                    "online": True,
+                    "last_seen": time.time(),
+                    "active_count": health.get("active_count", 0) if health else 0,
+                    "inactive_count": health.get("inactive_count", 0) if health else 0,
+                }
+            ).url
+        except Exception:
+            normalized = url.rstrip("/")
+        if normalized.rstrip("/") == self.address.rstrip("/"):
+            return None
+        if throttle and not self._reserve_git_update_request(normalized):
+            return None
+
+        target = (target_hash or self._current_git_head()).strip()
+        if not target:
+            return None
+        try:
+            response = self.client.post_json(
+                f"{normalized.rstrip('/')}/admin/git-update",
+                {
+                    "target_hash": target,
+                    "source_name": self.name,
+                    "source_url": self.address,
+                },
+                timeout=AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS,
+            )
+            if isinstance(response, dict):
+                response.setdefault("url", normalized)
+                if not response.get("ok"):
+                    self._report_git_update_failure(normalized, response)
+                return response
+            failure = {"ok": False, "status": "invalid-response", "error": f"unexpected response {response!r}", "url": normalized}
+            self._report_git_update_failure(normalized, failure)
+            return failure
+        except Exception as exc:
+            failure = {"ok": False, "status": "request-failed", "error": str(exc), "target_hash": target, "url": normalized}
+            self._report_git_update_failure(normalized, failure)
+            return failure
+
+    def _git_update_health(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "auto_update_from_git": self.auto_update_from_git,
+            "auto_update_restart_scheduled": self._auto_update_restart_scheduled,
+        }
+        if self.git_repo_root is not None:
+            payload["git_repo_root"] = str(self.git_repo_root)
+            payload["git_head"] = self._current_git_head()
+            payload["git_process_start_head"] = self.git_process_start_head
+        status = self._git_update_status
+        if status is not None:
+            payload["git_update"] = dict(status)
+        return payload
+
+    def _current_git_head(self) -> str:
+        if self.git_repo_root is None:
+            return ""
+        try:
+            return git_update.current_head(self.git_repo_root)
+        except git_update.GitUpdateError:
+            return self.git_process_start_head
+
+    def _store_git_update_status(self, status: dict[str, Any]) -> None:
+        with self._lock:
+            self._git_update_status = dict(status)
+
+    def _reserve_git_update_request(self, url: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            last = self._auto_update_request_times.get(url, 0.0)
+            if now - last < AUTO_UPDATE_REQUEST_INTERVAL_SECONDS:
+                return False
+            self._auto_update_request_times[url] = now
+            return True
+
+    def _schedule_auto_update_restart(self) -> bool:
+        if self._auto_update_restart_callback is None:
+            self._report_auto_update("restart required, but no restart callback is configured")
+            return False
+        with self._lock:
+            if self._auto_update_restart_scheduled:
+                return True
+            self._auto_update_restart_scheduled = True
+        thread = threading.Thread(
+            target=self._run_auto_update_restart,
+            name=f"paglets-auto-update-restart-{self.name}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _run_auto_update_restart(self) -> None:
+        time.sleep(self._auto_update_restart_delay)
+        callback = self._auto_update_restart_callback
+        try:
+            self.shutdown()
+        finally:
+            if callback is not None:
+                callback()
+
+    def _report_git_update_failure(self, url: str, response: dict[str, Any]) -> None:
+        status = str(response.get("status") or "failed")
+        target = str(response.get("target_hash") or "")
+        error = str(response.get("error") or "")
+        pieces = [f"{url}: git auto-update {status}"]
+        if target:
+            pieces.append(f"target {target}")
+        if error:
+            pieces.append(error)
+        if status == "target-missing":
+            pieces.append("The commit may not have been pushed yet; run git push and restart this host to broadcast again.")
+        stderr = _trim_git_output(str(response.get("stderr") or ""))
+        stdout = _trim_git_output(str(response.get("stdout") or ""))
+        if stderr:
+            pieces.append(f"stderr: {stderr}")
+        if stdout:
+            pieces.append(f"stdout: {stdout}")
+        self._report_auto_update("; ".join(pieces))
+
+    def _report_auto_update(self, message: str) -> None:
+        reporter = self._auto_update_reporter
+        if reporter is not None:
+            reporter(message)
 
     def add_listener(self, listener: ContextListener) -> None:
         self._events.add_listener(listener)
@@ -1923,6 +2134,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             return {"hosts": [ref.to_wire() for ref in host.list_hosts(include_self=True)]}
         if method == "POST" and parts == ["hosts", "join"]:
             return {"hosts": [ref.to_wire() for ref in host.join_mesh(payload)]}
+        if method == "POST" and parts == ["admin", "git-update"]:
+            return host.handle_git_update_request(payload)
         if method == "GET" and parts == ["events"]:
             since = int((query.get("since") or ["0"])[0])
             limit = int((query.get("limit") or ["100"])[0])
@@ -2050,3 +2263,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
             self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
+
+
+def _trim_git_output(value: str, *, limit: int = 500) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."

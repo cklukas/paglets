@@ -192,6 +192,15 @@ class MeshRegistry:
         if normalized != self._host.address.rstrip("/"):
             self._seeds.add(normalized)
 
+    def peer_urls(self, *, include_known: bool = True) -> list[str]:
+        self_url = self._host.address.rstrip("/")
+        with self._lock:
+            urls = set(self._seeds)
+            if include_known:
+                urls.update(self._hosts)
+        urls.discard(self_url)
+        return sorted(urls)
+
     def hosts(self, *, online_only: bool = False, include_self: bool = True) -> list[HostRef]:
         self.refresh_self()
         self._expire_stale_hosts()
@@ -252,6 +261,7 @@ class MeshRegistry:
                 f"ignoring mesh peer {ref.name} at {ref.url}: "
                 f"version {ref.code_version!r} != {self.code_version!r}"
             )
+            self._host.request_peer_git_update(ref.url)
             return None
         if ref.url.rstrip("/") == self._host.address.rstrip("/"):
             return self.refresh_self()
@@ -285,6 +295,7 @@ class MeshRegistry:
                     f"ignoring mesh peer {health.get('name', normalized)} at {normalized}: "
                     f"version {health_version!r} != {self.code_version!r}"
                 )
+                self._host.request_peer_git_update(normalized, health=health)
                 return self.hosts(include_self=True)
             remote_ref = HostRef(
                 name=str(health.get("name") or _name_from_url(normalized)),
