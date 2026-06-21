@@ -67,6 +67,8 @@ HOST_CAPABILITIES = [
     "transfer:tickets",
 ]
 
+SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS = 0.5
+
 
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
 
@@ -1755,21 +1757,39 @@ class Host:
 
     def _deactivate_active_for_shutdown(self) -> None:
         with self._lock:
-            agent_ids = list(self._agents)
-        for agent_id in agent_ids:
+            records = list(self._agents.items())
+        for agent_id, record in records:
             with self._lock:
-                if agent_id not in self._agents:
+                if self._agents.get(agent_id) is not record:
                     continue
+            request = DeactivationRequest(
+                reason="shutdown",
+                source="host",
+                policy=self._resident_service_shutdown_policy(agent_id),
+            )
             try:
-                self.deactivate(
-                    agent_id,
-                    DeactivationRequest(
-                        reason="shutdown",
-                        source="host",
-                        policy=self._resident_service_shutdown_policy(agent_id),
-                    ),
+                prepared = record.request(
+                    "deactivate_prepare",
+                    {"request": request.to_wire()},
+                    timeout=SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS,
                 )
-            except PagletError:
+                record._update_from_reply(prepared)
+                policy = DeactivationPolicy.from_wire(prepared.get("policy"))
+                info = {"name": self.name, "address": self.address}
+                envelope = self._make_envelope(record, EnvelopeKind.ACTIVATION, info)
+                inactive = InactiveRecord(envelope=envelope, policy=policy, request=request)
+                self._write_inactive_record(inactive)
+                with self._lock:
+                    if self._agents.get(agent_id) is record:
+                        self._inactive[agent_id] = inactive
+                self._remove_active_agent(agent_id, expected=record, terminate=True)
+                self._emit(
+                    "deactivate",
+                    agent_id=agent_id,
+                    class_name=envelope.agent_class_name,
+                    data={"reason": request.reason},
+                )
+            except Exception:
                 continue
 
     def _terminate_active_children(self) -> None:
@@ -1880,6 +1900,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json() if method == "POST" else {}
             result = self._route(method, self.path, payload)
             self._write_json(200, result)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return
         except NotHandledError as exc:
             self._write_error(422, exc)
         except InvalidAgentError as exc:
@@ -2024,4 +2046,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def _write_error(self, status: int, exc: Exception) -> None:
-        self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)})
+        try:
+            self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)})
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            return

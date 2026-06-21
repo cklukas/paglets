@@ -8,6 +8,7 @@ import time
 
 from paglets import Host, Message
 from paglets.admin import ServerRef, save_server_config
+from paglets.errors import InvalidAgentError
 from paglets.examples.compute import (
     PiBatchRequest,
     PiBatchResult,
@@ -23,7 +24,10 @@ from paglets.examples.compute.agent import (
     _encode_bigint,
     _host_worker_slots,
     _int_to_decimal_string,
+    _is_missing_worker_error,
+    _normalize_request,
 )
+from paglets.examples.compute.cli import _parser as pi_parser
 from paglets.examples.compute.cli import main as pi_main
 from paglets.examples.mesh_info import MeshHostSnapshot
 from paglets.serde import dataclass_to_wire
@@ -51,6 +55,24 @@ def test_bigint_wire_helpers_avoid_python_decimal_string_limit():
     assert encoded.startswith("-0x")
     assert _decode_bigint(encoded) == -value
     assert _int_to_decimal_string(value) == decimal_text
+
+
+def test_pi_compute_timeout_default_is_unbounded():
+    assert PiComputeRequest().timeout == 0.0
+    assert _normalize_request(PiComputeRequest(timeout=-1.0)).timeout == 0.0
+
+
+def test_pi_compute_cli_has_separate_request_timeout():
+    args = pi_parser().parse_args(["--digits", "8", "--stream-chunk-size", "123"])
+
+    assert args.timeout == 0.0
+    assert args.request_timeout == 300.0
+    assert args.stream_chunk_size == 123
+
+
+def test_self_disposed_worker_cleanup_errors_are_ignored():
+    assert _is_missing_worker_error(InvalidAgentError("No paglet 'pi-worker-1' on alpha"))
+    assert not _is_missing_worker_error(InvalidAgentError("Paglet 'pi-worker-1' crashed on alpha"))
 
 
 def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):
@@ -99,6 +121,67 @@ def test_pi_compute_summary_exposes_partial_digits():
     assert summary.available_digits == 4
     assert summary.pi == "3.1415"
     assert summary.decimal_digits == "1415"
+
+
+def test_pi_compute_stream_drain_returns_only_new_digits():
+    request = PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        pending_batches=[dataclass_to_wire(PiBatchRequest("terms:1:1", 1, 1))],
+    )
+    p, q, t = chudnovsky_binary_split(0, 1)
+    state.results["terms:0:1"] = dataclass_to_wire(
+        PiBatchResult(
+            batch_id="terms:0:1",
+            term_start=0,
+            term_count=1,
+            host_name="alpha",
+            host_url="http://127.0.0.1:1",
+            status="ok",
+            p=str(p),
+            q=str(q),
+            t=str(t),
+        )
+    )
+
+    reply = PiComputeCoordinatorAgent(state).drain_stream(after_digits=2, wait_timeout=0.0, max_digits=1)
+
+    assert reply["new_decimal_digits"] == "1"
+    assert reply["cursor"] == 3
+    assert reply["summary"]["available_digits"] == 4
+    assert "results" not in reply["summary"]
+    assert "decimal_digits" not in reply["summary"]
+
+
+def test_pi_compute_stream_drain_waits_until_all_available_digits_are_emitted():
+    request = PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        done=True,
+    )
+    p, q, t = chudnovsky_binary_split(0, 1)
+    state.results["terms:0:1"] = dataclass_to_wire(
+        PiBatchResult(
+            batch_id="terms:0:1",
+            term_start=0,
+            term_count=1,
+            host_name="alpha",
+            host_url="http://127.0.0.1:1",
+            status="ok",
+            p=str(p),
+            q=str(q),
+            t=str(t),
+        )
+    )
+
+    agent = PiComputeCoordinatorAgent(state)
+    first = agent.drain_stream(after_digits=2, wait_timeout=0.0, max_digits=1)
+    second = agent.drain_stream(after_digits=3, wait_timeout=0.0, max_digits=1)
+
+    assert first["new_decimal_digits"] == "1"
+    assert first["done"] is False
+    assert second["new_decimal_digits"] == "5"
+    assert second["done"] is True
 
 
 def test_pi_compute_counts_free_host_slots(tmp_path: Path):

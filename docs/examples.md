@@ -254,12 +254,18 @@ The free-slot estimate is based on `cpu_count * --max-load-per-cpu - load_1m`,
 optionally capped by `--max-workers-per-host`; `--max-in-flight` caps the whole
 job. In text mode the CLI starts the coordinator asynchronously, long-polls for
 newly reliable decimal digits, and appends them to the terminal as batches
-complete. Use `--json` for a final summary object instead of live output.
-Workers re-check local load before computing; if a host has become busy, the
-worker reports `skipped`, the coordinator requeues that batch, and the worker
-disposes itself. If all hosts are above the load/CPU thresholds and no batch is
-running, the coordinator sends one fallback worker anyway so a long job still
-makes minimum progress.
+complete. The stream drain call first refills worker slots, then returns only a
+bounded chunk of newly available digits and compact progress counters, not the
+full accumulated summary. Increase `--stream-chunk-size` when larger terminal
+bursts are useful. Use `--json` for a final summary object instead of live
+output. The default job timeout is disabled so long calculations can run to
+completion; add `--timeout SECONDS` when a run should be bounded, and increase
+`--request-timeout` if an exceptionally large coordinator response needs longer
+than the default HTTP request window. Workers re-check local load before
+computing; if a host has become busy, the worker reports `skipped`, the
+coordinator requeues that batch, and the worker disposes itself. If all hosts
+are above the load/CPU thresholds and no batch is running, the coordinator
+sends one fallback worker anyway so a long job still makes minimum progress.
 
 The worker result payloads encode large Chudnovsky partial integers in
 hexadecimal internally. The coordinator combines those integer terms and

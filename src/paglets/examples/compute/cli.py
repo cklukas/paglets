@@ -11,7 +11,10 @@ from ...client import HostClient
 from ...messages import Message
 from ...proxy import PagletProxy
 from ...serde import dataclass_to_wire
-from .agent import PiComputeRequest
+from .agent import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
+
+
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
         servers = load_server_config(args.config)
         for server_arg in args.server:
             servers = upsert_server_ref(servers, parse_server_arg(server_arg))
-        client = HostClient(timeout=args.timeout)
+        client = HostClient(timeout=max(1.0, float(args.request_timeout)))
         entry = _select_entry_server(servers, entry_name=args.entry, client=client)
         request = PiComputeRequest(
             start=max(0, args.start),
@@ -29,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=max(1, args.batch_size),
             max_in_flight=max(0, args.max_in_flight),
             max_workers_per_host=max(0, args.max_workers_per_host),
-            timeout=max(0.1, args.timeout),
+            timeout=max(0.0, args.timeout),
             max_load_per_cpu=float(args.max_load_per_cpu),
             max_cpu_percent=float(args.max_cpu_percent),
             min_memory_available_bytes=max(0, int(args.min_memory)),
@@ -39,7 +42,12 @@ def main(argv: list[str] | None = None) -> int:
             summary = _run(entry, request, client=client)
             print(json.dumps(summary, indent=2, sort_keys=True))
         else:
-            summary = _run_stream(entry, request, client=client)
+            summary = _run_stream(
+                entry,
+                request,
+                client=client,
+                stream_chunk_size=max(0, int(args.stream_chunk_size)),
+            )
         return 0 if summary.get("done") and not summary.get("errors") else 1
     except Exception as exc:
         print(f"paglets-pi-compute: {exc}", file=sys.stderr)
@@ -56,7 +64,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1, help="Chudnovsky terms per worker batch")
     parser.add_argument("--max-in-flight", type=int, default=0, help="Global in-flight batch cap; 0 uses free load slots")
     parser.add_argument("--max-workers-per-host", type=int, default=0, help="Per-host worker cap; 0 uses free load slots")
-    parser.add_argument("--timeout", type=float, default=60.0, help="Seconds to wait for the whole job")
+    parser.add_argument("--timeout", type=float, default=0.0, help="Whole-job timeout in seconds; 0 disables it")
+    parser.add_argument(
+        "--stream-chunk-size",
+        type=int,
+        default=DEFAULT_STREAM_CHUNK_DIGITS,
+        help="Maximum newly available decimal digits to return per text-mode poll; 0 disables the cap",
+    )
+    parser.add_argument(
+        "--request-timeout",
+        type=float,
+        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        help="HTTP request timeout in seconds for coordinator calls",
+    )
     parser.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
     parser.add_argument("--max-cpu-percent", type=float, default=90.0, help="Maximum sampled CPU percent")
     parser.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
@@ -97,21 +117,37 @@ def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> 
         _cleanup_coordinator(proxy)
 
 
-def _run_stream(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
+def _run_stream(
+    entry: ServerRef,
+    request: PiComputeRequest,
+    *,
+    client: HostClient,
+    stream_chunk_size: int = DEFAULT_STREAM_CHUNK_DIGITS,
+) -> dict:
     proxy = _create_coordinator(entry, client=client)
     summary: dict = {}
     cursor = 0
+    stream_chunk_size = max(0, int(stream_chunk_size))
     try:
         proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
         _print_stream_header(request)
         while True:
-            reply = proxy.send(Message("drain", {"after_digits": cursor, "wait_timeout": 0.5}))
+            reply = proxy.send(
+                Message(
+                    "drain_stream",
+                    {
+                        "after_digits": cursor,
+                        "wait_timeout": 0.5,
+                        "max_digits": stream_chunk_size,
+                    },
+                )
+            )
             summary = dict(reply.get("summary") or {})
-            decimal_digits = str(summary.get("decimal_digits") or "")
-            if len(decimal_digits) > cursor:
-                sys.stdout.write(decimal_digits[cursor:])
+            new_decimal_digits = str(reply.get("new_decimal_digits") or "")
+            if new_decimal_digits:
+                sys.stdout.write(new_decimal_digits)
                 sys.stdout.flush()
-                cursor = len(decimal_digits)
+                cursor = int(reply.get("cursor") or cursor + len(new_decimal_digits))
             if reply.get("done"):
                 break
         sys.stdout.write("\n")

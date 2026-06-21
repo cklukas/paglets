@@ -133,6 +133,21 @@ def test_host_stop_terminates_blocked_child_process(tmp_path: Path):
     _wait_until(lambda: not _pid_alive(pid), timeout=5.0)
 
 
+def test_shutdown_terminates_child_that_cannot_deactivate(tmp_path: Path):
+    host = _host(tmp_path)
+    host.start_background()
+    proxy = host.create(BlockingAgent, IsolationState())
+    pid = int(proxy.info()["pid"])
+    proxy.send_oneway(Message("block"))
+    time.sleep(0.2)
+
+    started = time.monotonic()
+    host.shutdown()
+
+    assert time.monotonic() - started < 4.0
+    _wait_until(lambda: not _pid_alive(pid), timeout=5.0)
+
+
 def test_shutdown_persists_inactive_state(tmp_path: Path):
     host = _host(tmp_path)
     host.start_background()

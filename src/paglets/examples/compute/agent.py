@@ -10,6 +10,7 @@ from typing import Any
 import uuid
 
 from ...agent import Paglet, PagletState, state_locked
+from ...errors import InvalidAgentError
 from ...messages import Message
 from ...serde import dataclass_from_wire, dataclass_to_wire
 from ...runtime_values import ServiceScope
@@ -24,6 +25,7 @@ CHUDNOVSKY_C = 640320
 CHUDNOVSKY_C3_OVER_24 = CHUDNOVSKY_C**3 // 24
 DECIMAL_CHUNK_DIGITS = 9
 DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
+DEFAULT_STREAM_CHUNK_DIGITS = 8192
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +35,7 @@ class PiComputeRequest:
     batch_size: int = 1
     max_in_flight: int = 0
     max_workers_per_host: int = 0
-    timeout: float = 60.0
+    timeout: float = 0.0
     max_load_per_cpu: float = 1.0
     max_cpu_percent: float = 90.0
     min_memory_available_bytes: int = 0
@@ -79,6 +81,21 @@ class PiComputeSummary:
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     cleanup_errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class _PiComputeProgress:
+    request: PiComputeRequest
+    pieces: list[PiBatchResult]
+    total_terms: int
+    completed_terms: int
+    available_digits: int
+    done: bool
+    pending: int
+    in_flight: int
+    skipped_count: int
+    errors: dict[str, str]
+    cleanup_errors: dict[str, str]
 
 
 @dataclass
@@ -127,6 +144,12 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 after_digits=int(message.args.get("after_digits", 0)),
                 wait_timeout=float(message.args.get("wait_timeout", 0.5)),
             )
+        if message.kind == "drain_stream":
+            return self.drain_stream(
+                after_digits=int(message.args.get("after_digits", 0)),
+                wait_timeout=float(message.args.get("wait_timeout", 0.5)),
+                max_digits=int(message.args.get("max_digits", DEFAULT_STREAM_CHUNK_DIGITS)),
+            )
         if message.kind == "batch_result":
             return self.record_batch_result(message.args)
         if message.kind == "summary":
@@ -159,14 +182,47 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         timeout = max(0.0, float(wait_timeout))
 
         def ready(state: PiComputeState) -> bool:
-            summary = self._summary_from_state(state)
-            return summary.done or bool(summary.errors) or summary.available_digits > after_digits
+            progress = self._progress_from_state(state)
+            return progress.done or bool(progress.errors) or progress.available_digits > after_digits
 
         self.wait_state(ready, timeout=timeout)
+        self._launch_from_current_state()
         summary = self.summary()
         return {
             "summary": dataclass_to_wire(summary),
             "done": summary.done or bool(summary.errors),
+        }
+
+    def drain_stream(
+        self,
+        *,
+        after_digits: int,
+        wait_timeout: float,
+        max_digits: int = DEFAULT_STREAM_CHUNK_DIGITS,
+    ) -> dict[str, Any]:
+        after_digits = max(0, int(after_digits))
+        timeout = max(0.0, float(wait_timeout))
+        max_digits = max(0, int(max_digits))
+
+        def ready(state: PiComputeState) -> bool:
+            progress = self._progress_from_state(state)
+            return progress.done or bool(progress.errors) or progress.available_digits > after_digits
+
+        self.wait_state(ready, timeout=timeout)
+        self._launch_from_current_state()
+        with self.locked_state() as state:
+            progress = self._progress_from_state(state)
+        decimal_digits = ""
+        if progress.completed_terms > 0 and progress.available_digits > after_digits:
+            available = progress.available_digits - after_digits
+            chunk_digits = available if max_digits <= 0 else min(available, max_digits)
+            decimal_digits = self._decimal_digits_from_progress(progress, after_digits=after_digits, digits=chunk_digits)
+        cursor = after_digits + len(decimal_digits)
+        return {
+            "new_decimal_digits": decimal_digits,
+            "cursor": cursor,
+            "summary": self._compact_summary_from_progress(progress),
+            "done": bool(progress.errors) or (progress.done and cursor >= progress.available_digits),
         }
 
     def _prepare_job(self, request: PiComputeRequest) -> None:
@@ -184,18 +240,18 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         self.notify_all_state_changed()
 
     def _run_job(self, request: PiComputeRequest) -> None:
-        deadline = time.monotonic() + request.timeout
+        deadline = time.monotonic() + request.timeout if request.timeout > 0 else None
         while True:
             with self.locked_state() as state:
                 complete = not state.pending_batches and not state.in_flight
             if complete:
                 break
-            if time.monotonic() >= deadline:
+            if _deadline_expired(deadline):
                 self._timeout_remaining()
                 break
             self._launch_available_batches(request)
             self.wait_state(
-                lambda state: (not state.pending_batches and not state.in_flight) or time.monotonic() >= deadline,
+                lambda state: (not state.pending_batches and not state.in_flight) or _deadline_expired(deadline),
                 timeout=0.1,
             )
         with self.locked_state() as state:
@@ -294,6 +350,15 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 state.errors["mesh-info"] = str(exc)
             return []
 
+    def _launch_from_current_state(self) -> None:
+        with self.locked_state() as state:
+            if state.done or state.errors or not state.pending_batches:
+                return
+            request_wire = dict(state.request)
+        if not request_wire:
+            return
+        self._launch_available_batches(_normalize_request(dataclass_from_wire(PiComputeRequest, request_wire)))
+
     def record_batch_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = dataclass_from_wire(PiBatchResult, payload)
         with self.locked_state() as state:
@@ -334,44 +399,103 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
 
     @staticmethod
     def _summary_from_state(state: PiComputeState) -> PiComputeSummary:
-        request = dataclass_from_wire(PiComputeRequest, state.request) if state.request else PiComputeRequest()
-        results = {batch_id: dataclass_from_wire(PiBatchResult, wire) for batch_id, wire in state.results.items()}
-        pieces = [result for result in sorted(results.values(), key=lambda item: item.term_start) if result.status == "ok"]
-        contiguous_pieces = _contiguous_result_pieces(pieces)
-        total_terms = _terms_for_request(request)
-        completed_terms = sum(piece.term_count for piece in contiguous_pieces)
-        available_digits = _available_decimal_digits(request, completed_terms)
+        progress = PiComputeCoordinatorAgent._progress_from_state(state)
         decimal_digits = ""
         pi_text = ""
-        if completed_terms > 0 and available_digits > 0:
-            p, q, t = _combine_result_parts(contiguous_pieces)
+        if progress.completed_terms > 0 and progress.available_digits > 0:
+            p, q, t = _combine_result_parts(progress.pieces)
             pi_text, decimal_digits = _format_pi_decimal(
                 p,
                 q,
                 t,
-                start=request.start,
-                digits=available_digits,
+                start=progress.request.start,
+                digits=progress.available_digits,
                 precision_digits=max(
                     CHUDNOVSKY_GUARD_DIGITS + 1,
-                    request.start + available_digits + CHUDNOVSKY_GUARD_DIGITS,
+                    progress.request.start + progress.available_digits + CHUDNOVSKY_GUARD_DIGITS,
                 ),
             )
         return PiComputeSummary(
-            start=request.start,
-            digits=request.digits,
+            start=progress.request.start,
+            digits=progress.request.digits,
             decimal_digits=decimal_digits,
             pi=pi_text,
-            terms=total_terms,
+            terms=progress.total_terms,
+            completed_terms=progress.completed_terms,
+            available_digits=progress.available_digits,
+            done=progress.done,
+            pending=progress.pending,
+            in_flight=progress.in_flight,
+            skipped_count=progress.skipped_count,
+            results=dict(state.results),
+            errors=progress.errors,
+            cleanup_errors=progress.cleanup_errors,
+        )
+
+    @staticmethod
+    def _progress_from_state(state: PiComputeState) -> _PiComputeProgress:
+        request = dataclass_from_wire(PiComputeRequest, state.request) if state.request else PiComputeRequest()
+        results = [dataclass_from_wire(PiBatchResult, wire) for wire in state.results.values()]
+        pieces = [result for result in sorted(results, key=lambda item: item.term_start) if result.status == "ok"]
+        contiguous_pieces = _contiguous_result_pieces(pieces)
+        total_terms = _terms_for_request(request)
+        completed_terms = sum(piece.term_count for piece in contiguous_pieces)
+        available_digits = _available_decimal_digits(request, completed_terms)
+        return _PiComputeProgress(
+            request=request,
+            pieces=contiguous_pieces,
+            total_terms=total_terms,
             completed_terms=completed_terms,
             available_digits=available_digits,
             done=bool(state.done),
             pending=len(state.pending_batches),
             in_flight=len(state.in_flight),
             skipped_count=state.skipped_count,
-            results=dict(state.results),
             errors=dict(state.errors),
             cleanup_errors=dict(state.cleanup_errors),
         )
+
+    @staticmethod
+    def _decimal_digits_from_progress(
+        progress: _PiComputeProgress,
+        *,
+        after_digits: int = 0,
+        digits: int | None = None,
+    ) -> str:
+        after_digits = max(0, int(after_digits))
+        available = max(0, progress.available_digits - after_digits)
+        digit_count = available if digits is None else min(available, max(0, int(digits)))
+        if progress.completed_terms <= 0 or digit_count <= 0:
+            return ""
+        p, q, t = _combine_result_parts(progress.pieces)
+        absolute_start = progress.request.start + after_digits
+        return _format_pi_decimal(
+            p,
+            q,
+            t,
+            start=absolute_start,
+            digits=digit_count,
+            precision_digits=max(
+                CHUDNOVSKY_GUARD_DIGITS + 1,
+                absolute_start + digit_count + CHUDNOVSKY_GUARD_DIGITS,
+            ),
+        )[1]
+
+    @staticmethod
+    def _compact_summary_from_progress(progress: _PiComputeProgress) -> dict[str, Any]:
+        return {
+            "start": progress.request.start,
+            "digits": progress.request.digits,
+            "terms": progress.total_terms,
+            "completed_terms": progress.completed_terms,
+            "available_digits": progress.available_digits,
+            "done": progress.done,
+            "pending": progress.pending,
+            "in_flight": progress.in_flight,
+            "skipped_count": progress.skipped_count,
+            "errors": progress.errors,
+            "cleanup_errors": progress.cleanup_errors,
+        }
 
     def cleanup_workers(self) -> PiComputeSummary:
         with self.locked_state() as state:
@@ -392,6 +516,8 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 if proxy is not None:
                     proxy.dispose()
             except Exception as exc:
+                if _is_missing_worker_error(exc):
+                    continue
                 with self.locked_state() as state:
                     state.cleanup_errors[host_name] = str(exc)
 
@@ -403,6 +529,8 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             if proxy is not None:
                 proxy.dispose()
         except Exception as exc:
+            if _is_missing_worker_error(exc):
+                return
             with self.locked_state() as state:
                 state.cleanup_errors[result.host_name or result.host_url] = str(exc)
 
@@ -658,6 +786,14 @@ def _in_flight_by_host(in_flight: dict[str, dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _is_missing_worker_error(exc: Exception) -> bool:
+    return isinstance(exc, InvalidAgentError) and str(exc).startswith("No paglet ")
+
+
 def _format_pi_decimal(
     p: int,
     q: int,
@@ -686,7 +822,7 @@ def _normalize_request(request: PiComputeRequest) -> PiComputeRequest:
         batch_size=max(1, int(request.batch_size)),
         max_in_flight=max(0, int(request.max_in_flight)),
         max_workers_per_host=max(0, int(request.max_workers_per_host)),
-        timeout=max(0.1, float(request.timeout)),
+        timeout=max(0.0, float(request.timeout)),
         max_load_per_cpu=float(request.max_load_per_cpu),
         max_cpu_percent=float(request.max_cpu_percent),
         min_memory_available_bytes=max(0, int(request.min_memory_available_bytes)),
