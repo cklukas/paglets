@@ -89,6 +89,25 @@ self.notify_message()
 self.notify_all_messages()
 ```
 
+Use `wait_message()` when you need a low-level mailbox notification. When one
+handler or background thread is waiting for another handler to change paglet
+state, prefer the predicate-based state wait:
+
+```python
+if self.wait_state(lambda state: not state.pending, timeout=5.0):
+    with self.locked_state() as state:
+        return state.result
+```
+
+After mutating state that may satisfy a waiter, wake it explicitly:
+
+```python
+with self.locked_state() as state:
+    state.result = reply
+    state.pending = False
+self.notify_all_state_changed()
+```
+
 Inactive paglets can still receive messages. By default, the host activates the
 paglet and delivers the message. Use `no_delay=True` when the caller wants a
 fast failure instead of activation or queueing:

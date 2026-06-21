@@ -9,7 +9,7 @@ description = "A small Python Aglets-inspired mobile object runtime."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["psutil>=5.9"]
+dependencies = ["pathspec>=0.12", "psutil>=5.9"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -19,6 +19,7 @@ tui = ["textual>=8.2,<9"]
 [project.scripts]
 paglets-host = "paglets.cli:main"
 paglets-perf-test = "paglets.examples.performance.cli:main"
+paglets-search = "paglets.examples.search.cli:main"
 paglets-sysinfo = "paglets.examples.system_info.cli:main"
 paglets-tui = "paglets.tui:main"
 

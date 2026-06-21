@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import is_dataclass
 from functools import wraps
 import threading
+import time
 from typing import Any, ClassVar, Concatenate, Generic, ParamSpec, TypeVar, TYPE_CHECKING
 import uuid
 
@@ -317,6 +318,7 @@ class Paglet(Generic[StateT]):
         self.agent_id = agent_id or uuid.uuid4().hex
         self.state: StateT = state
         self._state_lock = threading.RLock()
+        self._state_condition = threading.Condition(self._state_lock)
         self._context: PagletContext | None = None
         self._last_proxy: PagletProxy | None = None
         self.resources = ResourceRegistry()
@@ -352,6 +354,43 @@ class Paglet(Generic[StateT]):
 
         with self._state_lock:
             yield self.state
+
+    def wait_state(self, predicate: Callable[[StateT], bool], timeout: float | None = None) -> bool:
+        """Wait until ``predicate(state)`` is true.
+
+        This is for coordination between handlers/background work that mutate
+        paglet state and another handler waiting for that state to change. It
+        does not replace normal message delivery; incoming messages still call
+        ``handle_message`` through the paglet mailbox.
+        """
+
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+
+        with self._state_condition:
+            if predicate(self.state):
+                return True
+            while True:
+                if deadline is None:
+                    remaining = None
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return bool(predicate(self.state))
+                self._state_condition.wait(remaining)
+                if predicate(self.state):
+                    return True
+
+    def notify_state_changed(self) -> None:
+        """Wake one waiter blocked in :meth:`wait_state`."""
+
+        with self._state_condition:
+            self._state_condition.notify(1)
+
+    def notify_all_state_changed(self) -> None:
+        """Wake all waiters blocked in :meth:`wait_state`."""
+
+        with self._state_condition:
+            self._state_condition.notify_all()
 
     # Convenience operations available from inside lifecycle/message handlers.
     def dispatch(self, target: str | "TransferTicket") -> "PagletProxy":

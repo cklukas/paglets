@@ -240,6 +240,23 @@ volume mountpoint itself is not writable. Use `--path /some/mount` to limit disk
 tests, `--no-disk` to skip disk I/O, or `--verbose` to show skipped read-only
 and special volumes.
 
+Search files across online same-version mesh hosts with a mobile agent:
+
+```bash
+uv run paglets-search grep TODO .
+uv run paglets-search grep -C 2 -t py "class .*Agent" src tests
+uv run paglets-search find README .
+uv run paglets-search --jsonl grep TODO .
+```
+
+`paglets-search` creates a parent search paglet on the entry host and clones
+children to every online mesh host by default. Each child searches local paths
+with Python filesystem APIs and sends matching events back to the parent as they
+are found. The CLI long-polls the parent and prints results incrementally, so it
+does not need to copy remote file contents back before searching. Use repeated
+`--host` flags to restrict target hosts. Paths are interpreted locally on each
+host process.
+
 Run a parent/child clone survey example:
 
 ```bash
