@@ -423,6 +423,58 @@ The parent handles these messages:
 | `summary` | Return current aggregate state. |
 | `cleanup` | Dispose child agents after the CLI has finished. |
 
+### Flow Diagrams
+
+Use a Mermaid `sequenceDiagram` when you want to explain the calling sequence
+between the CLI, entry host, parent search paglet, child paglets, and local
+filesystems:
+
+```mermaid
+sequenceDiagram
+    participant CLI as "paglets-search CLI"
+    participant Entry as "entry host"
+    participant Parent as "parent MeshSearchAgent"
+    participant Child as "child MeshSearchAgent"
+    participant FS as "local filesystem"
+
+    CLI->>Entry: create parent agent
+    CLI->>Parent: start(SearchRequest, targets, timeout)
+    Parent->>Entry: available_hosts()
+    loop "for each target host"
+        Parent->>Child: clone_to(host)
+        Child->>FS: traverse and search local paths
+        Child-->>Parent: child_events(SearchEvent batch)
+    end
+    loop "until all hosts finish"
+        CLI->>Parent: drain(after_cursor, wait_timeout)
+        Parent-->>CLI: events, cursor, done, summary
+    end
+    Child-->>Parent: child_done(HostSearchSummary)
+    CLI->>Parent: cleanup()
+```
+
+Use a Mermaid `flowchart` when you want to explain the parent and child program
+flow without focusing on every individual call:
+
+```mermaid
+flowchart TD
+    Start["CLI starts search"] --> Parent["Create parent MeshSearchAgent"]
+    Parent --> Resolve["Resolve online same-version target hosts"]
+    Resolve --> Clone{"Any targets?"}
+    Clone -- "yes" --> Children["Clone child agents to targets"]
+    Clone -- "no" --> NoTargets["Record mesh error"]
+    Children --> LocalSearch["Each child searches local paths"]
+    LocalSearch --> EventBatch["Send child_events batches to parent"]
+    EventBatch --> Drain["CLI long-polls drain"]
+    Drain --> Print["Print streamed text or JSONL events"]
+    LocalSearch --> Done["Send child_done summary"]
+    Done --> Complete{"All hosts complete?"}
+    Complete -- "no" --> Drain
+    Complete -- "yes" --> Summary["Return final summary"]
+    NoTargets --> Summary
+    Summary --> Cleanup["Dispose child agents and parent"]
+```
+
 ### Search Options
 
 Useful content-search options:
