@@ -155,17 +155,15 @@ class WaitingCollectorAgent(Paglet[WaitingCollectorState]):
             with self.locked_state() as state:
                 state.pending = True
                 state.result = ""
-            deadline = time.monotonic() + 1.0
-            while time.monotonic() < deadline:
+            if self.wait_state(lambda state: not state.pending, timeout=1.0):
                 with self.locked_state() as state:
-                    if not state.pending:
-                        return {"result": state.result}
-                time.sleep(0.02)
+                    return {"result": state.result}
             return {"error": "timeout"}
         if message.kind == "child_result":
             with self.locked_state() as state:
                 state.result = str(message.args["value"])
                 state.pending = False
+            self.notify_all_state_changed()
             return {"ok": True}
         return self.not_handled()
 
@@ -296,6 +294,13 @@ def test_state_locked_decorator_serializes_methods_and_preserves_exceptions():
     assert sorted(agent.state.events) == ["one", "two"]
     with pytest.raises(RuntimeError, match="boom"):
         agent.decorated_failure()
+
+
+def test_wait_state_returns_immediately_when_predicate_already_true():
+    agent = LockingAgent(LockingState(count=1))
+
+    assert agent.wait_state(lambda state: state.count == 1, timeout=0.01) is True
+    assert agent.wait_state(lambda state: state.count == 2, timeout=0.01) is False
 
 
 def test_paglet_mailbox_workers_class_setting_limits_concurrent_handlers(tmp_path):

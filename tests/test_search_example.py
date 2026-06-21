@@ -1,0 +1,239 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+from __future__ import annotations
+
+import json
+import time
+
+from paglets import Host, Message
+from paglets.admin import ServerRef, save_server_config
+from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
+from paglets.examples.search.cli import main as search_main
+import paglets.examples.search.agent as search_agent
+from paglets.serde import dataclass_from_wire, dataclass_to_wire
+from tests.test_paglets_core import free_port
+
+
+def test_search_dataclasses_round_trip_through_wire():
+    request = SearchRequest(
+        mode="grep",
+        pattern="Needle",
+        paths=["."],
+        smart_case=True,
+        before_context=2,
+        globs=["*.py", "!vendor/**"],
+        type_names=["py"],
+        max_depth=3,
+    )
+    assert dataclass_from_wire(SearchRequest, dataclass_to_wire(request)) == request
+
+    event = SearchEvent(
+        event="match",
+        host_name="alpha",
+        host_url="http://alpha",
+        path="app.py",
+        line_number=3,
+        column=5,
+        text="has Needle",
+        match_text="Needle",
+        match_start=4,
+        match_end=10,
+        cursor=7,
+    )
+    assert dataclass_from_wire(SearchEvent, dataclass_to_wire(event)) == event
+
+    summary = HostSearchSummary("alpha", "http://alpha", files_matched=1, matches=2)
+    assert dataclass_from_wire(HostSearchSummary, dataclass_to_wire(summary)) == summary
+
+
+def test_local_grep_supports_context_globs_ignores_and_binary_skip(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    target = src / "app.py"
+    target.write_text("before\nneedle here\nafter\n", encoding="utf-8")
+    (tmp_path / ".hidden.py").write_text("needle hidden\n", encoding="utf-8")
+    (tmp_path / "ignored.log").write_text("needle ignored\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+    (tmp_path / "binary.py").write_bytes(b"needle\x00binary")
+
+    events: list[SearchEvent] = []
+    summary = run_local_search(
+        SearchRequest(
+            mode="grep",
+            pattern="needle",
+            paths=[str(tmp_path)],
+            before_context=1,
+            after_context=1,
+            globs=["*.py"],
+        ),
+        host_name="alpha",
+        host_url="http://alpha",
+        emit=events.extend,
+    )
+
+    assert summary.files_matched == 1
+    assert summary.matches == 1
+    assert [event.event for event in events] == ["context", "match", "context"]
+    assert events[1].path == str(target)
+    assert all("ignored" not in event.path for event in events)
+    assert all("binary" not in event.path for event in events)
+    assert all(".hidden" not in event.path for event in events)
+
+
+def test_local_find_supports_name_extension_and_kind_filters(tmp_path):
+    (tmp_path / "report.md").write_text("x", encoding="utf-8")
+    (tmp_path / "report.txt").write_text("x", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "REPORT.md").write_text("x", encoding="utf-8")
+
+    events: list[SearchEvent] = []
+    summary = run_local_search(
+        SearchRequest(
+            mode="find",
+            pattern="report",
+            paths=[str(tmp_path)],
+            ignore_case=True,
+            extensions=["md"],
+            kind="file",
+        ),
+        host_name="alpha",
+        host_url="http://alpha",
+        emit=events.extend,
+    )
+
+    assert summary.paths_matched == 2
+    assert sorted(event.path for event in events) == [
+        str(nested / "REPORT.md"),
+        str(tmp_path / "report.md"),
+    ]
+
+
+def test_mesh_search_drain_streams_events_before_completion(tmp_path, monkeypatch):
+    proxy = None
+    alpha = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh_version="search-stream-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    beta = Host(
+        "beta",
+        host="127.0.0.1",
+        port=free_port(),
+        peers=[alpha.address],
+        mesh_version="search-stream-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "beta",
+    )
+
+    def fake_search(request: SearchRequest, *, host_name: str, host_url: str, emit):
+        emit(
+            [
+                SearchEvent(
+                    event="match",
+                    host_name=host_name,
+                    host_url=host_url,
+                    path=f"{host_name}.txt",
+                    line_number=1,
+                    column=1,
+                    text="needle",
+                    match_text="needle",
+                    match_end=6,
+                )
+            ]
+        )
+        time.sleep(0.2)
+        return HostSearchSummary(host_name, host_url, files_seen=1, files_searched=1, files_matched=1, matches=1)
+
+    monkeypatch.setattr(search_agent, "run_local_search", fake_search)
+    alpha.start_background()
+    beta.start_background()
+    try:
+        beta.mesh.gossip_once()
+        alpha.mesh.gossip_once()
+        proxy = alpha.create(MeshSearchAgent)
+        proxy.send(
+            Message(
+                "start",
+                {
+                    "request": dataclass_to_wire(SearchRequest(mode="grep", pattern="needle", paths=[str(tmp_path)], batch_size=1)),
+                    "timeout": 3.0,
+                },
+            )
+        )
+
+        first = proxy.send(Message("drain", {"after_cursor": 0, "wait_timeout": 1.0, "limit": 10}))
+        assert first["events"]
+        assert first["done"] is False
+
+        cursor = first["cursor"]
+        final = first
+        deadline = time.monotonic() + 3.0
+        while not final["done"] and time.monotonic() < deadline:
+            final = proxy.send(Message("drain", {"after_cursor": cursor, "wait_timeout": 1.0, "limit": 10}))
+            cursor = max(cursor, final["cursor"])
+
+        assert final["done"] is True
+        assert set(final["summary"]["results"]) == {"alpha", "beta"}
+    finally:
+        if proxy is not None:
+            try:
+                proxy.send(Message("cleanup"))
+                proxy.dispose()
+            except Exception:
+                pass
+        beta.stop()
+        alpha.stop()
+
+
+def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys):
+    (tmp_path / "haystack.txt").write_text("needle\n", encoding="utf-8")
+    alpha = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh_version="search-cli-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    beta = Host(
+        "beta",
+        host="127.0.0.1",
+        port=free_port(),
+        peers=[alpha.address],
+        mesh_version="search-cli-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "beta",
+    )
+    alpha.start_background()
+    beta.start_background()
+    try:
+        beta.mesh.gossip_once()
+        alpha.mesh.gossip_once()
+        config_path = tmp_path / "servers.json"
+        save_server_config([ServerRef("alpha", alpha.address)], config_path)
+
+        result = search_main(
+            [
+                "--config",
+                str(config_path),
+                "--timeout",
+                "5",
+                "--poll-interval",
+                "0.2",
+                "--jsonl",
+                "grep",
+                "needle",
+                str(tmp_path / "haystack.txt"),
+            ]
+        )
+
+        assert result == 0
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert {event["host_name"] for event in events if event["event"] == "match"} == {"alpha", "beta"}
+    finally:
+        beta.stop()
+        alpha.stop()

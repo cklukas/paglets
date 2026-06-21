@@ -1,12 +1,14 @@
 # Example Agents
 
-`paglets` ships two packaged example agents that demonstrate different runtime
+`paglets` ships three packaged example agents that demonstrate different runtime
 patterns without mixing application code into the root runtime namespace:
 
 - `paglets.examples.system_info`: a resident typed service agent plus a
   mesh-wide collector CLI.
 - `paglets.examples.performance`: a pure mobile benchmark agent plus a
   mesh-wide benchmark CLI.
+- `paglets.examples.search`: a pure mobile filesystem search agent plus a
+  streaming mesh search CLI.
 
 The root `paglets` package is reserved for runtime infrastructure such as
 `Paglet`, `Host`, `Message`, service contracts, mesh discovery, startup config,
@@ -48,6 +50,7 @@ You can also pass an entry server directly:
 ```bash
 uv run paglets-sysinfo --server alpha=http://127.0.0.1:8765 --entry alpha df
 uv run paglets-perf-test --server alpha=http://127.0.0.1:8765 --entry alpha
+uv run paglets-search --server alpha=http://127.0.0.1:8765 --entry alpha grep TODO .
 ```
 
 There is no authentication layer yet. These examples are useful for trusted
@@ -316,6 +319,86 @@ summary = proxy.send(
 
 Most applications should use the `paglets-perf-test` CLI unless they need to
 embed benchmark collection into another paglet workflow.
+
+## Mesh Search
+
+`paglets-search` demonstrates a practical mobile-agent use case: move the
+search logic to each host, scan local files there, and send only hits back to
+the caller. This avoids repeatedly pulling remote file contents to one machine
+and gives the caller incremental results while hosts are still scanning.
+
+The command combines common `ripgrep` content search and `fd` filename search
+features:
+
+```bash
+uv run paglets-search grep TODO .
+uv run paglets-search grep -C 2 -t py "class .*Agent" src tests
+uv run paglets-search grep -i --hidden -g "*.md" paglets docs
+uv run paglets-search find README .
+uv run paglets-search find report --extension md --kind file
+uv run paglets-search --jsonl grep TODO .
+```
+
+By default the CLI uses the first enabled reachable server in
+`~/.paglets/servers.json` as the entry host, then the parent search paglet clones
+to all online same-version mesh hosts, including the entry host. Restrict the
+search to specific hosts with repeated `--host` flags:
+
+```bash
+uv run paglets-search --host alpha --host beta grep TODO /srv/app
+```
+
+Paths are interpreted locally by each target host process. Searching `.` means
+the current working directory of each host, not the directory where the CLI is
+running.
+
+### Streaming Flow
+
+The search agent uses message delivery rather than polling a remote filesystem:
+
+1. The CLI creates one parent `MeshSearchAgent` on the entry host.
+2. The parent discovers target hosts and clones child agents to them.
+3. Each child traverses local paths with Python APIs and sends hit batches back
+   to the parent as paglet messages.
+4. The parent appends events to state and wakes any `drain` call waiting for new
+   events.
+5. The CLI long-polls `drain`, printing events as soon as they arrive.
+
+Inside a host, incoming paglet messages already invoke `handle_message()`
+through the mailbox. There is no need for a paglet to busy-poll its mailbox.
+The search parent uses `wait_state()` so a `drain` request sleeps efficiently
+until a child message adds more events, all hosts finish, or the timeout elapses.
+
+### Search Options
+
+Useful content-search options:
+
+| Option | Meaning |
+| --- | --- |
+| `-i`, `-S` | Ignore case, or use smart case. |
+| `-F` | Treat the pattern as a literal string. |
+| `-w` | Match whole words. |
+| `-A`, `-B`, `-C` | Include context lines around matches. |
+| `-o` | Print only matching text. |
+| `-c` | Print matching-line counts per file. |
+| `-l`, `--files-without-match` | Print only matching or non-matching file paths. |
+| `-g` | Include or exclude glob patterns; prefix with `!` to exclude. |
+| `-t`, `-T` | Include or exclude supported file types. |
+| `--hidden`, `--no-ignore`, `--follow` | Control hidden paths, ignore files, and symlinks. |
+| `--max-depth`, `--max-file-size`, `--max-results-per-host` | Bound local work. |
+
+Useful filename-search options:
+
+| Option | Meaning |
+| --- | --- |
+| `--full-path` | Match against the full path instead of only the basename. |
+| `-e`, `--extension` | Limit results to one extension; repeatable. |
+| `--kind` | Emit only `file`, `dir`, `symlink`, or `any` paths. |
+
+The implementation is intentionally a practical subset, not a byte-for-byte
+clone of `ripgrep` or `fd`. Use `paglets-search --help`,
+`paglets-search grep --help`, `paglets-search find --help`, and
+`paglets-search --type-list` for the supported command surface.
 
 ## Source-Tree Demos
 
