@@ -317,6 +317,17 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             target_limit = min(target_limit, 1)
         with self.locked_state() as state:
             in_flight_by_host = _in_flight_by_host(state.in_flight)
+            host_capacity_by_url = _host_worker_capacity_by_url(
+                slots_by_host,
+                in_flight_by_host,
+                request,
+            )
+            additional_capacity = sum(
+                max(0, host_capacity - in_flight_by_host.get(host_url, 0))
+                for host_url, host_capacity in host_capacity_by_url.items()
+            )
+            if request.max_in_flight <= 0:
+                target_limit = max(1, len(state.in_flight) + additional_capacity)
             capacity = max(0, target_limit - len(state.in_flight))
         if capacity <= 0:
             return
@@ -325,8 +336,8 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         for target in targets:
             snapshot = target.snapshot
             host_url = snapshot.host_url.rstrip("/")
-            host_slots = slots_by_host.get(host_url, 0)
-            while capacity > 0 and in_flight_by_host.get(host_url, 0) < host_slots:
+            host_capacity = host_capacity_by_url.get(host_url, 0)
+            while capacity > 0 and in_flight_by_host.get(host_url, 0) < host_capacity:
                 with self.locked_state() as state:
                     if not state.pending_batches or len(state.in_flight) >= target_limit:
                         self._launch_worker_specs(launches)
@@ -901,6 +912,21 @@ def _slots_by_host(targets: list[Any], request: PiComputeRequest) -> dict[str, i
         host_url = target.snapshot.host_url.rstrip("/")
         slots[host_url] = _host_worker_slots(target.snapshot, request)
     return slots
+
+
+def _host_worker_capacity_by_url(
+    additional_slots_by_url: dict[str, int],
+    in_flight_by_url: dict[str, int],
+    request: PiComputeRequest,
+) -> dict[str, int]:
+    capacity: dict[str, int] = {}
+    for host_url, additional_slots in additional_slots_by_url.items():
+        current = max(0, int(in_flight_by_url.get(host_url, 0)))
+        host_capacity = current + max(0, int(additional_slots))
+        if request.max_workers_per_host > 0:
+            host_capacity = min(host_capacity, int(request.max_workers_per_host))
+        capacity[host_url] = max(0, host_capacity)
+    return capacity
 
 
 def _host_worker_slots(snapshot: Any, request: PiComputeRequest) -> int:

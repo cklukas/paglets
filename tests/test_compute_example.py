@@ -27,6 +27,7 @@ from paglets.examples.compute import (
 from paglets.examples.compute.agent import (
     _decode_bigint,
     _encode_bigint,
+    _host_worker_capacity_by_url,
     _host_worker_slots,
     _int_to_decimal_string,
     _is_missing_worker_error,
@@ -310,6 +311,30 @@ def test_pi_compute_counts_free_host_slots(tmp_path: Path):
         assert _host_worker_slots(snapshot, request) == 3
     finally:
         host.stop()
+
+
+def test_pi_compute_free_slots_are_additional_to_existing_in_flight():
+    request = PiComputeRequest(max_workers_per_host=0)
+
+    capacity = _host_worker_capacity_by_url(
+        {"http://alpha": 5},
+        {"http://alpha": 7},
+        request,
+    )
+
+    assert capacity["http://alpha"] == 12
+
+
+def test_pi_compute_per_host_cap_limits_total_host_capacity():
+    request = PiComputeRequest(max_workers_per_host=8)
+
+    capacity = _host_worker_capacity_by_url(
+        {"http://alpha": 5},
+        {"http://alpha": 7},
+        request,
+    )
+
+    assert capacity["http://alpha"] == 8
 
 
 def test_pi_compute_busy_hosts_have_no_slots_before_fallback(tmp_path: Path):

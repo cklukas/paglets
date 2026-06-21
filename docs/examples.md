@@ -262,13 +262,14 @@ uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-
 
 The coordinator stays on the dynamically discovered entry host, partitions the
 requested digit range into the required Chudnovsky terms, asks local
-`mesh-info` for eligible targets across the mesh, expands each host into
-approximate free load slots, creates short-lived
+`mesh-info` for eligible targets across the mesh, treats approximate free load
+slots as additional launch capacity, creates short-lived
 `PiBatchWorkerAgent` instances remotely, and receives `batch_result` messages.
 Worker creation requests are issued in parallel so process-spawn overhead does
 not keep free slots empty. The free-slot estimate is based on `cpu_count *
---max-load-per-cpu - load_1m`, optionally capped by `--max-workers-per-host`;
-`--max-in-flight` caps the whole job. In text mode the CLI starts the
+--max-load-per-cpu - load_1m`; existing in-flight workers are added back before
+new launches are capped by `--max-workers-per-host`. `--max-in-flight` caps the
+whole job. In text mode the CLI starts the
 coordinator asynchronously, long-polls for new batch results, formats newly
 reliable decimal digits locally in the CLI process, and appends them to the
 terminal as batches complete. The result drain call first refills worker slots,
