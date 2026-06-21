@@ -36,7 +36,7 @@ from paglets.examples.compute.agent import (
 )
 from paglets.examples.compute.cli import _parser as pi_parser
 from paglets.examples.compute.cli import main as pi_main
-from paglets.examples.mesh_info import MeshHostSnapshot
+from paglets.examples.mesh_info import MeshHostSnapshot, TargetCandidate
 from paglets.serde import dataclass_to_wire
 from paglets.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
@@ -249,6 +249,7 @@ def test_pi_compute_stream_drain_waits_until_all_available_digits_are_emitted():
     )
 
     agent = PiComputeCoordinatorAgent(state)
+    agent._context = SimpleNamespace(name="coordinator", address="http://127.0.0.1:8765")
     first = agent.drain_stream(after_digits=2, wait_timeout=0.0, max_digits=1)
     second = agent.drain_stream(after_digits=3, wait_timeout=0.0, max_digits=1)
 
@@ -366,24 +367,36 @@ def test_pi_compute_free_slots_are_additional_to_existing_in_flight():
     request = PiComputeRequest(max_workers_per_host=0)
 
     capacity = _host_worker_capacity_by_url(
-        {"http://alpha": 5},
+        {"http://alpha": (5, 16)},
         {"http://alpha": 7},
         request,
     )
 
-    assert capacity["http://alpha"] == 12
+    assert capacity["http://alpha"] == 5
 
 
 def test_pi_compute_per_host_cap_limits_total_host_capacity():
     request = PiComputeRequest(max_workers_per_host=8)
 
     capacity = _host_worker_capacity_by_url(
-        {"http://alpha": 5},
+        {"http://alpha": (5, 16)},
         {"http://alpha": 7},
         request,
     )
 
-    assert capacity["http://alpha"] == 8
+    assert capacity["http://alpha"] == 1
+
+
+def test_pi_compute_cpu_count_is_default_host_cap_when_workers_unset():
+    request = PiComputeRequest(max_workers_per_host=0)
+
+    capacity = _host_worker_capacity_by_url(
+        {"http://alpha": (5, 4)},
+        {"http://alpha": 7},
+        request,
+    )
+
+    assert capacity["http://alpha"] == 0
 
 
 def test_pi_compute_busy_hosts_have_no_slots_before_fallback(tmp_path: Path):
@@ -395,6 +408,74 @@ def test_pi_compute_busy_hosts_have_no_slots_before_fallback(tmp_path: Path):
         assert _host_worker_slots(snapshot, request) == 0
     finally:
         host.stop()
+
+
+def test_pi_compute_slots_are_cpu_capped():
+    snapshot = MeshHostSnapshot(
+        host_name="alpha",
+        host_url="http://alpha:1",
+        code_version="test",
+        observed_at=time.time(),
+        cpu_count_logical=4,
+        cpu_percent=10.0,
+        load_average=[0.0],
+        load_per_cpu=0.0,
+        memory_available_bytes=1024**3,
+        work_free_bytes=1024**3,
+    )
+    request = PiComputeRequest(max_load_per_cpu=10.0)
+
+    assert _host_worker_slots(snapshot, request) == 4
+
+
+def test_pi_compute_max_in_flight_is_capped_by_host_capacity(monkeypatch):
+    request = PiComputeRequest(
+        batch_size=1,
+        max_in_flight=100,
+        max_load_per_cpu=1.0,
+        max_cpu_percent=100.0,
+    )
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        pending_batches=[dataclass_to_wire(PiBatchRequest(f"terms:{index}:1", index, 1)) for index in range(100)],
+    )
+    agent = PiComputeCoordinatorAgent(state)
+    agent._context = SimpleNamespace(name="coordinator", address="http://127.0.0.1:8765")
+
+    targets = [
+        TargetCandidate(
+            snapshot=MeshHostSnapshot(
+                host_name=f"host-{index}",
+                host_url=f"http://{index}.local:8765",
+                code_version="test",
+                observed_at=time.time(),
+                cpu_count_logical=4,
+                cpu_percent=5.0,
+                load_average=[0.0],
+                load_per_cpu=0.0,
+                memory_available_bytes=1024**3,
+                work_free_bytes=1024**3,
+            ),
+            score=0.0,
+            reasons=["eligible"],
+        )
+        for index in range(2)
+    ]
+
+    launches: list[tuple[str, str]] = []
+
+    def _fake_create(host_url: str, _worker_state: PiBatchWorkerState, worker_id: str) -> None:
+        launches.append((host_url, worker_id))
+
+    monkeypatch.setattr(agent, "_select_targets", lambda request: targets)
+    monkeypatch.setattr(agent, "_create_worker_paglet", _fake_create)
+
+    agent._launch_available_batches(request)
+
+    with agent.locked_state() as current:
+        assert len(current.in_flight) == 8
+        assert len(current.pending_batches) == 92
+    assert len(launches) == 8
 
 
 def test_skipped_batch_results_are_requeued(tmp_path: Path):
