@@ -399,13 +399,13 @@ def test_pi_compute_cpu_count_is_default_host_cap_when_workers_unset():
     assert capacity["http://alpha"] == 0
 
 
-def test_pi_compute_busy_hosts_have_no_slots_before_fallback(tmp_path: Path):
+def test_load_values_do_not_fully_block_slots(tmp_path: Path):
     host = _host("alpha", tmp_path / "alpha")
     host.start_background()
     try:
         request = PiComputeRequest(start=0, digits=32, batch_size=1, max_load_per_cpu=0.5, max_cpu_percent=20.0)
         snapshot = _snapshot(host, cpu_count=4, load=4.0, cpu_percent=100.0)
-        assert _host_worker_slots(snapshot, request) == 0
+        assert _host_worker_slots(snapshot, request) == 1
     finally:
         host.stop()
 

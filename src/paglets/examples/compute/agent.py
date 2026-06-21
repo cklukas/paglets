@@ -18,11 +18,9 @@ from ...messages import Message
 from ...serde import dataclass_from_wire, dataclass_to_wire, qualified_name
 from ...runtime_values import ServiceScope
 from ..mesh_info import (
-    GET_SNAPSHOT,
     MESH_INFO,
     SELECT_TARGETS,
     MeshHostSnapshot,
-    SnapshotRequest,
     TargetCandidate,
     TargetSelectionRequest,
 )
@@ -40,7 +38,6 @@ DEFAULT_STREAM_CHUNK_DIGITS = 8192
 DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
 MAX_PARALLEL_WORKER_LAUNCHES = 32
 TARGET_SELECTION_TIMEOUT_SECONDS = 1.0
-WORKER_BUSY_REJECTION_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -823,39 +820,6 @@ class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
                 pass
 
     def _busy_rejection(self) -> str:
-        try:
-            service = self.require_contract(MESH_INFO, operation=GET_SNAPSHOT, scope=ServiceScope.LOCAL)
-            reply = service.call(
-                GET_SNAPSHOT,
-                SnapshotRequest(force=True),
-                no_delay=True,
-                timeout=WORKER_BUSY_REJECTION_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            if _is_mesh_info_transient_error(str(exc).lower()):
-                return ""
-            return f"mesh-info unavailable: {exc}"
-        snapshot = reply.snapshot
-        if snapshot is None:
-            return "mesh-info returned no snapshot"
-        if (
-            not self.state.ignore_load_limits
-            and self.state.max_load_per_cpu > 0
-            and snapshot.load_per_cpu > self.state.max_load_per_cpu
-        ):
-            return f"load per cpu {snapshot.load_per_cpu:.2f} > {self.state.max_load_per_cpu:.2f}"
-        if (
-            not self.state.ignore_load_limits
-            and self.state.max_cpu_percent >= 0
-            and snapshot.cpu_percent > self.state.max_cpu_percent
-        ):
-            return f"cpu {snapshot.cpu_percent:.1f}% > {self.state.max_cpu_percent:.1f}%"
-        if self.state.min_memory_available_bytes > 0 and snapshot.memory_available_bytes < self.state.min_memory_available_bytes:
-            return "available memory below minimum"
-        if self.state.min_work_free_bytes > 0 and snapshot.work_free_bytes < self.state.min_work_free_bytes:
-            return "work storage below minimum"
-        if snapshot.errors:
-            return "; ".join(snapshot.errors)
         return ""
 
 
@@ -1063,12 +1027,14 @@ def _host_cpu_count(snapshot: Any) -> int:
 
 def _host_worker_slots(snapshot: Any, request: PiComputeRequest) -> int:
     cpu_count = max(1, int(snapshot.cpu_count_logical or 0))
-    if request.max_load_per_cpu <= 0:
-        slots = cpu_count
-    else:
+    slots = cpu_count
+    if request.max_load_per_cpu > 0:
         target_load = max(0.0, float(request.max_load_per_cpu)) * cpu_count
         free_load = target_load - _snapshot_load_value(snapshot, cpu_count)
-        slots = 0 if free_load <= 0 else max(1, int(math.floor(free_load)))
+        if free_load <= 0:
+            slots = 1
+        else:
+            slots = max(1, int(math.ceil(free_load)))
     slots = min(slots, cpu_count)
     if request.max_workers_per_host > 0:
         slots = min(slots, request.max_workers_per_host)

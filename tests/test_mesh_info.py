@@ -20,6 +20,7 @@ from paglets.examples.mesh_info import (
     SnapshotRequest,
     TargetSelectionRequest,
 )
+from paglets.examples.mesh_info.agent import _target_rejection
 from paglets.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
@@ -70,7 +71,7 @@ def test_mesh_info_syncs_landscape_between_hosts(tmp_path: Path):
         alpha.stop()
 
 
-def test_mesh_info_target_selection_filters_stale_and_overloaded_hosts(tmp_path: Path):
+def test_mesh_info_target_selection_filters_stale_hosts(tmp_path: Path):
     launch_config = _launch_config(tmp_path)
     host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
     host.start_background()
@@ -113,9 +114,27 @@ def test_mesh_info_target_selection_filters_stale_and_overloaded_hosts(tmp_path:
         names = {target.snapshot.host_name for target in reply.targets}
         assert "alpha" in names
         assert "stale" not in names
-        assert reply.rejected["busy"].startswith("load per cpu")
+        assert "busy" in names
     finally:
         host.stop()
+
+
+def test_mesh_info_target_rejection_is_resource_only_when_load_is_not_used_for_filtering():
+    request = TargetSelectionRequest(max_load_per_cpu=1.0, max_cpu_percent=50.0)
+
+    snapshot = MeshHostSnapshot(
+        host_name="alpha",
+        host_url="http://alpha",
+        code_version="test",
+        observed_at=time.time(),
+        cpu_percent=99.0,
+        cpu_count_logical=4,
+        load_per_cpu=99.0,
+        memory_available_bytes=10**9,
+        work_free_bytes=10**9,
+    )
+
+    assert _target_rejection(snapshot, request) == ""
 
 
 def test_mesh_info_clears_peer_error_when_fresh_snapshot_arrives():

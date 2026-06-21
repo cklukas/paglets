@@ -238,6 +238,20 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
                 continue
             score = _target_score(snapshot)
             targets.append(TargetCandidate(snapshot=snapshot, score=score, reasons=["fresh", "eligible"]))
+        if not targets:
+            # Keep visibility high even when all candidates fail resource filters.
+            # This avoids returning empty results to tooling that expects a host view.
+            for snapshot in hosts:
+                key = snapshot.host_name or snapshot.host_url
+                if not request.include_self and snapshot.host_url.rstrip("/") == self.context.address.rstrip("/"):
+                    continue
+                score = _target_score(snapshot)
+                target = TargetCandidate(
+                    snapshot=snapshot,
+                    score=score,
+                    reasons=["fallback", rejected.get(key, "resource-restricted")],
+                )
+                targets.append(target)
         targets.sort(key=lambda item: (item.score, item.snapshot.host_name, item.snapshot.host_url))
         with self.locked_state() as state:
             errors = dict(state.errors)
@@ -413,10 +427,6 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
 
 
 def _target_rejection(snapshot: MeshHostSnapshot, request: TargetSelectionRequest) -> str:
-    if request.max_load_per_cpu > 0 and snapshot.load_per_cpu > request.max_load_per_cpu:
-        return f"load per cpu {snapshot.load_per_cpu:.2f} > {request.max_load_per_cpu:.2f}"
-    if request.max_cpu_percent >= 0 and snapshot.cpu_percent > request.max_cpu_percent:
-        return f"cpu {snapshot.cpu_percent:.1f}% > {request.max_cpu_percent:.1f}%"
     if request.min_memory_available_bytes > 0 and snapshot.memory_available_bytes < request.min_memory_available_bytes:
         return "available memory below minimum"
     if request.min_work_free_bytes > 0 and snapshot.work_free_bytes < request.min_work_free_bytes:
