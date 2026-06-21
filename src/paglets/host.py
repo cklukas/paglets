@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, is_dataclass, replace
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import shutil
 import threading
 import time
 import uuid
@@ -42,6 +43,7 @@ from .runtime_values import (
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 from .services import ServiceContract, ServiceHandle, ServiceRecord, ServiceRegistry
 from .startup import LaunchConfig, LaunchConfigSyncResult, ResolvedResidentService, resolve_resident_service, resolve_startup_agent
+from .storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES, ManagedStorage
 from .transfer import TransferTicket
 
 
@@ -108,6 +110,7 @@ class Host:
         mesh_gossip_interval: float = 1.0,
         mesh_offline_after: float = 10.0,
         persistence_dir: str | Path | None = None,
+        persistent_storage_quota_bytes: int | None = DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES,
         launch_config: LaunchConfig | None = None,
         launch_config_sync_result: LaunchConfigSyncResult | None = None,
     ):
@@ -124,6 +127,9 @@ class Host:
             else DEFAULT_PERSISTENCE_ROOT / self._safe_host_name(name)
         )
         self._inactive_dir = self.persistence_dir / "inactive"
+        self._work_root = self.persistence_dir / "work"
+        self._storage_root = self.persistence_dir / "storage"
+        self.persistent_storage_quota_bytes = persistent_storage_quota_bytes
         self._inactive: dict[str, InactiveRecord] = {}
         self._services = ServiceRegistry()
         self._resident_services: dict[str, _ManagedResidentService] = {}
@@ -154,6 +160,7 @@ class Host:
     def start_background(self) -> None:
         if self._server is not None:
             return
+        self._clear_work_root()
         server = _PagletHTTPServer((self.bind_host, self.port), _RequestHandler, self)
         actual_host, actual_port = server.server_address[:2]
         public_host = self.bind_host if self.bind_host not in ("0.0.0.0", "") else "127.0.0.1"
@@ -262,6 +269,21 @@ class Host:
 
     def resources_for(self, agent_id: str) -> ResourceRegistry:
         return self._require_agent(agent_id).resources
+
+    def work_dir_for(self, agent_id: str, *, create: bool = True) -> Path:
+        self._require_agent(agent_id)
+        path = self._work_path(agent_id)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def persistent_storage_for(self, agent_id: str, *, quota_bytes: int | None = None) -> ManagedStorage:
+        agent = self._require_agent(agent_id)
+        quota = self.persistent_storage_quota_bytes if quota_bytes is None else quota_bytes
+        return ManagedStorage(
+            self._storage_root / self._storage_class_key(qualified_name(agent.__class__)),
+            quota_bytes=quota,
+        )
 
     def list_agents(self, *, active: bool = True, inactive: bool = False) -> list[dict[str, Any]]:
         with self._lock:
@@ -417,6 +439,7 @@ class Host:
         )
         agent.on_dispatching(event)
         self._cleanup_agent_resources(agent, reason="dispatch")
+        self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(agent, EnvelopeKind.DISPATCH, target_info, ticket=ticket)
         response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         self._remove_active_agent(agent_id, agent)
@@ -532,11 +555,13 @@ class Host:
             if inactive is None:
                 raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
             self._delete_inactive_record(agent_id)
+            self._cleanup_agent_work_dir(agent_id)
             self._emit("dispose", agent_id=agent_id, class_name=inactive.envelope.agent_class_name, data={"active": False})
             return
         event = PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="dispose")
         agent.on_disposing(event)
         self._cleanup_agent_resources(agent, reason="dispose")
+        self._cleanup_agent_work_dir(agent_id)
         self._remove_active_agent(agent_id, agent)
         if inactive is not None:
             self._delete_inactive_record(agent_id)
@@ -665,6 +690,7 @@ class Host:
         )
         agent.on_reverting(event)
         self._cleanup_agent_resources(agent, reason="retract")
+        self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(agent, EnvelopeKind.RETRACT, target_info)
         response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
         self._remove_active_agent(agent_id, agent)
@@ -1104,6 +1130,30 @@ class Host:
 
     def _cleanup_agent_resources(self, agent: Paglet, *, reason: str) -> None:
         agent.resources.cleanup(reason=reason)
+
+    def _clear_work_root(self) -> None:
+        try:
+            shutil.rmtree(self._work_root)
+        except FileNotFoundError:
+            pass
+        self._work_root.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_agent_work_dir(self, agent_id: str) -> None:
+        try:
+            shutil.rmtree(self._work_path(agent_id))
+        except FileNotFoundError:
+            pass
+
+    def _work_path(self, agent_id: str) -> Path:
+        return self._work_root / self._safe_storage_name(agent_id)
+
+    @classmethod
+    def _storage_class_key(cls, class_name: str) -> str:
+        return cls._safe_storage_name(class_name.replace(":", "."))
+
+    @staticmethod
+    def _safe_storage_name(value: str) -> str:
+        return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "storage"
 
     def _arrival_mode(self, envelope: PagletEnvelope) -> ArrivalMode:
         ticket = envelope.metadata.get("transfer_ticket")

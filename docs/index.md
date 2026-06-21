@@ -33,13 +33,15 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-
 ```
 
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
-demo config. The default launch config declares the packaged example
-`server-info` service lazily, so mesh-wide commands can query local system state
-and start providers only when needed:
+demo config. The default launch config declares lazy `server-info` and eager
+`mesh-info`, so hosts continuously exchange resource snapshots while still
+using `server-info` as the local system information provider:
 
 ```bash
 uv run paglets-sysinfo df
 uv run paglets-sysinfo load
+uv run paglets-mesh-info summary
+uv run paglets-pi-compute --digits 16
 uv run paglets-perf-test
 ```
 
@@ -68,7 +70,7 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
   state objects, lifecycle hooks, message handlers, movement, and mesh-aware
   behavior.
 - [Example Agents](examples.md): detailed explanations of packaged example
-  agents, including `server-info`, `paglets-sysinfo`, and
+  agents, including `server-info`, `mesh-info`, Pi compute, and
   `paglets-perf-test`.
 - [Usage Ideas](usage-ideas.md): practical scenarios where mobile state and
   agent-to-agent communication are a useful fit.

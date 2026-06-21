@@ -18,7 +18,9 @@ tui = ["textual>=8.2,<9"]
 
 [project.scripts]
 paglets-host = "paglets.cli:main"
+paglets-mesh-info = "paglets.examples.mesh_info.cli:main"
 paglets-perf-test = "paglets.examples.performance.cli:main"
+paglets-pi-compute = "paglets.examples.compute.cli:main"
 paglets-search = "paglets.examples.search.cli:main"
 paglets-sysinfo = "paglets.examples.system_info.cli:main"
 paglets-tui = "paglets.tui:main"

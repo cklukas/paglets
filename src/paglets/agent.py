@@ -19,12 +19,14 @@ from .resources import ResourceRegistry
 from .runtime_values import ServiceScope
 
 if TYPE_CHECKING:  # pragma: no cover
+    from pathlib import Path
     from .host import Host
     from .mesh import HostRef
     from .proxy import PagletProxy
     from .references import PagletProxyRef
     from .resident import ServiceLease
     from .services import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord
+    from .storage import ManagedStorage
     from .transfer import TransferTicket
 
 
@@ -294,6 +296,23 @@ class PagletContext:
             raise HostError("resources requires an attached paglet or explicit agent_id")
         return self._host.resources_for(owner_id)
 
+    def work_dir(self, *, create: bool = True, agent_id: str | None = None) -> "Path":
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("work_dir requires an attached paglet or explicit agent_id")
+        return self._host.work_dir_for(owner_id, create=create)
+
+    def persistent_storage(
+        self,
+        *,
+        quota_bytes: int | None = None,
+        agent_id: str | None = None,
+    ) -> "ManagedStorage":
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("persistent_storage requires an attached paglet or explicit agent_id")
+        return self._host.persistent_storage_for(owner_id, quota_bytes=quota_bytes)
+
 
 class Paglet(Generic[StateT]):
     """Base class for mobile Python objects.
@@ -539,6 +558,12 @@ class Paglet(Generic[StateT]):
         ttl: float = 60.0,
     ) -> "ServiceLease":
         return self.context.lease_contract(contract, operation=operation, scope=scope, ttl=ttl)
+
+    def work_dir(self, *, create: bool = True) -> "Path":
+        return self.context.work_dir(create=create, agent_id=self.agent_id)
+
+    def persistent_storage(self, *, quota_bytes: int | None = None) -> "ManagedStorage":
+        return self.context.persistent_storage(quota_bytes=quota_bytes, agent_id=self.agent_id)
 
     @staticmethod
     def not_handled() -> _NotHandled:

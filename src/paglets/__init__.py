@@ -53,6 +53,7 @@ from .services import (
     ServiceRecord,
     ServiceRegistry,
 )
+from .storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES, ManagedStorage, StorageQuotaError, StorageStatus
 from .startup import AutoStartSpec, LaunchConfig, StartupAgentConfig, load_launch_config, sync_launch_config
 from .transfer import TransferTicket
 from .errors import PagletInactiveError, TransferError
@@ -69,6 +70,7 @@ __all__ = [
     "DEACTIVATE",
     "DeactivationPolicy",
     "DeactivationRequest",
+    "DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES",
     "DISPATCH",
     "DISPOSE",
     "EXECUTE_ON_ARRIVAL",
@@ -89,6 +91,7 @@ __all__ = [
     "LaunchConfigSyncAction",
     "MAX_PRIORITY",
     "MIN_PRIORITY",
+    "ManagedStorage",
     "MobilityEvent",
     "NORMAL_PRIORITY",
     "NOT_HANDLED",
@@ -121,6 +124,8 @@ __all__ = [
     "ServiceOperation",
     "ServiceRecord",
     "ServiceRegistry",
+    "StorageQuotaError",
+    "StorageStatus",
     "StartupAgentConfig",
     "TaskItineraryPlan",
     "TransferError",

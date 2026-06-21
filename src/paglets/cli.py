@@ -11,6 +11,7 @@ from .errors import PagletError
 from .host import Host
 from .runtime_values import LaunchConfigSyncAction
 from .startup import DEFAULT_LAUNCH_CONFIG_PATH, load_launch_config, sync_launch_config
+from .storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
+    parser.add_argument(
+        "--persistent-storage-quota",
+        type=_parse_size_or_none,
+        default=DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES,
+        help="Persistent storage quota per paglet class, e.g. 10M, or 'none'",
+    )
     parser.add_argument("--launch-config", default=str(DEFAULT_LAUNCH_CONFIG_PATH), help="Launch config TOML path")
     parser.add_argument(
         "--sync-launch-config",
@@ -65,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         mesh_multicast=args.mesh_multicast,
         mesh_version=args.mesh_version,
         persistence_dir=args.persistence_dir,
+        persistent_storage_quota_bytes=args.persistent_storage_quota,
         launch_config=launch_config,
         launch_config_sync_result=sync_result,
     )
@@ -85,6 +93,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     host.serve_forever()
     return 0
+
+
+def _parse_size_or_none(value: str) -> int | None:
+    text = value.strip()
+    if text.casefold() in {"none", "unlimited"}:
+        return None
+    if not text:
+        raise argparse.ArgumentTypeError("size cannot be empty")
+    unit = text[-1].upper()
+    if unit in {"K", "M", "G"}:
+        number = text[:-1]
+        multiplier = {"K": 1024, "M": 1024**2, "G": 1024**3}[unit]
+    else:
+        number = text[:-1] if unit == "B" else text
+        multiplier = 1
+    try:
+        amount = float(number)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid size {value!r}") from exc
+    if amount < 0:
+        raise argparse.ArgumentTypeError("size must be non-negative")
+    return int(amount * multiplier)
 
 
 if __name__ == "__main__":  # pragma: no cover

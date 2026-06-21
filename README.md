@@ -97,13 +97,14 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765
 
 On first start, `paglets-host` copies the bundled demo launch config to
 `~/.paglets/launch.toml`. That config declares the packaged example
-`server-info` service on each host. It is lazy by default: callers can discover
-it immediately, and the provider agent is created on first use:
+`server-info` service and the eager `mesh-info` service on each host.
+`server-info` is lazy, while `mesh-info` starts immediately and samples local
+resource data through `server-info`:
 
 ```toml
 [launch]
 demo_config_id = "paglets-default-launch"
-demo_config_version = "3"
+demo_config_version = "4"
 
 [[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
@@ -113,6 +114,16 @@ singleton = true
 lifecycle = "lazy"
 scope = "mesh"
 idle_timeout = 30.0
+state = { service_scope = "mesh" }
+
+[[resident_services]]
+class = "paglets.examples.mesh_info.agent:MeshInfoAgent"
+enabled = true
+agent_id = "service.mesh-info"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
 state = { service_scope = "mesh" }
 ```
 
@@ -143,6 +154,8 @@ uv run paglets-host --name gamma --port 8767 --no-mesh-multicast --peer http://1
 `--mesh/--no-mesh` controls the registry, `--peer URL` can be repeated,
 `--mesh-multicast/--no-mesh-multicast` controls UDP beacons, and
 `--persistence-dir` overrides the host's durable inactive-paglet directory.
+`--persistent-storage-quota 10M` controls the per-class managed persistent
+storage quota.
 Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
 current git commit, then a package-version fallback. Different versions are
 ignored by the mesh.
@@ -219,8 +232,22 @@ uv run paglets-sysinfo plist python --limit 10
 `~/.paglets/servers.json` as the entry host, then creates a collector paglet
 there. The collector clones to all online mesh hosts, calls each local
 `server-info` service, starts lazy providers on demand, and prints the aggregate
-result. For one-off use, pass `--server alpha=http://127.0.0.1:8765`; for
-scripts, add `--json`.
+result. For one-off use before saving a server config, pass optional
+`[--server alpha=http://127.0.0.1:8765]`; for scripts, add `--json`.
+
+Inspect the continuously synchronized mesh resource landscape:
+
+```bash
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] summary
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --max-load-per-cpu 1.0 --min-work-free 1G
+```
+
+`paglets-mesh-info` queries the entry host's eager `mesh-info` service. Each
+host's service samples local CPU, memory, and work-directory disk space through
+`server-info`, then exchanges snapshots with peer `mesh-info` services.
+
+The optional `--server` flag only chooses the entry host when
+`~/.paglets/servers.json` is not already configured.
 
 Run a mesh-wide benchmark with a mobile agent:
 
@@ -256,6 +283,21 @@ are found. The CLI long-polls the parent and prints results incrementally, so it
 does not need to copy remote file contents back before searching. Use repeated
 `--host` flags to restrict target hosts. Paths are interpreted locally on each
 host process.
+
+Compute decimal Pi digits across eligible hosts:
+
+```bash
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --json
+```
+
+The coordinator stays on the entry host, asks local `mesh-info` for ranked
+targets, creates short-lived worker paglets for Chudnovsky term batches,
+receives partial-sum results by message, combines them, and prints normal
+decimal output such as `3.1415926535897932`.
+
+The optional `--server` flag selects only that initial entry host; target
+selection across the mesh remains automatic.
 
 Run a parent/child clone survey example:
 
@@ -512,6 +554,18 @@ deactivate, retract, or dispose:
 ```python
 self.resources.track_closeable("socket", sock)
 self.resources.register("temporary-file", lambda: path.unlink(), suppress=True)
+```
+
+Managed filesystem storage is available from a paglet context. `work_dir()` is
+per instance and ephemeral: the host clears all work directories on startup and
+clears an instance's work directory on dispatch, retract, or dispose.
+`persistent_storage()` is shared per paglet class and survives restart, with a
+default 10 MiB quota enforced by the storage API:
+
+```python
+scratch = self.work_dir()
+store = self.persistent_storage()
+store.write_text("checkpoint.txt", "ok")
 ```
 
 ## Itinerary helpers

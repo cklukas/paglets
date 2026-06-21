@@ -1,6 +1,6 @@
 [launch]
 demo_config_id = "paglets-default-launch"
-demo_config_version = "3"
+demo_config_version = "4"
 
 [[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
@@ -10,4 +10,14 @@ singleton = true
 lifecycle = "lazy"
 scope = "mesh"
 idle_timeout = 30.0
+state = { service_scope = "mesh" }
+
+[[resident_services]]
+class = "paglets.examples.mesh_info.agent:MeshInfoAgent"
+enabled = true
+agent_id = "service.mesh-info"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
 state = { service_scope = "mesh" }

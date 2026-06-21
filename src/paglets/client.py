@@ -18,6 +18,7 @@ from .errors import (
     ServiceNotFoundError,
     TransferError,
 )
+from .storage import StorageQuotaError
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
@@ -29,6 +30,7 @@ _ERROR_TYPES: dict[str, type[PagletError]] = {
     "ResourceCleanupError": LifecycleError,
     "ServiceContractError": ServiceContractError,
     "ServiceNotFoundError": ServiceNotFoundError,
+    "StorageQuotaError": StorageQuotaError,
     "TransferError": TransferError,
 }
 

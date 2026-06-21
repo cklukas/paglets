@@ -1,10 +1,14 @@
 # Example Agents
 
-`paglets` ships three packaged example agents that demonstrate different runtime
+`paglets` ships five packaged example agents that demonstrate different runtime
 patterns without mixing application code into the root runtime namespace:
 
 - `paglets.examples.system_info`: a resident typed service agent plus a
   mesh-wide collector CLI.
+- `paglets.examples.mesh_info`: an eager resident mesh resource landscape
+  service plus a summary/target-selection CLI.
+- `paglets.examples.compute`: a coordinator/worker decimal Pi compute example
+  plus a mesh-aware CLI.
 - `paglets.examples.performance`: a pure mobile benchmark agent plus a
   mesh-wide benchmark CLI.
 - `paglets.examples.search`: a pure mobile filesystem search agent plus a
@@ -25,13 +29,13 @@ uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-
 ```
 
 On first start, `paglets-host` copies the bundled demo launch config to
-`~/.paglets/launch.toml`. The bundled config declares the packaged
-`server-info` example service lazily:
+`~/.paglets/launch.toml`. The bundled config declares lazy `server-info` and
+eager `mesh-info` services:
 
 ```toml
 [launch]
 demo_config_id = "paglets-default-launch"
-demo_config_version = "3"
+demo_config_version = "4"
 
 [[resident_services]]
 class = "paglets.examples.system_info.agent:ServerInfoAgent"
@@ -42,15 +46,29 @@ lifecycle = "lazy"
 scope = "mesh"
 idle_timeout = 30.0
 state = { service_scope = "mesh" }
+
+[[resident_services]]
+class = "paglets.examples.mesh_info.agent:MeshInfoAgent"
+enabled = true
+agent_id = "service.mesh-info"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
+state = { service_scope = "mesh" }
 ```
 
-The command-line examples use `~/.paglets/servers.json` to choose an entry host.
-You can also pass an entry server directly:
+The command-line examples use `~/.paglets/servers.json` to choose one entry
+host. You only need `--server NAME=URL` for one-off runs or before saving a
+server config. The entry host is just the bootstrap point; mesh-aware examples
+still discover and use online same-version mesh hosts automatically.
 
 ```bash
-uv run paglets-sysinfo --server alpha=http://127.0.0.1:8765 --entry alpha df
-uv run paglets-perf-test --server alpha=http://127.0.0.1:8765 --entry alpha
-uv run paglets-search --server alpha=http://127.0.0.1:8765 --entry alpha grep TODO .
+uv run paglets-sysinfo [--server alpha=http://127.0.0.1:8765] [--entry alpha] df
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] [--entry alpha] summary
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] [--entry alpha] --digits 16
+uv run paglets-perf-test [--server alpha=http://127.0.0.1:8765] [--entry alpha]
+uv run paglets-search [--server alpha=http://127.0.0.1:8765] [--entry alpha] grep TODO .
 ```
 
 There is no authentication layer yet. These examples are useful for trusted
@@ -168,6 +186,88 @@ the whole request.
 Process inspection uses `psutil`. Processes that disappear or deny access while
 being read are skipped so one protected process does not fail the whole host
 reply.
+
+## Mesh Info
+
+`mesh-info` is an eager resident service that keeps a fresh resource snapshot
+for each visible host. It samples local CPU, memory, swap, and work-directory
+disk space through the existing local `server-info` service, then exchanges
+bounded snapshot batches with peer `mesh-info` services.
+
+The core contract is:
+
+```python
+from paglets.examples.mesh_info import MESH_INFO, GET_LANDSCAPE, SELECT_TARGETS
+```
+
+Useful CLI commands:
+
+```bash
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] summary
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --max-load-per-cpu 1.0 --min-work-free 1G
+uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --json
+```
+
+The `summary` command prints the fresh landscape known to the entry host. The
+`targets` command applies placement constraints and ranks eligible hosts by
+load, CPU, memory pressure, and work-storage pressure. The optional `--server`
+flag only selects the entry host when no saved `~/.paglets/servers.json` entry
+is available.
+
+Programmatic target selection:
+
+```python
+from paglets import ServiceScope
+from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
+
+mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
+targets = mesh_info.call(
+    SELECT_TARGETS,
+    TargetSelectionRequest(limit=4, max_load_per_cpu=1.0, min_work_free_bytes=1024**3),
+)
+```
+
+`mesh-info` is intentionally a resident service rather than a one-shot clone
+collector: each host maintains its own current view, and schedulers can query
+the nearest local service repeatedly without fan-out for every placement
+decision.
+
+## Pi Compute
+
+`paglets-pi-compute` demonstrates using `mesh-info` as lightweight placement
+input for a distributed compute job. It computes decimal digits of Pi by
+distributing Chudnovsky term batches and combining the integer partial sums on
+the coordinator.
+
+```bash
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
+uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --json
+```
+
+The optional `--server` value only selects the entry host when no saved
+`~/.paglets/servers.json` entry is available. The coordinator stays on that
+entry host, partitions the requested digit range into the required Chudnovsky
+terms, asks local `mesh-info` for eligible targets across the mesh, creates
+short-lived `PiBatchWorkerAgent` instances remotely, and receives
+`batch_result` messages. Workers re-check local load before computing; if a
+host has become busy, the worker reports `skipped`, the coordinator requeues
+that batch, and the worker disposes itself.
+
+Programmatic use:
+
+```python
+from paglets.examples.compute import PiComputeCoordinatorAgent, PiComputeRequest
+from paglets.messages import Message
+from paglets.serde import dataclass_to_wire
+
+coordinator = self.context.create_paglet(PiComputeCoordinatorAgent)
+summary = coordinator.send(
+    Message(
+        "start",
+        {"request": dataclass_to_wire(PiComputeRequest(start=0, digits=16, batch_size=1))},
+    )
+)
+```
 
 ## Performance Benchmark
 

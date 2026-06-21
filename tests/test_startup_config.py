@@ -9,6 +9,7 @@ import time
 
 from paglets import Host, Message, Paglet, PagletContext, PagletState, ServiceScope
 from paglets.examples.system_info import SERVER_INFO, GET_SUMMARY
+from paglets.examples.mesh_info import MESH_INFO, GET_SNAPSHOT
 from paglets.runtime_values import LaunchConfigSyncAction, ResidentLifecycle
 from paglets.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
@@ -39,11 +40,13 @@ def test_launch_config_sync_copies_bundled_config_on_first_start(tmp_path):
     assert result.action is LaunchConfigSyncAction.COPIED
     assert path.exists()
     assert config.demo_config_id == "paglets-default-launch"
-    assert config.demo_config_version == "3"
+    assert config.demo_config_version == "4"
     assert len(config.startup_agents) == 0
-    assert len(config.resident_services) == 1
+    assert len(config.resident_services) == 2
     assert config.resident_services[0].class_name == "paglets.examples.system_info.agent:ServerInfoAgent"
     assert config.resident_services[0].lifecycle is ResidentLifecycle.LAZY
+    assert config.resident_services[1].class_name == "paglets.examples.mesh_info.agent:MeshInfoAgent"
+    assert config.resident_services[1].lifecycle is ResidentLifecycle.EAGER
 
 
 def test_launch_config_sync_updates_with_backup_when_accepted(tmp_path):
@@ -67,7 +70,7 @@ use = "old-service"
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert "old-service" in result.backup_path.read_text(encoding="utf-8")
-    assert load_launch_config(path).demo_config_version == "3"
+    assert load_launch_config(path).demo_config_version == "4"
 
 
 def test_launch_config_sync_warns_without_replacing_noninteractive(tmp_path, capsys):
@@ -109,8 +112,7 @@ sync_demo_config = false
 
 
 def test_launch_config_declares_lazy_server_info_and_starts_on_first_call(tmp_path):
-    path = tmp_path / "launch.toml"
-    sync_launch_config(path, interactive=False)
+    path = _server_info_resident_config(tmp_path, lifecycle="lazy", idle_timeout=30.0)
     launch_config = load_launch_config(path)
     persistence_dir = tmp_path / "alpha-persist"
 
@@ -256,6 +258,31 @@ def test_eager_resident_service_starts_immediately(tmp_path):
     try:
         assert host.get_proxy("service.server-info") is not None
         assert PagletContext(host).require_contract(SERVER_INFO, operation=GET_SUMMARY, scope=ServiceScope.MESH).call(GET_SUMMARY)
+    finally:
+        host.stop()
+
+
+def test_default_launch_config_starts_eager_mesh_info(tmp_path):
+    path = tmp_path / "launch.toml"
+    sync_launch_config(path, interactive=False)
+    launch_config = load_launch_config(path)
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha-persist",
+        launch_config=launch_config,
+    )
+    host.start_background()
+    try:
+        assert host.get_proxy("service.mesh-info") is not None
+        snapshot = PagletContext(host).require_contract(MESH_INFO, operation=GET_SNAPSHOT, scope=ServiceScope.MESH).call(
+            GET_SNAPSHOT
+        )
+        assert snapshot.snapshot is not None
+        assert snapshot.snapshot.host_name == "alpha"
     finally:
         host.stop()
 

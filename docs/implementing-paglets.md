@@ -342,6 +342,51 @@ self.resources.register("temp-file", lambda: path.unlink(), suppress=True)
 Cleanup failures cancel the lifecycle operation unless that resource was
 registered with `suppress=True`.
 
+## Use Managed Storage
+
+Use `work_dir()` for per-instance scratch files that should not survive final
+departure or host restart:
+
+```python
+path = self.work_dir() / "batch.tmp"
+path.write_text("intermediate", encoding="utf-8")
+```
+
+The host clears all work directories on startup. It also clears an instance's
+work directory on dispatch, retract, or dispose. Deactivation keeps the work
+directory in the same process, but a restart clears it.
+
+Use `persistent_storage()` for small class-level state that should survive host
+restart:
+
+```python
+store = self.persistent_storage()
+store.write_text("checkpoint.txt", "ok")
+data = store.read_bytes("checkpoint.txt")
+```
+
+Persistent storage is rooted under the host persistence directory, shared by
+paglet class, and quota-accounted by the API. The default quota is 10 MiB per
+class and can be changed with `paglets-host --persistent-storage-quota 20M` or
+the `Host(..., persistent_storage_quota_bytes=...)` constructor argument.
+
+## Query Mesh Placement
+
+The packaged `mesh-info` resident service keeps fresh host resource snapshots
+and ranks eligible compute targets:
+
+```python
+from paglets import ServiceScope
+from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
+
+mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
+targets = mesh_info.call(SELECT_TARGETS, TargetSelectionRequest(limit=2, max_load_per_cpu=1.0))
+```
+
+For distributed compute, keep the coordinator's accumulated job state on one
+host and create short-lived worker paglets remotely. Workers should report
+results by message and dispose themselves after sending the result.
+
 ## Keep Imports Stable
 
 Movement sends class names like `examples.disk_survey_demo:DiskSurveyPaglet`.

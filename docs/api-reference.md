@@ -26,6 +26,10 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.services
 
+## Managed Storage
+
+::: paglets.storage
+
 ## Runtime Values
 
 ::: paglets.runtime_values
@@ -41,6 +45,10 @@ This page is generated from the Python source using `mkdocstrings`.
 ## Packaged Examples
 
 ::: paglets.examples.system_info
+
+::: paglets.examples.mesh_info
+
+::: paglets.examples.compute
 
 ::: paglets.examples.performance
 

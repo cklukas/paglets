@@ -51,8 +51,8 @@ Itinerary
 
 LaunchConfig
 : The `~/.paglets/launch.toml` startup configuration read by `paglets-host`.
-  The bundled demo config declares the packaged example `server-info` service
-  as lazy by default.
+  The bundled demo config declares lazy `server-info` and eager `mesh-info`
+  resident services by default.
 
 Message
 : A JSON-compatible command delivered to a paglet's `handle_message` method.
@@ -65,6 +65,11 @@ MessageMailbox
 Mesh
 : The same-version host registry built from seed-list gossip and optional
   multicast beacons.
+
+MeshInfoAgent
+: The packaged eager resident service agent advertised as `mesh-info`. It
+  samples local system data through `server-info`, syncs snapshots with peers,
+  and ranks eligible compute targets.
 
 Paglet
 : A Python mobile object with explicit dataclass state, lifecycle hooks, and

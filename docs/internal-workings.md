@@ -155,7 +155,8 @@ There is no authentication layer in this first runtime.
 
 `paglets-host` loads `~/.paglets/launch.toml` by default. On first start it
 copies the bundled demo launch config, which declares the packaged example
-`server-info` service as a lazy managed resident service:
+`server-info` service as a lazy managed resident service and `mesh-info` as an
+eager resident service:
 
 ```toml
 [[resident_services]]
@@ -166,6 +167,16 @@ singleton = true
 lifecycle = "lazy"
 scope = "mesh"
 idle_timeout = 30.0
+state = { service_scope = "mesh" }
+
+[[resident_services]]
+class = "paglets.examples.mesh_info.agent:MeshInfoAgent"
+enabled = true
+agent_id = "service.mesh-info"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
 state = { service_scope = "mesh" }
 ```
 
@@ -198,6 +209,26 @@ for managed services. A lazy active provider is deactivated after
 `idle_timeout` when there are no in-flight calls and no active leases. The
 managed service record stays discoverable, so a later call can activate it
 again.
+
+## Managed Storage
+
+Hosts own two filesystem areas below their persistence root:
+
+```text
+~/.paglets/hosts/{host-name}/work/{agent-id}
+~/.paglets/hosts/{host-name}/storage/{class-key}
+```
+
+The `work` tree is per active paglet instance. It is cleared on host startup,
+and a source instance's work directory is cleared on dispatch, retract, or
+dispose. Deactivation does not clear work in the same process, but a restart
+does.
+
+The `storage` tree is per paglet class and survives restart, deactivation,
+dispatch, and dispose. `ManagedStorage` resolves all API paths under its root
+and enforces the configured quota before writes. The runtime cannot prevent
+arbitrary direct filesystem writes by user code, so quota enforcement applies
+to writes performed through the managed storage API.
 
 ## Durable Inactive Records
 
