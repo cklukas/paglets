@@ -378,6 +378,16 @@ class MeshRegistry:
             self._hosts[ref.url] = ref
         return ref
 
+    def local_address_changed(self, previous_url: str) -> HostRef:
+        previous = normalize_host_url(previous_url)
+        with self._lock:
+            self._hosts.pop(previous, None)
+            self._seeds.discard(previous)
+        ref = self.refresh_self()
+        if self.enabled:
+            self.gossip_once()
+        return ref
+
     def _gossip_loop(self) -> None:
         while not self._stop.wait(self.gossip_interval):
             try:

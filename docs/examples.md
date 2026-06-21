@@ -28,6 +28,21 @@ uv run paglets-host --name alpha --port 8765 --mesh-version dev
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
+For hosts on different machines, use `--bind-public` so each host binds and
+publishes a reachable LAN address:
+
+```bash
+uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
+uv run paglets-host --name windows --bind-public [IP] --port 8765 --mesh-version dev
+```
+
+`--bind-public` without an `IP` binds only the detected LAN address. Supplying
+an `IP` binds only that address, which is useful on machines with multiple
+network interfaces. Repeat the flag to bind multiple specific addresses; the
+first one is published to the mesh. The auto form keeps watching for LAN
+address changes and rebinds/publishes the new address after DHCP or network
+reconnect changes it.
+
 On first start, `paglets-host` copies the bundled demo launch config to
 `~/.paglets/launch.toml`. The bundled config declares lazy `server-info` and
 eager `mesh-info` services:
@@ -362,6 +377,10 @@ Example with two local hosts running in separate terminals:
 uv run paglets-host --name alpha --port 8765 --mesh-version dev
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
+
+Across machines, use `--bind-public [IP]` on each host instead of loopback.
+Repeat `--bind-public IP` only when the host must listen on multiple specific
+interfaces.
 
 Then run the benchmark from the repository checkout:
 

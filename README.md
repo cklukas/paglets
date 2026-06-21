@@ -128,6 +128,25 @@ uv run paglets-host --name alpha --port 8765
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765
 ```
 
+For hosts on different machines, use `--bind-public` so the host binds to the
+detected LAN address and publishes that reachable URL to the mesh:
+
+```bash
+uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
+uv run paglets-host --name windows --bind-public --port 8765 --mesh-version dev
+```
+
+`--bind-public` binds only the auto-detected address, watches that address for
+runtime changes, and rebinds/publishes the new address if DHCP or a network
+reconnect changes it. On machines with multiple usable addresses, pass the
+exact address to bind and publish. Repeat the flag to listen on multiple
+specific addresses; the first one is published to the mesh:
+
+```bash
+uv run paglets-host --name windows --bind-public 192.168.86.42 --port 8765 --mesh-version dev
+uv run paglets-host --name labbox --bind-public 192.168.86.42 --bind-public 10.10.0.42 --port 8765 --mesh-version dev
+```
+
 On first start, `paglets-host` copies the bundled demo launch config to
 `~/.paglets/launch.toml`. That config declares the packaged example
 `server-info` service and the eager `mesh-info` service on each host.
@@ -182,11 +201,16 @@ Useful host mesh flags:
 uv run paglets-host --name alpha --port 8765 --mesh-version dev
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 uv run paglets-host --name gamma --port 8767 --no-mesh-multicast --peer http://127.0.0.1:8765
+uv run paglets-host --name labbox --bind-public [HOST] --port 8765 --mesh-version dev
 ```
 
 `--mesh/--no-mesh` controls the registry, `--peer URL` can be repeated,
 `--mesh-multicast/--no-mesh-multicast` controls UDP beacons, and
-`--persistence-dir` overrides the host's durable inactive-paglet directory.
+`--bind-public [HOST]` binds only the auto-detected LAN address or the supplied
+address. The auto form refreshes if the detected LAN address changes; supplied
+addresses remain fixed. Repeat it to bind multiple supplied addresses; the
+first bound address is the mesh URL. `--persistence-dir` overrides the host's
+durable inactive-paglet directory.
 `--persistent-storage-quota 10M` controls the per-class managed persistent
 storage quota.
 Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the

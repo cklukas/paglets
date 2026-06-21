@@ -22,6 +22,19 @@ uv run paglets-host --name alpha --port 8765 --auto-update-from-git
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --auto-update-from-git
 ```
 
+Across machines, add `--bind-public [IP]` so each host binds only a reachable
+LAN address and publishes that URL to the mesh:
+
+```bash
+uv run paglets-host --name mac --bind-public --port 8765 --auto-update-from-git
+uv run paglets-host --name windows --bind-public [IP] --port 8765 --auto-update-from-git
+```
+
+Repeat `--bind-public IP` to listen on multiple specific addresses. The first
+bound address is the one published to mesh peers. The auto form keeps watching
+for LAN address changes and rebinds/publishes the new address after DHCP or
+network reconnect changes it.
+
 The checkout must be clean. If `git status --porcelain` reports uncommitted or
 untracked files, startup is cancelled before any fetch or pull runs:
 

@@ -104,6 +104,22 @@ def test_offline_peer_is_marked_offline_after_failed_gossip():
     assert beta_status.error
 
 
+def test_local_address_change_replaces_mesh_self_record():
+    host = _host("alpha")
+    host.start_background()
+    try:
+        old_address = host.address
+        host.address = f"http://127.0.0.1:{free_port()}"
+        host.mesh.local_address_changed(old_address)
+
+        refs = host.list_hosts()
+    finally:
+        host.stop()
+
+    assert [ref.url for ref in refs] == [host.address]
+    assert old_address not in {ref.url for ref in refs}
+
+
 def test_version_mismatch_peers_are_ignored():
     alpha = _host("alpha", version="mesh-a")
     beta = _host("beta", version="mesh-b", peers=[alpha.address])

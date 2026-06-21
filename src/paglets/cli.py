@@ -64,9 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"paglets-host: {exc}", file=sys.stderr)
         return 1
 
+    bind_host = args.bind_public if args.bind_public is not None else args.host
     host = Host(
         name=args.name,
-        host=args.host,
+        host=bind_host,
         port=args.port,
         mesh=args.mesh,
         peers=args.peer,
@@ -107,6 +108,15 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a paglets host")
     parser.add_argument("--name", required=True, help="Host/context name, e.g. alpha")
     parser.add_argument("--host", default="127.0.0.1", help="Bind host")
+    parser.add_argument(
+        "--bind-public",
+        action="append",
+        nargs="?",
+        const="auto",
+        default=None,
+        metavar="HOST",
+        help="Bind to the detected LAN IP, refresh it if it changes, or bind to HOST; repeat for multiple explicit hosts",
+    )
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     parser.add_argument("--peer", action="append", default=[], help="Peer host URL to join; repeatable")
     parser.add_argument("--mesh", action=argparse.BooleanOptionalAction, default=True, help="Enable host mesh discovery")

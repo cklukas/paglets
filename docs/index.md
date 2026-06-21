@@ -38,6 +38,19 @@ uv run paglets-host --name alpha --port 8765 --mesh-version dev
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
+For hosts on different machines, start each host with `--bind-public`:
+
+```bash
+uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
+uv run paglets-host --name windows --bind-public [IP] --port 8765 --mesh-version dev
+```
+
+Without an `IP`, `--bind-public` binds only the detected LAN address. With an
+`IP`, it binds only that supplied address. Repeat the flag to bind multiple
+specific addresses; the first one is published to the mesh. The auto form
+keeps watching the detected address and rebinds/publishes a new one after DHCP
+or network reconnect changes it.
+
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
 demo config. The default launch config declares lazy `server-info` and eager
 `mesh-info`, so hosts continuously exchange resource snapshots while still

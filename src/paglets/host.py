@@ -7,10 +7,11 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import shutil
+import socket
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import git_update
@@ -73,9 +74,65 @@ SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS = 0.5
 AUTO_UPDATE_REQUEST_INTERVAL_SECONDS = 10.0
 AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS = 10.0
 AUTO_UPDATE_RESTART_DELAY_SECONDS = 0.2
+NETWORK_BIND_WATCH_INTERVAL_SECONDS = 5.0
 
 
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
+
+
+def _resolve_bind_host(host: str) -> str:
+    value = str(host).strip()
+    if value.casefold() == "auto":
+        return _auto_lan_host()
+    return value
+
+
+def _bind_host_specs(host: str | Sequence[str]) -> list[str]:
+    values = [host] if isinstance(host, str) else list(host)
+    specs = [str(value).strip() for value in values if str(value).strip()]
+    if not specs:
+        raise ValueError("at least one bind host is required")
+    return specs
+
+
+def _resolve_bind_hosts(host: str | Sequence[str]) -> list[str]:
+    values = _bind_host_specs(host)
+    resolved: list[str] = []
+    for value in values:
+        bind_host = _resolve_bind_host(value)
+        if bind_host not in resolved:
+            resolved.append(bind_host)
+    return resolved
+
+
+def _resolve_public_host(bind_host: str) -> str:
+    if bind_host in {"0.0.0.0", ""}:
+        return _auto_lan_host()
+    return bind_host
+
+
+def _auto_lan_host() -> str:
+    """Return the local IP used for outbound LAN/default-route traffic."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            address = sock.getsockname()[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            if family != socket.AF_INET:
+                continue
+            address = sockaddr[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+    return "127.0.0.1"
 
 
 @dataclass(slots=True)
@@ -106,7 +163,7 @@ class Host:
     def __init__(
         self,
         name: str,
-        host: str = "127.0.0.1",
+        host: str | Sequence[str] = "127.0.0.1",
         port: int = 0,
         *,
         client: HostClient | None = None,
@@ -126,11 +183,20 @@ class Host:
         auto_update_restart_callback: Callable[[], None] | None = None,
         auto_update_reporter: Callable[[str], None] | None = None,
         auto_update_restart_delay: float = AUTO_UPDATE_RESTART_DELAY_SECONDS,
+        bind_watch_interval: float = NETWORK_BIND_WATCH_INTERVAL_SECONDS,
     ):
         self.name = name
-        self.bind_host = host
+        self._bind_host_specs = _bind_host_specs(host)
+        self._auto_bind_enabled = any(value.casefold() == "auto" for value in self._bind_host_specs)
+        self._bind_watch_interval = max(0.1, float(bind_watch_interval))
+        self._bind_watch_stop = threading.Event()
+        self._bind_watch_thread: threading.Thread | None = None
+        self._server_lock = threading.RLock()
+        self.bind_hosts = _resolve_bind_hosts(self._bind_host_specs)
+        self.bind_host = self.bind_hosts[0]
+        self.public_host = _resolve_public_host(self.bind_host)
         self.port = int(port)
-        self.address = f"http://{host}:{port}"
+        self.address = f"http://{self.public_host}:{port}"
         self.client = client or HostClient()
         self._agents: dict[str, ChildProcessController] = {}
         self._mailboxes: dict[str, MessageMailbox] = {}
@@ -153,7 +219,9 @@ class Host:
         self.launch_config_sync_result = launch_config_sync_result
         self._lock = threading.RLock()
         self._server: _PagletHTTPServer | None = None
+        self._servers: list[_PagletHTTPServer] = []
         self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
         self._activation_stop = threading.Event()
         self._activation_thread: threading.Thread | None = None
         self.auto_update_from_git = bool(auto_update_from_git)
@@ -185,18 +253,12 @@ class Host:
     # Server lifecycle
     # ------------------------------------------------------------------
     def start_background(self) -> None:
-        if self._server is not None:
-            return
-        self._clear_work_root()
-        server = _PagletHTTPServer((self.bind_host, self.port), _RequestHandler, self)
-        actual_host, actual_port = server.server_address[:2]
-        public_host = self.bind_host if self.bind_host not in ("0.0.0.0", "") else "127.0.0.1"
-        if self.port == 0:
-            self.port = int(actual_port)
-        self.address = f"http://{public_host}:{actual_port}"
-        self._server = server
-        self._thread = threading.Thread(target=server.serve_forever, name=f"paglets-{self.name}", daemon=True)
-        self._thread.start()
+        with self._server_lock:
+            if self._server is not None:
+                return
+            self._clear_work_root()
+            servers = self._open_http_servers(self.bind_hosts, self.port)
+            self._install_http_servers(servers, self.bind_hosts)
         self._activation_stop.clear()
         self._emit_launch_config_sync_result()
         self._activate_startup_records()
@@ -204,13 +266,21 @@ class Host:
         self._start_launch_agents()
         self._start_activation_scheduler()
         self.mesh.start()
+        self._start_bind_watcher()
         self._emit("context-start")
 
     def serve_forever(self) -> None:
         self.start_background()
-        assert self._thread is not None
         try:
-            self._thread.join()
+            while True:
+                with self._server_lock:
+                    if self._server is None:
+                        return
+                    threads = list(self._threads)
+                if not threads:
+                    return
+                for thread in threads:
+                    thread.join(timeout=0.5)
         except KeyboardInterrupt:  # pragma: no cover - CLI convenience
             self.shutdown()
 
@@ -218,22 +288,152 @@ class Host:
         self.stop(deactivate_active=True)
 
     def stop(self, *, deactivate_active: bool = False) -> None:
-        server = self._server
-        if server is None:
-            return
+        self._stop_bind_watcher()
+        with self._server_lock:
+            server = self._server
+            if server is None:
+                return
+            servers = list(self._servers or [server])
+            threads = list(self._threads)
+            if not threads and self._thread is not None:
+                threads = [self._thread]
         self._stop_activation_scheduler()
         if deactivate_active:
             self._deactivate_active_for_shutdown()
         self._terminate_active_children()
         self.mesh.stop()
         self._emit("context-shutdown")
-        server.shutdown()
-        server.server_close()
+        with self._server_lock:
+            self._clear_http_servers()
+        self._shutdown_http_servers(servers, threads)
+
+    def _open_http_servers(self, bind_hosts: list[str], port: int) -> list["_PagletHTTPServer"]:
+        servers: list[_PagletHTTPServer] = []
+        try:
+            for index, bind_host in enumerate(bind_hosts):
+                bind_port = port if index == 0 or port != 0 else int(servers[0].server_address[1])
+                servers.append(_PagletHTTPServer((bind_host, bind_port), _RequestHandler, self))
+        except Exception:
+            for server in servers:
+                server.server_close()
+            raise
+        return servers
+
+    def _install_http_servers(self, servers: list["_PagletHTTPServer"], bind_hosts: list[str]) -> None:
+        _actual_host, actual_port = servers[0].server_address[:2]
+        self.bind_hosts = list(bind_hosts)
+        self.bind_host = self.bind_hosts[0]
+        self.public_host = _resolve_public_host(self.bind_host)
+        self.port = int(actual_port)
+        self.address = f"http://{self.public_host}:{actual_port}"
+        self._servers = servers
+        self._server = servers[0]
+        self._threads = [
+            threading.Thread(target=server.serve_forever, name=f"paglets-{self.name}-{index}", daemon=True)
+            for index, server in enumerate(servers)
+        ]
+        self._thread = self._threads[0]
+        for thread in self._threads:
+            thread.start()
+
+    def _clear_http_servers(self) -> None:
+        self._servers = []
         self._server = None
-        thread = self._thread
+        self._threads = []
         self._thread = None
-        if thread is not None and thread.is_alive():
+
+    def _shutdown_http_servers(
+        self,
+        servers: list["_PagletHTTPServer"],
+        threads: list[threading.Thread],
+    ) -> None:
+        for running_server in servers:
+            running_server.shutdown()
+        for running_server in servers:
+            running_server.server_close()
+        current_thread = threading.current_thread()
+        for thread in threads:
+            if thread is not current_thread and thread.is_alive():
+                thread.join(timeout=2)
+
+    def _start_bind_watcher(self) -> None:
+        if not self._auto_bind_enabled:
+            return
+        if self._bind_watch_thread is not None and self._bind_watch_thread.is_alive():
+            return
+        self._bind_watch_stop.clear()
+        self._bind_watch_thread = threading.Thread(
+            target=self._bind_watch_loop,
+            name=f"paglets-bind-watch-{self.name}",
+            daemon=True,
+        )
+        self._bind_watch_thread.start()
+
+    def _stop_bind_watcher(self) -> None:
+        self._bind_watch_stop.set()
+        thread = self._bind_watch_thread
+        self._bind_watch_thread = None
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=2)
+
+    def _bind_watch_loop(self) -> None:
+        while not self._bind_watch_stop.wait(self._bind_watch_interval):
+            try:
+                self._check_auto_bind_change()
+            except Exception as exc:  # pragma: no cover - defensive background boundary
+                self.mesh._debug(f"auto bind refresh failed: {exc}")
+
+    def _check_auto_bind_change(self) -> bool:
+        if not self._auto_bind_enabled:
+            return False
+        with self._server_lock:
+            if self._server is None:
+                return False
+            current_bind_hosts = list(self.bind_hosts)
+        next_bind_hosts = _resolve_bind_hosts(self._bind_host_specs)
+        if next_bind_hosts == current_bind_hosts:
+            return False
+        return self._rebind_http_servers(next_bind_hosts)
+
+    def _rebind_http_servers(self, next_bind_hosts: list[str]) -> bool:
+        with self._server_lock:
+            server = self._server
+            if server is None:
+                return False
+            current_bind_hosts = list(self.bind_hosts)
+            if next_bind_hosts == current_bind_hosts:
+                return False
+            old_address = self.address
+            old_port = self.port
+            old_servers = list(self._servers or [server])
+            old_threads = list(self._threads)
+            if not old_threads and self._thread is not None:
+                old_threads = [self._thread]
+            try:
+                self._shutdown_http_servers(old_servers, old_threads)
+                new_servers = self._open_http_servers(next_bind_hosts, old_port)
+            except Exception as exc:
+                try:
+                    restored_servers = self._open_http_servers(current_bind_hosts, old_port)
+                except Exception as restore_exc:
+                    self._clear_http_servers()
+                    self.mesh._debug(f"auto bind refresh failed and restore failed: {exc}; restore: {restore_exc}")
+                    raise
+                self._install_http_servers(restored_servers, current_bind_hosts)
+                self.mesh._debug(f"auto bind refresh failed; restored previous bind hosts: {exc}")
+                return False
+            self._install_http_servers(new_servers, next_bind_hosts)
+            new_address = self.address
+        self.mesh.local_address_changed(old_address)
+        self._emit(
+            "context-rebind",
+            data={
+                "old_address": old_address,
+                "new_address": new_address,
+                "bind_hosts": list(next_bind_hosts),
+            },
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Local management API
