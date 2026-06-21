@@ -106,7 +106,10 @@ def _selection_request(args: argparse.Namespace) -> TargetSelectionRequest:
 
 
 def _print_summary(reply) -> None:
-    print(f"{'host':<14} {'age':>6} {'cpu%':>6} {'load/cpu':>8} {'ram free':>10} {'work free':>10} errors")
+    print(
+        f"{'host':<14} {'age':>6} {'cpu%':>6} {'load/cpu':>8} {'ram free':>10} "
+        f"{'work free':>10} {'active':>6} {'inactive':>8} errors"
+    )
     now = time.time()
     for snapshot in reply.hosts:
         age = max(0.0, now - snapshot.observed_at)
@@ -114,19 +117,24 @@ def _print_summary(reply) -> None:
         print(
             f"{snapshot.host_name:<14} {age:>5.1f}s {snapshot.cpu_percent:>6.1f} "
             f"{snapshot.load_per_cpu:>8.2f} {_bytes(snapshot.memory_available_bytes):>10} "
-            f"{_bytes(snapshot.work_free_bytes):>10} {errors}"
+            f"{_bytes(snapshot.work_free_bytes):>10} {snapshot.active_count:>6} "
+            f"{snapshot.inactive_count:>8} {errors}"
         )
     _print_errors(reply.errors)
 
 
 def _print_targets(reply) -> None:
-    print(f"{'host':<14} {'score':>7} {'cpu%':>6} {'load/cpu':>8} {'ram free':>10} {'work free':>10}")
+    print(
+        f"{'host':<14} {'score':>7} {'cpu%':>6} {'load/cpu':>8} {'ram free':>10} "
+        f"{'work free':>10} {'active':>6} {'inactive':>8}"
+    )
     for target in reply.targets:
         snapshot = target.snapshot
         print(
             f"{snapshot.host_name:<14} {target.score:>7.3f} {snapshot.cpu_percent:>6.1f} "
             f"{snapshot.load_per_cpu:>8.2f} {_bytes(snapshot.memory_available_bytes):>10} "
-            f"{_bytes(snapshot.work_free_bytes):>10}"
+            f"{_bytes(snapshot.work_free_bytes):>10} {snapshot.active_count:>6} "
+            f"{snapshot.inactive_count:>8}"
         )
     if reply.rejected:
         print("\nrejected:")

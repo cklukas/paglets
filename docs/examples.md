@@ -206,9 +206,9 @@ reply.
 ## Mesh Info
 
 `mesh-info` is an eager resident service that keeps a fresh resource snapshot
-for each visible host. It samples local CPU, memory, swap, and work-directory
-disk space through the existing local `server-info` service, then exchanges
-bounded snapshot batches with peer `mesh-info` services.
+for each visible host. It samples local CPU, memory, swap, work-directory disk
+space, and active/inactive paglet counts, then exchanges bounded snapshot
+batches with peer `mesh-info` services.
 
 The core contract is:
 
@@ -226,8 +226,9 @@ uv run paglets-mesh-info targets --json
 
 The `summary` command prints the fresh landscape known to the entry host. The
 `targets` command applies placement constraints and ranks eligible hosts by
-load, CPU, memory pressure, and work-storage pressure. Use optional
-`--entry HOSTNAME` to choose a discovered entry host by name.
+load, CPU, memory pressure, and work-storage pressure. Both text tables include
+active and inactive paglet counts for each host. Use optional `--entry
+HOSTNAME` to choose a discovered entry host by name.
 
 Programmatic target selection:
 

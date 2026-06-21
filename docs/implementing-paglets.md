@@ -386,8 +386,8 @@ the `Host(..., persistent_storage_quota_bytes=...)` constructor argument.
 
 ## Query Mesh Placement
 
-The packaged `mesh-info` resident service keeps fresh host resource snapshots
-and ranks eligible compute targets:
+The packaged `mesh-info` resident service keeps fresh host resource snapshots,
+including active/inactive paglet counts, and ranks eligible compute targets:
 
 ```python
 from paglets import ServiceScope

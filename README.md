@@ -258,8 +258,9 @@ uv run paglets-mesh-info targets --max-load-per-cpu 1.0 --min-work-free 1G
 ```
 
 `paglets-mesh-info` queries the entry host's eager `mesh-info` service. Each
-host's service samples local CPU, memory, and work-directory disk space through
-`server-info`, then exchanges snapshots with peer `mesh-info` services.
+host's service samples local CPU, memory, work-directory disk space, and
+active/inactive paglet counts, then exchanges snapshots with peer `mesh-info`
+services.
 
 Use optional `--entry HOSTNAME` to choose a discovered entry host by name.
 
