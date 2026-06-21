@@ -425,7 +425,7 @@ The parent handles these messages:
 
 ### Flow Diagrams
 
-Use a Mermaid `sequenceDiagram` when you want to explain the calling sequence
+The below Mermaid `sequenceDiagram` explains the calling sequence
 between the CLI, entry host, parent search paglet, child paglets, and local
 filesystems:
 
@@ -453,7 +453,7 @@ sequenceDiagram
     CLI->>Parent: cleanup()
 ```
 
-Use a Mermaid `flowchart` when you want to explain the parent and child program
+The following Mermaid `flowchart` explains the parent and child program
 flow without focusing on every individual call:
 
 ```mermaid
