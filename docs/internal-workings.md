@@ -129,6 +129,32 @@ The host API is intentionally small:
 
 There is no authentication layer in this first runtime.
 
+## Launch Config And Autostart
+
+`paglets-host` loads `~/.paglets/launch.toml` by default. On first start it
+copies the bundled demo launch config, which starts the packaged example
+`server-info` service:
+
+```toml
+[[startup_agents]]
+class = "paglets.examples.system_info.agent:ServerInfoAgent"
+agent_id = "service.server-info"
+singleton = true
+state = { service_scope = "mesh" }
+```
+
+If a later package version includes a different bundled demo config version,
+interactive starts ask before replacing the user file. The previous file is
+moved to `launch.toml.old` or a timestamped `.old-*` path. Non-interactive
+starts never block; they keep the existing file and print a warning. Operators
+can use `--yes`, `--no-sync-launch-config`, or set `sync_demo_config = false`
+in `[launch]`.
+
+Startup agents run after the HTTP server is bound and durable startup records
+are activated, but before mesh gossip starts. Singleton entries with a fixed
+agent ID skip an already active paglet and activate an inactive matching record
+instead of creating a duplicate.
+
 ## Durable Inactive Records
 
 Deactivation serializes a paglet into an inactive record and removes the live

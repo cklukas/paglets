@@ -1,0 +1,10 @@
+[launch]
+demo_config_id = "paglets-default-launch"
+demo_config_version = "2"
+
+[[startup_agents]]
+class = "paglets.examples.system_info.agent:ServerInfoAgent"
+enabled = true
+agent_id = "service.server-info"
+singleton = true
+state = { service_scope = "mesh" }

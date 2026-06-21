@@ -1,0 +1,277 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from typing import Any
+
+from ...admin import DEFAULT_CONFIG_PATH, PagletsAdminClient, ServerRef, load_server_config, parse_server_arg, upsert_server_ref
+from ...client import HostClient
+from ...messages import Message
+from .agent import (
+    DEFAULT_BENCHMARK_DURATION_SECONDS,
+    DEFAULT_DISK_SIZE_BYTES,
+    DEFAULT_LOCK_TIMEOUT_SECONDS,
+    BenchmarkMetric,
+    BenchmarkRequest,
+    HostBenchmarkResult,
+    parse_size,
+)
+from ...proxy import PagletProxy
+from ...serde import dataclass_from_wire, dataclass_to_wire
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _parser()
+    args = parser.parse_args(argv)
+
+    try:
+        servers = load_server_config(args.config)
+        for server_arg in args.server:
+            servers = upsert_server_ref(servers, parse_server_arg(server_arg))
+        client = HostClient(timeout=max(1.0, args.timeout + 10.0))
+        entry = _select_entry_server(servers, entry_name=args.entry, client=client)
+        request = _benchmark_request(args)
+        summary = _collect(entry, request, timeout=args.timeout, client=client)
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            _print_text(summary)
+        return 1 if _has_failures(summary) else 0
+    except Exception as exc:
+        print(f"paglets-perf-test: {exc}", file=sys.stderr)
+        return 2
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run performance benchmarks across a paglets mesh")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Server config path")
+    parser.add_argument("--server", action="append", default=[], help="One-off server in NAME=URL format")
+    parser.add_argument("--entry", default=None, help="Entry server name from config")
+    parser.add_argument("--timeout", type=float, default=120.0, help="Seconds to wait for mesh benchmark replies")
+    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--duration", type=float, default=DEFAULT_BENCHMARK_DURATION_SECONDS, help="Seconds per CPU/memory kernel")
+    parser.add_argument("--disk-size", default=_format_size(DEFAULT_DISK_SIZE_BYTES), help="Temporary file size per tested volume")
+    parser.add_argument("--workers", type=int, default=0, help="Multi-core worker count; default is logical CPU count")
+    parser.add_argument("--path", action="append", default=[], help="Disk path to benchmark; repeat for multiple paths")
+    parser.add_argument("--no-cpu", action="store_true", help="Skip CPU benchmarks")
+    parser.add_argument("--no-memory", action="store_true", help="Skip memory benchmarks")
+    parser.add_argument("--no-disk", action="store_true", help="Skip disk benchmarks")
+    parser.add_argument("--lock-timeout", type=float, default=DEFAULT_LOCK_TIMEOUT_SECONDS, help="Seconds to wait for local benchmark lock")
+    return parser
+
+
+def _benchmark_request(args: argparse.Namespace) -> BenchmarkRequest:
+    return BenchmarkRequest(
+        include_cpu=not args.no_cpu,
+        include_memory=not args.no_memory,
+        include_disk=not args.no_disk,
+        duration_seconds=max(0.01, args.duration),
+        disk_size_bytes=parse_size(args.disk_size),
+        workers=max(0, args.workers),
+        paths=list(args.path),
+        lock_timeout_seconds=max(0.0, args.lock_timeout),
+    )
+
+
+def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
+    candidates = servers if entry_name is None else [server for server in servers if server.name == entry_name]
+    if entry_name is not None and not candidates:
+        raise ValueError(f"No server named {entry_name!r} in config; pass --server {entry_name}=URL or update {DEFAULT_CONFIG_PATH}")
+    if entry_name is None:
+        candidates = [server for server in candidates if server.enabled]
+    if not candidates:
+        raise ValueError(f"No enabled servers configured in {DEFAULT_CONFIG_PATH}; pass --server NAME=URL")
+
+    errors: list[str] = []
+    for server in candidates:
+        try:
+            client.get_json(f"{server.url.rstrip('/')}/health", timeout=2.0)
+            return server
+        except Exception as exc:
+            errors.append(f"{server.name}: {exc}")
+    details = "; ".join(errors) if errors else "none reachable"
+    raise ValueError(f"No reachable entry server found ({details})")
+
+
+def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, client: HostClient) -> dict[str, Any]:
+    admin = PagletsAdminClient([entry], client=client)
+    proxy_wire = admin.create_agent(
+        entry,
+        "paglets.examples.performance.agent:PerformanceBenchmarkAgent",
+        "paglets.examples.performance.agent:PerformanceBenchmarkState",
+        {},
+    )
+    proxy = PagletProxy.from_wire(proxy_wire, client)
+    try:
+        return proxy.send(
+            Message(
+                "collect",
+                {
+                    "request": dataclass_to_wire(request),
+                    "timeout": timeout,
+                },
+            )
+        )
+    finally:
+        try:
+            proxy.dispose()
+        except Exception:
+            pass
+
+
+def _print_text(summary: dict[str, Any]) -> None:
+    print(
+        f"{'host':<14} {'int/s':>10} {'float/s':>10} {'sha':>10} "
+        f"{'multi-int/s':>12} {'mem copy':>10} {'disk wr':>10} {'disk rd':>10} {'err':>3}"
+    )
+    results = summary.get("results", {})
+    for host, item in sorted(results.items()):
+        result = dataclass_from_wire(HostBenchmarkResult, item["result"])
+        single_int = _metric(result.cpu.single_core if result.cpu else [], "integer")
+        single_float = _metric(result.cpu.single_core if result.cpu else [], "float")
+        single_sha = _metric(result.cpu.single_core if result.cpu else [], "sha256")
+        multi_int = _metric(result.cpu.multi_core if result.cpu else [], "integer-multi")
+        mem_copy = _metric(result.memory.metrics if result.memory else [], "memory-copy")
+        disk_write, disk_read = _best_disk_rates(result)
+        error_count = len(result.errors)
+        if result.cpu:
+            error_count += len(result.cpu.errors)
+        if result.memory:
+            error_count += len(result.memory.errors)
+        if result.disk:
+            error_count += len(result.disk.errors)
+        print(
+            f"{host:<14} {_ops(single_int):>10} {_ops(single_float):>10} {_bytes_per_second(single_sha):>10} "
+            f"{_ops(multi_int):>12} {_bytes_per_second(mem_copy):>10} {_bytes_per_second_value(disk_write):>10} "
+            f"{_bytes_per_second_value(disk_read):>10} {error_count:>3}"
+        )
+
+    _print_disk_details(summary)
+    _print_errors(summary)
+
+
+def _print_disk_details(summary: dict[str, Any]) -> None:
+    printed_header = False
+    for host, item in sorted(summary.get("results", {}).items()):
+        result = dataclass_from_wire(HostBenchmarkResult, item["result"])
+        if not result.disk or not result.disk.volumes:
+            continue
+        if not printed_header:
+            print("\ndisks:")
+            print(f"{'host':<14} {'path':<32} {'size':>9} {'write':>10} {'read':>10} {'metadata':>10}")
+            printed_header = True
+        for volume in result.disk.volumes:
+            print(
+                f"{host:<14} {volume.path:<32.32} {_bytes(volume.benchmark_size_bytes):>9} "
+                f"{_bytes_per_second_value(volume.write_bytes_per_second):>10} "
+                f"{_bytes_per_second_value(volume.read_bytes_per_second):>10} "
+                f"{volume.metadata_files_per_second:>9.0f}/s"
+            )
+
+
+def _print_errors(summary: dict[str, Any]) -> None:
+    lines: list[str] = []
+    for host, error in sorted((summary.get("errors") or {}).items()):
+        lines.append(f"{host}: {error}")
+    for host, error in sorted((summary.get("cleanup_errors") or {}).items()):
+        lines.append(f"{host}: cleanup failed: {error}")
+    for host, item in sorted((summary.get("results") or {}).items()):
+        result = dataclass_from_wire(HostBenchmarkResult, item["result"])
+        for error in result.errors:
+            lines.append(f"{host}: {error}")
+        if result.cpu:
+            lines.extend(f"{host}: {error}" for error in result.cpu.errors)
+        if result.memory:
+            lines.extend(f"{host}: {error}" for error in result.memory.errors)
+        if result.disk:
+            lines.extend(f"{host}: {error}" for error in result.disk.errors)
+            lines.extend(f"{host}: skipped {skip.path}: {skip.reason}" for skip in result.disk.skipped)
+    if lines:
+        print("\nnotes:")
+        for line in lines:
+            print(f"  - {line}")
+
+
+def _has_failures(summary: dict[str, Any]) -> bool:
+    if summary.get("errors") or summary.get("cleanup_errors"):
+        return True
+    for item in (summary.get("results") or {}).values():
+        result = dataclass_from_wire(HostBenchmarkResult, item["result"])
+        if result.errors:
+            return True
+        if result.cpu and result.cpu.errors:
+            return True
+        if result.memory and result.memory.errors:
+            return True
+        if result.disk and result.disk.errors:
+            return True
+    return False
+
+
+def _metric(metrics: list[BenchmarkMetric], name: str) -> BenchmarkMetric | None:
+    for metric in metrics:
+        if metric.name == name:
+            return metric
+    return None
+
+
+def _best_disk_rates(result: HostBenchmarkResult) -> tuple[float, float]:
+    if result.disk is None or not result.disk.volumes:
+        return 0.0, 0.0
+    return (
+        max(volume.write_bytes_per_second for volume in result.disk.volumes),
+        max(volume.read_bytes_per_second for volume in result.disk.volumes),
+    )
+
+
+def _ops(metric: BenchmarkMetric | None) -> str:
+    if metric is None:
+        return "-"
+    return _rate(metric.operations_per_second)
+
+
+def _rate(value: float) -> str:
+    units = ("", "K", "M", "G")
+    amount = float(value)
+    for unit in units:
+        if abs(amount) < 1000.0 or unit == units[-1]:
+            return f"{amount:.1f}{unit}"
+        amount /= 1000.0
+    return f"{amount:.1f}G"
+
+
+def _bytes_per_second(metric: BenchmarkMetric | None) -> str:
+    if metric is None:
+        return "-"
+    return _bytes_per_second_value(metric.bytes_per_second)
+
+
+def _bytes_per_second_value(value: float) -> str:
+    return f"{_bytes(int(value))}/s" if value > 0 else "-"
+
+
+def _bytes(value: int) -> str:
+    units = ("B", "K", "M", "G", "T", "P")
+    amount = float(value)
+    for unit in units:
+        if abs(amount) < 1024.0 or unit == units[-1]:
+            return f"{amount:.1f}{unit}" if unit != "B" else f"{int(amount)}B"
+        amount /= 1024.0
+    return f"{amount:.1f}P"
+
+
+def _format_size(value: int) -> str:
+    if value % (1024**3) == 0:
+        return f"{value // (1024**3)}G"
+    if value % (1024**2) == 0:
+        return f"{value // (1024**2)}M"
+    if value % 1024 == 0:
+        return f"{value // 1024}K"
+    return str(value)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

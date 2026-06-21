@@ -26,6 +26,16 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.services
 
+## Startup
+
+::: paglets.startup
+
+## Packaged Examples
+
+::: paglets.examples.system_info
+
+::: paglets.examples.performance
+
 ## Transfer Tickets
 
 ::: paglets.transfer

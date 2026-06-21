@@ -95,6 +95,29 @@ uv run paglets-host --name alpha --port 8765
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765
 ```
 
+On first start, `paglets-host` copies the bundled demo launch config to
+`~/.paglets/launch.toml`. That config starts the packaged example
+`server-info` service agent on each host:
+
+```toml
+[launch]
+demo_config_id = "paglets-default-launch"
+demo_config_version = "2"
+
+[[startup_agents]]
+class = "paglets.examples.system_info.agent:ServerInfoAgent"
+enabled = true
+agent_id = "service.server-info"
+singleton = true
+state = { service_scope = "mesh" }
+```
+
+If a newer bundled demo config ships later, interactive host starts ask whether
+to replace the user config and move the old file to `launch.toml.old`.
+Non-interactive starts never block; they keep the existing file and print a
+warning. Use `--yes` to accept the update or `--no-sync-launch-config` to skip
+demo config syncing.
+
 Hosts form a lightweight version-gated mesh. A host exposes its own view at
 `GET /hosts`, accepts seed joins at `POST /hosts/join`, and includes its
 `code_version` in `/health`. Same-version peers are visible to paglets through:
@@ -178,6 +201,37 @@ agent class, state class, and initial state JSON for the selected class, and
 still allows manual `module:qualname` entry. Press `g` to add a discovery path
 or module, and `y` to remove one. Discovery is a TUI convenience only: target
 servers must already be able to import the selected module name.
+
+Query the packaged example server-info service across all online same-version mesh
+hosts:
+
+```bash
+uv run paglets-sysinfo df
+uv run paglets-sysinfo load
+uv run paglets-sysinfo plist python --limit 10
+```
+
+`paglets-sysinfo` uses the first enabled reachable server in
+`~/.paglets/servers.json` as the entry host, then creates a collector paglet
+there. The collector clones to all online mesh hosts, calls each local
+`server-info` service, and prints the aggregate result. For one-off use, pass
+`--server alpha=http://127.0.0.1:8765`; for scripts, add `--json`.
+
+Run a mesh-wide benchmark with a mobile agent:
+
+```bash
+uv run paglets-perf-test
+uv run paglets-perf-test --json
+uv run paglets-perf-test --duration 2 --disk-size 256M
+```
+
+`paglets-perf-test` also uses the first enabled reachable server as the entry
+host, but it does not talk to a resident service. It creates a parent benchmark
+paglet and clones workers to all online same-version mesh hosts. Each worker
+runs CPU, memory, and bounded disk I/O tests locally, then reports results back
+to the parent. Disk tests use temporary files on writable real volumes and clean
+them up afterward. Use `--path /some/mount` to limit disk tests, or `--no-disk`
+to skip disk I/O.
 
 Run a parent/child clone survey example:
 
@@ -363,12 +417,15 @@ self.notify_all_messages()
 
 ## Services, Tickets, Events, And Resources
 
-Paglets can advertise local or mesh-visible services:
+Paglets can advertise local or mesh-visible services through typed contracts.
+The packaged example `server-info` service is one example; it advertises a typed
+contract that callers can discover and invoke:
 
 ```python
-self.advertise_service("quotes", capabilities=("quote",), scope="mesh")
-service_ref = self.lookup_service("quotes", capability="quote", scope="mesh")
-reply = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
+from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
+
+service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh")
+reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 ```
 
 Use `TransferTicket` when dispatch or clone needs target checks or inactive

@@ -32,6 +32,21 @@ uv run paglets-host --name alpha --port 8765 --mesh-version dev
 uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
+On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
+demo config. The default launch config starts the packaged example
+`server-info` service agent, so mesh-wide commands can query local system state:
+
+```bash
+uv run paglets-sysinfo df
+uv run paglets-sysinfo load
+uv run paglets-perf-test
+```
+
+`paglets-perf-test` is a pure mobile-agent example: the entry host creates a
+parent benchmark paglet, clones workers to online same-version mesh hosts, runs
+local CPU, memory, and bounded temporary disk I/O checks, and reports the
+summary centrally.
+
 Run the Textual TUI:
 
 ```bash

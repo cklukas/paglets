@@ -189,24 +189,32 @@ message fails immediately instead.
 
 ## Talk To Resident Services
 
-Advertise a service from the owning paglet:
+Prefer typed service contracts for resident services. The packaged example
+`server-info` service is a ready-made example: each host starts it from launch
+config, it advertises the `SERVER_INFO` contract, and callers receive typed
+dataclass replies:
 
 ```python
-self.advertise_service(
-    "flight-ticket",
-    capabilities=("quote", "watch"),
-    metadata={"version": 1},
-    scope="mesh",
-)
+from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
+
+
+service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope="mesh")
+reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 ```
 
-Look up a local or mesh-visible service. Lookups return a serializable
-`PagletProxyRef`, which can be stored in dataclass state or resolved to a proxy:
+For custom services, put the `ServiceContract`, `ServiceOperation`, and payload
+dataclasses in an importable module shared by provider and caller. The provider
+uses `advertise_contract`, routes with `contract.route(...)`, and the caller
+uses `require_contract` or `lookup_contract`.
+
+The lower-level string API remains available when a fully typed contract is not
+needed. `lookup_service` returns a serializable `PagletProxyRef`, which can be
+stored in dataclass state or resolved to a proxy:
 
 ```python
 service_ref = self.lookup_service("flight-ticket", capability="quote", scope="mesh")
 if service_ref is not None:
-    quote = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
+    reply = service_ref.resolve(self.context).send(Message("quote", {"from": "FRA", "to": "SFO"}))
 ```
 
 ## Observe Context Events

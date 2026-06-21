@@ -16,6 +16,10 @@ ContextEvent
 : A host-level event record emitted for lifecycle, transfer, service, and
   message activity. Hosts keep a bounded in-memory event log.
 
+AutoStartSpec
+: A class-level marker declaring that a paglet can be started from launch
+  config, usually with an alias, fixed agent ID, and singleton behavior.
+
 Dispatch
 : Move a paglet from one host to another. The source host removes the original
   after successful delivery.
@@ -45,6 +49,11 @@ Itinerary
 : A serializable plan that lets a paglet visit hosts and run tasks at lifecycle
   points.
 
+LaunchConfig
+: The `~/.paglets/launch.toml` startup configuration read by `paglets-host`.
+  The bundled demo config starts the packaged example `server-info` service by
+  default.
+
 Message
 : A JSON-compatible command delivered to a paglet's `handle_message` method.
 
@@ -68,13 +77,39 @@ PagletProxyRef
 : A serializable reference containing host URL and agent ID. It can be stored in
   paglet state and later resolved to a `PagletProxy`.
 
+PerformanceBenchmarkAgent
+: The packaged example mobile benchmark agent used by `paglets-perf-test`. It
+  clones workers across the mesh, runs local CPU, memory, and bounded disk I/O
+  tests, and reports results to the parent agent.
+
+Performance Benchmark Lock
+: A host-local lock used by benchmark workers so multiple benchmark paglets on
+  the same server run sequentially while different servers can run in parallel.
+
 ResourceRegistry
 : Runtime-only cleanup registry owned by a paglet. Cleanup runs before
   dispatch, deactivate, retract, or dispose.
 
+ServiceContract
+: An importable typed service definition containing a service name, exact
+  version, and typed operations. Providers advertise it; callers look it up to
+  get a typed `ServiceHandle`.
+
+ServiceHandle
+: A resolved typed client for a `ServiceContract`. It wraps a discovered
+  `ServiceRecord`, sends normal paglet messages, and decodes typed replies.
+
+ServiceOperation
+: A typed operation within a `ServiceContract`, including the stable wire
+  message name and dataclass request/reply schemas.
+
 ServiceRecord
 : A service registry entry containing a service name, capabilities, metadata,
   scope, and a `PagletProxyRef` for the providing paglet.
+
+ServerInfoAgent
+: The packaged example resident service agent advertised as `server-info`. It
+  reports load, memory, disk usage, process matches, and host summary data.
 
 State
 : The dataclass object that moves with a paglet. Ordinary instance attributes

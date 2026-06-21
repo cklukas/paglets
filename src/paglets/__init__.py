@@ -41,12 +41,23 @@ from .persistency import DeactivationPolicy, DeactivationRequest
 from .proxy import PagletProxy
 from .references import PagletProxyRef
 from .resources import ResourceCleanupError, ResourceRegistry
-from .services import ServiceRecord, ServiceRegistry
+from .services import (
+    EmptyPayload,
+    ServiceContract,
+    ServiceContractError,
+    ServiceHandle,
+    ServiceNotFoundError,
+    ServiceOperation,
+    ServiceRecord,
+    ServiceRegistry,
+)
+from .startup import AutoStartSpec, LaunchConfig, StartupAgentConfig, load_launch_config, sync_launch_config
 from .transfer import TransferTicket
 from .errors import PagletInactiveError, TransferError
 
 __all__ = [
     "ACTIVE",
+    "AutoStartSpec",
     "CLONE",
     "CloneEvent",
     "ContextEvent",
@@ -61,6 +72,7 @@ __all__ = [
     "EXECUTE_ON_DEFAULT",
     "EXECUTE_ON_DISPATCH",
     "EXECUTE_ON_REVERTING",
+    "EmptyPayload",
     "FUTURE",
     "FutureReply",
     "Host",
@@ -69,6 +81,7 @@ __all__ = [
     "ItineraryAgentMixin",
     "ItineraryPlan",
     "ItineraryTask",
+    "LaunchConfig",
     "MAX_PRIORITY",
     "MIN_PRIORITY",
     "MobilityEvent",
@@ -92,10 +105,18 @@ __all__ = [
     "ResourceRegistry",
     "SYNCHRONOUS",
     "SYSTEM_PRIORITY",
+    "ServiceContract",
+    "ServiceContractError",
+    "ServiceHandle",
+    "ServiceNotFoundError",
+    "ServiceOperation",
     "ServiceRecord",
     "ServiceRegistry",
+    "StartupAgentConfig",
     "TaskItineraryPlan",
     "TransferError",
     "TransferTicket",
     "UNQUEUED_PRIORITY",
+    "load_launch_config",
+    "sync_launch_config",
 ]

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import signal
 import sys
 
+from .errors import PagletError
 from .host import Host
+from .startup import DEFAULT_LAUNCH_CONFIG_PATH, load_launch_config, sync_launch_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,7 +27,33 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
+    parser.add_argument("--launch-config", default=str(DEFAULT_LAUNCH_CONFIG_PATH), help="Launch config TOML path")
+    parser.add_argument(
+        "--sync-launch-config",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Copy/update the bundled demo launch config before startup",
+    )
+    parser.add_argument("--yes", action="store_true", help="Accept launch config update prompts")
     args = parser.parse_args(argv)
+
+    launch_config_path = Path(args.launch_config).expanduser()
+    try:
+        sync_result = sync_launch_config(
+            launch_config_path,
+            enabled=args.sync_launch_config,
+            yes=args.yes,
+            interactive=sys.stdin.isatty(),
+            output=sys.stderr,
+        )
+        if sync_result.action in {"copied", "updated"}:
+            print(f"paglets host: {sync_result.message}", file=sys.stderr, flush=True)
+            if sync_result.backup_path is not None:
+                print(f"paglets host: previous launch config moved to {sync_result.backup_path}", file=sys.stderr, flush=True)
+        launch_config = load_launch_config(launch_config_path)
+    except PagletError as exc:
+        print(f"paglets-host: {exc}", file=sys.stderr)
+        return 1
 
     host = Host(
         name=args.name,
@@ -35,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         mesh_multicast=args.mesh_multicast,
         mesh_version=args.mesh_version,
         persistence_dir=args.persistence_dir,
+        launch_config=launch_config,
+        launch_config_sync_result=sync_result,
     )
 
     def shutdown(_signum, _frame):

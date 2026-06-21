@@ -15,6 +15,14 @@ class HostError(PagletError):
     """Raised for local host/runtime errors."""
 
 
+class ServiceContractError(HostError):
+    """Raised when a typed service contract is invalid or misused."""
+
+
+class ServiceNotFoundError(ServiceContractError):
+    """Raised when a required typed service contract cannot be found."""
+
+
 class RemoteHostError(PagletError):
     """Raised when a remote host returns an error response."""
 

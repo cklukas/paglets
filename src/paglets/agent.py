@@ -17,7 +17,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .mesh import HostRef
     from .proxy import PagletProxy
     from .references import PagletProxyRef
-    from .services import ServiceRecord, ServiceScope
+    from .services import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord, ServiceScope
     from .transfer import TransferTicket
 
 
@@ -183,6 +183,72 @@ class PagletContext:
     ) -> list["ServiceRecord"]:
         return self._host.lookup_services(name, capability=capability, scope=scope)
 
+    def advertise_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        scope: "ServiceScope" = "local",
+        ttl: float | None = None,
+        metadata: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+    ) -> "ServiceRecord":
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("advertise_contract requires an attached paglet or explicit agent_id")
+        return self.advertise_service(
+            contract.name,
+            capabilities=contract.capabilities,
+            metadata=contract.advertise_metadata(metadata),
+            scope=scope,
+            ttl=ttl,
+            agent_id=owner_id,
+        )
+
+    def lookup_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> "ServiceHandle | None":
+        handles = self.lookup_contracts(contract, operation=operation, scope=scope)
+        return handles[0] if handles else None
+
+    def lookup_contracts(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> list["ServiceHandle"]:
+        from .services import ServiceHandle
+
+        if operation is not None:
+            operation = contract.require_operation(operation)
+        capability = operation.name if operation is not None else None
+        return [
+            ServiceHandle(contract, record, self)
+            for record in self.lookup_services(contract.name, capability=capability, scope=scope)
+            if contract.matches_record(record)
+        ]
+
+    def require_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> "ServiceHandle":
+        from .services import ServiceNotFoundError
+
+        handle = self.lookup_contract(contract, operation=operation, scope=scope)
+        if handle is None:
+            operation_text = f" operation {operation.name!r}" if operation is not None else ""
+            raise ServiceNotFoundError(
+                f"No service contract {contract.name!r} version {contract.version!r}{operation_text} found in {scope} scope"
+            )
+        return handle
+
     def resources(self, agent_id: str | None = None) -> ResourceRegistry:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
@@ -327,6 +393,49 @@ class Paglet(Generic[StateT]):
         scope: "ServiceScope" = "local",
     ) -> list["ServiceRecord"]:
         return self.context.lookup_services(name, capability=capability, scope=scope)
+
+    def advertise_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        scope: "ServiceScope" = "local",
+        ttl: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "ServiceRecord":
+        return self.context.advertise_contract(
+            contract,
+            scope=scope,
+            ttl=ttl,
+            metadata=metadata,
+            agent_id=self.agent_id,
+        )
+
+    def lookup_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> "ServiceHandle | None":
+        return self.context.lookup_contract(contract, operation=operation, scope=scope)
+
+    def lookup_contracts(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> list["ServiceHandle"]:
+        return self.context.lookup_contracts(contract, operation=operation, scope=scope)
+
+    def require_contract(
+        self,
+        contract: "ServiceContract",
+        *,
+        operation: "ServiceOperation[Any, Any] | None" = None,
+        scope: "ServiceScope" = "local",
+    ) -> "ServiceHandle":
+        return self.context.require_contract(contract, operation=operation, scope=scope)
 
     @staticmethod
     def not_handled() -> _NotHandled:

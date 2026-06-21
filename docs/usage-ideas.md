@@ -21,11 +21,29 @@ Send a paglet to each server and let it inspect local-only state:
 - installed software versions.
 
 The paglet returns summarized findings instead of streaming raw machine data
-back to a central client.
+back to a central client. The packaged example `server-info` service and
+`paglets-sysinfo` CLI provide this as a concrete demo:
 
 ```bash
-uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
+uv run paglets-sysinfo df
+uv run paglets-sysinfo load
+uv run paglets-sysinfo plist python --limit 10
 ```
+
+For performance checks, `paglets-perf-test` demonstrates a service-free mobile
+agent pattern. The entry host creates one parent paglet, the parent clones
+benchmark workers to all online same-version mesh hosts, and each worker runs
+local CPU, memory, and bounded disk I/O tests before reporting centrally:
+
+```bash
+uv run paglets-perf-test
+uv run paglets-perf-test --duration 2 --disk-size 256M
+uv run paglets-perf-test --path /data --json
+```
+
+Disk benchmarks write temporary files only on writable real volumes, skip
+special or read-only mounts, and clean up afterward. Results are useful for
+practical host-to-host comparison, not calibrated hardware certification.
 
 ### Edge And IoT Coordination
 
@@ -165,16 +183,89 @@ verifier, and reporter paglets. The planner clones workers, workers talk to
 local services, verifiers check results, and the reporter summarizes final
 state.
 
-## Service Discovery Direction
+## LLM And AI Agents
 
-Agent-to-agent scenarios work today if an agent already has a proxy, knows an
-agent ID, or uses an application-specific registry. A useful future runtime
-feature would be first-class service registration:
+LLM-backed agents are a natural fit for paglets because the useful mobile part
+is often not the model itself, but the agent's state: persona, task, constraints,
+memory summary, current plan, partial findings, tool permissions, and itinerary.
+The model runtime can stay local to each host while the paglet moves the
+serializable work context through the mesh.
+
+A practical AI paglet might carry state such as:
+
+- persona and operating style;
+- user task and success criteria;
+- allowed tools and safety constraints;
+- short-term memory or summarized conversation history;
+- open questions and hypotheses;
+- per-host findings and confidence notes;
+- next hosts to visit or clone targets.
+
+When the agent arrives on a host, it can ask a local LLM adapter, such as a
+resident paglet wrapping Ollama, a hosted model API, Codex-like code assistant
+workflow, or an application-specific planner. The adapter can provide reasoning,
+summarization, code analysis, natural-language planning, or report writing
+without requiring model handles, API clients, credentials, or GPU resources to
+move with the paglet.
 
 ```python
-self.context.advertise_service("flight-ticket", capabilities=["quote", "watch"])
-ticket_service = self.context.lookup_service("flight-ticket")
+@dataclass
+class AnalysisAgentState:
+    persona: str
+    task: str
+    constraints: list[str]
+    memory_summary: str
+    findings: dict[str, str]
+    itinerary: list[str]
 ```
 
-That would let resident paglets advertise service names and capabilities while
-mobile paglets discover them without hard-coding agent IDs.
+This makes several patterns possible:
+
+- a code-review paglet moves to servers with local source trees, asks a local
+  model or code assistant to inspect specific modules, and returns summarized
+  findings;
+- an operations paglet visits production, staging, and build hosts, talks to
+  resident log, metrics, and LLM-summary agents, then composes an incident
+  report;
+- a research paglet clones itself across data-holding hosts, with each clone
+  using local retrieval and summarization before returning only conclusions and
+  citations;
+- a planner paglet creates specialist clones for implementation, verification,
+  security review, and documentation, then merges their results into one final
+  state;
+- a personal delegate carries user preferences and negotiates with trusted
+  service agents, using an LLM only to interpret offers, explain trade-offs, or
+  prepare a final recommendation.
+
+In this model, an "intelligent agent" is still an ordinary paglet with explicit
+state and lifecycle hooks. The LLM is a host-local capability the paglet may use
+at each stop. That keeps mobility clear: clone and dispatch move persona, task,
+memory, and plan; local agents provide tools, retrieval, execution, and model
+access.
+
+Real deployments should treat AI paglets as security-sensitive. Hosts should
+control which resident services an arriving paglet may call, what local data can
+be included in prompts, how outputs are audited, and whether an agent is allowed
+to clone itself. For sensitive meshes, the useful default is to move summaries,
+decisions, and provenance rather than raw prompts, credentials, private files, or
+unbounded conversation history.
+
+## Service Discovery
+
+Agent-to-agent scenarios do not need hard-coded agent IDs. Resident paglets can
+advertise local or mesh-visible services, and mobile paglets can discover them
+by service contract:
+
+```python
+QUOTE = ServiceOperation("quote", QuoteRequest, QuoteReply)
+FLIGHT_TICKETS = ServiceContract("flight-ticket", operations=(QUOTE,), version="1")
+
+self.advertise_contract(FLIGHT_TICKETS, scope="mesh")
+tickets = self.require_contract(FLIGHT_TICKETS, operation=QUOTE, scope="mesh")
+reply = tickets.call(QUOTE, QuoteRequest("FRA", "SFO"))
+```
+
+The stable wire identifiers are still strings, but they are declared once in a
+shared importable contract instead of repeated across agents. The contract also
+defines dataclass request and reply schemas, so callers get a typed handle while
+the runtime keeps the existing JSON message and service registry model.

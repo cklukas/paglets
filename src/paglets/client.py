@@ -7,7 +7,17 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .errors import InvalidAgentError, LifecycleError, NotHandledError, PagletError, PagletInactiveError, RemoteHostError, TransferError
+from .errors import (
+    InvalidAgentError,
+    LifecycleError,
+    NotHandledError,
+    PagletError,
+    PagletInactiveError,
+    RemoteHostError,
+    ServiceContractError,
+    ServiceNotFoundError,
+    TransferError,
+)
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
@@ -17,6 +27,8 @@ _ERROR_TYPES: dict[str, type[PagletError]] = {
     "PagletInactiveError": PagletInactiveError,
     "RemoteHostError": RemoteHostError,
     "ResourceCleanupError": LifecycleError,
+    "ServiceContractError": ServiceContractError,
+    "ServiceNotFoundError": ServiceNotFoundError,
     "TransferError": TransferError,
 }
 

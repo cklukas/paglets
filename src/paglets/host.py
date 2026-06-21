@@ -27,6 +27,7 @@ from .references import PagletProxyRef
 from .resources import ResourceRegistry
 from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 from .services import ServiceRecord, ServiceRegistry, ServiceScope
+from .startup import LaunchConfig, LaunchConfigSyncResult, resolve_startup_agent
 from .transfer import TransferTicket
 
 
@@ -76,6 +77,8 @@ class Host:
         mesh_gossip_interval: float = 1.0,
         mesh_offline_after: float = 10.0,
         persistence_dir: str | Path | None = None,
+        launch_config: LaunchConfig | None = None,
+        launch_config_sync_result: LaunchConfigSyncResult | None = None,
     ):
         self.name = name
         self.bind_host = host
@@ -94,6 +97,8 @@ class Host:
         self._services = ServiceRegistry()
         self._events = ContextEventLog()
         self._properties: dict[str, Any] = {}
+        self.launch_config = launch_config
+        self.launch_config_sync_result = launch_config_sync_result
         self._lock = threading.RLock()
         self._server: _PagletHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -126,7 +131,9 @@ class Host:
         self._thread = threading.Thread(target=server.serve_forever, name=f"paglets-{self.name}", daemon=True)
         self._thread.start()
         self._activation_stop.clear()
+        self._emit_launch_config_sync_result()
         self._activate_startup_records()
+        self._start_launch_agents()
         self._start_activation_scheduler()
         self.mesh.start()
         self._emit("context-start")
@@ -962,6 +969,78 @@ class Host:
                 self.activate(agent_id)
             except PagletError:
                 continue
+
+    def _emit_launch_config_sync_result(self) -> None:
+        result = self.launch_config_sync_result
+        if result is None:
+            return
+        if result.action == "copied":
+            self._emit("launch-config-copy", data={"path": str(result.path), "message": result.message})
+        elif result.action == "updated":
+            self._emit(
+                "launch-config-update",
+                data={
+                    "path": str(result.path),
+                    "backup_path": str(result.backup_path) if result.backup_path is not None else None,
+                    "message": result.message,
+                },
+            )
+
+    def _start_launch_agents(self) -> None:
+        config = self.launch_config
+        if config is None:
+            return
+        for startup_agent in config.startup_agents:
+            if not startup_agent.enabled:
+                self._emit("startup-agent-skip", data={"reason": "disabled", "use": startup_agent.use, "class": startup_agent.class_name})
+                continue
+            try:
+                resolved = resolve_startup_agent(startup_agent)
+                class_name = qualified_name(resolved.agent_cls)
+                if resolved.singleton and resolved.agent_id:
+                    with self._lock:
+                        active = resolved.agent_id in self._agents
+                        inactive = resolved.agent_id in self._inactive
+                    if active:
+                        self._emit(
+                            "startup-agent-skip",
+                            agent_id=resolved.agent_id,
+                            class_name=class_name,
+                            data={"reason": "already-active"},
+                        )
+                        continue
+                    if inactive:
+                        self.activate(resolved.agent_id)
+                        self._emit(
+                            "startup-agent-activate",
+                            agent_id=resolved.agent_id,
+                            class_name=class_name,
+                            data={"source": "launch-config"},
+                        )
+                        continue
+
+                proxy = self.create(
+                    resolved.agent_cls,
+                    resolved.state,
+                    init=resolved.init,
+                    agent_id=resolved.agent_id,
+                )
+                self._emit(
+                    "startup-agent-create",
+                    agent_id=proxy.agent_id,
+                    class_name=class_name,
+                    data={"source": "launch-config"},
+                )
+            except Exception as exc:
+                self._emit(
+                    "startup-agent-failed",
+                    agent_id=startup_agent.agent_id,
+                    data={
+                        "use": startup_agent.use,
+                        "class": startup_agent.class_name,
+                        "error": str(exc),
+                    },
+                )
 
     def _start_activation_scheduler(self) -> None:
         if self._activation_thread is not None and self._activation_thread.is_alive():
