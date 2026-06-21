@@ -2,15 +2,14 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import json
+import ipaddress
 from pathlib import Path
 import socket
-import subprocess
-import sys
 from time import perf_counter
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode
 
 from .client import HostClient
 from .errors import RemoteHostError
@@ -19,7 +18,8 @@ from .messages import Message
 from .runtime_values import ServiceScope, enum_from_wire, require_enum
 
 
-DEFAULT_CONFIG_PATH = Path.home() / ".paglets" / "servers.json"
+DEFAULT_LAN_DISCOVERY_TIMEOUT_SECONDS = 0.25
+DEFAULT_LAN_DISCOVERY_WORKERS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +34,6 @@ class ServerRef:
 class AgentDiscoveryConfig:
     paths: list[str]
     modules: list[str]
-
-
-@dataclass(slots=True)
-class TuiConfig:
-    servers: list[ServerRef]
-    agent_discovery: AgentDiscoveryConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,12 +95,6 @@ def default_agent_discovery_config() -> AgentDiscoveryConfig:
     return AgentDiscoveryConfig(paths=paths, modules=[])
 
 
-def is_local_server_url(url: str) -> bool:
-    parsed = urlparse(normalize_server_url(url))
-    host = (parsed.hostname or "").lower()
-    return host in {"localhost", "127.0.0.1", "::1"}
-
-
 def detect_lan_host() -> str:
     """Return the local IPv4 address used for default-route traffic."""
     try:
@@ -131,208 +119,13 @@ def detect_lan_host() -> str:
     return "127.0.0.1"
 
 
-def can_start_local_server(server: ServerRef) -> bool:
-    return is_local_server_url(server.url)
-
-
-def local_server_command(server: ServerRef, *, peers: list[str] | None = None) -> list[str]:
-    parsed = urlparse(normalize_server_url(server.url))
-    if not is_local_server_url(server.url):
-        raise ValueError(f"Server {server.name!r} is not a local server URL")
-    if parsed.port is None:
-        raise ValueError(f"Server {server.name!r} URL must include a port to start locally")
-    host = parsed.hostname or "127.0.0.1"
-    if host == "localhost":
-        host = "127.0.0.1"
-    command = [
-        sys.executable,
-        "-m",
-        "paglets.cli",
-        "--name",
-        server.name,
-        "--host",
-        host,
-        "--port",
-        str(parsed.port),
-    ]
-    for peer in peers or []:
-        normalized_peer = normalize_server_url(peer)
-        if normalized_peer != normalize_server_url(server.url):
-            command.extend(["--peer", normalized_peer])
-    return command
-
-
-def start_local_server(server: ServerRef, *, peers: list[str] | None = None) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        local_server_command(server, peers=peers),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
-def parse_server_arg(value: str) -> ServerRef:
-    if "=" not in value:
-        raise ValueError("Expected server in NAME=URL format")
-    name, url = value.split("=", 1)
-    normalized_url = normalize_server_url(url)
-    return ServerRef(
-        name=name.strip(),
-        url=normalized_url,
-        enabled=True,
-        local_start=is_local_server_url(normalized_url),
-    )
-
-
-def load_server_config(path: Path | str = DEFAULT_CONFIG_PATH) -> list[ServerRef]:
-    config_path = Path(path)
-    if not config_path.exists():
-        return []
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    return _server_refs_from_payload(payload, config_path)
-
-
-def load_tui_config(
-    path: Path | str = DEFAULT_CONFIG_PATH,
-    *,
-    base_path: Path | str | None = None,
-) -> TuiConfig:
-    config_path = Path(path)
-    if not config_path.exists():
-        return TuiConfig(servers=[], agent_discovery=default_agent_discovery_config())
-    payload = json.loads(config_path.read_text(encoding="utf-8"))
-    return TuiConfig(
-        servers=_server_refs_from_payload(payload, config_path),
-        agent_discovery=_discovery_config_from_payload(payload, base_path=base_path),
-    )
-
-
-def _server_refs_from_payload(payload: dict[str, Any], config_path: Path) -> list[ServerRef]:
-    servers = payload.get("servers", [])
-    if not isinstance(servers, list):
-        raise ValueError(f"{config_path} must contain a 'servers' list")
-    refs: list[ServerRef] = []
-    for item in servers:
-        if not isinstance(item, dict):
-            raise ValueError(f"Invalid server entry in {config_path}: {item!r}")
-        url = normalize_server_url(str(item["url"]))
-        refs.append(
-            ServerRef(
-                name=str(item["name"]),
-                url=url,
-                enabled=bool(item.get("enabled", True)),
-                local_start=bool(item.get("local_start", is_local_server_url(url)))
-                and is_local_server_url(url),
-            )
-        )
-    return refs
-
-
-def _discovery_config_from_payload(
-    payload: dict[str, Any],
-    *,
-    base_path: Path | str | None = None,
-) -> AgentDiscoveryConfig:
-    discovery = payload.get("agent_discovery")
-    if discovery is None:
-        return default_agent_discovery_config()
-    if not isinstance(discovery, dict):
-        raise ValueError("'agent_discovery' must be an object")
-    raw_paths = discovery.get("paths", [])
-    raw_modules = discovery.get("modules", [])
-    if not isinstance(raw_paths, list) or not isinstance(raw_modules, list):
-        raise ValueError("'agent_discovery.paths' and 'agent_discovery.modules' must be lists")
-    return AgentDiscoveryConfig(
-        paths=[normalize_discovery_path(str(item), base_path=base_path) for item in raw_paths],
-        modules=[str(item).strip() for item in raw_modules if str(item).strip()],
-    )
-
-
-def save_server_config(servers: list[ServerRef], path: Path | str = DEFAULT_CONFIG_PATH) -> None:
-    save_tui_config(
-        TuiConfig(servers=servers, agent_discovery=AgentDiscoveryConfig(paths=[], modules=[])),
-        path,
-        include_agent_discovery=False,
-    )
-
-
-def save_tui_config(
-    config: TuiConfig,
-    path: Path | str = DEFAULT_CONFIG_PATH,
-    *,
-    include_agent_discovery: bool = True,
-) -> None:
-    config_path = Path(path)
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "servers": [
-            {
-                "name": server.name,
-                "url": normalize_server_url(server.url),
-                "enabled": server.enabled,
-                "local_start": (
-                    bool(server.local_start or is_local_server_url(server.url))
-                    and is_local_server_url(server.url)
-                ),
-            }
-            for server in config.servers
-        ]
-    }
-    if include_agent_discovery:
-        payload["agent_discovery"] = {
-            "paths": list(config.agent_discovery.paths),
-            "modules": list(config.agent_discovery.modules),
-        }
-    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
-def register_running_server(
-    name: str,
-    url: str,
-    path: Path | str = DEFAULT_CONFIG_PATH,
-    *,
-    enabled: bool = True,
-) -> ServerRef:
-    server = ServerRef(
-        name=name,
-        url=normalize_server_url(url),
-        enabled=enabled,
-        local_start=is_local_server_url(url),
-    )
-    config_path = Path(path)
-    if config_path.exists():
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError(f"{config_path} must contain a JSON object")
-    else:
-        payload = {}
-    existing = _server_refs_from_payload(payload, config_path) if "servers" in payload else []
-    payload["servers"] = [_server_ref_payload(item) for item in upsert_server_ref(existing, server)]
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return server
-
-
 def select_reachable_entry_server(
-    servers: list[ServerRef],
     *,
     entry_name: str | None,
     client: HostClient,
-    config_path: Path | str = DEFAULT_CONFIG_PATH,
     timeout: float = 1.0,
 ) -> ServerRef:
-    candidates = servers if entry_name is None else [server for server in servers if server.name == entry_name]
-    if entry_name is not None and not candidates:
-        raise ValueError(
-            f"No server named {entry_name!r} in config; pass --server {entry_name}=URL or update {config_path}"
-        )
-    if entry_name is None:
-        candidates = [server for server in candidates if server.enabled]
-
-    entry_candidates = _entry_server_candidates(candidates)
-    if entry_name is None:
-        entry_candidates.extend(_ambient_entry_candidates(candidates))
+    entry_candidates = _ambient_entry_candidates()
     tried: list[str] = []
     for candidate in _dedupe_servers(entry_candidates):
         tried.append(candidate.url)
@@ -340,47 +133,23 @@ def select_reachable_entry_server(
             health = client.get_json(f"{candidate.url.rstrip('/')}/health", timeout=timeout)
         except Exception:
             continue
-        return ServerRef(
+        selected = ServerRef(
             name=str(health.get("name") or candidate.name),
             url=normalize_server_url(str(health.get("address") or candidate.url)),
-            enabled=candidate.enabled,
-            local_start=candidate.local_start,
+            enabled=True,
+            local_start=False,
         )
+        if entry_name is not None and selected.name != entry_name:
+            continue
+        return selected
     tried_text = ", ".join(tried) if tried else "none"
+    if entry_name is not None:
+        raise ValueError(f"No reachable entry server named {entry_name!r} found; tried {tried_text}")
     raise ValueError(f"No reachable entry server found; tried {tried_text}")
 
 
-def _entry_server_candidates(servers: list[ServerRef]) -> list[ServerRef]:
-    candidates: list[ServerRef] = []
-    for server in servers:
-        candidates.append(server)
-        parsed = urlparse(normalize_server_url(server.url))
-        if not is_local_server_url(server.url) or parsed.port is None:
-            continue
-        lan_host = detect_lan_host()
-        if lan_host.startswith("127."):
-            continue
-        candidates.append(
-            ServerRef(
-                name=server.name,
-                url=f"{parsed.scheme or 'http'}://{lan_host}:{parsed.port}",
-                enabled=server.enabled,
-                local_start=False,
-            )
-        )
-    return candidates
-
-
-def _ambient_entry_candidates(servers: list[ServerRef]) -> list[ServerRef]:
+def _ambient_entry_candidates() -> list[ServerRef]:
     ports = {8765}
-    for server in servers:
-        try:
-            parsed = urlparse(normalize_server_url(server.url))
-        except ValueError:
-            continue
-        if parsed.port is not None:
-            ports.add(parsed.port)
-
     candidates: list[ServerRef] = []
     lan_host = detect_lan_host()
     for port in sorted(ports):
@@ -392,6 +161,7 @@ def _ambient_entry_candidates(servers: list[ServerRef]) -> list[ServerRef]:
                 ServerRef("local-lan", f"http://{lan_host}:{port}", enabled=True, local_start=False)
             )
     candidates.extend(discover_mesh_entry_servers(timeout=0.75))
+    candidates.extend(discover_lan_entry_servers(ports=ports))
     return candidates
 
 
@@ -427,6 +197,62 @@ def discover_mesh_entry_servers(*, timeout: float = 0.75) -> list[ServerRef]:
     return _dedupe_servers(discovered)
 
 
+def discover_lan_entry_servers(
+    *,
+    ports: set[int] | list[int] | tuple[int, ...] | None = None,
+    timeout: float = DEFAULT_LAN_DISCOVERY_TIMEOUT_SECONDS,
+    workers: int = DEFAULT_LAN_DISCOVERY_WORKERS,
+) -> list[ServerRef]:
+    lan_host = detect_lan_host()
+    try:
+        address = ipaddress.ip_address(lan_host)
+    except ValueError:
+        return []
+    if not isinstance(address, ipaddress.IPv4Address) or address.is_loopback:
+        return []
+
+    network = ipaddress.ip_network(f"{lan_host}/24", strict=False)
+    probe_ports = sorted({int(port) for port in (ports or {8765}) if int(port) > 0})
+    if not probe_ports:
+        return []
+
+    targets = [
+        (str(candidate), port)
+        for candidate in network.hosts()
+        if candidate != address
+        for port in probe_ports
+    ]
+    if not targets:
+        return []
+
+    client = HostClient(timeout=timeout)
+    discovered: list[ServerRef] = []
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor:
+        futures = [executor.submit(_probe_entry_server, client, host, port, timeout) for host, port in targets]
+        for future in as_completed(futures):
+            ref = future.result()
+            if ref is not None:
+                discovered.append(ref)
+    return _dedupe_servers(discovered)
+
+
+def _probe_entry_server(client: HostClient, host: str, port: int, timeout: float) -> ServerRef | None:
+    url = f"http://{host}:{port}"
+    try:
+        health = client.get_json(f"{url}/health", timeout=timeout)
+    except Exception:
+        return None
+    if not isinstance(health, dict):
+        return None
+    address = normalize_server_url(str(health.get("address") or url))
+    return ServerRef(
+        name=str(health.get("name") or host),
+        url=address,
+        enabled=True,
+        local_start=False,
+    )
+
+
 def _dedupe_servers(servers: list[ServerRef]) -> list[ServerRef]:
     result: list[ServerRef] = []
     seen: set[str] = set()
@@ -447,40 +273,6 @@ def _dedupe_servers(servers: list[ServerRef]) -> list[ServerRef]:
             )
         )
     return result
-
-
-def _server_ref_payload(server: ServerRef) -> dict[str, Any]:
-    normalized_url = normalize_server_url(server.url)
-    return {
-        "name": server.name,
-        "url": normalized_url,
-        "enabled": server.enabled,
-        "local_start": bool(server.local_start or is_local_server_url(normalized_url)) and is_local_server_url(normalized_url),
-    }
-
-
-def add_server_ref(servers: list[ServerRef], server: ServerRef) -> list[ServerRef]:
-    if any(existing.name == server.name for existing in servers):
-        raise ValueError(f"Duplicate server name {server.name!r}")
-    return [*servers, server]
-
-
-def upsert_server_ref(servers: list[ServerRef], server: ServerRef) -> list[ServerRef]:
-    replaced = False
-    updated: list[ServerRef] = []
-    for existing in servers:
-        if existing.name == server.name:
-            updated.append(server)
-            replaced = True
-        else:
-            updated.append(existing)
-    if not replaced:
-        updated.append(server)
-    return updated
-
-
-def remove_server_ref(servers: list[ServerRef], name: str) -> list[ServerRef]:
-    return [server for server in servers if server.name != name]
 
 
 class PagletsAdminClient:

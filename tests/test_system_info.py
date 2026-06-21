@@ -8,7 +8,7 @@ from pathlib import Path
 import psutil
 
 from paglets import Host, PagletContext, ServiceScope
-from paglets.admin import ServerRef, save_server_config
+from paglets.admin import ServerRef
 from paglets.examples.system_info import (
     GET_DISK,
     GET_LOAD,
@@ -63,7 +63,7 @@ def test_server_info_contract_returns_load_disk_and_process_data(tmp_path):
         host.stop()
 
 
-def test_paglets_sysinfo_df_uses_default_server_config_and_collects_mesh(tmp_path, capsys):
+def test_paglets_sysinfo_df_uses_dynamic_entry_and_collects_mesh(tmp_path, capsys, monkeypatch):
     launch_config_path = tmp_path / "launch.toml"
     sync_launch_config(launch_config_path, interactive=False)
     launch_config = load_launch_config(launch_config_path)
@@ -91,10 +91,12 @@ def test_paglets_sysinfo_df_uses_default_server_config_and_collects_mesh(tmp_pat
     try:
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
-        config_path = tmp_path / "servers.json"
-        save_server_config([ServerRef("alpha", alpha.address)], config_path)
+        monkeypatch.setattr(
+            "paglets.examples.system_info.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", alpha.address),
+        )
 
-        result = sysinfo_main(["--config", str(config_path), "--timeout", "3", "--json", "df", str(tmp_path)])
+        result = sysinfo_main(["--timeout", "3", "--json", "df", str(tmp_path)])
 
         assert result == 0
         payload = json.loads(capsys.readouterr().out)

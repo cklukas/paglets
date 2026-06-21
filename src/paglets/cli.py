@@ -9,7 +9,7 @@ import signal
 import sys
 
 from . import git_update
-from .admin import register_running_server
+from .admin import discover_lan_entry_servers, discover_mesh_entry_servers
 from .errors import PagletError
 from .host import Host
 from .runtime_values import LaunchConfigSyncAction
@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         mesh=args.mesh,
         peers=args.peer,
         mesh_multicast=args.mesh_multicast,
+        mesh_lan_discovery=args.mesh_lan_discovery,
         mesh_version=args.mesh_version,
         persistence_dir=args.persistence_dir,
         persistent_storage_quota_bytes=args.persistent_storage_quota,
@@ -92,10 +93,6 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     host.start_background()
-    try:
-        register_running_server(host.name, host.address)
-    except Exception as exc:
-        print(f"paglets host warning: could not update server config: {exc}", file=sys.stderr, flush=True)
     if host.mesh.version_warning:
         print(f"paglets host warning: {host.mesh.version_warning}", file=sys.stderr, flush=True)
     print(
@@ -104,9 +101,15 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     if args.auto_update_from_git:
-        host.broadcast_git_update()
+        host.broadcast_git_update(targets=_auto_update_discovery_targets(host.port))
     host.serve_forever()
     return 0
+
+
+def _auto_update_discovery_targets(port: int) -> list[str]:
+    discovered = discover_mesh_entry_servers(timeout=1.0)
+    discovered.extend(discover_lan_entry_servers(ports={port}, timeout=0.25))
+    return [server.url for server in discovered]
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -130,6 +133,12 @@ def _parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable UDP multicast mesh beacons",
+    )
+    parser.add_argument(
+        "--mesh-lan-discovery",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable TCP LAN discovery for paglets hosts when multicast/seed peers are incomplete",
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")

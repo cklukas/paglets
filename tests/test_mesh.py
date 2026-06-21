@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
+import time
 
 import pytest
 
@@ -82,6 +83,26 @@ def test_seeded_hosts_join_and_converge_on_same_version_peers():
 
     assert alpha_hosts == {"alpha", "beta"}
     assert beta_hosts == {"alpha", "beta"}
+
+
+def test_lan_discovery_registers_dynamic_hosts_and_adds_seed():
+    alpha = _host("alpha", lan_discovery=True)
+    ref = HostRef(
+        name="windows",
+        url="http://192.168.86.28:8765",
+        code_version="mesh-test",
+        online=True,
+        last_seen=time.time(),
+        active_count=0,
+        inactive_count=0,
+    )
+
+    alpha.mesh._discover_lan_refs = lambda ports: [ref]  # type: ignore[method-assign]
+    registered = alpha.mesh.discover_lan_once(force=True)
+
+    assert registered == [ref]
+    assert alpha.mesh.lookup("windows") == ref
+    assert "http://192.168.86.28:8765" in alpha.mesh.peer_urls()
 
 
 def test_offline_peer_is_marked_offline_after_failed_gossip():
@@ -224,7 +245,13 @@ def test_mesh_beacon_round_trips_and_version_filter_ignores_mismatches():
         host.stop()
 
 
-def _host(name: str, *, version: str = "mesh-test", peers: list[str] | None = None) -> Host:
+def _host(
+    name: str,
+    *,
+    version: str = "mesh-test",
+    peers: list[str] | None = None,
+    lan_discovery: bool = False,
+) -> Host:
     return Host(
         name=name,
         host="127.0.0.1",
@@ -232,6 +259,7 @@ def _host(name: str, *, version: str = "mesh-test", peers: list[str] | None = No
         mesh=True,
         peers=peers,
         mesh_multicast=False,
+        mesh_lan_discovery=lan_discovery,
         mesh_version=version,
         mesh_gossip_interval=0.05,
         mesh_offline_after=0.2,

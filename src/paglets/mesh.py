@@ -2,7 +2,9 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+import ipaddress
 import importlib.metadata
 import json
 import os
@@ -23,6 +25,9 @@ if TYPE_CHECKING:  # pragma: no cover
 MESH_BEACON_KIND = "paglets.mesh.v1"
 MESH_MULTICAST_GROUP = "239.42.74.53"
 MESH_MULTICAST_PORT = 48765
+MESH_LAN_DISCOVERY_INTERVAL_SECONDS = 10.0
+MESH_LAN_DISCOVERY_TIMEOUT_SECONDS = 0.25
+MESH_LAN_DISCOVERY_WORKERS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +141,8 @@ class MeshRegistry:
         peers: list[str] | None = None,
         code_version: str | None = None,
         multicast: bool = True,
+        lan_discovery: bool = True,
+        lan_discovery_interval: float = MESH_LAN_DISCOVERY_INTERVAL_SECONDS,
         gossip_interval: float = 1.0,
         offline_after: float = 10.0,
     ):
@@ -145,6 +152,8 @@ class MeshRegistry:
         self.version_warning = warning
         self.enabled = enabled
         self.multicast = multicast
+        self.lan_discovery = lan_discovery
+        self.lan_discovery_interval = max(1.0, float(lan_discovery_interval))
         self.gossip_interval = max(0.05, float(gossip_interval))
         self.offline_after = max(0.1, float(offline_after))
         self._seeds = {normalize_host_url(peer) for peer in peers or []}
@@ -152,12 +161,14 @@ class MeshRegistry:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._last_lan_discovery_at = 0.0
 
     def start(self) -> None:
         self._stop.clear()
         self.refresh_self()
         if not self.enabled:
             return
+        self.discover_lan_once(force=True)
         self.gossip_once()
         self._threads = [
             threading.Thread(target=self._gossip_loop, name=f"paglets-mesh-{self._host.name}", daemon=True)
@@ -325,11 +336,100 @@ class MeshRegistry:
         if not self.enabled:
             return
         self.refresh_self()
+        self.discover_lan_once()
         targets = set(self._seeds)
         with self._lock:
             targets.update(url for url in self._hosts if url != self._host.address.rstrip("/"))
         for url in sorted(targets):
             self.join(url)
+
+    def discover_lan_once(self, *, force: bool = False) -> list[HostRef]:
+        if not self.enabled or not self.lan_discovery:
+            return []
+        now = time.monotonic()
+        if not force and now - self._last_lan_discovery_at < self.lan_discovery_interval:
+            return []
+        self._last_lan_discovery_at = now
+
+        ports = self._lan_discovery_ports()
+        refs = self._discover_lan_refs(ports)
+        registered: list[HostRef] = []
+        for ref in refs:
+            item = self.register(ref)
+            if item is not None:
+                registered.append(item)
+                self.add_seed(item.url)
+        return registered
+
+    def _lan_discovery_ports(self) -> set[int]:
+        ports = {8765}
+        if self._host.port > 0:
+            ports.add(int(self._host.port))
+        with self._lock:
+            urls = set(self._seeds)
+            urls.update(self._hosts)
+        for url in urls:
+            try:
+                parsed = urlparse(normalize_host_url(url))
+            except ValueError:
+                continue
+            if parsed.port is not None:
+                ports.add(int(parsed.port))
+        return ports
+
+    def _discover_lan_refs(self, ports: set[int]) -> list[HostRef]:
+        lan_host = _detect_lan_host()
+        try:
+            address = ipaddress.ip_address(lan_host)
+        except ValueError:
+            return []
+        if not isinstance(address, ipaddress.IPv4Address) or address.is_loopback:
+            return []
+
+        probe_ports = sorted(port for port in ports if port > 0)
+        if not probe_ports:
+            return []
+        network = ipaddress.ip_network(f"{lan_host}/24", strict=False)
+        targets = [
+            (str(candidate), port)
+            for candidate in network.hosts()
+            if candidate != address
+            for port in probe_ports
+        ]
+        if not targets:
+            return []
+
+        refs: list[HostRef] = []
+        with ThreadPoolExecutor(max_workers=MESH_LAN_DISCOVERY_WORKERS) as executor:
+            futures = [executor.submit(self._probe_lan_host, host, port) for host, port in targets]
+            for future in as_completed(futures):
+                ref = future.result()
+                if ref is not None:
+                    refs.append(ref)
+        return refs
+
+    def _probe_lan_host(self, host: str, port: int) -> HostRef | None:
+        url = f"http://{host}:{port}"
+        if url.rstrip("/") == self._host.address.rstrip("/"):
+            return None
+        try:
+            health = self._host.client.get_json(f"{url}/health", timeout=MESH_LAN_DISCOVERY_TIMEOUT_SECONDS)
+        except Exception:
+            return None
+        if not isinstance(health, dict):
+            return None
+        code_version = str(health.get("code_version") or "")
+        if not code_version:
+            return None
+        return HostRef(
+            name=str(health.get("name") or _name_from_url(url)),
+            url=str(health.get("address") or url).rstrip("/"),
+            code_version=code_version,
+            online=True,
+            last_seen=time.time(),
+            active_count=int(health.get("active_count", 0)),
+            inactive_count=int(health.get("inactive_count", 0)),
+        )
 
     def mark_offline(self, url: str, error: str) -> None:
         normalized = normalize_host_url(url)
@@ -467,3 +567,26 @@ class MeshRegistry:
 def _name_from_url(url: str) -> str:
     parsed = urlparse(url)
     return parsed.netloc or url
+
+
+def _detect_lan_host() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            address = sock.getsockname()[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            if family != socket.AF_INET:
+                continue
+            address = sockaddr[0]
+            if address and not address.startswith("127."):
+                return address
+    except OSError:
+        pass
+    return "127.0.0.1"

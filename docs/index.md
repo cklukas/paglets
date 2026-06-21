@@ -69,14 +69,6 @@ parent benchmark paglet, clones workers to online same-version mesh hosts, runs
 local CPU, memory, and bounded temporary disk I/O checks, and reports the
 summary centrally.
 
-Run the Textual TUI:
-
-```bash
-uv run --extra tui paglets-tui \
-  --server alpha=http://127.0.0.1:8765 \
-  --server beta=http://127.0.0.1:8766
-```
-
 Run the disk survey demo:
 
 ```bash

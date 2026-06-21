@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 
 from paglets import Host
+from paglets.admin import ServerRef
 from paglets import cli as host_cli
 from paglets import git_update
 from tests.test_paglets_core import free_port
@@ -15,6 +16,24 @@ def test_host_cli_accepts_auto_update_from_git_flag():
     args = host_cli._parser().parse_args(["--name", "alpha", "--auto-update-from-git"])
 
     assert args.auto_update_from_git is True
+
+
+def test_auto_update_discovery_targets_use_mesh_and_lan_discovery(monkeypatch):
+    monkeypatch.setattr(
+        host_cli,
+        "discover_mesh_entry_servers",
+        lambda timeout=1.0: [ServerRef("mesh", "http://192.168.86.28:8765")],
+    )
+    monkeypatch.setattr(
+        host_cli,
+        "discover_lan_entry_servers",
+        lambda *, ports, timeout=0.25: [ServerRef("lan", "http://192.168.86.29:8765")],
+    )
+
+    assert host_cli._auto_update_discovery_targets(8765) == [
+        "http://192.168.86.28:8765",
+        "http://192.168.86.29:8765",
+    ]
 
 
 def test_host_cli_cancels_auto_update_when_checkout_is_dirty(tmp_path: Path, monkeypatch, capsys):

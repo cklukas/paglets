@@ -6,7 +6,7 @@ import json
 import time
 
 from paglets import Host, Message
-from paglets.admin import ServerRef, save_server_config
+from paglets.admin import ServerRef
 from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
 from paglets.examples.search.cli import main as search_main
 from paglets.serde import dataclass_from_wire, dataclass_to_wire
@@ -168,7 +168,7 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path):
         alpha.stop()
 
 
-def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys):
+def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys, monkeypatch):
     (tmp_path / "haystack.txt").write_text("needle\n", encoding="utf-8")
     alpha = Host(
         "alpha",
@@ -192,13 +192,13 @@ def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys):
     try:
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
-        config_path = tmp_path / "servers.json"
-        save_server_config([ServerRef("alpha", alpha.address)], config_path)
+        monkeypatch.setattr(
+            "paglets.examples.search.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", alpha.address),
+        )
 
         result = search_main(
             [
-                "--config",
-                str(config_path),
                 "--timeout",
                 "5",
                 "--poll-interval",

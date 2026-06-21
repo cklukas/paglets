@@ -73,24 +73,18 @@ idle_timeout = 0.0
 state = { service_scope = "mesh" }
 ```
 
-The command-line examples use `~/.paglets/servers.json` to choose one entry
-host. You only need `--server NAME=URL` for one-off runs or before saving a
-server config. The entry host is just the bootstrap point; mesh-aware examples
-still discover and use online same-version mesh hosts automatically.
-`paglets-host` updates that config with its actual runtime URL after binding,
-including `--bind-public` LAN URLs. If an older config still points at
-`127.0.0.1` while the host is bound to a LAN address, the example CLIs try the
-current LAN address on the same port. Dead configured URLs are treated as
-hints; the CLIs continue through current local/LAN candidates and mesh
-multicast discovery before reporting that no entry host is reachable. If the
-config is empty or every saved URL is stale, discovery still runs.
+The command-line examples dynamically discover a reachable entry host from
+local/LAN probes and mesh multicast beacons. The entry host is only the
+bootstrap point; mesh-aware examples still discover and use online
+same-version mesh hosts automatically. There is no saved server/IP membership
+file to maintain.
 
 ```bash
-uv run paglets-sysinfo [--server alpha=http://127.0.0.1:8765] [--entry alpha] df
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] [--entry alpha] summary
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] [--entry alpha] --digits 16
-uv run paglets-perf-test [--server alpha=http://127.0.0.1:8765] [--entry alpha]
-uv run paglets-search [--server alpha=http://127.0.0.1:8765] [--entry alpha] grep TODO .
+uv run paglets-sysinfo [--entry alpha] df
+uv run paglets-mesh-info [--entry alpha] summary
+uv run paglets-pi-compute [--entry alpha] --digits 16
+uv run paglets-perf-test [--entry alpha]
+uv run paglets-search [--entry alpha] grep TODO .
 ```
 
 There is no authentication layer yet. These examples are useful for trusted
@@ -177,9 +171,9 @@ uv run paglets-sysinfo plist python --limit 10
 uv run paglets-sysinfo plist postgres --args --json
 ```
 
-The CLI does not require a `--server` argument when `~/.paglets/servers.json`
-has at least one enabled reachable server. It uses that server as the entry host,
-then lets the collector paglet discover online same-version mesh hosts.
+The CLI discovers a reachable entry host automatically. Use optional
+`--entry HOSTNAME` to choose one discovered entry host by name, then the
+collector paglet discovers online same-version mesh hosts.
 
 ### Collector Flow
 
@@ -225,16 +219,15 @@ from paglets.examples.mesh_info import MESH_INFO, GET_LANDSCAPE, SELECT_TARGETS
 Useful CLI commands:
 
 ```bash
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] summary
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --max-load-per-cpu 1.0 --min-work-free 1G
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --json
+uv run paglets-mesh-info summary
+uv run paglets-mesh-info targets --max-load-per-cpu 1.0 --min-work-free 1G
+uv run paglets-mesh-info targets --json
 ```
 
 The `summary` command prints the fresh landscape known to the entry host. The
 `targets` command applies placement constraints and ranks eligible hosts by
-load, CPU, memory pressure, and work-storage pressure. The optional `--server`
-flag only selects the entry host when no saved `~/.paglets/servers.json` entry
-is available.
+load, CPU, memory pressure, and work-storage pressure. Use optional
+`--entry HOSTNAME` to choose a discovered entry host by name.
 
 Programmatic target selection:
 
@@ -262,15 +255,14 @@ distributing Chudnovsky term batches and combining the integer partial sums on
 the coordinator.
 
 ```bash
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
+uv run paglets-pi-compute --digits 16 --batch-size 1
+uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
 ```
 
-The optional `--server` value only selects the entry host when no saved
-`~/.paglets/servers.json` entry is available. The coordinator stays on that
-entry host, partitions the requested digit range into the required Chudnovsky
-terms, asks local `mesh-info` for eligible targets across the mesh, expands
-each host into approximate free load slots, creates short-lived
+The coordinator stays on the dynamically discovered entry host, partitions the
+requested digit range into the required Chudnovsky terms, asks local
+`mesh-info` for eligible targets across the mesh, expands each host into
+approximate free load slots, creates short-lived
 `PiBatchWorkerAgent` instances remotely, and receives `batch_result` messages.
 The free-slot estimate is based on `cpu_count * --max-load-per-cpu - load_1m`,
 optionally capped by `--max-workers-per-host`; `--max-in-flight` caps the whole
@@ -498,10 +490,10 @@ uv run paglets-search find report --extension md --kind file
 uv run paglets-search --jsonl grep TODO .
 ```
 
-By default the CLI uses the first enabled reachable server in
-`~/.paglets/servers.json` as the entry host, then the parent search paglet clones
-to all online same-version mesh hosts, including the entry host. Restrict the
-search to specific hosts with repeated `--host` flags:
+By default the CLI dynamically discovers a reachable entry host, then the
+parent search paglet clones to all online same-version mesh hosts, including
+the entry host. Restrict the search to specific hosts with repeated `--host`
+flags:
 
 ```bash
 uv run paglets-search --host alpha --host beta grep TODO /srv/app

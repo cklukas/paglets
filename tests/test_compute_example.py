@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 
 from paglets import Host, Message
-from paglets.admin import ServerRef, save_server_config
+from paglets.admin import ServerRef
 from paglets.errors import InvalidAgentError
 from paglets.examples.compute import (
     PiBatchRequest,
@@ -252,18 +252,18 @@ def test_skipped_batch_results_are_requeued(tmp_path: Path):
         host.stop()
 
 
-def test_pi_compute_cli_json_output(tmp_path: Path, capsys):
+def test_pi_compute_cli_json_output(tmp_path: Path, capsys, monkeypatch):
     launch_config = _launch_config(tmp_path)
     host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
     host.start_background()
     try:
-        config_path = tmp_path / "servers.json"
-        save_server_config([ServerRef("alpha", host.address)], config_path)
+        monkeypatch.setattr(
+            "paglets.examples.compute.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", host.address),
+        )
 
         result = pi_main(
             [
-                "--config",
-                str(config_path),
                 "--timeout",
                 "5",
                 "--digits",
@@ -285,18 +285,18 @@ def test_pi_compute_cli_json_output(tmp_path: Path, capsys):
         host.stop()
 
 
-def test_pi_compute_cli_streams_text_output(tmp_path: Path, capsys):
+def test_pi_compute_cli_streams_text_output(tmp_path: Path, capsys, monkeypatch):
     launch_config = _launch_config(tmp_path)
     host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
     host.start_background()
     try:
-        config_path = tmp_path / "servers.json"
-        save_server_config([ServerRef("alpha", host.address)], config_path)
+        monkeypatch.setattr(
+            "paglets.examples.compute.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", host.address),
+        )
 
         result = pi_main(
             [
-                "--config",
-                str(config_path),
                 "--timeout",
                 "5",
                 "--digits",

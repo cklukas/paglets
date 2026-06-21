@@ -14,7 +14,6 @@ dependencies = ["pathspec>=0.12", "psutil>=5.9", "setproctitle>=1.3"]
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10", "mkdocstrings[python]>=0.28,<1"]
-tui = ["textual>=8.2,<9"]
 
 [project.scripts]
 paglets-host = "paglets.cli:main"
@@ -23,7 +22,6 @@ paglets-perf-test = "paglets.examples.performance.cli:main"
 paglets-pi-compute = "paglets.examples.compute.cli:main"
 paglets-search = "paglets.examples.search.cli:main"
 paglets-sysinfo = "paglets.examples.system_info.cli:main"
-paglets-tui = "paglets.tui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/paglets"]

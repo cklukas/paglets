@@ -8,12 +8,8 @@ import sys
 import time
 
 from ...admin import (
-    DEFAULT_CONFIG_PATH,
     ServerRef,
-    load_server_config,
-    parse_server_arg,
     select_reachable_entry_server,
-    upsert_server_ref,
 )
 from ...client import HostClient
 from ...runtime_values import ServiceScope
@@ -31,11 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        servers = load_server_config(args.config)
-        for server_arg in args.server:
-            servers = upsert_server_ref(servers, parse_server_arg(server_arg))
         client = HostClient(timeout=args.timeout)
-        entry = _select_entry_server(servers, entry_name=args.entry, client=client)
+        entry = _select_entry_server(entry_name=args.entry, client=client)
         handle = _mesh_info_handle(entry, client)
         if args.command == "targets":
             reply = handle.call(SELECT_TARGETS, _selection_request(args))
@@ -63,9 +56,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Show the mesh-info resource landscape")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Server config path")
-    parser.add_argument("--server", action="append", default=[], help="One-off server in NAME=URL format")
-    parser.add_argument("--entry", default=None, help="Entry server name from config")
+    parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -85,12 +76,10 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
+def _select_entry_server(*, entry_name: str | None, client: HostClient) -> ServerRef:
     return select_reachable_entry_server(
-        servers,
         entry_name=entry_name,
         client=client,
-        config_path=DEFAULT_CONFIG_PATH,
     )
 
 

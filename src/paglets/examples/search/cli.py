@@ -8,13 +8,9 @@ import sys
 from typing import Any
 
 from ...admin import (
-    DEFAULT_CONFIG_PATH,
     PagletsAdminClient,
     ServerRef,
-    load_server_config,
-    parse_server_arg,
     select_reachable_entry_server,
-    upsert_server_ref,
 )
 from ...client import HostClient
 from ...messages import Message
@@ -40,11 +36,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a command is required unless --type-list is used")
 
     try:
-        servers = load_server_config(args.config)
-        for server_arg in args.server:
-            servers = upsert_server_ref(servers, parse_server_arg(server_arg))
         client = HostClient(timeout=max(1.0, args.timeout + 5.0))
-        entry = _select_entry_server(servers, entry_name=args.entry, client=client)
+        entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _search_request(args)
         summary, events = _run_search(entry, request, args, client=client)
         if args.json:
@@ -62,9 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Search files across a paglets mesh with mobile agents")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Server config path")
-    parser.add_argument("--server", action="append", default=[], help="One-off server in NAME=URL format")
-    parser.add_argument("--entry", default=None, help="Entry server name from config")
+    parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--host", action="append", default=[], help="Restrict search to a mesh host name or URL; repeatable")
     parser.add_argument("--timeout", type=float, default=DEFAULT_SEARCH_TIMEOUT_SECONDS, help="Seconds to wait for mesh replies")
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_DRAIN_WAIT_SECONDS, help="Seconds each drain call may wait for new events")
@@ -169,12 +160,10 @@ def _search_request(args: argparse.Namespace) -> SearchRequest:
     )
 
 
-def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
+def _select_entry_server(*, entry_name: str | None, client: HostClient) -> ServerRef:
     return select_reachable_entry_server(
-        servers,
         entry_name=entry_name,
         client=client,
-        config_path=DEFAULT_CONFIG_PATH,
     )
 
 

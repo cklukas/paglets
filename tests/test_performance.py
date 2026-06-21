@@ -9,6 +9,7 @@ import threading
 import time
 
 from paglets import Host, Message
+from paglets.admin import ServerRef
 from paglets.examples.performance.agent import (
     _BENCHMARK_THREAD_LOCK,
     BenchmarkMetric,
@@ -196,7 +197,7 @@ def test_host_benchmark_lock_timeout_returns_host_error_result():
     assert "benchmark lock busy" in result.errors[0]
 
 
-def test_paglets_perf_test_json_collects_mesh_with_server_override(tmp_path, capsys):
+def test_paglets_perf_test_json_collects_mesh_with_dynamic_entry(tmp_path, capsys, monkeypatch):
     alpha = Host(
         "alpha",
         host="127.0.0.1",
@@ -219,13 +220,13 @@ def test_paglets_perf_test_json_collects_mesh_with_server_override(tmp_path, cap
     try:
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
+        monkeypatch.setattr(
+            "paglets.examples.performance.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", alpha.address),
+        )
 
         result = perf_main(
             [
-                "--config",
-                str(tmp_path / "servers.json"),
-                "--server",
-                f"alpha={alpha.address}",
                 "--entry",
                 "alpha",
                 "--timeout",

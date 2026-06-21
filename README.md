@@ -213,15 +213,10 @@ first bound address is the mesh URL. `--persistence-dir` overrides the host's
 durable inactive-paglet directory.
 `--persistent-storage-quota 10M` controls the per-class managed persistent
 storage quota.
-After binding, `paglets-host` updates `~/.paglets/servers.json` with the
-actual runtime URL, so example CLIs such as `paglets-mesh-info` and
-`paglets-pi-compute` do not keep using a stale loopback entry. If an older
-config still points at `127.0.0.1` while the host is bound to a LAN address,
-the CLIs also try the current LAN address on the same port. Dead configured
-URLs are treated as hints; the CLIs continue through current local/LAN
-candidates and mesh multicast discovery before reporting that no entry host is
-reachable. If the config is empty or every saved URL is stale, discovery still
-runs.
+Example CLIs such as `paglets-mesh-info` and `paglets-pi-compute` treat
+mesh membership as dynamic. They first try current local/LAN candidates and
+mesh multicast discovery, then use the discovered entry host only as a bootstrap
+point. There is no saved server/IP membership file to maintain.
 Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
 current git commit, then a package-version fallback. Different versions are
 ignored by the mesh.
@@ -236,64 +231,9 @@ broadcast their commit to peer hosts. See the dedicated
 modes, and diagrams. This endpoint is unauthenticated; use it only on trusted
 networks.
 
-Start the multi-server TUI admin console:
-
-```bash
-uv run --extra tui paglets-tui \
-  --server alpha=http://127.0.0.1:8765 \
-  --server beta=http://127.0.0.1:8766
-```
-
-You can also start it from a saved server config:
-
-```bash
-uv run --extra tui paglets-tui
-```
-
-The TUI loads and persists server entries in `~/.paglets/servers.json` by
-default. Use `--config /path/to/servers.json` to point it at another file.
-`--server NAME=URL` entries are added to that config when the TUI starts:
-
-```json
-{
-  "agent_discovery": {
-    "paths": ["/path/to/paglets/examples"],
-    "modules": []
-  },
-  "servers": [
-    {
-      "name": "alpha",
-      "url": "http://127.0.0.1:8765",
-      "enabled": true,
-      "local_start": true
-    },
-    {
-      "name": "beta",
-      "url": "http://127.0.0.1:8766",
-      "enabled": true,
-      "local_start": true
-    }
-  ]
-}
-```
-
-The TUI polls all enabled servers. If a configured local server
-(`localhost`, `127.0.0.1`, or `::1`) is offline, select that server and press
-`p` or the `Start` button. The TUI starts it as a local subprocess using the
-same Python environment and passes the other configured servers as mesh peers:
-
-```bash
-python -m paglets.cli --name alpha --host 127.0.0.1 --port 8765 --peer http://127.0.0.1:8766
-```
-
-Remote URLs are monitored and administered, but are not started by the TUI.
-
-Press `c` to create a paglet. The create dialog lists discovered `Paglet`
-classes from `agent_discovery.paths` and `agent_discovery.modules`, fills the
-agent class, state class, and initial state JSON for the selected class, and
-still allows manual `module:qualname` entry. Press `g` to add a discovery path
-or module, and `y` to remove one. Discovery is a TUI convenience only: target
-servers must already be able to import the selected module name.
+The former Textual TUI has been removed. Host administration and examples now
+use the CLI and HTTP/admin APIs, and mesh membership is discovered dynamically
+instead of being stored in a local GUI/server list.
 
 Query the packaged example server-info service across all online same-version mesh
 hosts:
@@ -304,26 +244,24 @@ uv run paglets-sysinfo load
 uv run paglets-sysinfo plist python --limit 10
 ```
 
-`paglets-sysinfo` uses the first enabled reachable server in
-`~/.paglets/servers.json` as the entry host, then creates a collector paglet
-there. The collector clones to all online mesh hosts, calls each local
-`server-info` service, starts lazy providers on demand, and prints the aggregate
-result. For one-off use before saving a server config, pass optional
-`[--server alpha=http://127.0.0.1:8765]`; for scripts, add `--json`.
+`paglets-sysinfo` dynamically discovers a reachable entry host, then creates a
+collector paglet there. The collector clones to all online mesh hosts, calls
+each local `server-info` service, starts lazy providers on demand, and prints
+the aggregate result. Use optional `--entry HOSTNAME` to choose a discovered
+entry host by name; for scripts, add `--json`.
 
 Inspect the continuously synchronized mesh resource landscape:
 
 ```bash
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] summary
-uv run paglets-mesh-info [--server alpha=http://127.0.0.1:8765] targets --max-load-per-cpu 1.0 --min-work-free 1G
+uv run paglets-mesh-info summary
+uv run paglets-mesh-info targets --max-load-per-cpu 1.0 --min-work-free 1G
 ```
 
 `paglets-mesh-info` queries the entry host's eager `mesh-info` service. Each
 host's service samples local CPU, memory, and work-directory disk space through
 `server-info`, then exchanges snapshots with peer `mesh-info` services.
 
-The optional `--server` flag only chooses the entry host when
-`~/.paglets/servers.json` is not already configured.
+Use optional `--entry HOSTNAME` to choose a discovered entry host by name.
 
 Run a mesh-wide benchmark with a mobile agent:
 
@@ -363,8 +301,8 @@ host process.
 Compute decimal Pi digits across eligible hosts:
 
 ```bash
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 16 --batch-size 1
-uv run paglets-pi-compute [--server alpha=http://127.0.0.1:8765] --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
+uv run paglets-pi-compute --digits 16 --batch-size 1
+uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
 ```
 
 The coordinator stays on the entry host, asks local `mesh-info` for ranked
@@ -389,8 +327,8 @@ internally, and the coordinator renders final Pi text with chunked decimal
 conversion. This keeps the CLI output as ordinary `3.1415...` text while
 avoiding Python's default guard for huge decimal integer string conversions.
 
-The optional `--server` flag selects only that initial entry host; target
-selection across the mesh remains automatic.
+Use optional `--entry HOSTNAME` to select a discovered initial entry host;
+target selection across the mesh remains automatic.
 
 Run a parent/child clone survey example:
 
@@ -719,8 +657,7 @@ src/paglets/
   runtime_values.py Closed runtime enums for scopes, lifecycles, and transfer modes
   persistency.py Durable deactivation policy and inactive records
   itinerary.py  Serializable itinerary/task helpers
-  admin.py      Multi-server admin client/config helpers
-  tui.py        Optional Textual TUI admin console
+  admin.py      Dynamic mesh entry discovery and admin client helpers
   serde.py      Dataclass state serializer/restorer
   cli.py        paglets-host CLI
 examples/

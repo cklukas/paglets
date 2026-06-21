@@ -7,13 +7,9 @@ import json
 import sys
 
 from ...admin import (
-    DEFAULT_CONFIG_PATH,
     PagletsAdminClient,
     ServerRef,
-    load_server_config,
-    parse_server_arg,
     select_reachable_entry_server,
-    upsert_server_ref,
 )
 from ...client import HostClient
 from ...messages import Message
@@ -29,11 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        servers = load_server_config(args.config)
-        for server_arg in args.server:
-            servers = upsert_server_ref(servers, parse_server_arg(server_arg))
         client = HostClient(timeout=max(1.0, float(args.request_timeout)))
-        entry = _select_entry_server(servers, entry_name=args.entry, client=client)
+        entry = _select_entry_server(entry_name=args.entry, client=client)
         request = PiComputeRequest(
             start=max(0, args.start),
             digits=max(0, args.digits),
@@ -64,9 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute decimal Pi digits across a paglets mesh")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Server config path")
-    parser.add_argument("--server", action="append", default=[], help="One-off server in NAME=URL format")
-    parser.add_argument("--entry", default=None, help="Entry server name from config")
+    parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--start", type=int, default=0, help="Zero-based decimal digit position after the point")
     parser.add_argument("--digits", type=int, default=16, help="Number of decimal digits to compute")
     parser.add_argument("--batch-size", type=int, default=1, help="Chudnovsky terms per worker batch")
@@ -93,12 +84,10 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_entry_server(servers: list[ServerRef], *, entry_name: str | None, client: HostClient) -> ServerRef:
+def _select_entry_server(*, entry_name: str | None, client: HostClient) -> ServerRef:
     return select_reachable_entry_server(
-        servers,
         entry_name=entry_name,
         client=client,
-        config_path=DEFAULT_CONFIG_PATH,
     )
 
 

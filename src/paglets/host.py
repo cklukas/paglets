@@ -170,6 +170,7 @@ class Host:
         mesh: bool = True,
         peers: list[str] | None = None,
         mesh_multicast: bool = True,
+        mesh_lan_discovery: bool = True,
         mesh_version: str | None = None,
         mesh_gossip_interval: float = 1.0,
         mesh_offline_after: float = 10.0,
@@ -244,6 +245,7 @@ class Host:
             peers=peers,
             code_version=mesh_version,
             multicast=mesh_multicast,
+            lan_discovery=mesh_lan_discovery,
             gossip_interval=mesh_gossip_interval,
             offline_after=mesh_offline_after,
         )

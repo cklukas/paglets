@@ -51,18 +51,15 @@ handles, or arbitrary instance attributes.
 
 `paglets.mesh`
 : Defines `HostRef` and `MeshRegistry`, including version-gated peer discovery,
-  seed-list gossip, multicast beacons, online/offline status, and host-name
-  resolution.
+  dynamic LAN discovery, multicast beacons, online/offline status, and
+  host-name resolution.
 
 `paglets.admin`
-: Provides a reusable client layer for multi-server administration and TUI
-  configuration.
+: Provides dynamic entry-host discovery and a reusable client layer for HTTP
+  administration.
 
 `paglets.discovery`
-: Implements local TUI-side discovery of importable `Paglet` subclasses.
-
-`paglets.tui`
-: Provides the optional Textual admin console.
+: Implements local discovery of importable `Paglet` subclasses for tooling.
 
 ## Movement Flow
 
@@ -326,12 +323,12 @@ result in `/health`, and exposes `POST /admin/git-update` only for opted-in
 hosts. Normal mesh version gating still protects dispatch and clone selection;
 the update endpoint is a separate trusted-network maintenance path.
 
-## TUI And Admin Client
+## Admin Client
 
-The TUI is a client, not a host. It reads a local config file, polls configured
-hosts, displays health/agent/mesh status, and sends admin operations through the
-same HTTP API a normal client would use.
+The admin client is a normal HTTP client, not a host. It works with discovered
+entry hosts and sends admin operations through the same HTTP API used by
+proxies and examples. Mesh membership is not loaded from a saved IP list.
 
-The TUI-side class discovery feature scans local paths/modules for importable
-`Paglet` subclasses. It is a convenience for filling create forms; it does not
-upload code to servers or mutate remote import paths.
+The local class discovery helper scans paths/modules for importable `Paglet`
+subclasses. It is a tooling convenience only; it does not upload code to
+servers or mutate remote import paths.

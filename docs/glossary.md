@@ -149,6 +149,3 @@ State Lock
 TransferTicket
 : Transfer options for dispatch or clone, including destination, retry policy,
   required host capabilities, expected code version, and arrival mode.
-
-TUI
-: The optional Textual terminal UI for administering multiple paglets hosts.
