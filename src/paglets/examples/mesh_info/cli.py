@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Show the mesh-info resource landscape")
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
-    parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=20.0, help="HTTP timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -69,7 +69,7 @@ def _parser() -> argparse.ArgumentParser:
     targets.add_argument("--limit", type=int, default=5, help="Maximum targets to print")
     targets.add_argument("--max-age", type=float, default=0.0, help="Freshness cutoff in seconds; 0 uses service default")
     targets.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
-    targets.add_argument("--max-cpu-percent", type=float, default=90.0, help="Maximum sampled CPU percent")
+    targets.add_argument("--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent")
     targets.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
     targets.add_argument("--min-work-free", type=_parse_size, default=0, help="Minimum free work storage, e.g. 1G")
     targets.add_argument("--exclude-self", action="store_true", help="Exclude the entry host")

@@ -77,7 +77,7 @@ def _parser() -> argparse.ArgumentParser:
         help="HTTP request timeout in seconds for coordinator calls",
     )
     parser.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
-    parser.add_argument("--max-cpu-percent", type=float, default=90.0, help="Maximum sampled CPU percent")
+    parser.add_argument("--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent")
     parser.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
     parser.add_argument("--min-work-free", type=_parse_size, default=0, help="Minimum free work storage, e.g. 1G")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")

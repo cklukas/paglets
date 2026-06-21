@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 
 from paglets import Host, Message
 from paglets.admin import ServerRef
@@ -97,6 +98,54 @@ def test_pi_compute_workers_send_results_and_dispose(tmp_path: Path):
         _wait_until(lambda: not _pi_workers(host))
     finally:
         host.stop()
+
+
+def test_pi_compute_local_fallback_target_used_when_mesh_info_times_out(monkeypatch):
+    agent = PiComputeCoordinatorAgent(PiComputeState())
+    host = SimpleNamespace(
+        list_agents=lambda active=True, inactive=False: [
+            {"agent_id": "a", "active": True},
+            {"agent_id": "b", "active": False},
+        ]
+    )
+    fake_context = SimpleNamespace(
+        name="alpha",
+        address="http://127.0.0.1:9999",
+        host=host,
+        work_dir=lambda create=True: Path("/tmp/paglets-compute-fallback-test"),
+    )
+    agent._context = fake_context
+
+    def _raise_contract(*_, **__) -> None:
+        raise RuntimeError("could not reach mesh-info")
+
+    monkeypatch.setattr(agent, "require_contract", _raise_contract)
+
+    targets = agent._select_targets(PiComputeRequest(max_in_flight=1))
+
+    assert len(targets) == 1
+    assert targets[0].snapshot.host_name == "alpha"
+    assert targets[0].snapshot.host_url == "http://127.0.0.1:9999"
+
+
+def test_pi_compute_launches_despite_existing_error(monkeypatch):
+    agent = PiComputeCoordinatorAgent(
+        PiComputeState(
+            request=dataclass_to_wire(PiComputeRequest(batch_size=1)),
+            pending_batches=[dataclass_to_wire(PiBatchRequest("terms:0:1", 0, 1))],
+            errors={"mesh-info": "timeout"},
+        )
+    )
+    launches: list[PiComputeRequest] = []
+
+    def _capture(request: PiComputeRequest) -> None:
+        launches.append(request)
+
+    monkeypatch.setattr(agent, "_launch_available_batches", _capture)
+
+    agent._launch_from_current_state()
+
+    assert launches
 
 
 def test_pi_worker_self_disposes_when_parent_report_fails(tmp_path: Path):

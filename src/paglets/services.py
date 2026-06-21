@@ -189,6 +189,7 @@ class ServiceHandle:
         *,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
+        timeout: float | None = None,
     ) -> RepT:
         operation = self.contract.require_operation(operation)  # type: ignore[assignment]
         message = operation.to_message(request)
@@ -196,6 +197,7 @@ class ServiceHandle:
             message,
             activate_if_inactive=activate_if_inactive,
             no_delay=no_delay,
+            timeout=timeout,
         )
         return operation.decode_reply(payload)
 
@@ -206,6 +208,7 @@ class ServiceHandle:
         *,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
+        timeout: float | None = None,
     ) -> None:
         operation = self.contract.require_operation(operation)  # type: ignore[assignment]
         message = operation.to_message(request)
@@ -213,6 +216,7 @@ class ServiceHandle:
             message,
             activate_if_inactive=activate_if_inactive,
             no_delay=no_delay,
+            timeout=timeout,
         )
 
 

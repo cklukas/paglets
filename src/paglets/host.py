@@ -75,6 +75,7 @@ AUTO_UPDATE_REQUEST_INTERVAL_SECONDS = 10.0
 AUTO_UPDATE_REQUEST_TIMEOUT_SECONDS = 10.0
 AUTO_UPDATE_RESTART_DELAY_SECONDS = 0.2
 NETWORK_BIND_WATCH_INTERVAL_SECONDS = 5.0
+MESH_SERVICE_LOOKUP_TIMEOUT_SECONDS = 1.0
 
 
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
@@ -859,7 +860,10 @@ class Host:
             suffix = f"?{urlencode(query)}" if query else ""
             try:
                 separator = "&" if suffix else "?"
-                payload = self.client.get_json(f"{host_ref.url.rstrip('/')}/services{suffix}{separator}scope=mesh", timeout=2.0)
+                payload = self.client.get_json(
+                    f"{host_ref.url.rstrip('/')}/services{suffix}{separator}scope=mesh",
+                    timeout=MESH_SERVICE_LOOKUP_TIMEOUT_SECONDS,
+                )
             except PagletError:
                 continue
             for item in payload.get("services", []):

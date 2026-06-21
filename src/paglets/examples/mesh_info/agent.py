@@ -22,6 +22,7 @@ DEFAULT_SAMPLE_TTL_SECONDS = 20.0
 DEFAULT_PEER_BATCH_SIZE = 8
 DEFAULT_SYNC_BATCH_SIZE = 64
 MESH_INFO_LOOP_ERROR_KEY = "mesh-info-loop"
+MESH_INFO_SYNC_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +278,7 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
                     SYNC_MESH_INFO,
                     MeshInfoSyncRequest(snapshots=outgoing, max_age_seconds=sample_ttl, limit=sync_batch_size),
                     no_delay=True,
+                    timeout=MESH_INFO_SYNC_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
                 self._record_peer_error(handle.record, str(exc))

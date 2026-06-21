@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+import os
 import math
 import threading
+import shutil
 import time
 from typing import Any
 import uuid
@@ -15,7 +17,15 @@ from ...errors import InvalidAgentError
 from ...messages import Message
 from ...serde import dataclass_from_wire, dataclass_to_wire, qualified_name
 from ...runtime_values import ServiceScope
-from ..mesh_info import GET_SNAPSHOT, MESH_INFO, SELECT_TARGETS, SnapshotRequest, TargetSelectionRequest
+from ..mesh_info import (
+    GET_SNAPSHOT,
+    MESH_INFO,
+    SELECT_TARGETS,
+    MeshHostSnapshot,
+    SnapshotRequest,
+    TargetCandidate,
+    TargetSelectionRequest,
+)
 
 
 CHUDNOVSKY_DIGITS_PER_TERM = 14
@@ -29,6 +39,8 @@ DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
 DEFAULT_STREAM_CHUNK_DIGITS = 8192
 DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
 MAX_PARALLEL_WORKER_LAUNCHES = 32
+TARGET_SELECTION_TIMEOUT_SECONDS = 1.0
+WORKER_BUSY_REJECTION_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +128,7 @@ class PiComputeState(PagletState):
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     cleanup_errors: dict[str, str] = field(default_factory=dict)
+    cached_targets: list[dict[str, Any]] = field(default_factory=list)
     skipped_count: int = 0
     done: bool = False
     started_at: float = 0.0
@@ -419,29 +432,117 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         )
 
     def _select_targets(self, request: PiComputeRequest, *, ignore_load_limits: bool = False, limit: int | None = None):
+        request_wire = TargetSelectionRequest(
+            limit=max(1, limit if limit is not None else request.max_in_flight or 64),
+            max_load_per_cpu=0.0 if ignore_load_limits else request.max_load_per_cpu,
+            max_cpu_percent=-1.0 if ignore_load_limits else request.max_cpu_percent,
+            min_memory_available_bytes=request.min_memory_available_bytes,
+            min_work_free_bytes=request.min_work_free_bytes,
+            include_self=True,
+        )
+        requested_limit = request_wire.limit
         try:
             service = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
             reply = service.call(
                 SELECT_TARGETS,
-                TargetSelectionRequest(
-                    limit=max(1, limit if limit is not None else request.max_in_flight or 64),
-                    max_load_per_cpu=0.0 if ignore_load_limits else request.max_load_per_cpu,
-                    max_cpu_percent=-1.0 if ignore_load_limits else request.max_cpu_percent,
-                    min_memory_available_bytes=request.min_memory_available_bytes,
-                    min_work_free_bytes=request.min_work_free_bytes,
-                    include_self=True,
-                ),
+                request_wire,
                 no_delay=True,
+                timeout=TARGET_SELECTION_TIMEOUT_SECONDS,
             )
+            with self.locked_state() as state:
+                state.cached_targets = [dataclass_to_wire(target) for target in reply.targets]
+                state.errors.pop("mesh-info", None)
             return reply.targets
         except Exception as exc:
+            message = str(exc).lower()
+            is_transient_error = _is_mesh_info_transient_error(message)
+            fallback_targets = self._get_cached_targets(requested_limit)
+            if not fallback_targets:
+                fallback_targets = self._local_fallback_targets(request_wire)
+            if fallback_targets:
+                with self.locked_state() as state:
+                    state.cached_targets = [dataclass_to_wire(target) for target in fallback_targets]
+                    if is_transient_error:
+                        state.errors.pop("mesh-info", None)
+                    else:
+                        state.errors["mesh-info"] = str(exc)
+                return fallback_targets
             with self.locked_state() as state:
                 state.errors["mesh-info"] = str(exc)
             return []
 
+    def _get_cached_targets(self, limit: int | None = None) -> list[TargetCandidate]:
+        requested = max(1, limit or 1)
+        with self.locked_state() as state:
+            cached_wire = list(state.cached_targets)
+        targets: list[TargetCandidate] = []
+        for wire in cached_wire:
+            try:
+                targets.append(dataclass_from_wire(TargetCandidate, wire))
+            except Exception:
+                continue
+        return targets[:requested]
+
+    def _local_fallback_targets(self, request_wire: TargetSelectionRequest) -> list[TargetCandidate]:
+        if self._context is None:
+            return []
+        if not request_wire.include_self:
+            return []
+        snapshot = self._current_host_snapshot()
+        if snapshot is None:
+            return []
+        return [TargetCandidate(snapshot=snapshot, score=0.0, reasons=["fallback", "eligible"])]
+
+    def _current_host_snapshot(self) -> MeshHostSnapshot | None:
+        try:
+            work_path = str(self.context.work_dir(create=True))
+        except Exception:
+            work_path = str(self.context.work_dir())
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        try:
+            load_average = list(os.getloadavg())
+        except Exception:
+            load_average = []
+        try:
+            work_usage = shutil.disk_usage(work_path)
+            work_total_bytes = work_usage.total
+            work_free_bytes = work_usage.free
+        except Exception:
+            work_total_bytes = 0
+            work_free_bytes = 0
+        work_percent_used = 0.0
+        if work_total_bytes > 0:
+            work_percent_used = (1.0 - float(work_free_bytes) / float(work_total_bytes)) * 100.0
+        agent_count = self.context.host.list_agents()
+        active_count = len([item for item in agent_count if item.get("active")])
+        inactive_count = len([item for item in agent_count if not item.get("active")])
+        load_average_value = load_average[0] if load_average else 0.0
+        return MeshHostSnapshot(
+            host_name=self.context.name,
+            host_url=self.context.address.rstrip("/"),
+            code_version="",
+            observed_at=time.time(),
+            platform="",
+            cpu_count_logical=cpu_count,
+            cpu_percent=0.0,
+            load_average=load_average,
+            load_per_cpu=max(0.0, float(load_average_value)) / max(1.0, float(cpu_count)),
+            memory_total_bytes=1,
+            memory_available_bytes=1,
+            memory_percent=0.0,
+            swap_percent=0.0,
+            work_path=work_path,
+            work_total_bytes=work_total_bytes,
+            work_free_bytes=work_free_bytes,
+            work_percent_used=work_percent_used,
+            active_count=active_count,
+            inactive_count=inactive_count,
+            errors=[],
+        )
+
     def _launch_from_current_state(self) -> None:
         with self.locked_state() as state:
-            if state.done or state.errors or not state.pending_batches:
+            if state.done or not state.pending_batches:
                 return
             request_wire = dict(state.request)
         if not request_wire:
@@ -620,6 +721,12 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 with self.locked_state() as state:
                     state.cleanup_errors[host_name] = str(exc)
 
+
+def _is_mesh_info_transient_error(message: str) -> bool:
+    if not message:
+        return False
+    return "timeout" in message or "timed out" in message or "connection" in message
+
 class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
     """Compute one Chudnovsky term range and report it to a coordinator."""
 
@@ -705,8 +812,15 @@ class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):
     def _busy_rejection(self) -> str:
         try:
             service = self.require_contract(MESH_INFO, operation=GET_SNAPSHOT, scope=ServiceScope.LOCAL)
-            reply = service.call(GET_SNAPSHOT, SnapshotRequest(force=True), no_delay=True)
+            reply = service.call(
+                GET_SNAPSHOT,
+                SnapshotRequest(force=True),
+                no_delay=True,
+                timeout=WORKER_BUSY_REJECTION_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
+            if _is_mesh_info_transient_error(str(exc).lower()):
+                return ""
             return f"mesh-info unavailable: {exc}"
         snapshot = reply.snapshot
         if snapshot is None:

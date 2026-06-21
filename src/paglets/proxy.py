@@ -88,7 +88,14 @@ class PagletProxy:
     def get_agent_class_name(self) -> str:
         return str(self.info()["class_name"])
 
-    def send(self, message: Message, *, activate_if_inactive: bool = True, no_delay: bool = False) -> Any:
+    def send(
+        self,
+        message: Message,
+        *,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+        timeout: float | None = None,
+    ) -> Any:
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/messages"),
             {
@@ -96,6 +103,7 @@ class PagletProxy:
                 "activate_if_inactive": activate_if_inactive,
                 "no_delay": no_delay,
             },
+            timeout=timeout,
         )
         return response.get("result")
 
@@ -105,6 +113,7 @@ class PagletProxy:
         *,
         activate_if_inactive: bool = True,
         no_delay: bool = False,
+        timeout: float | None = None,
     ) -> None:
         message.message_type = ONEWAY
         self.client.post_json(
@@ -115,6 +124,7 @@ class PagletProxy:
                 "activate_if_inactive": activate_if_inactive,
                 "no_delay": no_delay,
             },
+            timeout=timeout,
         )
 
     def send_future(
