@@ -36,6 +36,16 @@ def test_auto_update_discovery_targets_use_mesh_and_lan_discovery(monkeypatch):
     ]
 
 
+def test_windows_reexec_argv_does_not_put_spaced_path_in_argv0():
+    argv = host_cli._reexec_argv(
+        ["--name", "windows", "--bind-public"],
+        executable=r"C:\Users\Christian Klukas\git\paglets\.venv\Scripts\python.exe",
+        windows=True,
+    )
+
+    assert argv == ["python.exe", "-m", "paglets.cli", "--name", "windows", "--bind-public"]
+
+
 def test_host_cli_cancels_auto_update_when_checkout_is_dirty(tmp_path: Path, monkeypatch, capsys):
     head = "a" * 40
 

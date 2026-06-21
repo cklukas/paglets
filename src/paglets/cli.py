@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import signal
 import sys
 
@@ -165,7 +165,19 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _reexec(argv: list[str]) -> None:
-    os.execv(sys.executable, [sys.executable, "-m", "paglets.cli", *argv])
+    os.execv(sys.executable, _reexec_argv(argv))
+
+
+def _reexec_argv(
+    argv: list[str],
+    *,
+    executable: str | None = None,
+    windows: bool | None = None,
+) -> list[str]:
+    executable = executable or sys.executable
+    windows = os.name == "nt" if windows is None else windows
+    executable_arg = PureWindowsPath(executable).name if windows else executable
+    return [executable_arg, "-m", "paglets.cli", *argv]
 
 
 def _print_git_update_failure(result: git_update.GitUpdateResult) -> None:
