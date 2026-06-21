@@ -26,6 +26,7 @@ CHUDNOVSKY_C3_OVER_24 = CHUDNOVSKY_C**3 // 24
 DECIMAL_CHUNK_DIGITS = 9
 DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
 DEFAULT_STREAM_CHUNK_DIGITS = 8192
+DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,13 @@ class PiBatchResult:
     t: str = ""
     error: str = ""
     duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class PiResultDrainRequest:
+    known_batch_ids: list[str] = field(default_factory=list)
+    wait_timeout: float = 0.5
+    max_results: int = DEFAULT_RESULT_DRAIN_BATCH_SIZE
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +158,10 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 wait_timeout=float(message.args.get("wait_timeout", 0.5)),
                 max_digits=int(message.args.get("max_digits", DEFAULT_STREAM_CHUNK_DIGITS)),
             )
+        if message.kind == "drain_results":
+            request_wire = dict(message.args.get("request") or message.args)
+            request = dataclass_from_wire(PiResultDrainRequest, request_wire)
+            return self.drain_results(request)
         if message.kind == "batch_result":
             return self.record_batch_result(message.args)
         if message.kind == "summary":
@@ -223,6 +235,32 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             "cursor": cursor,
             "summary": self._compact_summary_from_progress(progress),
             "done": bool(progress.errors) or (progress.done and cursor >= progress.available_digits),
+        }
+
+    def drain_results(self, request: PiResultDrainRequest) -> dict[str, Any]:
+        known_batch_ids = {str(batch_id) for batch_id in request.known_batch_ids}
+        wait_timeout = max(0.0, float(request.wait_timeout))
+
+        def ready(state: PiComputeState) -> bool:
+            return bool(state.errors) or state.done or any(batch_id not in known_batch_ids for batch_id in state.results)
+
+        self.wait_state(ready, timeout=wait_timeout)
+        self._launch_from_current_state()
+        with self.locked_state() as state:
+            summary = self._compact_summary_from_state(state)
+            result_items = [
+                dict(result)
+                for batch_id, result in state.results.items()
+                if batch_id not in known_batch_ids
+            ]
+        result_items.sort(key=lambda item: (int(item.get("term_start") or 0), str(item.get("batch_id") or "")))
+        max_results = max(0, int(request.max_results))
+        if max_results > 0:
+            result_items = result_items[:max_results]
+        return {
+            "results": result_items,
+            "summary": summary,
+            "done": bool(summary["errors"]) or bool(summary["done"]),
         }
 
     def _prepare_job(self, request: PiComputeRequest) -> None:
@@ -466,19 +504,12 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
         digit_count = available if digits is None else min(available, max(0, int(digits)))
         if progress.completed_terms <= 0 or digit_count <= 0:
             return ""
-        p, q, t = _combine_result_parts(progress.pieces)
-        absolute_start = progress.request.start + after_digits
-        return _format_pi_decimal(
-            p,
-            q,
-            t,
-            start=absolute_start,
+        return pi_decimal_digits_from_results(
+            progress.request,
+            progress.pieces,
+            after_digits=after_digits,
             digits=digit_count,
-            precision_digits=max(
-                CHUDNOVSKY_GUARD_DIGITS + 1,
-                absolute_start + digit_count + CHUDNOVSKY_GUARD_DIGITS,
-            ),
-        )[1]
+        )
 
     @staticmethod
     def _compact_summary_from_progress(progress: _PiComputeProgress) -> dict[str, Any]:
@@ -494,6 +525,24 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             "skipped_count": progress.skipped_count,
             "errors": progress.errors,
             "cleanup_errors": progress.cleanup_errors,
+        }
+
+    @staticmethod
+    def _compact_summary_from_state(state: PiComputeState) -> dict[str, Any]:
+        request = dataclass_from_wire(PiComputeRequest, state.request) if state.request else PiComputeRequest()
+        completed_terms = _contiguous_completed_terms_from_wires(state.results.values())
+        return {
+            "start": request.start,
+            "digits": request.digits,
+            "terms": _terms_for_request(request),
+            "completed_terms": completed_terms,
+            "available_digits": _available_decimal_digits(request, completed_terms),
+            "done": bool(state.done),
+            "pending": len(state.pending_batches),
+            "in_flight": len(state.in_flight),
+            "skipped_count": state.skipped_count,
+            "errors": dict(state.errors),
+            "cleanup_errors": dict(state.cleanup_errors),
         }
 
     def cleanup_workers(self) -> PiComputeSummary:
@@ -648,6 +697,36 @@ def pi_decimal(start: int, digits: int) -> str:
     return _format_pi_decimal(p, q, t, start=request.start, digits=request.digits, precision_digits=_precision_digits(request))[0]
 
 
+def pi_decimal_digits_from_results(
+    request: PiComputeRequest,
+    results: list[PiBatchResult],
+    *,
+    after_digits: int = 0,
+    digits: int | None = None,
+) -> str:
+    after_digits = max(0, int(after_digits))
+    contiguous = _contiguous_result_pieces(results)
+    completed_terms = sum(piece.term_count for piece in contiguous)
+    available = max(0, _available_decimal_digits(request, completed_terms) - after_digits)
+    digit_count = available if digits is None else min(available, max(0, int(digits)))
+    if digit_count <= 0:
+        return ""
+    pieces = _pieces_needed_for_digits(request, contiguous, after_digits + digit_count)
+    p, q, t = _combine_result_parts(pieces)
+    absolute_start = request.start + after_digits
+    return _format_pi_decimal(
+        p,
+        q,
+        t,
+        start=absolute_start,
+        digits=digit_count,
+        precision_digits=max(
+            CHUDNOVSKY_GUARD_DIGITS + 1,
+            absolute_start + digit_count + CHUDNOVSKY_GUARD_DIGITS,
+        ),
+    )[1]
+
+
 def chudnovsky_binary_split(a: int, b: int) -> tuple[int, int, int]:
     if b <= a:
         raise ValueError("term range cannot be empty")
@@ -741,6 +820,39 @@ def _available_decimal_digits(request: PiComputeRequest, completed_terms: int) -
     reliable_digits = completed_terms * CHUDNOVSKY_DIGITS_PER_TERM - CHUDNOVSKY_GUARD_DIGITS
     available_after_start = max(0, reliable_digits - request.start)
     return min(request.digits, available_after_start)
+
+
+def _contiguous_completed_terms_from_wires(result_wires: Any) -> int:
+    terms: list[tuple[int, int]] = []
+    for wire in result_wires:
+        if not isinstance(wire, dict) or wire.get("status") != "ok":
+            continue
+        terms.append((int(wire.get("term_start") or 0), int(wire.get("term_count") or 0)))
+    completed_terms = 0
+    for term_start, term_count in sorted(terms):
+        if term_start != completed_terms:
+            break
+        completed_terms += term_count
+    return completed_terms
+
+
+def _pieces_needed_for_digits(
+    request: PiComputeRequest,
+    pieces: list[PiBatchResult],
+    digit_end: int,
+) -> list[PiBatchResult]:
+    absolute_digit_end = request.start + max(0, int(digit_end))
+    required_terms = max(1, math.ceil((absolute_digit_end + CHUDNOVSKY_GUARD_DIGITS) / CHUDNOVSKY_DIGITS_PER_TERM) + 1)
+    selected: list[PiBatchResult] = []
+    completed_terms = 0
+    for piece in sorted(pieces, key=lambda item: item.term_start):
+        if piece.term_start != completed_terms:
+            break
+        selected.append(piece)
+        completed_terms += piece.term_count
+        if completed_terms >= required_terms:
+            break
+    return selected
 
 
 def _slots_by_host(targets: list[Any], request: PiComputeRequest) -> dict[str, int]:

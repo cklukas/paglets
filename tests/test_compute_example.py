@@ -20,6 +20,8 @@ from paglets.examples.compute import (
     chudnovsky_binary_split,
     pi_decimal,
     pi_decimal_digits,
+    pi_decimal_digits_from_results,
+    PiResultDrainRequest,
 )
 from paglets.examples.compute.agent import (
     _decode_bigint,
@@ -203,6 +205,55 @@ def test_pi_compute_stream_drain_waits_until_all_available_digits_are_emitted():
     assert first["done"] is False
     assert second["new_decimal_digits"] == "5"
     assert second["done"] is True
+
+
+def test_pi_compute_result_drain_returns_compact_new_results_only():
+    request = PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
+    state = PiComputeState(
+        request=dataclass_to_wire(request),
+        done=True,
+    )
+    p, q, t = chudnovsky_binary_split(0, 1)
+    result = PiBatchResult(
+        batch_id="terms:0:1",
+        term_start=0,
+        term_count=1,
+        host_name="alpha",
+        host_url="http://127.0.0.1:1",
+        status="ok",
+        p=str(p),
+        q=str(q),
+        t=str(t),
+    )
+    state.results[result.batch_id] = dataclass_to_wire(result)
+
+    agent = PiComputeCoordinatorAgent(state)
+    first = agent.drain_results(PiResultDrainRequest(wait_timeout=0.0))
+    second = agent.drain_results(PiResultDrainRequest(known_batch_ids=[result.batch_id], wait_timeout=0.0))
+
+    assert first["results"] == [dataclass_to_wire(result)]
+    assert first["summary"]["available_digits"] == 4
+    assert "decimal_digits" not in first["summary"]
+    assert "pi" not in first["summary"]
+    assert second["results"] == []
+
+
+def test_pi_digits_can_be_formatted_from_drained_results_locally():
+    request = PiComputeRequest(start=0, digits=8, batch_size=1, timeout=5.0, max_cpu_percent=100.0)
+    p, q, t = chudnovsky_binary_split(0, 1)
+    result = PiBatchResult(
+        batch_id="terms:0:1",
+        term_start=0,
+        term_count=1,
+        host_name="alpha",
+        host_url="http://127.0.0.1:1",
+        status="ok",
+        p=str(p),
+        q=str(q),
+        t=str(t),
+    )
+
+    assert pi_decimal_digits_from_results(request, [result], after_digits=0, digits=4) == "1415"
 
 
 def test_pi_compute_counts_free_host_slots(tmp_path: Path):

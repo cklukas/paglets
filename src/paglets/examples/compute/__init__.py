@@ -11,9 +11,11 @@ from .agent import (
     PiComputeRequest,
     PiComputeState,
     PiComputeSummary,
+    PiResultDrainRequest,
     chudnovsky_binary_split,
     pi_decimal,
     pi_decimal_digits,
+    pi_decimal_digits_from_results,
 )
 
 __all__ = [
@@ -25,7 +27,9 @@ __all__ = [
     "PiComputeRequest",
     "PiComputeState",
     "PiComputeSummary",
+    "PiResultDrainRequest",
     "chudnovsky_binary_split",
     "pi_decimal",
     "pi_decimal_digits",
+    "pi_decimal_digits_from_results",
 ]
