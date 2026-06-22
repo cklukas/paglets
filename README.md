@@ -49,8 +49,11 @@ This first implementation intentionally uses **one approach**:
 - runtime fields on the agent instance are transient;
 - host control messages use a tiny JSON HTTP API, while paglet movement sends
   state through a binary HTTP payload to avoid JSON encoding large mobile state;
-- large paglet state is streamed through both host-to-host transport and the
-  host/child process boundary instead of being embedded in JSON control calls;
+- large paglet state is streamed through host-to-host transport and shared
+  memory for local host/child handoff instead of being embedded in JSON control
+  calls;
+- same-host movement bypasses HTTP/TCP and delivers the serialized movement
+  envelope directly inside the local host;
 - every active paglet instance runs in its own child Python process;
 - migration works equally across different machines or between two host processes
   on the same Mac using different ports.

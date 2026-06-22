@@ -9,6 +9,8 @@ from pathlib import Path
 import pickle
 import time
 
+import pytest
+
 import paglets.client as client_module
 import paglets.host as host_module
 import paglets.process_runtime as process_runtime
@@ -45,6 +47,11 @@ class RecordingClient(HostClient):
     def post_pickle(self, url: str, payload: dict, *, timeout: float | None = None):
         self.pickle_posts.append(url)
         return super().post_pickle(url, payload, timeout=timeout)
+
+
+class FailingPickleClient(HostClient):
+    def post_pickle(self, url: str, payload: dict, *, timeout: float | None = None):
+        raise AssertionError(f"post_pickle should not be used for same-host movement: {url}")
 
 
 def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
@@ -222,6 +229,23 @@ def test_child_startup_streams_state_outside_process_config():
     assert transport_module.receive_local_pickle(config.state_stream) == state
 
 
+def test_local_pickle_stream_uses_shared_memory_and_unlinks_after_receive(monkeypatch):
+    monkeypatch.setattr(transport_module, "LOCAL_PICKLE_SEGMENT_BYTES", 64)
+    payload = {"value": b"x" * 512}
+
+    stream = transport_module.start_local_pickle_sender(payload)
+
+    assert stream["kind"] == "shared_memory_pickle"
+    assert len(stream["segments"]) > 1
+    assert not hasattr(transport_module, "Listener")
+    segment_names = [segment["name"] for segment in stream["segments"]]
+    assert transport_module.receive_local_pickle(stream) == payload
+    assert stream["token"] not in transport_module._LOCAL_PICKLE_STREAMS
+    for name in segment_names:
+        with pytest.raises(FileNotFoundError):
+            transport_module.shared_memory.SharedMemory(name=name)
+
+
 def test_child_host_call_state_payload_uses_local_pickle_stream():
     payload = {"state": {"payload": b"x" * (2 * 1024 * 1024)}, "small": True}
 
@@ -278,6 +302,47 @@ def test_large_binary_state_moves_clones_and_reactivates(tmp_path: Path):
     assert clone_state.marker == bytearray(b"m")
     assert moved_state.payload == payload
     assert moved_state.marker == bytearray(b"m")
+
+
+def test_same_host_dispatch_bypasses_http_pickle(tmp_path: Path):
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        client=FailingPickleClient(),
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        proxy = host.create(TravelAgent, TravelState(last_message="local"))
+        moved = proxy.dispatch(host.address)
+        state = host.get_state(moved.agent_id, TravelState)
+    finally:
+        host.stop()
+
+    assert moved.host_url == host.address
+    assert state.last_message == "local"
+    assert "arrived:alpha:from:alpha" in state.events
+
+
+def test_same_host_clone_bypasses_http_pickle(tmp_path: Path):
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        client=FailingPickleClient(),
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        proxy = host.create(BinaryTravelAgent, BinaryTravelState(payload=b"x" * 1024))
+        clone = proxy.clone(target=host.address)
+        state = host.get_state(clone.agent_id, BinaryTravelState)
+    finally:
+        host.stop()
+
+    assert clone.host_url == host.address
+    assert state.payload == b"x" * 1024
 
 
 def test_binary_payload_encoding_benchmark_avoids_json_transport_cost():

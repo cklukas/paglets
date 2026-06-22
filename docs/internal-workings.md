@@ -7,12 +7,14 @@ This page describes how the codebase fits together.
 Paglets move as a transfer envelope:
 
 1. The source host finds the active child-process record.
-2. The host asks the child for fresh dataclass state over a one-shot local
-   pickle stream.
+2. The host asks the child for fresh dataclass state over a one-shot
+   shared-memory pickle stream.
 3. The host records the paglet class name and state class name.
-4. The source host posts the envelope to the target with chunked pickle HTTP.
+4. The source host posts the envelope to the target with chunked pickle HTTP,
+   or directly receives it locally when the target is the same host.
 5. The target host imports those classes by name.
-6. The target host streams the initial state into a fresh child process.
+6. The target host streams the initial state into a fresh child process through
+   shared memory.
 7. The child reconstructs the paglet and attaches a fresh context.
 8. The target host invokes the appropriate lifecycle hook and then `run()`.
 
@@ -36,11 +38,12 @@ handles, or arbitrary instance attributes.
   starts children with `multiprocessing.get_context("spawn")`, talks to each
   child over a private `Pipe`, routes child host calls back to `Host`, and
   caches the latest serialized state. Large state payloads cross this boundary
-  through one-shot local pickle streams; the pipe carries only control metadata.
+  through one-shot shared-memory pickle streams; the pipe carries only control
+  metadata.
 
 `paglets.transport`
 : Provides the internal streamed pickle transport helpers for host-to-host HTTP
-  movement and local host/child process state handoff.
+  movement and shared-memory local host/child process state handoff.
 
 `paglets.proxy`
 : Defines `PagletProxy`, the controlled handle used to inspect, message, move,
@@ -78,11 +81,11 @@ sequenceDiagram
     participant B as Target Host
 
     A->>P: on_dispatching/on_cloning
-    P-->>A: streamed dataclass state
+    P-->>A: shared-memory dataclass state
     A->>A: build PagletEnvelope
-    A->>B: chunked pickle POST /agents { envelope }
+    A->>B: chunked pickle POST /agents or local receive
     B->>B: import class + state class
-    B->>P: stream initial state
+    B->>P: shared-memory initial state
     P->>P: deserialize dataclass state
     B->>P: attach PagletContext
     B->>P: on_arrival/on_clone

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import time
 from typing import Any
 
 from .agent import ACTIVE, INACTIVE
@@ -105,7 +106,7 @@ class PagletProxy:
             },
             timeout=timeout,
         )
-        return response.get("result")
+        return self._settled_same_agent_proxy_result(response.get("result"))
 
     def send_oneway(
         self,
@@ -151,6 +152,45 @@ class PagletProxy:
             {"ticket": ticket.to_wire()},
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
+
+    def _settled_same_agent_proxy_result(self, result: Any) -> Any:
+        if not isinstance(result, dict):
+            return result
+        if str(result.get("agent_id") or "") != self.agent_id or "host_url" not in result:
+            return result
+        deadline = time.monotonic() + 2.0
+        stable_since: float | None = None
+        last_seen = {"host_url": str(result["host_url"]), "agent_id": self.agent_id}
+        while time.monotonic() < deadline:
+            current = self._find_active_same_agent_proxy(last_seen["host_url"])
+            if current is None:
+                time.sleep(0.05)
+                continue
+            if current == last_seen:
+                if stable_since is None:
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= 0.15:
+                    return current
+            else:
+                last_seen = current
+                stable_since = time.monotonic()
+            time.sleep(0.05)
+        return last_seen
+
+    def _find_active_same_agent_proxy(self, fallback_host_url: str) -> dict[str, str] | None:
+        hosts = [fallback_host_url]
+        try:
+            hosts.extend(str(item.get("url") or item.get("address") or "") for item in self.client.get_json(f"{self.host_url.rstrip('/')}/hosts").get("hosts", []))
+        except PagletError:
+            pass
+        for host_url in dict.fromkeys(host.rstrip("/") for host in hosts if host):
+            try:
+                info = self.client.get_json(_agent_url(host_url, self.agent_id), timeout=0.2)
+            except PagletError:
+                continue
+            if info.get("active"):
+                return {"host_url": host_url, "agent_id": self.agent_id}
+        return None
 
     def clone(self, target: str | TransferTicket | None = None) -> "PagletProxy":
         payload = {"target": None} if target is None else {"ticket": TransferTicket.from_target(target).to_wire()}

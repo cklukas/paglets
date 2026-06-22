@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import base64
 import http.client
-import os
 import pickle
+from multiprocessing import resource_tracker, shared_memory
 import threading
-from multiprocessing.connection import Client, Connection, Listener
 from typing import Any
+import uuid
 
 from .errors import HostError
 
 
 PICKLE_CONTENT_TYPE = "application/x-paglets-pickle"
 LOCAL_PICKLE_CHUNK_BYTES = 1024 * 1024
-_LOCAL_SENDERS: list[threading.Thread] = []
-_LOCAL_SENDERS_LOCK = threading.Lock()
+LOCAL_PICKLE_SEGMENT_BYTES = 64 * 1024 * 1024
+_LOCAL_PICKLE_STREAMS: dict[str, list[shared_memory.SharedMemory]] = {}
+_LOCAL_PICKLE_STREAMS_LOCK = threading.Lock()
 
 
 def dump_pickle(value: Any, target: Any) -> None:
@@ -51,65 +52,41 @@ def load_http_pickle_payload(headers: Any, source: Any) -> dict[str, Any]:
 
 
 def start_local_pickle_sender(value: Any) -> dict[str, Any]:
-    authkey = os.urandom(32)
-    listener = Listener(("127.0.0.1", 0), authkey=authkey)
-    address = listener.address
-
-    def serve_once() -> None:
-        try:
-            with listener:
-                conn = listener.accept()
-                try:
-                    writer = LocalConnectionWriter(conn)
-                    try:
-                        dump_pickle(value, writer)
-                    finally:
-                        writer.close()
-                finally:
-                    conn.close()
-        except Exception:
-            try:
-                listener.close()
-            except Exception:
-                pass
-        finally:
-            with _LOCAL_SENDERS_LOCK:
-                try:
-                    _LOCAL_SENDERS.remove(threading.current_thread())
-                except ValueError:
-                    pass
-
-    thread = threading.Thread(target=serve_once, name="paglets-local-pickle-sender", daemon=True)
-    with _LOCAL_SENDERS_LOCK:
-        _LOCAL_SENDERS.append(thread)
-    thread.start()
-    return {
-        "address": address,
-        "authkey": authkey,
-    }
+    writer = SharedMemoryPickleWriter(segment_size=LOCAL_PICKLE_SEGMENT_BYTES)
+    try:
+        dump_pickle(value, writer)
+        return writer.finish()
+    except Exception:
+        writer.abort()
+        raise
 
 
 def wait_for_local_pickle_senders(timeout: float = 5.0) -> None:
-    current = threading.current_thread()
-    with _LOCAL_SENDERS_LOCK:
-        threads = [thread for thread in _LOCAL_SENDERS if thread is not current]
-    if not threads:
+    return None
+
+
+def release_local_pickle_sender(stream_or_token: dict[str, Any] | str) -> None:
+    token = stream_or_token if isinstance(stream_or_token, str) else str(stream_or_token.get("token") or "")
+    if not token:
         return
-    per_thread_timeout = max(0.0, timeout / max(1, len(threads)))
-    for thread in threads:
-        thread.join(timeout=per_thread_timeout)
+    with _LOCAL_PICKLE_STREAMS_LOCK:
+        handles = _LOCAL_PICKLE_STREAMS.pop(token, [])
+    for handle in handles:
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 def receive_local_pickle(stream: dict[str, Any]) -> Any:
-    address = stream.get("address")
-    authkey = stream.get("authkey")
-    if address is None or authkey is None:
-        raise HostError("Incomplete local pickle stream metadata")
-    conn = Client(address, authkey=bytes(authkey))
+    if stream.get("kind") != "shared_memory_pickle":
+        raise HostError("Unsupported local pickle stream metadata")
+    reader = SharedMemoryPickleReader(stream)
     try:
-        return load_pickle(LocalConnectionReader(conn))
+        return load_pickle(reader)
     finally:
-        conn.close()
+        reader.close(unlink=True)
+        release_local_pickle_sender(stream)
 
 
 def json_safe(value: Any) -> Any:
@@ -257,71 +234,170 @@ class ChunkedRequestReader:
                 return
 
 
-class LocalConnectionWriter:
-    def __init__(self, conn: Connection):
-        self._conn = conn
+class SharedMemoryPickleWriter:
+    def __init__(self, *, segment_size: int):
+        self._segment_size = max(1, int(segment_size))
+        self._token = uuid.uuid4().hex[:12]
+        self._segments: list[dict[str, Any]] = []
+        self._handles: list[shared_memory.SharedMemory] = []
+        self._current: shared_memory.SharedMemory | None = None
+        self._current_used = 0
+        self._total_size = 0
         self._closed = False
 
     def write(self, data: bytes) -> int:
         if self._closed:
-            raise ValueError("local pickle writer is closed")
+            raise ValueError("shared-memory pickle writer is closed")
         if not data:
             return 0
         view = memoryview(data)
-        for offset in range(0, len(view), LOCAL_PICKLE_CHUNK_BYTES):
-            self._conn.send_bytes(view[offset : offset + LOCAL_PICKLE_CHUNK_BYTES])
+        written = 0
+        while written < len(view):
+            if self._current is None or self._current_used >= self._segment_size:
+                self._open_segment()
+            assert self._current is not None
+            available = self._segment_size - self._current_used
+            size = min(available, len(view) - written)
+            self._current.buf[self._current_used : self._current_used + size] = view[written : written + size]
+            self._current_used += size
+            self._segments[-1]["used"] = self._current_used
+            self._total_size += size
+            written += size
         return len(view)
 
     def flush(self) -> None:
         return None
 
+    def finish(self) -> dict[str, Any]:
+        metadata = {
+            "kind": "shared_memory_pickle",
+            "token": self._token,
+            "segment_size": self._segment_size,
+            "total_size": self._total_size,
+            "segments": [dict(segment) for segment in self._segments],
+        }
+        if not self._closed:
+            self._closed = True
+            with _LOCAL_PICKLE_STREAMS_LOCK:
+                _LOCAL_PICKLE_STREAMS[self._token] = list(self._handles)
+            self._handles = []
+            self._current = None
+        return metadata
+
+    def abort(self) -> None:
+        self._closed = True
+        with _LOCAL_PICKLE_STREAMS_LOCK:
+            registered = _LOCAL_PICKLE_STREAMS.pop(self._token, [])
+        self._handles.extend(registered)
+        for handle in self._handles:
+            try:
+                handle.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+        self._close_handles()
+
+    def _open_segment(self) -> None:
+        name = f"pgl{self._token}{len(self._segments):x}"
+        handle = shared_memory.SharedMemory(name=name, create=True, size=self._segment_size)
+        _unregister_shared_memory(handle)
+        self._handles.append(handle)
+        self._current = handle
+        self._current_used = 0
+        self._segments.append({"name": handle.name, "size": self._segment_size, "used": 0})
+
+    def _close_handles(self) -> None:
+        for handle in self._handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._handles = []
+        self._current = None
+
     def close(self) -> None:
         if not self._closed:
-            self._conn.send_bytes(b"")
-            self._closed = True
+            self.finish()
 
 
-class LocalConnectionReader:
-    def __init__(self, conn: Connection):
-        self._conn = conn
-        self._buffer = bytearray()
-        self._done = False
+class SharedMemoryPickleReader:
+    def __init__(self, stream: dict[str, Any]):
+        self._segments_meta = [dict(segment) for segment in stream.get("segments") or []]
+        self._handles: list[shared_memory.SharedMemory] = []
+        self._index = 0
+        self._offset = 0
+        self._closed = False
+        try:
+            self._handles = [
+                shared_memory.SharedMemory(name=str(segment["name"]), create=False)
+                for segment in self._segments_meta
+            ]
+        except Exception:
+            self.close(unlink=False)
+            raise
 
     def read(self, size: int = -1) -> bytes:
+        if self._closed:
+            raise ValueError("shared-memory pickle reader is closed")
         if size is None or size < 0:
-            chunks = [bytes(self._buffer)]
-            self._buffer.clear()
-            while not self._done:
-                self._read_next_chunk()
-                if self._buffer:
-                    chunks.append(bytes(self._buffer))
-                    self._buffer.clear()
-            return b"".join(chunks)
-        while len(self._buffer) < size and not self._done:
-            self._read_next_chunk()
-        data = bytes(self._buffer[:size])
-        del self._buffer[:size]
-        return data
+            chunks: list[bytes] = []
+            while True:
+                chunk = self.read(LOCAL_PICKLE_CHUNK_BYTES)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        remaining = int(size)
+        chunks: list[bytes] = []
+        while remaining > 0 and self._index < len(self._handles):
+            used = int(self._segments_meta[self._index].get("used") or 0)
+            if self._offset >= used:
+                self._index += 1
+                self._offset = 0
+                continue
+            amount = min(remaining, used - self._offset)
+            handle = self._handles[self._index]
+            chunks.append(bytes(handle.buf[self._offset : self._offset + amount]))
+            self._offset += amount
+            remaining -= amount
+        return b"".join(chunks)
 
     def readline(self, size: int = -1) -> bytes:
         limit = None if size is None or size < 0 else int(size)
-        while not self._done and b"\n" not in self._buffer and (limit is None or len(self._buffer) < limit):
-            self._read_next_chunk()
-        if limit is None:
-            newline = self._buffer.find(b"\n")
-            end = len(self._buffer) if newline < 0 else newline + 1
-        else:
-            newline = self._buffer.find(b"\n", 0, limit)
-            end = min(len(self._buffer), limit) if newline < 0 else newline + 1
-        data = bytes(self._buffer[:end])
-        del self._buffer[:end]
-        return data
+        chunks: list[bytes] = []
+        while limit is None or sum(len(chunk) for chunk in chunks) < limit:
+            remaining = 1 if limit is None else max(0, limit - sum(len(chunk) for chunk in chunks))
+            if remaining <= 0:
+                break
+            chunk = self.read(1)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if chunk == b"\n":
+                break
+        return b"".join(chunks)
 
-    def _read_next_chunk(self) -> None:
-        if self._done:
+    def close(self, *, unlink: bool = False) -> None:
+        if self._closed:
             return
-        data = self._conn.recv_bytes()
-        if not data:
-            self._done = True
-            return
-        self._buffer.extend(data)
+        for handle in self._handles:
+            if unlink:
+                try:
+                    handle.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    pass
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._handles = []
+        self._closed = True
+
+
+def _unregister_shared_memory(handle: shared_memory.SharedMemory) -> None:
+    try:
+        resource_tracker.unregister(handle._name, "shared_memory")
+    except Exception:
+        pass

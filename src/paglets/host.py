@@ -7,6 +7,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
+import queue
 import shutil
 import socket
 import threading
@@ -1151,7 +1152,10 @@ class Host:
         record.cleanup_resources(reason="retract")
         self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.RETRACT, target_info)
-        response = self.client.post_pickle(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
+        if self._is_local_transfer_target(target_info):
+            response = self._receive_local_envelope_response(envelope)
+        else:
+            response = self.client.post_pickle(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
         self._remove_active_agent(agent_id, record, terminate=True)
         self._emit("retract", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
@@ -1197,6 +1201,7 @@ class Host:
             record.request_lifecycle("arrival", dataclass_to_wire(event))
             record.ready = True
             self._emit("arrival", agent_id=record.agent_id, class_name=record.agent_class_name, data={"kind": envelope.kind.value})
+            record.wait_for_run_complete_or_departure()
         elif envelope.kind is EnvelopeKind.CLONE:
             event = CloneEvent(
                 agent_id=record.agent_id,
@@ -1570,6 +1575,8 @@ class Host:
         target_info: dict[str, Any],
         envelope: PagletEnvelope,
     ) -> dict[str, Any]:
+        if self._is_local_transfer_target(target_info):
+            return self._receive_local_envelope_response(envelope)
         url = f"{str(target_info['address']).rstrip('/')}/agents"
         attempts = max(0, ticket.retries) + 1
         last_error: Exception | None = None
@@ -1733,6 +1740,7 @@ class Host:
         self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.DISPATCH, target_info, ticket=ticket)
         self._remove_active_agent(agent_id, record, terminate=False)
+        record.set_terminal_proxy_wire({"host_url": target_info["address"], "agent_id": agent_id})
         response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         self._emit("dispatch", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return {"proxy": response["proxy"]}
@@ -1981,6 +1989,30 @@ class Host:
             # expose /health yet; the actual POST will still fail if unreachable.
             parsed = urlparse(url)
             return {"name": parsed.netloc or url, "address": url}
+
+    def _is_local_transfer_target(self, target_info: dict[str, Any]) -> bool:
+        return str(target_info.get("address") or "").rstrip("/") == self.address.rstrip("/")
+
+    def _receive_local_envelope_response(self, envelope: PagletEnvelope) -> dict[str, Any]:
+        results: queue.Queue[dict[str, Any] | BaseException] = queue.Queue(maxsize=1)
+
+        def receive() -> None:
+            try:
+                results.put({"proxy": self._receive_envelope(envelope).to_wire()})
+            except BaseException as exc:
+                results.put(exc)
+
+        thread = threading.Thread(
+            target=receive,
+            name=f"paglets-local-receive-{envelope.agent_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+        result = results.get()
+        thread.join(timeout=0.1)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     def _summary(self, record: ChildProcessController) -> dict[str, Any]:
         mailbox = self._mailboxes.get(record.agent_id)
