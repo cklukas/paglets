@@ -300,10 +300,13 @@ uncounted collection round and prints a Markdown matrix where row `A`, column
 `B` is the average A->B travel time. Timing uses request/reply probes against
 the stable starter clock at dispatch and arrival points, and clock-offset plus
 message round-trip diagnostics are reported versus the entry host. The output
-also reports the overall benchmark time from start through collection. For large
-payloads, `--timeout` applies to both the whole run and each movement transfer.
-When `--repeats` is greater than one, matrix cells are per-direction averages;
-the sum line below the matrix covers all repeated measured movements.
+also reports average payload transfer speed per destination host, split into
+cross-host and self-host movements. Payload speed is shown with binary byte
+units such as MB/s and decimal network bit units such as Mbit/s. The output
+also includes the overall benchmark time from start through collection. For
+large payloads, `--timeout` applies to both the whole run and each movement
+transfer. When `--repeats` is greater than one, matrix cells are per-direction
+averages; the sum line below the matrix covers all repeated measured movements.
 
 Search files across online same-version mesh hosts with a mobile agent:
 
@@ -620,7 +623,7 @@ Managed filesystem storage is available from a paglet context. `work_dir()` is
 per instance and ephemeral: the host clears all work directories on startup and
 clears an instance's work directory on dispatch, retract, or dispose.
 `persistent_storage()` is shared per paglet class and survives restart, with a
-default 10 MiB quota enforced by the storage API:
+default 10 MB quota enforced by the storage API:
 
 ```python
 scratch = self.work_dir()

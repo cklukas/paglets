@@ -28,3 +28,12 @@ project-level behavior.
 
 Keep documentation examples current with the code and prefer commands that can
 be run from the repository root.
+
+## Units
+
+Use classic binary-scaled byte units for storage, payload sizes, and byte
+throughput: label them as `KB`, `MB`, `GB`, etc., and scale by 1024. Do not use
+IEC labels such as `KiB`, `MiB`, or `GiB`.
+
+For network-style bit throughput, use decimal-scaled units such as `kbit/s`,
+`Mbit/s`, and `Gbit/s`, scaled by 1000.

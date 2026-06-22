@@ -384,7 +384,7 @@ data = store.read_bytes("checkpoint.txt")
 ```
 
 Persistent storage is rooted under the host persistence directory, shared by
-paglet class, and quota-accounted by the API. The default quota is 10 MiB per
+paglet class, and quota-accounted by the API. The default quota is 10 MB per
 class and can be changed with `paglets-host --persistent-storage-quota 20M` or
 the `Host(..., persistent_storage_quota_bytes=...)` constructor argument.
 

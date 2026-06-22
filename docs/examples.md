@@ -509,7 +509,11 @@ benchmark exercises the normal dispatch path rather than a benchmark-specific
 bulk-transfer shortcut. The same runtime path streams state through HTTP and
 through the host/child process handoff. For very large payloads, increase
 `--timeout`; the value is used for the overall benchmark deadline and for each
-movement transfer.
+movement transfer. When payload data is present, the text output also reports
+average payload transfer speed grouped by destination host, split into
+cross-host movements and self-host movements. Byte units use binary scaling
+such as MB/s = bytes / 1024 / 1024, while network bit units use decimal
+scaling such as Mbit/s = bits / 1,000,000.
 
 Timing is based on the stable starter clock. Before each dispatch, the traveler
 probes the starter, estimates entry-host time for the local instant immediately

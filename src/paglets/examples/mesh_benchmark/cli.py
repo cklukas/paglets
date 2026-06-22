@@ -24,6 +24,7 @@ from .agent import (
     MeshBenchmarkHost,
     MeshBenchmarkRequest,
     MeshBenchmarkSummary,
+    PayloadTransferSpeedSummary,
     normalize_request,
     parse_size,
 )
@@ -141,6 +142,9 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
         lines.append("errors:")
         for host, error in sorted(summary.errors.items()):
             lines.append(f"- {host}: {error}")
+    if summary.payload_transfer_speeds:
+        lines.append("")
+        lines.extend(_payload_speed_lines(summary.payload_transfer_speeds, digits=digits))
     lines.append("")
     lines.append(f"overall benchmark time: {_format_duration(summary.overall_benchmark_seconds, digits)}")
     return "\n".join(lines)
@@ -214,6 +218,26 @@ def _message_timing_table(timings: list[MessageTimingSummary], *, digits: int) -
     )
 
 
+def _payload_speed_lines(speeds: list[PayloadTransferSpeedSummary], *, digits: int) -> list[str]:
+    lines: list[str] = []
+    for relation, label in (
+        ("other", "average payload transfer speed to other hosts"),
+        ("self", "average payload transfer speed to self hosts"),
+    ):
+        items = [speed for speed in speeds if speed.relation == relation]
+        if not items:
+            continue
+        values = ", ".join(
+            (
+                f"{speed.host_name} "
+                f"({_format_transfer_speed(speed.bytes_per_second, digits)}, {speed.sample_count} samples)"
+            )
+            for speed in sorted(items, key=lambda item: item.host_name)
+        )
+        lines.append(f"{label}: {values}")
+    return lines
+
+
 def _aligned_markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
     widths = [len(header) for header in headers]
     for row in rows:
@@ -267,6 +291,31 @@ def _format_signed(value: float, digits: int) -> str:
 def _format_duration(seconds: float, digits: int) -> str:
     unit, multiplier = _select_duration_unit(seconds)
     return f"{_format_decimal(seconds * multiplier, digits)} {unit}"
+
+
+def _format_bytes_per_second(value: float, digits: int) -> str:
+    amount = max(0.0, float(value))
+    for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if amount < 1024.0 or unit == "GB/s":
+            return f"{_format_decimal(amount, digits)} {unit}"
+        amount /= 1024.0
+    return f"{_format_decimal(amount, digits)} GB/s"
+
+
+def _format_bits_per_second(value: float, digits: int) -> str:
+    amount = max(0.0, float(value)) * 8.0
+    for unit in ("bit/s", "kbit/s", "Mbit/s", "Gbit/s"):
+        if amount < 1000.0 or unit == "Gbit/s":
+            return f"{_format_decimal(amount, digits)} {unit}"
+        amount /= 1000.0
+    return f"{_format_decimal(amount, digits)} Gbit/s"
+
+
+def _format_transfer_speed(bytes_per_second: float, digits: int) -> str:
+    return (
+        f"{_format_bytes_per_second(bytes_per_second, digits)} / "
+        f"{_format_bits_per_second(bytes_per_second, digits)}"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover

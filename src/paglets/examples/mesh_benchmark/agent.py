@@ -90,6 +90,17 @@ class MessageTimingSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class PayloadTransferSpeedSummary:
+    host_name: str
+    host_url: str
+    relation: str
+    sample_count: int
+    payload_bytes: int
+    elapsed_seconds: float
+    bytes_per_second: float
+
+
+@dataclass(frozen=True, slots=True)
 class MeshTravelRecord:
     run_id: str
     sequence: int
@@ -116,6 +127,7 @@ class MeshBenchmarkSummary:
     clock_offsets: list[ClockOffsetSummary] = field(default_factory=list)
     clock_samples: list[ClockOffsetSample] = field(default_factory=list)
     message_timings: list[MessageTimingSummary] = field(default_factory=list)
+    payload_transfer_speeds: list[PayloadTransferSpeedSummary] = field(default_factory=list)
     movement_count: int = 0
     measured_round_trip_seconds: float = 0.0
     setup_seconds: float = 0.0
@@ -632,6 +644,7 @@ def build_summary(
     matrix = aggregate_matrix(records, hosts)
     offsets = aggregate_clock_offsets(clock_samples)
     message_timings = aggregate_message_timings(clock_samples)
+    payload_transfer_speeds = aggregate_payload_transfer_speeds(records, hosts)
     movement_count = len(records)
     total_elapsed = sum(record.elapsed_seconds for record in records)
     average = statistics.fmean(record.elapsed_seconds for record in records) if records else 0.0
@@ -645,6 +658,7 @@ def build_summary(
         clock_offsets=offsets,
         clock_samples=clock_samples,
         message_timings=message_timings,
+        payload_transfer_speeds=payload_transfer_speeds,
         movement_count=movement_count,
         measured_round_trip_seconds=measured_round_trip_seconds,
         setup_seconds=setup_seconds,
@@ -714,6 +728,39 @@ def aggregate_message_timings(samples: list[ClockOffsetSample]) -> list[MessageT
                 mean_rtt_seconds=statistics.fmean(sample.rtt_seconds for sample in host_samples),
                 best_rtt_seconds=best.rtt_seconds,
                 worst_rtt_seconds=worst.rtt_seconds,
+            )
+        )
+    return summaries
+
+
+def aggregate_payload_transfer_speeds(
+    records: list[MeshTravelRecord],
+    hosts: list[MeshBenchmarkHost],
+) -> list[PayloadTransferSpeedSummary]:
+    grouped: dict[tuple[str, str], list[MeshTravelRecord]] = {}
+    for record in records:
+        if record.payload_size_bytes <= 0 or record.elapsed_seconds <= 0:
+            continue
+        relation = "self" if record.source_url.rstrip("/") == record.target_url.rstrip("/") else "other"
+        grouped.setdefault((record.target_name, relation), []).append(record)
+
+    by_name = {host.name: host for host in hosts}
+    summaries: list[PayloadTransferSpeedSummary] = []
+    for (host_name, relation), host_records in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        payload_bytes = sum(max(0, int(record.payload_size_bytes)) for record in host_records)
+        elapsed_seconds = sum(max(0.0, float(record.elapsed_seconds)) for record in host_records)
+        if elapsed_seconds <= 0:
+            continue
+        host = by_name.get(host_name, MeshBenchmarkHost(host_name, host_records[0].target_url))
+        summaries.append(
+            PayloadTransferSpeedSummary(
+                host_name=host.name,
+                host_url=host.url,
+                relation=relation,
+                sample_count=len(host_records),
+                payload_bytes=payload_bytes,
+                elapsed_seconds=elapsed_seconds,
+                bytes_per_second=payload_bytes / elapsed_seconds,
             )
         )
     return summaries
