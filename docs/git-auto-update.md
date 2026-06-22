@@ -158,7 +158,7 @@ Runtime update requests restart slightly differently from startup updates. A
 background update thread may request shutdown, but it does not call `exec`
 itself. The foreground CLI thread sees the restart request after the HTTP host
 has shut down and then re-execs the same command via `uv run python -m
-paglets.cli ...`. This avoids Windows-specific failures caused by replacing the
+paglets.tooling.cli ...`. This avoids Windows-specific failures caused by replacing the
 process from a worker thread or by reusing a Python executable path that `uv
 sync` just recreated.
 
@@ -166,7 +166,7 @@ On Windows, auto-update defers the explicit `uv sync` step until that re-exec
 path. This avoids trying to replace the currently running
 `.venv\Scripts\paglets-host.exe` console wrapper, which Windows keeps locked
 while the host process is active. The checkout is still pulled first, and the
-restart still goes through `uv run python -m paglets.cli ...`.
+restart still goes through `uv run python -m paglets.tooling.cli ...`.
 
 ## Runtime API
 

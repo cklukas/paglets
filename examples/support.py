@@ -10,7 +10,7 @@ import sys
 import tempfile
 from typing import Iterator
 
-from paglets import Host
+from paglets.runtime.host import Host
 
 
 def free_port() -> int:

@@ -275,6 +275,18 @@ UDP multicast and LAN probing are disabled by default in connect mode, and
 `--auto-update-from-git` is rejected there. In relay mode, the git update API is
 disabled even when the API key is valid.
 
+Relay forwarding is transparent to paglet code. The relay is treated only as a
+transport hop: `on_dispatching` names the final target, `on_arrival` runs only
+on the final target, and the source paglet is removed only after that target
+acknowledges delivery. If the relay cannot be reached, the target is offline or
+not polling, delivery times out, or final arrival fails, the caller receives the
+normal transfer/message error and the source paglet remains active.
+
+Operational timing can be tuned on the hub with `--relay-offline-after`,
+`--relay-delivery-timeout`, and `--relay-queue-limit`. `GET /paglets/relay/diagnostics`
+returns connected node status, last poll age, queue depth, in-flight delivery
+count, and the last relay error.
+
 Packaged example CLIs accept the same `--api-key-env` option when their entry
 host is protected by a bearer key, for example:
 
@@ -450,7 +462,8 @@ A paglet is a Python object with one explicit dataclass state object:
 
 ```python
 from dataclasses import dataclass, field
-from paglets import Message, Paglet, PagletState
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.messages import Message
 
 @dataclass
 class TravellerState(PagletState):
@@ -478,7 +491,8 @@ class Traveller(Paglet[TravellerState]):
 Start two hosts in one Python process for local development:
 
 ```python
-from paglets import Host, Message
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
 
 alpha = Host("alpha", port=8765)
 beta = Host("beta", port=8766)
@@ -546,7 +560,7 @@ paglet, calls `on_activation`, and then invokes `run()`:
 
 ```python
 import time
-from paglets import DeactivationPolicy
+from paglets.persistence.persistency import DeactivationPolicy
 
 proxy.deactivate()
 proxy.activate()
@@ -632,7 +646,7 @@ lazy resident service by launch config, advertises a typed contract before the
 provider is active, and starts on first use:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
 
 service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
@@ -652,7 +666,8 @@ Use `TransferTicket` when dispatch or clone needs target checks or inactive
 arrival:
 
 ```python
-from paglets import ArrivalMode, TransferTicket
+from paglets.core.runtime_values import ArrivalMode
+from paglets.remote.transfer import TransferTicket
 
 ticket = TransferTicket(
     beta.address,
@@ -697,7 +712,7 @@ store.write_text("checkpoint.txt", "ok")
 
 ## Itinerary helpers
 
-The `paglets.itinerary` module converts the portable parts of the Aglets
+The `paglets.core.itinerary` module converts the portable parts of the Aglets
 itinerary utilities:
 
 - `ItineraryPlan` stores destinations, current route position, visited
@@ -750,18 +765,14 @@ pickle segments.
 
 ```text
 src/paglets/
-  agent.py      Paglet, PagletState, PagletContext, lifecycle hooks
-  host.py       Host runtime + JSON HTTP server
-  proxy.py      PagletProxy control handle
-  messages.py   Message model
-  events.py     Lifecycle event dataclasses
-  envelope.py   Mobile-state transfer envelope
-  runtime_values.py Closed runtime enums for scopes, lifecycles, and transfer modes
-  persistency.py Durable deactivation policy and inactive records
-  itinerary.py  Serializable itinerary/task helpers
-  admin.py      Dynamic mesh entry discovery and admin client helpers
-  serde.py      Dataclass state serializer/restorer
-  cli.py        paglets-host CLI
+  core/          Paglet authoring primitives, messages, events, itinerary, enums, errors
+  runtime/       Host runtime, child processes, mailboxes, envelopes, resources
+  remote/        Host clients, proxies, transfer tickets, transport, mesh, admin API
+  persistence/   Durable deactivation records and managed storage
+  services/      Service contracts, registry records, resident service metadata
+  serialization/ Dataclass wire conversion and qualified-name resolution
+  config/        Launch configuration and bundled defaults
+  tooling/       paglets-host CLI, class discovery, git auto-update
 examples/
   start_hello_demo.py
   mobility_events_demo.py

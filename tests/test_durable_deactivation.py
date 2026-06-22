@@ -8,7 +8,11 @@ import time
 
 import pytest
 
-from paglets import DEACTIVATE, DeactivationPolicy, Host, Message, Paglet, PagletInactiveError, PagletState
+from paglets.core.messages import DEACTIVATE, Message
+from paglets.persistence.persistency import DeactivationPolicy
+from paglets.runtime.host import Host
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.errors import PagletInactiveError
 from tests.test_paglets_core import free_port
 
 

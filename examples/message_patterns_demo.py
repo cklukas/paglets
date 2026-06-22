@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paglets import Message, Paglet, PagletState, ReplySet
+from paglets.core.messages import Message, ReplySet
+from paglets.core.agent import Paglet, PagletState
 
 try:
     from .support import local_hosts, run_importable_main

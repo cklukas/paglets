@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from paglets.admin import AgentRecord, PagletsAdminClient, ServerRef
+from paglets.remote.admin import AgentRecord, PagletsAdminClient, ServerRef
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
-from paglets import Host, Message
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
 
 
 def test_admin_client_manages_agents_across_two_hosts(tmp_path: Path):

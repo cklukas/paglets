@@ -9,11 +9,11 @@ import sys
 import time
 from typing import Any
 
-from ...admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
-from ...client import HostClient
-from ...messages import Message
-from ...proxy import PagletProxy
-from ...serde import dataclass_from_wire, dataclass_to_wire
+from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
+from paglets.remote.client import HostClient
+from paglets.core.messages import Message
+from paglets.remote.proxy import PagletProxy
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 from .agent import (
     DEFAULT_CLOCK_PROBES,
     DEFAULT_DIGITS,

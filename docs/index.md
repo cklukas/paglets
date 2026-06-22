@@ -95,6 +95,12 @@ Connect-mode hosts do not open inbound ports. Movement and messages are relayed
 through A over authenticated HTTP long-polling, and git auto-update is disabled
 in this mode.
 
+Relay forwarding is transparent to paglets: lifecycle events name the final
+target, arrivals run only there, and the source paglet is kept active when a
+relay delivery fails. Hubs expose `GET /paglets/relay/diagnostics` and support
+`--relay-offline-after`, `--relay-delivery-timeout`, and `--relay-queue-limit`
+for corporate network tuning.
+
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
 demo config. The default launch config declares lazy `server-info` and eager
 `mesh-info`, so hosts continuously exchange resource snapshots while still
@@ -139,10 +145,11 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
   code.
 - [Usage Ideas](usage-ideas.md): practical scenarios where mobile state and
   agent-to-agent communication are a useful fit.
-- [Internal Workings](internal-workings.md): how the runtime is structured and
-  how code, state, messages, proxies, hosts, and the mesh registry fit together.
-- [API Reference](api-reference.md): generated Python API documentation for the
-  public modules.
+- [Technical Overview](technical/overview.md): how the topic packages fit
+  together and where implementation details live.
+- [Core](technical/core.md), [Runtime](technical/runtime.md), and
+  [Remote](technical/remote.md): package-level implementation notes and
+  generated API references for the main runtime subsystems.
 - [Glossary](glossary.md): terminology used by the project.
 
 ## Build The Docs Locally

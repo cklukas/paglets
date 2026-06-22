@@ -8,9 +8,10 @@ import threading
 import time
 from types import SimpleNamespace
 
-from paglets import Host, Message
-from paglets.admin import ServerRef
-from paglets.errors import InvalidAgentError
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.remote.admin import ServerRef
+from paglets.core.errors import InvalidAgentError
 from paglets.examples.compute import (
     PiBatchRequest,
     PiBatchResult,
@@ -40,8 +41,8 @@ from paglets.examples.compute.agent import (
 from paglets.examples.compute.cli import _parser as pi_parser
 from paglets.examples.compute.cli import main as pi_main
 from paglets.examples.mesh_info import MeshHostSnapshot, TargetCandidate
-from paglets.serde import dataclass_to_wire
-from paglets.startup import load_launch_config, sync_launch_config
+from paglets.serialization.serde import dataclass_to_wire
+from paglets.config.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from paglets import Host
-from paglets.admin import AgentDiscoveryConfig, PagletsAdminClient, ServerRef, default_agent_discovery_config
-from paglets.discovery import discover_agent_classes
+from paglets.runtime.host import Host
+from paglets.remote.admin import AgentDiscoveryConfig, PagletsAdminClient, ServerRef, default_agent_discovery_config
+from paglets.tooling.discovery import discover_agent_classes
 from tests.test_paglets_core import free_port
 
 

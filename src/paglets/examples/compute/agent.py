@@ -12,11 +12,11 @@ import time
 from typing import Any
 import uuid
 
-from ...agent import Paglet, PagletState, state_locked
-from ...errors import InvalidAgentError
-from ...messages import Message
-from ...serde import dataclass_from_wire, dataclass_to_wire, qualified_name
-from ...runtime_values import ServiceScope
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.core.errors import InvalidAgentError
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name
+from paglets.core.runtime_values import ServiceScope
 from ..mesh_info import (
     MESH_INFO,
     SELECT_TARGETS,

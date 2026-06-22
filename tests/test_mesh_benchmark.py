@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from paglets import Host
-from paglets.admin import ServerRef
+from paglets.runtime.host import Host
+from paglets.remote.admin import ServerRef
 from paglets.examples.mesh_benchmark import (
     ClockOffsetSample,
     MessageTimingSummary,
@@ -28,7 +28,7 @@ from paglets.examples.mesh_benchmark import (
     parse_size,
 )
 from paglets.examples.mesh_benchmark.cli import _format_markdown, _format_transfer_speed, _parser, main as mesh_benchmark_main
-from paglets.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
 

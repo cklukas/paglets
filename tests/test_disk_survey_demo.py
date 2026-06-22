@@ -2,7 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from paglets import Message
+from paglets.core.messages import Message
 from examples.disk_survey_demo import DiskSurveyPaglet, DiskSurveyState, run_survey
 from examples.support import local_hosts
 

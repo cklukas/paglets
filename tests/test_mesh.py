@@ -9,9 +9,11 @@ import time
 
 import pytest
 
-from paglets import Host, Message, Paglet, PagletState
-from paglets.errors import HostError
-from paglets.mesh import HostRef, decode_mesh_beacon, encode_mesh_beacon
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.errors import HostError
+from paglets.remote.mesh import HostRef, decode_mesh_beacon, encode_mesh_beacon
 from tests.test_paglets_core import free_port
 
 

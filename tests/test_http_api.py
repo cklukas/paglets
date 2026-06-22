@@ -14,17 +14,21 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-import paglets.client as client_module
-import paglets.host as host_module
-import paglets.process_runtime as process_runtime
-import paglets.transport as transport_module
-from paglets import Host, Message, Paglet, PagletState, ServiceScope
-from paglets import PagletProxy
-from paglets.cli import main as host_cli_main
-from paglets.cli import _parser as host_cli_parser
-from paglets.client import HostClient
-from paglets.errors import AuthenticationError, ForbiddenError
-from paglets.serde import dataclass_from_wire, dataclass_to_wire, qualified_name
+import paglets.remote.client as client_module
+import paglets.runtime.host as host_module
+import paglets.runtime.process_runtime as process_runtime
+import paglets.remote.transport as transport_module
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.runtime_values import ServiceScope
+from paglets.remote.proxy import PagletProxy
+from paglets.tooling.cli import main as host_cli_main
+from paglets.tooling.cli import _parser as host_cli_parser
+from paglets.remote.client import HostClient
+from paglets.core.errors import AuthenticationError, ForbiddenError, RemoteHostError, TransferError
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name
+from paglets.remote.transfer import TransferTicket
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
 
 
@@ -42,6 +46,28 @@ class BinaryTravelAgent(Paglet[BinaryTravelState]):
             return self.dispatch(message.args["target"]).to_wire()
         if message.kind == "clone":
             return self.clone(target=message.args["target"]).to_wire()
+        return self.not_handled()
+
+
+class ExplodingArrivalAgent(Paglet[TravelState]):
+    State = TravelState
+
+    def on_dispatching(self, event):
+        self.state.events.append(f"dispatching:{event.source_host_name}->{event.target_host_name}")
+
+    def on_arrival(self, event):
+        raise RuntimeError("arrival boom")
+
+
+class SelfDispatchAgent(Paglet[TravelState]):
+    State = TravelState
+
+    def handle_message(self, message: Message):
+        if message.kind == "go":
+            target = message.args["target"]
+            if isinstance(target, dict):
+                target = TransferTicket.from_wire(target)
+            return self.dispatch(target).to_wire()
         return self.not_handled()
 
 
@@ -67,6 +93,40 @@ def _wait_for(predicate, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.05)
     raise AssertionError("timed out waiting for condition")
+
+
+def _relay_hosts(tmp_path: Path, *, relay_offline_after: float = 30.0, relay_delivery_timeout: float | None = None):
+    port = free_port()
+    public_url = f"http://127.0.0.1:{port}/paglets"
+    hub = Host(
+        name="A",
+        host="127.0.0.1",
+        port=port,
+        api_key="secret",
+        public_url=public_url,
+        persistence_dir=tmp_path / "A",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+        relay_offline_after=relay_offline_after,
+        relay_delivery_timeout=relay_delivery_timeout,
+    )
+    beta = Host(
+        name="B",
+        api_key="secret",
+        connect_to=public_url,
+        persistence_dir=tmp_path / "B",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    laptop = Host(
+        name="L",
+        api_key="secret",
+        connect_to=public_url,
+        persistence_dir=tmp_path / "L",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    return hub, beta, laptop, public_url
 
 
 def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
@@ -267,6 +327,157 @@ def test_relay_connect_mode_dispatch_and_bidirectional_messages(tmp_path: Path):
         hub.stop()
 
 
+def test_relay_dispatch_to_offline_target_fails_and_keeps_source_active(tmp_path: Path):
+    hub, _beta, laptop, public_url = _relay_hosts(tmp_path, relay_offline_after=0.1)
+    hub.start_background()
+    hub.relay_connect(
+        {
+            "health": {
+                "name": "B",
+                "address": f"{public_url}/relay/hosts/B",
+                "code_version": hub.mesh.code_version,
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+        }
+    )
+    with hub._lock:
+        hub._relay_nodes["B"].last_seen = time.time() - 1.0
+    laptop.start_background()
+    try:
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+        local = laptop.create(TravelAgent, TravelState(last_message="from-laptop"), init="seed")
+
+        with pytest.raises(TransferError) as error:
+            laptop.dispatch(local.agent_id, "B")
+
+        assert "offline/not polling" in str(error.value)
+        assert laptop.get_proxy(local.agent_id) is not None
+        assert laptop.get_state(local.agent_id, TravelState).last_message == "from-laptop"
+        assert any(event.kind == "relay-target-offline" and event.data.get("target") == "B" for event in hub.list_events())
+    finally:
+        laptop.stop()
+        hub.stop()
+
+
+def test_relay_delivery_timeout_fails_and_keeps_source_active(tmp_path: Path):
+    hub, _beta, laptop, public_url = _relay_hosts(tmp_path, relay_offline_after=30.0)
+    hub.start_background()
+    hub.relay_connect(
+        {
+            "health": {
+                "name": "B",
+                "address": f"{public_url}/relay/hosts/B",
+                "code_version": hub.mesh.code_version,
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+        }
+    )
+    laptop.start_background()
+    try:
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+        local = laptop.create(TravelAgent, TravelState(last_message="waiting"), init="seed")
+
+        with pytest.raises(TransferError) as error:
+            laptop.dispatch(local.agent_id, TransferTicket("B", timeout=0.2))
+
+        assert "timed out" in str(error.value)
+        assert laptop.get_proxy(local.agent_id) is not None
+        state = laptop.get_state(local.agent_id, TravelState)
+        assert "dispatching:L->B" in state.events
+        diagnostics = HostClient(api_key="secret").get_json(f"{public_url}/relay/diagnostics")
+        assert diagnostics["nodes"][0]["name"] == "B"
+        assert diagnostics["nodes"][0]["queue_depth"] >= 1
+        assert any(event.kind == "relay-delivery-enqueued" and event.data.get("target") == "B" for event in hub.list_events())
+        assert any(event.kind == "relay-delivery-timeout" and event.data.get("stage") == "relay-ack" for event in hub.list_events())
+    finally:
+        laptop.stop()
+        hub.stop()
+
+
+def test_relay_target_arrival_failure_propagates_and_keeps_source_active(tmp_path: Path):
+    hub, beta, laptop, _public_url = _relay_hosts(tmp_path)
+    hub.start_background()
+    beta.start_background()
+    laptop.start_background()
+    try:
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+        local = laptop.create(ExplodingArrivalAgent, TravelState(last_message="boom"), init=None)
+
+        with pytest.raises(TransferError) as error:
+            laptop.dispatch(local.agent_id, "B")
+
+        assert "arrival boom" in str(error.value)
+        assert laptop.get_proxy(local.agent_id) is not None
+        assert laptop.get_state(local.agent_id, TravelState).last_message == "boom"
+        assert any(event.kind == "relay-delivery-ack" and event.data.get("ok") is False for event in hub.list_events())
+        assert not any(event.kind == "arrival" and event.agent_id == local.agent_id for event in hub.list_events())
+    finally:
+        laptop.stop()
+        beta.stop()
+        hub.stop()
+
+
+def test_relay_child_dispatch_failure_keeps_paglet_active(tmp_path: Path):
+    hub, _beta, laptop, public_url = _relay_hosts(tmp_path, relay_offline_after=30.0)
+    hub.start_background()
+    hub.relay_connect(
+        {
+            "health": {
+                "name": "B",
+                "address": f"{public_url}/relay/hosts/B",
+                "code_version": hub.mesh.code_version,
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+        }
+    )
+    laptop.start_background()
+    try:
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+        local = laptop.create(SelfDispatchAgent, TravelState(last_message="inside"), init=None)
+
+        with pytest.raises(TransferError):
+            local.send(Message("go", {"target": TransferTicket("B", timeout=0.2).to_wire()}))
+
+        assert laptop.get_proxy(local.agent_id) is not None
+        assert laptop.get_state(local.agent_id, TravelState).last_message == "inside"
+    finally:
+        laptop.stop()
+        hub.stop()
+
+
+def test_relay_message_to_offline_target_reports_remote_error(tmp_path: Path):
+    hub, _beta, laptop, public_url = _relay_hosts(tmp_path, relay_offline_after=0.1)
+    hub.start_background()
+    hub.relay_connect(
+        {
+            "health": {
+                "name": "B",
+                "address": f"{public_url}/relay/hosts/B",
+                "code_version": hub.mesh.code_version,
+                "active_count": 0,
+                "inactive_count": 0,
+            }
+        }
+    )
+    with hub._lock:
+        hub._relay_nodes["B"].last_seen = time.time() - 1.0
+    laptop.start_background()
+    try:
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+        proxy = PagletProxy(f"{public_url}/relay/hosts/B", "missing-agent", laptop.client)
+
+        with pytest.raises(RemoteHostError) as error:
+            proxy.send(Message("remember", {"value": "x"}), timeout=1.0)
+
+        assert "offline/not polling" in str(error.value)
+    finally:
+        laptop.stop()
+        hub.stop()
+
+
 def test_relay_mode_disables_git_update_endpoint_even_with_valid_key(tmp_path: Path):
     port = free_port()
     public_url = f"http://127.0.0.1:{port}/paglets"
@@ -324,8 +535,8 @@ def test_binary_pickle_transport_streams_without_dumps_or_loads(tmp_path: Path, 
     def fail_loads(*_args, **_kwargs):
         raise AssertionError("host should stream with pickle.load, not pickle.loads")
 
-    monkeypatch.setattr("paglets.transport.pickle.dumps", fail_dumps)
-    monkeypatch.setattr("paglets.transport.pickle.loads", fail_loads)
+    monkeypatch.setattr("paglets.remote.transport.pickle.dumps", fail_dumps)
+    monkeypatch.setattr("paglets.remote.transport.pickle.loads", fail_loads)
     host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
     host.start_background()
     try:

@@ -12,11 +12,11 @@ import time
 from typing import Any
 import uuid
 
-from ...agent import Paglet, PagletState, state_locked
-from ...mesh import HostRef
-from ...messages import Message
-from ...serde import dataclass_from_wire, dataclass_to_wire
-from ...transfer import TransferTicket
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.remote.mesh import HostRef
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.remote.transfer import TransferTicket
 
 
 DEFAULT_CLOCK_PROBES = 5

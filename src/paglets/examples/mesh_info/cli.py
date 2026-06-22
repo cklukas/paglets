@@ -8,13 +8,13 @@ import os
 import sys
 import time
 
-from ...admin import (
+from paglets.remote.admin import (
     ServerRef,
     select_reachable_entry_server,
 )
-from ...client import HostClient
-from ...runtime_values import ServiceScope
-from ...services import ServiceHandle, ServiceRecord
+from paglets.remote.client import HostClient
+from paglets.core.runtime_values import ServiceScope
+from paglets.services.contracts import ServiceHandle, ServiceRecord
 from .agent import (
     GET_LANDSCAPE,
     MESH_INFO,

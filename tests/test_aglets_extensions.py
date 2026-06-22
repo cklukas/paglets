@@ -8,21 +8,16 @@ import time
 
 import pytest
 
-from paglets import (
-    DeactivationPolicy,
-    Host,
-    Message,
-    Paglet,
-    PagletProxyRef,
-    PagletState,
-    ServiceScope,
-    ArrivalMode,
-    TransferError,
-    TransferTicket,
-    state_locked,
-)
-from paglets.errors import LifecycleError
-from paglets.mailbox import MessageMailbox
+from paglets.persistence.persistency import DeactivationPolicy
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.remote.references import PagletProxyRef
+from paglets.core.runtime_values import ServiceScope, ArrivalMode
+from paglets.core.errors import TransferError
+from paglets.remote.transfer import TransferTicket
+from paglets.core.errors import LifecycleError
+from paglets.runtime.mailbox import MessageMailbox
 from tests.test_paglets_core import free_port
 
 

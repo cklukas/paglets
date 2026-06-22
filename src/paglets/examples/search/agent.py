@@ -14,10 +14,10 @@ from typing import Any, Callable, Iterable
 
 import pathspec
 
-from ...agent import Paglet, PagletState, state_locked
-from ...messages import Message
-from ...proxy import PagletProxy
-from ...serde import dataclass_from_wire, dataclass_to_wire
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.core.messages import Message
+from paglets.remote.proxy import PagletProxy
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 
 
 DEFAULT_SEARCH_TIMEOUT_SECONDS = 60.0

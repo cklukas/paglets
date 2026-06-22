@@ -7,12 +7,12 @@ import threading
 import time
 from typing import Any
 
-from ...agent import Paglet, PagletState, state_locked
-from ...messages import Message
-from ...resident import ResidentServiceSpec
-from ...runtime_values import ResidentLifecycle, ServiceScope
-from ...serde import dataclass_from_wire, dataclass_to_wire
-from ...services import ServiceContract, ServiceOperation
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.core.messages import Message
+from paglets.services.resident import ResidentServiceSpec
+from paglets.core.runtime_values import ResidentLifecycle, ServiceScope
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.services.contracts import ServiceContract, ServiceOperation
 from ..system_info import GET_DISK, GET_LOAD, GET_SUMMARY, SERVER_INFO, DiskRequest, LoadRequest
 
 

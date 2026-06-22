@@ -4,19 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paglets import (
-    ACTIVE,
-    EXECUTE_ON_ARRIVAL,
-    EXECUTE_ON_DEFAULT,
-    EXECUTE_ON_DISPATCH,
-    Host,
-    ItineraryAgentMixin,
-    ItineraryTask,
-    Message,
-    Paglet,
-    PagletState,
-    TaskItineraryPlan,
-)
+from paglets.core.agent import ACTIVE, Paglet, PagletState
+from paglets.core.itinerary import EXECUTE_ON_ARRIVAL, EXECUTE_ON_DEFAULT, EXECUTE_ON_DISPATCH, ItineraryAgentMixin, ItineraryTask, TaskItineraryPlan
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
 
 try:
     from .support import local_hosts, run_importable_main

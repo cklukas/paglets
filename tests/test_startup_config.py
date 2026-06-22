@@ -7,11 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
-from paglets import Host, Message, Paglet, PagletContext, PagletState, ServiceScope
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletContext, PagletState
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.system_info import SERVER_INFO, GET_SUMMARY
 from paglets.examples.mesh_info import MESH_INFO, GET_SNAPSHOT
-from paglets.runtime_values import LaunchConfigSyncAction, ResidentLifecycle
-from paglets.startup import load_launch_config, sync_launch_config
+from paglets.core.runtime_values import LaunchConfigSyncAction, ResidentLifecycle
+from paglets.config.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
 

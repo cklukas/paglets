@@ -7,22 +7,12 @@ from enum import Enum
 
 import pytest
 
-from paglets import (
-    EmptyPayload,
-    Host,
-    Message,
-    Paglet,
-    PagletContext,
-    PagletProxyRef,
-    PagletState,
-    ServiceContract,
-    ServiceContractError,
-    ServiceHandle,
-    ServiceNotFoundError,
-    ServiceOperation,
-    ServiceRecord,
-    ServiceScope,
-)
+from paglets.services.contracts import EmptyPayload, ServiceContract, ServiceContractError, ServiceHandle, ServiceNotFoundError, ServiceOperation, ServiceRecord
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletContext, PagletState
+from paglets.remote.references import PagletProxyRef
+from paglets.core.runtime_values import ServiceScope
 from tests.test_paglets_core import free_port
 
 

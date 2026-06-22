@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from paglets import git_update
+import paglets.tooling.git_update as git_update
 
 
 def test_git_update_reports_missing_requested_hash_after_fetch(tmp_path: Path):

@@ -8,8 +8,9 @@ from pathlib import Path
 import threading
 import time
 
-from paglets import Host, Message
-from paglets.admin import ServerRef
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.remote.admin import ServerRef
 from paglets.examples.performance.agent import (
     _BENCHMARK_THREAD_LOCK,
     BenchmarkMetric,
@@ -29,7 +30,7 @@ from paglets.examples.performance.agent import (
     run_host_benchmarks,
 )
 from paglets.examples.performance.cli import _print_text, main as perf_main
-from paglets.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
 

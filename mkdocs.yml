@@ -18,8 +18,16 @@ nav:
   - Example Agents: examples.md
   - Git Auto-Update: git-auto-update.md
   - Usage Ideas: usage-ideas.md
-  - Internal Workings: internal-workings.md
-  - API Reference: api-reference.md
+  - Technical:
+      - Overview: technical/overview.md
+      - Core: technical/core.md
+      - Runtime: technical/runtime.md
+      - Remote: technical/remote.md
+      - Persistence: technical/persistence.md
+      - Services: technical/services.md
+      - Serialization: technical/serialization.md
+      - Configuration: technical/configuration.md
+      - Tooling: technical/tooling.md
   - Glossary: glossary.md
 
 plugins:

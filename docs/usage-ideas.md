@@ -267,7 +267,7 @@ advertise local or mesh-visible services, and mobile paglets can discover them
 by service contract:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 
 QUOTE = ServiceOperation("quote", QuoteRequest, QuoteReply)
 FLIGHT_TICKETS = ServiceContract("flight-ticket", operations=(QUOTE,), version="1")

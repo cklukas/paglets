@@ -10,8 +10,10 @@ import time
 
 import pytest
 
-from paglets import Host, Message, Paglet, PagletState
-from paglets.errors import HostError, PagletCrashedError
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.errors import HostError, PagletCrashedError
 from tests.test_paglets_core import free_port
 
 

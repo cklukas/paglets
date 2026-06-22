@@ -16,10 +16,9 @@ patterns without mixing application code into the root runtime namespace:
 - `paglets.examples.search`: a pure mobile filesystem search agent plus a
   streaming mesh search CLI.
 
-The root `paglets` package is reserved for runtime infrastructure such as
-`Paglet`, `Host`, `Message`, service contracts, mesh discovery, startup config,
-and transfer mechanics. Example agents live under `paglets.examples.*` so their
-imports make that boundary explicit.
+Runtime infrastructure lives in topic packages such as `paglets.core`,
+`paglets.runtime`, `paglets.remote`, and `paglets.services`. Example agents live
+under `paglets.examples.*` so their imports make that boundary explicit.
 
 ## Running The Examples
 
@@ -161,7 +160,7 @@ return SERVER_INFO.route(
 Consumer code can call the typed service directly:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
 
 service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
@@ -243,7 +242,7 @@ HOSTNAME` to choose a discovered entry host by name.
 Programmatic target selection:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
 
 mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
@@ -311,8 +310,8 @@ Programmatic use:
 
 ```python
 from paglets.examples.compute import PiComputeCoordinatorAgent, PiComputeRequest
-from paglets.messages import Message
-from paglets.serde import dataclass_to_wire
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_to_wire
 
 coordinator = self.context.create_paglet(PiComputeCoordinatorAgent)
 summary = coordinator.send(
@@ -460,8 +459,8 @@ The request and reply dataclasses are importable:
 
 ```python
 from paglets.examples.performance import BenchmarkRequest, PerformanceBenchmarkAgent
-from paglets.messages import Message
-from paglets.serde import dataclass_to_wire
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_to_wire
 
 proxy = self.context.create_paglet(PerformanceBenchmarkAgent)
 summary = proxy.send(
@@ -737,8 +736,8 @@ agent directly and drain streamed events:
 
 ```python
 from paglets.examples.search import MeshSearchAgent, SearchRequest
-from paglets.messages import Message
-from paglets.serde import dataclass_to_wire
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_to_wire
 
 proxy = self.context.create_paglet(MeshSearchAgent)
 proxy.send(

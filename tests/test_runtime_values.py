@@ -6,19 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from paglets import PagletProxyRef, ServiceRecord, TransferTicket
-from paglets.envelope import PagletEnvelope
-from paglets.errors import HostError
+from paglets.remote.references import PagletProxyRef
+from paglets.services.contracts import ServiceRecord
+from paglets.remote.transfer import TransferTicket
+from paglets.runtime.envelope import PagletEnvelope
+from paglets.core.errors import HostError
 from paglets.examples.system_info import SERVER_INFO
-from paglets.resident import ResidentServiceSpec
-from paglets.runtime_values import (
+from paglets.services.resident import ResidentServiceSpec
+from paglets.core.runtime_values import (
     ArrivalMode,
     EnvelopeKind,
     LaunchConfigSyncAction,
     ResidentLifecycle,
     ServiceScope,
 )
-from paglets.startup import LaunchConfigSyncResult, load_launch_config
+from paglets.config.startup import LaunchConfigSyncResult, load_launch_config
 
 
 def test_python_runtime_value_fields_reject_raw_strings(tmp_path: Path):

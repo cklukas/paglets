@@ -10,7 +10,8 @@ import threading
 import time
 from typing import Any
 
-from paglets import Message, Paglet, PagletState
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
 
 try:
     from .support import local_hosts, run_importable_main
@@ -174,7 +175,7 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
     def cleanup_children(self) -> dict[str, Any]:
         for host_name, proxy_wire in list(self.state.child_proxies.items()):
             try:
-                from paglets import PagletProxy
+                from paglets.remote.proxy import PagletProxy
 
                 PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
             except Exception as exc:

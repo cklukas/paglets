@@ -14,12 +14,12 @@ from typing import Any
 
 import psutil
 
-from ...agent import Paglet, PagletState, state_locked
-from ...messages import Message
-from ...resident import ResidentServiceSpec
-from ...runtime_values import ResidentLifecycle, ServiceScope
-from ...serde import dataclass_from_wire
-from ...services import EmptyPayload, ServiceContract, ServiceOperation
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.core.messages import Message
+from paglets.services.resident import ResidentServiceSpec
+from paglets.core.runtime_values import ResidentLifecycle, ServiceScope
+from paglets.serialization.serde import dataclass_from_wire
+from paglets.services.contracts import EmptyPayload, ServiceContract, ServiceOperation
 
 
 @dataclass(frozen=True, slots=True)

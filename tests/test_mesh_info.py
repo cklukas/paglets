@@ -6,7 +6,9 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
-from paglets import Host, PagletContext, ServiceScope
+from paglets.runtime.host import Host
+from paglets.core.agent import PagletContext
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.mesh_info import (
     GET_LANDSCAPE,
     GET_SNAPSHOT,
@@ -21,7 +23,7 @@ from paglets.examples.mesh_info import (
     TargetSelectionRequest,
 )
 from paglets.examples.mesh_info.agent import _target_rejection
-from paglets.startup import load_launch_config, sync_launch_config
+from paglets.config.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
 

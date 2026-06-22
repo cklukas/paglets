@@ -5,22 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from paglets import (
-    EXECUTE_ON_ARRIVAL,
-    EXECUTE_ON_DEFAULT,
-    EXECUTE_ON_DISPATCH,
-    ACTIVE,
-    INACTIVE,
-    Host,
-    ItineraryAgentMixin,
-    ItineraryPlan,
-    ItineraryTask,
-    Message,
-    Paglet,
-    PagletState,
-    ReplySet,
-    TaskItineraryPlan,
-)
+from paglets.core.itinerary import EXECUTE_ON_ARRIVAL, EXECUTE_ON_DEFAULT, EXECUTE_ON_DISPATCH, ItineraryAgentMixin, ItineraryPlan, ItineraryTask, TaskItineraryPlan
+from paglets.core.agent import ACTIVE, INACTIVE, Paglet, PagletState
+from paglets.runtime.host import Host
+from paglets.core.messages import Message, ReplySet
 from tests.test_paglets_core import free_port
 
 

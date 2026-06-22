@@ -17,9 +17,9 @@ from typing import Any
 
 import psutil
 
-from ...agent import Paglet, PagletState, state_locked
-from ...messages import Message
-from ...serde import dataclass_from_wire, dataclass_to_wire
+from paglets.core.agent import Paglet, PagletState, state_locked
+from paglets.core.messages import Message
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 
 
 DEFAULT_BENCHMARK_DURATION_SECONDS = 1.0
@@ -360,7 +360,7 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
             children = {host_name: dict(proxy) for host_name, proxy in state.child_proxies.items()}
         for host_name, proxy_wire in children.items():
             try:
-                from ...proxy import PagletProxy
+                from paglets.remote.proxy import PagletProxy
 
                 PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
             except Exception as exc:

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import paglets.admin as admin_module
-from paglets.admin import (
+import paglets.remote.admin as admin_module
+from paglets.remote.admin import (
     ServerRef,
     default_agent_discovery_config,
     normalize_discovery_path,

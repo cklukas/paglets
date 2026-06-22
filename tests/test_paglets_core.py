@@ -7,8 +7,10 @@ import socket
 
 import pytest
 
-from paglets import Host, Message, Paglet, PagletState
-from paglets.errors import NotHandledError
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
+from paglets.core.errors import NotHandledError
 
 
 def free_port() -> int:

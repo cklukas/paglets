@@ -7,8 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from paglets import Host, Message, Paglet, PagletState, StorageQuotaError
-from paglets.storage import ManagedStorage
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.core.agent import Paglet, PagletState
+from paglets.persistence.storage import StorageQuotaError
+from paglets.persistence.storage import ManagedStorage
 from tests.test_paglets_core import free_port
 
 

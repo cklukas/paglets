@@ -9,14 +9,14 @@ import sys
 import time
 from typing import Any
 
-from ...admin import (
+from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
     select_reachable_entry_server,
 )
-from ...client import HostClient
-from ...messages import Message
-from ...proxy import PagletProxy
+from paglets.remote.client import HostClient
+from paglets.core.messages import Message
+from paglets.remote.proxy import PagletProxy
 from .agent import (
     GET_DISK,
     GET_LOAD,

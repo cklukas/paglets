@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import time
 
-from paglets import Host, Message
-from paglets.admin import ServerRef
+from paglets.runtime.host import Host
+from paglets.core.messages import Message
+from paglets.remote.admin import ServerRef
 from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
 from paglets.examples.search.cli import main as search_main
-from paglets.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
 

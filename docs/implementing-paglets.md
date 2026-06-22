@@ -9,7 +9,7 @@ that dataclass. Treat ordinary instance attributes as transient runtime data.
 
 ```python
 from dataclasses import dataclass, field
-from paglets import Paglet, PagletState
+from paglets.core.agent import Paglet, PagletState
 
 
 @dataclass
@@ -69,7 +69,7 @@ expect call stacks, threads, sockets, or open files to move with the paglet.
 Paglets talk through messages delivered to `handle_message`.
 
 ```python
-from paglets import Message
+from paglets.core.messages import Message
 
 
 def handle_message(self, message: Message):
@@ -155,7 +155,7 @@ with self.locked():
 For small helper methods, `@state_locked` keeps the handler readable:
 
 ```python
-from paglets import state_locked
+from paglets.core.agent import state_locked
 
 
 @state_locked
@@ -206,7 +206,8 @@ self.clone_to(target.name)
 Use a `TransferTicket` for preflight checks, retries, or inactive arrival:
 
 ```python
-from paglets import ArrivalMode, TransferTicket
+from paglets.core.runtime_values import ArrivalMode
+from paglets.remote.transfer import TransferTicket
 
 self.dispatch(
     TransferTicket(
@@ -246,7 +247,7 @@ A paglet can deactivate itself and choose its own inactive policy:
 
 ```python
 import time
-from paglets import DeactivationPolicy
+from paglets.persistence.persistency import DeactivationPolicy
 
 
 def handle_message(self, message: Message):
@@ -281,7 +282,7 @@ config, callers can discover the `SERVER_INFO` contract immediately, and the
 provider agent starts lazily on first use:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
 
 
@@ -394,7 +395,7 @@ The packaged `mesh-info` resident service keeps fresh host resource snapshots,
 including active/inactive paglet counts, and ranks eligible compute targets:
 
 ```python
-from paglets import ServiceScope
+from paglets.core.runtime_values import ServiceScope
 from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
 
 mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
@@ -427,7 +428,7 @@ between independently started hosts.
 For local tests, create multiple host objects in one process:
 
 ```python
-from paglets import Host
+from paglets.runtime.host import Host
 
 alpha = Host("alpha", port=8765, mesh_version="dev")
 beta = Host("beta", port=8766, peers=["http://127.0.0.1:8765"], mesh_version="dev")

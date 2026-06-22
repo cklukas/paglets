@@ -7,13 +7,13 @@ import threading
 
 import pytest
 
-from paglets import Host
-from paglets.admin import ServerRef
-from paglets import cli as host_cli
-from paglets.errors import RemoteHostError
-from paglets import git_update
-from paglets.runtime_values import LaunchConfigSyncAction
-from paglets.startup import LaunchConfig, LaunchConfigSyncResult
+from paglets.runtime.host import Host
+from paglets.remote.admin import ServerRef
+import paglets.tooling.cli as host_cli
+from paglets.core.errors import RemoteHostError
+import paglets.tooling.git_update as git_update
+from paglets.core.runtime_values import LaunchConfigSyncAction
+from paglets.config.startup import LaunchConfig, LaunchConfigSyncResult
 from tests.test_paglets_core import free_port
 
 
@@ -51,7 +51,7 @@ def test_windows_python_reexec_argv_does_not_put_spaced_path_in_argv0():
         windows=True,
     )
 
-    assert argv == ["python.exe", "-m", "paglets.cli", "--name", "windows", "--bind-public"]
+    assert argv == ["python.exe", "-m", "paglets.tooling.cli", "--name", "windows", "--bind-public"]
 
 
 def test_reexec_command_prefers_uv_run_python_on_windows():
@@ -62,7 +62,7 @@ def test_reexec_command_prefers_uv_run_python_on_windows():
     )
 
     assert executable == r"C:\Program Files\uv\uv.exe"
-    assert argv == ["uv.exe", "run", "python", "-m", "paglets.cli", "--name", "windows", "--bind-public"]
+    assert argv == ["uv.exe", "run", "python", "-m", "paglets.tooling.cli", "--name", "windows", "--bind-public"]
 
 
 def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path, monkeypatch, capsys):
@@ -191,7 +191,7 @@ def test_git_update_endpoint_stores_missing_hash_failure(tmp_path: Path, monkeyp
             error=f"requested commit {target_hash} was not found after git fetch; it may not have been pushed yet",
         )
 
-    monkeypatch.setattr("paglets.host.git_update.update_checkout", fake_update_checkout)
+    monkeypatch.setattr("paglets.runtime.host.git_update.update_checkout", fake_update_checkout)
     host = _host(tmp_path, auto_update=True, process_start_head=old_head)
     host.start_background()
     try:
@@ -225,7 +225,7 @@ def test_git_update_endpoint_schedules_restart_when_head_changes(tmp_path: Path,
             restart_required=True,
         )
 
-    monkeypatch.setattr("paglets.host.git_update.update_checkout", fake_update_checkout)
+    monkeypatch.setattr("paglets.runtime.host.git_update.update_checkout", fake_update_checkout)
     host = _host(
         tmp_path,
         auto_update=True,
@@ -260,7 +260,7 @@ def test_requesting_host_reports_remote_update_failure(tmp_path: Path, monkeypat
             error=f"requested commit {target_hash} was not found after git fetch; it may not have been pushed yet",
         )
 
-    monkeypatch.setattr("paglets.host.git_update.update_checkout", fake_update_checkout)
+    monkeypatch.setattr("paglets.runtime.host.git_update.update_checkout", fake_update_checkout)
     alpha = _host(tmp_path / "alpha", auto_update=True, process_start_head=old_head, reporter=messages.append)
     beta = _host(tmp_path / "beta", auto_update=True, process_start_head=old_head)
     alpha.start_background()

@@ -7,8 +7,10 @@ from pathlib import Path
 
 import psutil
 
-from paglets import Host, PagletContext, ServiceScope
-from paglets.admin import ServerRef
+from paglets.runtime.host import Host
+from paglets.core.agent import PagletContext
+from paglets.core.runtime_values import ServiceScope
+from paglets.remote.admin import ServerRef
 from paglets.examples.system_info import (
     GET_DISK,
     GET_LOAD,
@@ -19,7 +21,7 @@ from paglets.examples.system_info import (
     ProcessListRequest,
 )
 from paglets.examples.system_info.cli import main as sysinfo_main
-from paglets.startup import load_launch_config, sync_launch_config
+from paglets.config.startup import load_launch_config, sync_launch_config
 from tests.test_paglets_core import free_port
 
 
