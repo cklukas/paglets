@@ -1,0 +1,223 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from paglets import Host
+from paglets.admin import ServerRef
+from paglets.examples.mesh_benchmark import (
+    ClockOffsetSample,
+    MeshBenchmarkHost,
+    MeshBenchmarkRequest,
+    MeshBenchmarkSummary,
+    MeshTravelRecord,
+    aggregate_clock_offsets,
+    aggregate_matrix,
+    build_route_edges,
+    parse_size,
+)
+from paglets.examples.mesh_benchmark.cli import _format_markdown, main as mesh_benchmark_main
+from paglets.serde import dataclass_from_wire, dataclass_to_wire
+from tests.test_paglets_core import free_port
+
+
+def test_route_generation_covers_directed_pairs_with_self_edges():
+    hosts = [
+        MeshBenchmarkHost("alpha", "http://alpha"),
+        MeshBenchmarkHost("beta", "http://beta"),
+        MeshBenchmarkHost("gamma", "http://gamma"),
+    ]
+
+    edges = build_route_edges(hosts, repeats=2, include_self=True)
+
+    assert len(edges) == 3 * 3 * 2
+    pairs = [(edge.source_name, edge.target_name, edge.repeat) for edge in edges]
+    for repeat in range(2):
+        assert {
+            (source.name, target.name)
+            for source in hosts
+            for target in hosts
+        } == {(source, target) for source, target, item_repeat in pairs if item_repeat == repeat}
+    assert edges[0].source_name == "alpha"
+    assert edges[-1].target_name == "alpha"
+
+
+def test_route_generation_skips_self_edges_when_disabled():
+    hosts = [
+        MeshBenchmarkHost("alpha", "http://alpha"),
+        MeshBenchmarkHost("beta", "http://beta"),
+        MeshBenchmarkHost("gamma", "http://gamma"),
+    ]
+
+    edges = build_route_edges(hosts, repeats=3, include_self=False)
+
+    assert len(edges) == 3 * (3 - 1) * 3
+    assert all(edge.source_name != edge.target_name for edge in edges)
+
+
+def test_directional_aggregation_keeps_opposite_directions_separate():
+    hosts = [MeshBenchmarkHost("alpha", "http://alpha"), MeshBenchmarkHost("beta", "http://beta")]
+    records = [
+        _record("alpha", "beta", 0.010),
+        _record("alpha", "beta", 0.020),
+        _record("beta", "alpha", 0.100),
+    ]
+
+    matrix = aggregate_matrix(records, hosts)
+
+    assert matrix["alpha"]["beta"] == 0.015
+    assert matrix["beta"]["alpha"] == 0.100
+    assert "alpha" not in matrix["alpha"]
+
+
+def test_parse_size_accepts_binary_units_and_zero():
+    assert parse_size("0") == 0
+    assert parse_size("64K") == 64 * 1024
+    assert parse_size("128K") == 128 * 1024
+    assert parse_size("1M") == 1024 * 1024
+
+
+def test_mesh_benchmark_dataclasses_round_trip_through_wire():
+    request = MeshBenchmarkRequest(repeats=2, payload_size_bytes=64 * 1024, include_self=False, clock_probes=3)
+    assert dataclass_from_wire(MeshBenchmarkRequest, dataclass_to_wire(request)) == request
+
+    summary = MeshBenchmarkSummary(
+        run_id="run",
+        entry_host_name="alpha",
+        entry_host_url="http://alpha",
+        hosts=[MeshBenchmarkHost("alpha", "http://alpha")],
+        records=[_record("alpha", "alpha", 0.001)],
+    )
+    assert dataclass_from_wire(MeshBenchmarkSummary, dataclass_to_wire(summary)) == summary
+
+
+def test_clock_offset_aggregation_reports_median_mean_and_best_rtt():
+    samples = [
+        _sample("beta", 0.003, 0.050),
+        _sample("beta", 0.009, 0.010),
+        _sample("beta", 0.006, 0.020),
+    ]
+
+    [summary] = aggregate_clock_offsets(samples)
+
+    assert summary.sample_count == 3
+    assert summary.median_offset_seconds == 0.006
+    assert summary.mean_offset_seconds == pytest.approx(0.006)
+    assert summary.best_rtt_offset_seconds == 0.009
+    assert summary.best_rtt_seconds == 0.010
+
+
+def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
+    hosts = [MeshBenchmarkHost("alpha", "http://alpha"), MeshBenchmarkHost("beta", "http://beta")]
+    summary = MeshBenchmarkSummary(
+        run_id="run",
+        entry_host_name="alpha",
+        entry_host_url="http://alpha",
+        hosts=hosts,
+        records=[_record("alpha", "beta", 0.001234), _record("beta", "alpha", 0.002345)],
+        matrix_seconds={"alpha": {"beta": 0.001234}, "beta": {"alpha": 0.002345}},
+        clock_offsets=aggregate_clock_offsets([_sample("beta", 0.002, 0.001)]),
+        movement_count=2,
+        measured_round_trip_seconds=0.010,
+        average_elapsed_seconds=0.0017895,
+    )
+
+    output = _format_markdown(summary, digits=3, include_self=False)
+
+    assert "unit: ms" in output
+    assert "| from \\ to | alpha |  beta |" in output
+    assert "| alpha     |     - | 1.234 |" in output
+    assert "| beta      | 2.345 |     - |" in output
+    assert "average travel time: 1.790 ms" in output
+    assert "measured round trip time: 10.000 ms" in output
+    assert "measured movements: 2" in output
+    assert "clock offsets vs entry:" in output
+
+
+def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path: Path, capsys, monkeypatch):
+    alpha = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh_version="mesh-benchmark-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    beta = Host(
+        "beta",
+        host="127.0.0.1",
+        port=free_port(),
+        peers=[alpha.address],
+        mesh_version="mesh-benchmark-test",
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "beta",
+    )
+    alpha.start_background()
+    beta.start_background()
+    try:
+        beta.mesh.gossip_once()
+        alpha.mesh.gossip_once()
+        monkeypatch.setattr(
+            "paglets.examples.mesh_benchmark.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", alpha.address),
+        )
+
+        result = mesh_benchmark_main(
+            [
+                "--entry",
+                "alpha",
+                "--timeout",
+                "20",
+                "--json",
+                "--repeats",
+                "1",
+                "--payload-size",
+                "0",
+                "--clock-probes",
+                "1",
+            ]
+        )
+
+        assert result == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["movement_count"] == 2 * 2
+        assert {host["name"] for host in payload["hosts"]} == {"alpha", "beta"}
+        assert set(payload["matrix_seconds"]) == {"alpha", "beta"}
+        assert set(payload["matrix_seconds"]["alpha"]) == {"alpha", "beta"}
+        assert set(payload["matrix_seconds"]["beta"]) == {"alpha", "beta"}
+        assert payload["errors"] == {}
+    finally:
+        beta.stop()
+        alpha.stop()
+
+
+def _record(source: str, target: str, elapsed: float) -> MeshTravelRecord:
+    return MeshTravelRecord(
+        run_id="run",
+        sequence=0,
+        repeat=0,
+        source_name=source,
+        source_url=f"http://{source}",
+        target_name=target,
+        target_url=f"http://{target}",
+        source_wall_start=1.0,
+        source_wall_end=1.0 + elapsed,
+        elapsed_seconds=elapsed,
+        payload_size_bytes=0,
+    )
+
+
+def _sample(host: str, offset: float, rtt: float) -> ClockOffsetSample:
+    return ClockOffsetSample(
+        host_name=host,
+        host_url=f"http://{host}",
+        entry_host_name="alpha",
+        entry_host_url="http://alpha",
+        offset_seconds=offset,
+        rtt_seconds=rtt,
+        sampled_at=1.0,
+    )

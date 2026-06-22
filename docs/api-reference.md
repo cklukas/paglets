@@ -60,6 +60,8 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.examples.performance
 
+::: paglets.examples.mesh_benchmark
+
 ## Transfer Tickets
 
 ::: paglets.transfer

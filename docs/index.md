@@ -62,12 +62,18 @@ uv run paglets-sysinfo load
 uv run paglets-mesh-info summary
 uv run paglets-pi-compute --digits 16
 uv run paglets-perf-test
+uv run paglets-mesh-benchmark --payload-size 64K
 ```
 
 `paglets-perf-test` is a pure mobile-agent example: the entry host creates a
 parent benchmark paglet, clones workers to online same-version mesh hosts, runs
 local CPU, memory, and bounded temporary disk I/O checks, and reports the
 summary centrally.
+
+`paglets-mesh-benchmark` measures mobile-agent movement itself. A starter
+paglet remains on the entry host while a traveler visits every directed host
+pair, stores per-hop timings locally on arrival, then collects and prints a
+directional Markdown matrix plus clock-offset diagnostics.
 
 Run the disk survey demo:
 
@@ -81,8 +87,8 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
   state objects, lifecycle hooks, message handlers, movement, and mesh-aware
   behavior.
 - [Example Agents](examples.md): detailed explanations of packaged example
-  agents, including `server-info`, `mesh-info`, Pi compute, and
-  `paglets-perf-test`.
+  agents, including `server-info`, `mesh-info`, Pi compute,
+  `paglets-perf-test`, and `paglets-mesh-benchmark`.
 - [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,
   synchronize dependencies, broadcast commit hashes, and restart from updated
   code.

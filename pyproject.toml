@@ -17,6 +17,7 @@ docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10", "mkdocstrings[python]>=0.2
 
 [project.scripts]
 paglets-host = "paglets.cli:main"
+paglets-mesh-benchmark = "paglets.examples.mesh_benchmark.cli:main"
 paglets-mesh-info = "paglets.examples.mesh_info.cli:main"
 paglets-perf-test = "paglets.examples.performance.cli:main"
 paglets-pi-compute = "paglets.examples.compute.cli:main"

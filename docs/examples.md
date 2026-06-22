@@ -1,6 +1,6 @@
 # Example Agents
 
-`paglets` ships five packaged example agents that demonstrate different runtime
+`paglets` ships six packaged example agents that demonstrate different runtime
 patterns without mixing application code into the root runtime namespace:
 
 - `paglets.examples.system_info`: a resident typed service agent plus a
@@ -11,6 +11,8 @@ patterns without mixing application code into the root runtime namespace:
   plus a mesh-aware CLI.
 - `paglets.examples.performance`: a pure mobile benchmark agent plus a
   mesh-wide benchmark CLI.
+- `paglets.examples.mesh_benchmark`: a directional mesh movement benchmark
+  with a stable starter and one mobile traveler.
 - `paglets.examples.search`: a pure mobile filesystem search agent plus a
   streaming mesh search CLI.
 
@@ -469,6 +471,46 @@ summary = proxy.send(
 
 Most applications should use the `paglets-perf-test` CLI unless they need to
 embed benchmark collection into another paglet workflow.
+
+## Mesh Movement Benchmark
+
+`paglets-mesh-benchmark` measures the cost of moving a paglet through the mesh
+instead of measuring CPU, memory, or disk throughput. The entry host keeps a
+starter/coordinator agent active and sends one mobile traveler across every
+directed host pair.
+
+Run the default directional route:
+
+```bash
+uv run paglets-mesh-benchmark
+```
+
+Useful variations:
+
+```bash
+uv run paglets-mesh-benchmark --repeats 3
+uv run paglets-mesh-benchmark --payload-size 64K
+uv run paglets-mesh-benchmark --exclude-self
+uv run paglets-mesh-benchmark --clock-probes 7 --digits 4
+uv run paglets-mesh-benchmark --json
+```
+
+The text output is Markdown that is also padded for plain terminal reading. It
+prints one timing unit before the matrix, then reports source hosts as rows and
+destination hosts as columns. Cell A/B contains only A->B samples; cell B/A
+contains only B->A samples. When self-visits are disabled, diagonal cells are
+shown as `-`.
+
+Timing is based on the stable starter clock. Before each dispatch, the traveler
+probes the starter for entry-host time; after arrival, it probes the starter
+again and stores the elapsed entry-clock interval in destination-local
+persistent storage. At the end, the traveler performs an uncounted collection
+round, clears the run's local storage files, and sends the summary back to the
+starter.
+
+Clock diagnostics use repeated request/reply probes against the starter. The
+displayed value is the median host-minus-entry offset; JSON output also
+includes raw samples, mean offset, and best-RTT offset.
 
 ## Mesh Search
 

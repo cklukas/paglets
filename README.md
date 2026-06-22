@@ -282,6 +282,22 @@ volume mountpoint itself is not writable. Use `--path /some/mount` to limit disk
 tests, `--no-disk` to skip disk I/O, or `--verbose` to show skipped read-only
 and special volumes.
 
+Explore directional mesh movement costs with one mobile traveler:
+
+```bash
+uv run paglets-mesh-benchmark
+uv run paglets-mesh-benchmark --repeats 3 --payload-size 64K
+uv run paglets-mesh-benchmark --exclude-self --clock-probes 7 --digits 4
+```
+
+`paglets-mesh-benchmark` keeps a starter/coordinator paglet on the entry host
+and sends a mobile traveler through every directed host pair. The traveler
+stores hop timings in destination-local persistent storage, then performs an
+uncounted collection round and prints a Markdown matrix where row `A`, column
+`B` is the average A->B travel time. Timing uses request/reply probes against
+the stable starter clock, and clock-offset diagnostics are reported versus the
+entry host.
+
 Search files across online same-version mesh hosts with a mobile agent:
 
 ```bash
