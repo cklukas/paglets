@@ -44,7 +44,8 @@ messages, proxies, and lifecycle events.
 This first implementation intentionally uses **one approach**:
 
 - every target host already has the same Python code version installed/importable;
-- no authentication or code upload is attempted;
+- API-key authentication is optional for direct local/dev hosts and recommended
+  for proxied relay deployments; no code upload is attempted;
 - only a dataclass state object moves between hosts;
 - runtime fields on the agent instance are transient;
 - host control messages use a tiny JSON HTTP API, while paglet movement sends
@@ -227,6 +228,53 @@ Version resolution uses `--mesh-version`, then `PAGLETS_MESH_VERSION`, then the
 current git commit, then a package-version fallback. Different versions are
 ignored by the mesh.
 
+For corporate networks where only an existing HTTPS site should accept inbound
+traffic, run one hub host behind the existing reverse proxy and place paglets
+under a path such as `/paglets`. The backend can bind only to localhost while
+Nginx or another proxy listens on the already-approved HTTPS port:
+
+Place the `location` block inside the existing HTTPS `server` block. Common
+drop-in locations are `/etc/nginx/default.d/paglets.conf` on RHEL-style layouts
+when the main server includes `default.d/*.conf`, or an included snippet from
+`/etc/nginx/sites-available/<site>` on Debian/Ubuntu-style layouts. If using
+`/etc/nginx/conf.d/paglets.conf`, wrap the `location` in a full `server` block
+or include it from one; a bare `location` is not valid at top level.
+
+```nginx
+# Example: /etc/nginx/default.d/paglets.conf
+location /paglets/ {
+    proxy_pass http://127.0.0.1:8765/;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    client_max_body_size 256M;
+}
+```
+
+Validate and reload with the commands your deployment normally uses, for
+example `sudo nginx -t` followed by `sudo systemctl reload nginx`.
+
+Require a bearer API key for that endpoint and start outbound-only hosts in
+connect mode:
+
+```bash
+export PAGLETS_API_KEY='change-me'
+uv run paglets-host --name A --host 127.0.0.1 --port 8765 \
+  --public-url https://server-a.example.com/paglets \
+  --api-key-env PAGLETS_API_KEY
+uv run paglets-host --name B --connect-to https://server-a.example.com/paglets \
+  --api-key-env PAGLETS_API_KEY
+uv run paglets-host --name L --connect-to https://server-a.example.com/paglets \
+  --api-key-env PAGLETS_API_KEY
+```
+
+Connect-mode hosts do not bind public ports. They register with the hub and
+receive relayed movement and messages through outbound long-poll HTTP requests.
+UDP multicast and LAN probing are disabled by default in connect mode, and
+`--auto-update-from-git` is rejected there. In relay mode, the git update API is
+disabled even when the API key is valid.
+
 For trusted lab meshes where every host runs from a git checkout, add
 `--auto-update-from-git` to `paglets-host`. The checkout must be clean; if
 `git status --porcelain` reports uncommitted or untracked files, startup is
@@ -234,8 +282,8 @@ cancelled before any fetch or pull runs. Clean hosts serialize `git fetch`,
 `git pull`, `uv sync`, and self-restart through a checkout-local lock, then
 broadcast their commit to peer hosts. See the dedicated
 [Git Auto-Update](docs/git-auto-update.md) guide for the full flow, failure
-modes, and diagrams. This endpoint is unauthenticated; use it only on trusted
-networks.
+modes, and diagrams. Use auto-update only on trusted direct meshes; it is not
+available in relay/connect mode.
 
 The former Textual TUI has been removed. Host administration and examples now
 use the CLI and HTTP/admin APIs, and mesh membership is discovered dynamically
@@ -715,7 +763,8 @@ tests/
 
 ## Current intentional limitations
 
-- No authentication/authorization.
+- API-key authentication is available for the HTTP API; authorization remains
+  coarse-grained per host.
 - No code upload: classes must already be importable on every host.
 - No call-stack migration; movement resumes through lifecycle events and `run`.
 - Message arguments and replies are expected to be JSON-compatible.

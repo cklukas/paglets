@@ -273,6 +273,37 @@ def test_mesh_beacon_round_trips_and_version_filter_ignores_mismatches():
         host.stop()
 
 
+def test_relay_mode_version_mismatch_does_not_request_git_update(monkeypatch):
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        public_url="http://127.0.0.1:8765/paglets",
+        mesh_version="mesh-a",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+        persistence_dir=Path(tempfile.mkdtemp(prefix="paglets-test-")) / "alpha",
+    )
+    calls = []
+    monkeypatch.setattr(host, "request_peer_git_update", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    assert host.mesh.register(
+        HostRef(
+            name="beta",
+            url="http://127.0.0.1:8765/paglets/relay/hosts/beta",
+            code_version="mesh-b",
+            online=True,
+            last_seen=time.time(),
+            active_count=0,
+            inactive_count=0,
+        )
+    ) is None
+
+    assert calls == []
+    assert host.mesh.lookup("beta") is not None
+    assert host.mesh.lookup("beta").online is False
+
+
 def _host(
     name: str,
     *,

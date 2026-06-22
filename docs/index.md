@@ -57,6 +57,44 @@ specific addresses; the first one is published to the mesh. The auto form
 keeps watching the detected address and rebinds/publishes a new one after DHCP
 or network reconnect changes it.
 
+For locked-down networks, one public HTTPS endpoint can act as a relay. Bind
+the paglets backend on server A to localhost, publish it through an existing
+reverse-proxy path such as `/paglets`, require an API key, and let other hosts
+connect outbound:
+
+Example Nginx drop-in:
+
+```nginx
+# Example: /etc/nginx/default.d/paglets.conf
+# Include this from an existing HTTPS server block.
+location /paglets/ {
+    proxy_pass http://127.0.0.1:8765/;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    client_max_body_size 256M;
+}
+```
+
+`/etc/nginx/default.d/paglets.conf` is common on RHEL-style layouts when the
+site includes `default.d/*.conf`. On Debian/Ubuntu-style layouts, place the
+same `location` in `/etc/nginx/sites-available/<site>` or include it as a
+snippet from that server block. Test with `sudo nginx -t` before reloading.
+
+```bash
+export PAGLETS_API_KEY='change-me'
+uv run paglets-host --name A --host 127.0.0.1 --port 8765 \
+  --public-url https://server-a.example.com/paglets \
+  --api-key-env PAGLETS_API_KEY
+uv run paglets-host --name B --connect-to https://server-a.example.com/paglets \
+  --api-key-env PAGLETS_API_KEY
+```
+
+Connect-mode hosts do not open inbound ports. Movement and messages are relayed
+through A over authenticated HTTP long-polling, and git auto-update is disabled
+in this mode.
+
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
 demo config. The default launch config declares lazy `server-info` and eager
 `mesh-info`, so hosts continuously exchange resource snapshots while still

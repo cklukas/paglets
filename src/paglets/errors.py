@@ -15,6 +15,14 @@ class HostError(PagletError):
     """Raised for local host/runtime errors."""
 
 
+class AuthenticationError(PagletError):
+    """Raised when a host API request is missing valid credentials."""
+
+
+class ForbiddenError(PagletError):
+    """Raised when a valid request is not allowed by host policy."""
+
+
 class ServiceContractError(HostError):
     """Raised when a typed service contract is invalid or misused."""
 

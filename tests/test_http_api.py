@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import io
 import json
+import http.client
 from pathlib import Path
 import pickle
 import time
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
@@ -16,8 +19,11 @@ import paglets.host as host_module
 import paglets.process_runtime as process_runtime
 import paglets.transport as transport_module
 from paglets import Host, Message, Paglet, PagletState
+from paglets import PagletProxy
+from paglets.cli import main as host_cli_main
 from paglets.cli import _parser as host_cli_parser
 from paglets.client import HostClient
+from paglets.errors import AuthenticationError, ForbiddenError
 from paglets.serde import dataclass_from_wire, dataclass_to_wire, qualified_name
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
 
@@ -52,6 +58,15 @@ class RecordingClient(HostClient):
 class FailingPickleClient(HostClient):
     def post_pickle(self, url: str, payload: dict, *, timeout: float | None = None):
         raise AssertionError(f"post_pickle should not be used for same-host movement: {url}")
+
+
+def _wait_for(predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for condition")
 
 
 def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
@@ -96,6 +111,168 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
     assert active_state["state"]["last_message"] == "hello"
     assert inactive_state["active"] is False
     assert inactive_state["state"]["last_message"] == "hello"
+
+
+def test_host_api_key_rejects_missing_and_wrong_bearer_tokens(tmp_path: Path):
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        api_key="secret",
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        with pytest.raises(AuthenticationError):
+            HostClient().get_json(f"{host.address}/health")
+        with pytest.raises(AuthenticationError):
+            HostClient(api_key="wrong").get_json(f"{host.address}/health")
+        assert HostClient(api_key="secret").get_json(f"{host.address}/health")["name"] == "alpha"
+
+        request = Request(f"{host.address}/health", method="GET")
+        with pytest.raises(HTTPError) as error:
+            urlopen(request, timeout=2)
+    finally:
+        host.stop()
+
+    assert error.value.code == 401
+    assert error.value.headers["WWW-Authenticate"] == "Bearer"
+    payload = json.loads(error.value.read().decode("utf-8"))
+    assert payload == {"error_type": "AuthenticationError", "error": "Authentication required"}
+
+
+def test_host_api_key_rejects_pickle_post_before_reading_payload(tmp_path: Path, monkeypatch):
+    def fail_load(*_args, **_kwargs):
+        raise AssertionError("unauthorized pickle body should not be read")
+
+    monkeypatch.setattr(host_module, "load_http_pickle_payload", fail_load)
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        api_key="secret",
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    parsed = client_module.urlparse(host.address)
+    connection = http.client.HTTPConnection(parsed.netloc, timeout=2.0)
+    try:
+        connection.putrequest("POST", "/agents")
+        connection.putheader("Host", parsed.netloc)
+        connection.putheader("Content-Type", transport_module.PICKLE_CONTENT_TYPE)
+        connection.putheader("Content-Length", "1048576")
+        connection.endheaders()
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        connection.close()
+        host.stop()
+
+    assert response.status == 401
+    assert payload == {"error_type": "AuthenticationError", "error": "Authentication required"}
+
+
+def test_public_url_path_prefix_and_api_key_are_supported(tmp_path: Path):
+    port = free_port()
+    public_url = f"http://127.0.0.1:{port}/paglets"
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=port,
+        api_key="secret",
+        public_url=public_url,
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        health = HostClient(api_key="secret").get_json(f"{public_url}/health")
+    finally:
+        host.stop()
+
+    assert host.address == public_url
+    assert health["address"] == public_url
+
+
+def test_relay_connect_mode_dispatch_and_bidirectional_messages(tmp_path: Path):
+    port = free_port()
+    public_url = f"http://127.0.0.1:{port}/paglets"
+    hub = Host(
+        name="A",
+        host="127.0.0.1",
+        port=port,
+        api_key="secret",
+        public_url=public_url,
+        persistence_dir=tmp_path / "A",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    beta = Host(
+        name="B",
+        api_key="secret",
+        connect_to=public_url,
+        persistence_dir=tmp_path / "B",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    laptop = Host(
+        name="L",
+        api_key="secret",
+        connect_to=public_url,
+        persistence_dir=tmp_path / "L",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    hub.start_background()
+    beta.start_background()
+    laptop.start_background()
+    try:
+        _wait_for(lambda: hub.mesh.lookup("B") is not None and hub.mesh.lookup("L") is not None)
+        _wait_for(lambda: laptop.mesh.lookup("B") is not None)
+
+        local = laptop.create(TravelAgent, TravelState(last_message="from-laptop"), init="seed")
+        remote = laptop.dispatch(local.agent_id, "B")
+
+        assert remote.host_url == beta.address
+        assert hub.get_proxy(local.agent_id) is None
+        assert laptop.get_proxy(local.agent_id) is None
+        assert beta.get_state(local.agent_id, TravelState).last_message == "from-laptop"
+        assert remote.send(Message("remember", {"value": "on-beta"})) == "remembered:on-beta"
+        assert beta.get_state(local.agent_id, TravelState).last_message == "on-beta"
+
+        receiver = laptop.create(TravelAgent, TravelState(), init=None)
+        receiver_from_beta = PagletProxy(laptop.address, receiver.agent_id, beta.client)
+        assert receiver_from_beta.send(Message("remember", {"value": "from-beta"})) == "remembered:from-beta"
+        assert laptop.get_state(receiver.agent_id, TravelState).last_message == "from-beta"
+    finally:
+        laptop.stop()
+        beta.stop()
+        hub.stop()
+
+
+def test_relay_mode_disables_git_update_endpoint_even_with_valid_key(tmp_path: Path):
+    port = free_port()
+    public_url = f"http://127.0.0.1:{port}/paglets"
+    host = Host(
+        name="alpha",
+        host="127.0.0.1",
+        port=port,
+        api_key="secret",
+        public_url=public_url,
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        with pytest.raises(ForbiddenError):
+            HostClient(api_key="secret").post_json(f"{public_url}/admin/git-update", {"target_hash": "a" * 40})
+    finally:
+        host.stop()
+
+
+def test_cli_rejects_connect_mode_with_auto_update():
+    with pytest.raises(SystemExit) as error:
+        host_cli_main(["--name", "B", "--connect-to", "http://example.test/paglets", "--auto-update-from-git"])
+
+    assert error.value.code == 2
 
 
 def test_host_accepts_binary_pickle_create_payload(tmp_path: Path):

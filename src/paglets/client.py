@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from .errors import (
+    AuthenticationError,
+    ForbiddenError,
     InvalidAgentError,
     HostError,
     LifecycleError,
@@ -27,6 +29,8 @@ from .transport import PICKLE_CONTENT_TYPE, dump_http_chunked_pickle
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
+    "AuthenticationError": AuthenticationError,
+    "ForbiddenError": ForbiddenError,
     "InvalidAgentError": InvalidAgentError,
     "HostError": HostError,
     "LifecycleError": LifecycleError,
@@ -44,8 +48,9 @@ _ERROR_TYPES: dict[str, type[PagletError]] = {
 class HostClient:
     """Tiny JSON HTTP client used by proxies and hosts."""
 
-    def __init__(self, timeout: float = 10.0):
+    def __init__(self, timeout: float = 10.0, *, api_key: str | None = None):
         self.timeout = timeout
+        self.api_key = api_key
 
     def get_json(self, url: str, *, timeout: float | None = None) -> Any:
         return self._request("GET", url, None, timeout=timeout)
@@ -61,6 +66,8 @@ class HostClient:
             connection.putheader("Host", parsed.netloc)
             connection.putheader("Content-Type", PICKLE_CONTENT_TYPE)
             connection.putheader("Accept", "application/json")
+            if self.api_key:
+                connection.putheader("Authorization", f"Bearer {self.api_key}")
             connection.putheader("Transfer-Encoding", "chunked")
             connection.endheaders()
             dump_http_chunked_pickle(connection, payload)
@@ -76,11 +83,14 @@ class HostClient:
 
     def _request(self, method: str, url: str, payload: dict[str, Any] | None, *, timeout: float | None = None) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = Request(
             url,
             data=data,
             method=method,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers=headers,
         )
         try:
             with urlopen(req, timeout=self.timeout if timeout is None else timeout) as response:

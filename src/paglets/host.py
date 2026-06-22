@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, is_dataclass, replace
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+import hmac
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -14,14 +16,14 @@ import threading
 import time
 import uuid
 from typing import Any, Callable, Sequence
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
 from . import git_update
 from .agent import ACTIVE, INACTIVE, Paglet, PagletState
 from .client import HostClient
 from .context_events import ContextEvent, ContextEventLog, ContextListener
 from .envelope import PagletEnvelope
-from .errors import HostError, InvalidAgentError, NotHandledError, PagletCrashedError, PagletError, PagletInactiveError, RemoteHostError, ServiceNotFoundError, TransferError
+from .errors import AuthenticationError, ForbiddenError, HostError, InvalidAgentError, NotHandledError, PagletCrashedError, PagletError, PagletInactiveError, RemoteHostError, ServiceNotFoundError, TransferError
 from .events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from .mailbox import MessageMailbox
 from .mesh import HostRef, MeshRegistry
@@ -156,6 +158,24 @@ class _ManagedResidentService:
     last_used: float = field(default_factory=time.time)
 
 
+@dataclass(slots=True)
+class _RelayNode:
+    name: str
+    health: dict[str, Any]
+    last_seen: float = field(default_factory=time.time)
+    online: bool = True
+
+
+@dataclass(slots=True)
+class _RelayDelivery:
+    delivery_id: str
+    target: str
+    kind: str
+    payload: dict[str, Any]
+    future: Future[dict[str, Any]]
+    created_at: float = field(default_factory=time.time)
+
+
 class Host:
     """A paglet host/context served over a small JSON HTTP API.
 
@@ -171,6 +191,9 @@ class Host:
         port: int = 0,
         *,
         client: HostClient | None = None,
+        api_key: str | None = None,
+        public_url: str | None = None,
+        connect_to: str | None = None,
         mesh: bool = True,
         peers: list[str] | None = None,
         mesh_multicast: bool = True,
@@ -191,6 +214,10 @@ class Host:
         bind_watch_interval: float = NETWORK_BIND_WATCH_INTERVAL_SECONDS,
     ):
         self.name = name
+        self.api_key = api_key
+        self.public_url = public_url.strip().rstrip("/") if public_url else None
+        self.connect_to = connect_to.strip().rstrip("/") if connect_to else None
+        self.relay_mode = bool(self.public_url or self.connect_to)
         self._bind_host_specs = _bind_host_specs(host)
         self._auto_bind_enabled = any(value.casefold() == "auto" for value in self._bind_host_specs)
         self._bind_watch_interval = max(0.1, float(bind_watch_interval))
@@ -201,8 +228,10 @@ class Host:
         self.bind_host = self.bind_hosts[0]
         self.public_host = _resolve_public_host(self.bind_host)
         self.port = int(port)
-        self.address = f"http://{self.public_host}:{port}"
-        self.client = client or HostClient()
+        self.address = self._connect_relay_url() if self.connect_to else (self.public_url or f"http://{self.public_host}:{port}")
+        self.client = client or HostClient(api_key=api_key)
+        if api_key and getattr(self.client, "api_key", None) is None:
+            self.client.api_key = api_key
         self._agents: dict[str, ChildProcessController] = {}
         self._mailboxes: dict[str, MessageMailbox] = {}
         self.persistence_dir = (
@@ -229,6 +258,11 @@ class Host:
         self._threads: list[threading.Thread] = []
         self._activation_stop = threading.Event()
         self._activation_thread: threading.Thread | None = None
+        self._relay_stop = threading.Event()
+        self._relay_client_thread: threading.Thread | None = None
+        self._relay_nodes: dict[str, _RelayNode] = {}
+        self._relay_queues: dict[str, queue.Queue[_RelayDelivery]] = {}
+        self._relay_pending: dict[str, _RelayDelivery] = {}
         self.auto_update_from_git = bool(auto_update_from_git)
         self.git_repo_root = Path(git_repo_root).resolve() if git_repo_root is not None else None
         self.git_process_start_head = git_process_start_head or ""
@@ -255,10 +289,18 @@ class Host:
         )
         self._load_inactive_records()
 
+    def _connect_relay_url(self) -> str:
+        if not self.connect_to:
+            return self.public_url or f"http://{self.public_host}:{self.port}"
+        return f"{self.connect_to.rstrip('/')}/relay/hosts/{quote(self.name, safe='')}"
+
     # ------------------------------------------------------------------
     # Server lifecycle
     # ------------------------------------------------------------------
     def start_background(self) -> None:
+        if self.connect_to:
+            self._start_connect_background()
+            return
         with self._server_lock:
             if self._server is not None:
                 return
@@ -297,12 +339,13 @@ class Host:
         self._stop_bind_watcher()
         with self._server_lock:
             server = self._server
-            if server is None:
+            if server is None and self._relay_client_thread is None:
                 return
-            servers = list(self._servers or [server])
+            servers = list(self._servers or ([server] if server is not None else []))
             threads = list(self._threads)
             if not threads and self._thread is not None:
                 threads = [self._thread]
+        self._stop_relay_client()
         self._stop_activation_scheduler()
         if deactivate_active:
             self._deactivate_active_for_shutdown()
@@ -311,7 +354,23 @@ class Host:
         self._emit("context-shutdown")
         with self._server_lock:
             self._clear_http_servers()
-        self._shutdown_http_servers(servers, threads)
+        if servers:
+            self._shutdown_http_servers(servers, threads)
+
+    def _start_connect_background(self) -> None:
+        with self._server_lock:
+            if self._relay_client_thread is not None:
+                return
+            self._clear_work_root()
+        self._activation_stop.clear()
+        self._emit_launch_config_sync_result()
+        self._activate_startup_records()
+        self._start_resident_services()
+        self._start_launch_agents()
+        self._start_activation_scheduler()
+        self.mesh.refresh_self()
+        self._start_relay_client()
+        self._emit("context-start")
 
     def _open_http_servers(self, bind_hosts: list[str], port: int) -> list["_PagletHTTPServer"]:
         servers: list[_PagletHTTPServer] = []
@@ -331,7 +390,7 @@ class Host:
         self.bind_host = self.bind_hosts[0]
         self.public_host = _resolve_public_host(self.bind_host)
         self.port = int(actual_port)
-        self.address = f"http://{self.public_host}:{actual_port}"
+        self.address = self.public_url or f"http://{self.public_host}:{actual_port}"
         self._servers = servers
         self._server = servers[0]
         self._threads = [
@@ -549,13 +608,18 @@ class Host:
         with self._lock:
             active_count = sum(1 for record in self._agents.values() if record.ready and not record.crashed)
             inactive_count = len(self._inactive)
+        capabilities = list(HOST_CAPABILITIES)
+        if self.relay_mode and "admin:git-update" in capabilities:
+            capabilities.remove("admin:git-update")
+        if not self.connect_to:
+            capabilities.extend(["relay:connect", "relay:poll"])
         payload = {
             "name": self.name,
             "address": self.address,
             "active_count": active_count,
             "inactive_count": inactive_count,
             "code_version": self.mesh.code_version,
-            "capabilities": list(HOST_CAPABILITIES),
+            "capabilities": capabilities,
         }
         payload.update(self._git_update_health())
         return payload
@@ -566,6 +630,210 @@ class Host:
     def join_mesh(self, payload: dict[str, Any]) -> list[HostRef]:
         self.mesh.register_wire(payload)
         return self.mesh.hosts(include_self=True)
+
+    def relay_connect(self, payload: dict[str, Any]) -> dict[str, Any]:
+        health = dict(payload.get("health") or payload)
+        name = str(health.get("name") or payload.get("name") or "").strip()
+        if not name:
+            raise HostError("Relay connection requires a host name")
+        address = str(health.get("address") or f"{self.address.rstrip('/')}/relay/hosts/{quote(name, safe='')}").rstrip("/")
+        health["name"] = name
+        health["address"] = address
+        health.setdefault("code_version", self.mesh.code_version)
+        health.setdefault("active_count", 0)
+        health.setdefault("inactive_count", 0)
+        now = time.time()
+        with self._lock:
+            self._relay_nodes[name] = _RelayNode(name=name, health=health, last_seen=now, online=True)
+            self._relay_queues.setdefault(name, queue.Queue())
+        self.mesh.register(
+            HostRef(
+                name=name,
+                url=address,
+                code_version=str(health.get("code_version") or self.mesh.code_version),
+                online=True,
+                last_seen=now,
+                active_count=int(health.get("active_count", 0)),
+                inactive_count=int(health.get("inactive_count", 0)),
+            )
+        )
+        return {"hosts": [ref.to_wire() for ref in self.mesh.hosts(include_self=True)]}
+
+    def relay_host_health(self, target: str) -> dict[str, Any]:
+        name = unquote(target)
+        if name == self.name:
+            return self.health()
+        with self._lock:
+            node = self._relay_nodes.get(name)
+        if node is None or not node.online:
+            raise RemoteHostError(f"Relay host {name!r} is not connected")
+        return dict(node.health)
+
+    def relay_poll(self, node_name: str, *, timeout: float = 25.0) -> dict[str, Any]:
+        name = unquote(node_name)
+        with self._lock:
+            node = self._relay_nodes.get(name)
+            if node is not None:
+                node.last_seen = time.time()
+                node.online = True
+            delivery_queue = self._relay_queues.setdefault(name, queue.Queue())
+        try:
+            delivery = delivery_queue.get(timeout=max(0.0, timeout))
+        except queue.Empty:
+            return {"delivery": None}
+        return {
+            "delivery": {
+                "delivery_id": delivery.delivery_id,
+                "kind": delivery.kind,
+                "payload": delivery.payload,
+            }
+        }
+
+    def relay_ack(self, delivery_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            delivery = self._relay_pending.pop(delivery_id, None)
+        if delivery is None:
+            return {"ok": True, "duplicate": True}
+        if payload.get("ok", True):
+            delivery.future.set_result(dict(payload))
+        else:
+            delivery.future.set_exception(RemoteHostError(str(payload.get("error") or "Relay delivery failed")))
+        return {"ok": True}
+
+    def relay_receive_envelope(self, target: str, envelope: PagletEnvelope, *, timeout: float = 10.0) -> dict[str, Any]:
+        return self._relay_submit(
+            unquote(target),
+            "envelope",
+            {"envelope": envelope.to_wire()},
+            timeout=timeout,
+        )
+
+    def relay_deliver_message(
+        self,
+        target: str,
+        agent_id: str,
+        message: Message,
+        *,
+        oneway: bool = False,
+        activate_if_inactive: bool = True,
+        no_delay: bool = False,
+        timeout: float = 10.0,
+    ) -> Any:
+        response = self._relay_submit(
+            unquote(target),
+            "message",
+            {
+                "agent_id": agent_id,
+                "message": message.to_wire(),
+                "oneway": oneway,
+                "activate_if_inactive": activate_if_inactive,
+                "no_delay": no_delay,
+            },
+            timeout=timeout,
+        )
+        return response.get("result")
+
+    def _relay_submit(self, target: str, kind: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        with self._lock:
+            node = self._relay_nodes.get(target)
+            delivery_queue = self._relay_queues.setdefault(target, queue.Queue())
+        if node is None or not node.online:
+            raise RemoteHostError(f"Relay host {target!r} is not connected")
+        delivery_id = uuid.uuid4().hex
+        future: Future[dict[str, Any]] = Future()
+        delivery = _RelayDelivery(
+            delivery_id=delivery_id,
+            target=target,
+            kind=kind,
+            payload=payload,
+            future=future,
+        )
+        with self._lock:
+            self._relay_pending[delivery_id] = delivery
+        delivery_queue.put(delivery)
+        try:
+            response = future.result(timeout=max(0.01, timeout))
+        except FutureTimeoutError as exc:
+            with self._lock:
+                self._relay_pending.pop(delivery_id, None)
+            raise RemoteHostError(f"Relay delivery to {target!r} timed out") from exc
+        if not response.get("ok", True):
+            raise RemoteHostError(str(response.get("error") or "Relay delivery failed"))
+        return response
+
+    def _start_relay_client(self) -> None:
+        if not self.connect_to:
+            return
+        self._relay_stop.clear()
+        self._relay_client_thread = threading.Thread(
+            target=self._relay_client_loop,
+            name=f"paglets-relay-client-{self.name}",
+            daemon=True,
+        )
+        self._relay_client_thread.start()
+
+    def _stop_relay_client(self) -> None:
+        self._relay_stop.set()
+        thread = self._relay_client_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._relay_client_thread = None
+
+    def _relay_client_loop(self) -> None:
+        assert self.connect_to is not None
+        while not self._relay_stop.is_set():
+            try:
+                self._relay_register_once()
+                response = self.client.get_json(
+                    f"{self.connect_to.rstrip('/')}/relay/poll/{quote(self.name, safe='')}?timeout=25",
+                    timeout=35.0,
+                )
+                delivery = response.get("delivery") if isinstance(response, dict) else None
+                if isinstance(delivery, dict):
+                    self._handle_relay_delivery(delivery)
+            except Exception as exc:
+                self._emit("relay-client-error", error=str(exc))
+                self._relay_stop.wait(1.0)
+
+    def _relay_register_once(self) -> None:
+        assert self.connect_to is not None
+        response = self.client.post_json(
+            f"{self.connect_to.rstrip('/')}/relay/connect",
+            {"health": self.health()},
+            timeout=5.0,
+        )
+        hosts = response.get("hosts", []) if isinstance(response, dict) else []
+        if isinstance(hosts, list):
+            for item in hosts:
+                if isinstance(item, dict):
+                    try:
+                        self.mesh.register_wire(item)
+                    except (KeyError, TypeError, ValueError):
+                        continue
+
+    def _handle_relay_delivery(self, delivery: dict[str, Any]) -> None:
+        assert self.connect_to is not None
+        delivery_id = str(delivery["delivery_id"])
+        payload = dict(delivery.get("payload") or {})
+        try:
+            kind = str(delivery["kind"])
+            if kind == "envelope":
+                proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
+                ack = {"ok": True, "proxy": proxy.to_wire()}
+            elif kind == "message":
+                result = self.deliver_message(
+                    str(payload["agent_id"]),
+                    Message.from_wire(payload["message"]),
+                    oneway=bool(payload.get("oneway", False)),
+                    activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
+                    no_delay=bool(payload.get("no_delay", False)),
+                )
+                ack = {"ok": True, "result": result}
+            else:
+                raise HostError(f"Unknown relay delivery kind {kind!r}")
+        except Exception as exc:
+            ack = {"ok": False, "error_type": exc.__class__.__name__, "error": str(exc)}
+        self.client.post_json(f"{self.connect_to.rstrip('/')}/relay/ack/{delivery_id}", ack, timeout=5.0)
 
     def handle_git_update_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.auto_update_from_git or self.git_repo_root is None:
@@ -2382,11 +2650,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         try:
+            self._require_auth()
             payload = self._read_payload() if method == "POST" else {}
             result = self._route(method, self.path, payload)
             self._write_json(200, result)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
+        except AuthenticationError as exc:
+            self._write_error(401, exc, authenticate=True)
+        except ForbiddenError as exc:
+            self._write_error(403, exc)
         except NotHandledError as exc:
             self._write_error(422, exc)
         except InvalidAgentError as exc:
@@ -2396,11 +2669,23 @@ class _RequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - defensive server boundary
             self._write_error(500, RemoteHostError(str(exc)))
 
+    def _require_auth(self) -> None:
+        expected = self.server.host_runtime.api_key
+        if not expected:
+            return
+        header = str(self.headers.get("Authorization") or "")
+        scheme, _, value = header.partition(" ")
+        if scheme.casefold() != "bearer" or not value or not hmac.compare_digest(value, expected):
+            raise AuthenticationError("Authentication required")
+
     def _route(self, method: str, path: str, payload: dict[str, Any]) -> Any:
         host = self.server.host_runtime
         parsed = urlparse(path)
         parts = [part for part in parsed.path.split("/") if part]
         query = parse_qs(parsed.query)
+        public_path_parts = _public_path_parts(host.public_url)
+        if public_path_parts and parts[: len(public_path_parts)] == public_path_parts:
+            parts = parts[len(public_path_parts):]
 
         if method == "GET" and parts == ["health"]:
             return host.health()
@@ -2409,7 +2694,39 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if method == "POST" and parts == ["hosts", "join"]:
             return {"hosts": [ref.to_wire() for ref in host.join_mesh(payload)]}
         if method == "POST" and parts == ["admin", "git-update"]:
+            if host.relay_mode:
+                raise ForbiddenError("Git auto-update is disabled in relay mode")
             return host.handle_git_update_request(payload)
+        if method == "POST" and parts == ["relay", "connect"]:
+            return host.relay_connect(payload)
+        if method == "GET" and len(parts) == 3 and parts[:2] == ["relay", "poll"]:
+            timeout = float((query.get("timeout") or ["25"])[0])
+            return host.relay_poll(parts[2], timeout=timeout)
+        if method == "POST" and len(parts) == 3 and parts[:2] == ["relay", "ack"]:
+            return host.relay_ack(parts[2], payload)
+        if method == "GET" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "health":
+            return host.relay_host_health(parts[2])
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents":
+            if "envelope" not in payload:
+                raise HostError("Relay agent route requires an envelope")
+            response = host.relay_receive_envelope(
+                parts[2],
+                PagletEnvelope.from_wire(payload["envelope"]),
+                timeout=float(payload.get("timeout", 10.0)),
+            )
+            return {"proxy": response["proxy"]}
+        if method == "POST" and len(parts) == 6 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents" and parts[5] == "messages":
+            message = Message.from_wire(payload["message"])
+            result = host.relay_deliver_message(
+                parts[2],
+                parts[4],
+                message,
+                oneway=bool(payload.get("oneway", False)),
+                activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
+                no_delay=bool(payload.get("no_delay", False)),
+                timeout=float(payload.get("timeout", 10.0)),
+            )
+            return {"result": result}
         if method == "GET" and parts == ["events"]:
             since = int((query.get("since") or ["0"])[0])
             limit = int((query.get("limit") or ["100"])[0])
@@ -2527,17 +2844,20 @@ class _RequestHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8"))
 
-    def _write_json(self, status: int, payload: Any) -> None:
+    def _write_json(self, status: int, payload: Any, *, extra_headers: dict[str, str] | None = None) -> None:
         raw = json.dumps(json_safe(payload)).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
-    def _write_error(self, status: int, exc: Exception) -> None:
+    def _write_error(self, status: int, exc: Exception, *, authenticate: bool = False) -> None:
         try:
-            self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)})
+            headers = {"WWW-Authenticate": "Bearer"} if authenticate else None
+            self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)}, extra_headers=headers)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
 
@@ -2547,3 +2867,9 @@ def _trim_git_output(value: str, *, limit: int = 500) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}..."
+
+
+def _public_path_parts(public_url: str | None) -> list[str]:
+    if not public_url:
+        return []
+    return [part for part in urlparse(public_url).path.split("/") if part]

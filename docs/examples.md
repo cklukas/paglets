@@ -89,8 +89,9 @@ uv run paglets-perf-test [--entry alpha]
 uv run paglets-search [--entry alpha] grep TODO .
 ```
 
-There is no authentication layer yet. These examples are useful for trusted
-local or lab meshes, not untrusted networks.
+Direct local examples can still run without an API key. For proxied or shared
+networks, start hosts with `--api-key-env` and use the relay setup from the main
+guide so the HTTP API requires bearer authentication.
 
 ## Server Info
 

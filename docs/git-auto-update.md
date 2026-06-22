@@ -9,8 +9,9 @@ The feature is host-side only. Client commands such as `paglets-pi-compute`,
 `paglets-sysinfo`, and `paglets-search` do not need extra flags.
 
 !!! warning "Trusted networks only"
-    The update endpoint is unauthenticated and runs `git fetch`, `git pull`, and
-    `uv sync`. Use it only on trusted local or lab networks.
+    The update endpoint runs `git fetch`, `git pull`, and `uv sync`. Use it only
+    on trusted direct local or lab meshes. Relay/connect mode rejects
+    auto-update and does not accept update requests.
 
 ## Quick Start
 

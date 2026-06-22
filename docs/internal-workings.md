@@ -97,6 +97,59 @@ For dispatch and retract, the source host removes the original after successful
 delivery. For clone, the source host keeps the original and the target receives a
 new agent ID.
 
+## Single-Port Relay Mode
+
+A host can advertise a public path-prefixed URL with `--public-url`, for
+example `https://server-a.example.com/paglets`, while its backend listens only
+on localhost behind a reverse proxy. Other hosts can start with `--connect-to`
+that URL instead of binding an inbound HTTP server.
+
+For Nginx, the relay path is normally a `location` block inside an existing
+HTTPS `server` block. A common RHEL-style drop-in is
+`/etc/nginx/default.d/paglets.conf` when that directory is included by the
+server config:
+
+```nginx
+# Example: /etc/nginx/default.d/paglets.conf
+location /paglets/ {
+    proxy_pass http://127.0.0.1:8765/;
+    proxy_http_version 1.1;
+    proxy_set_header Authorization $http_authorization;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    client_max_body_size 256M;
+}
+```
+
+On layouts that use `/etc/nginx/sites-available`, put the same block in the
+site's existing TLS virtual host or include it from that server block. A bare
+`location` block is not valid directly under top-level `conf.d` unless it is
+wrapped by a `server` block.
+
+Connect-mode hosts keep their normal local paglet runtime, but they register
+with the hub and receive work through outbound long-poll HTTP requests. The hub
+stores connected hosts in the mesh as relay URLs such as
+`/relay/hosts/B`. When a source dispatches or sends a message to one of those
+URLs, the hub queues a delivery for the target host. The target receives the
+delivery through its poll loop, performs the normal local receive or message
+operation, then acknowledges the result. Dispatch removes the source paglet only
+after the final target acknowledgment succeeds, so the hub never activates the
+paglet while forwarding it.
+
+Relay/connect mode disables UDP multicast and LAN discovery by default. It also
+does not run git auto-update and does not accept `/admin/git-update` requests.
+Version mismatches are recorded as incompatible/offline hosts instead of
+triggering update requests.
+
+## API Authentication
+
+`Host(api_key=...)` or `paglets-host --api-key-env ENV_NAME` requires every HTTP
+request to include `Authorization: Bearer <key>`. Missing or invalid credentials
+return HTTP `401` with a JSON `AuthenticationError` and `WWW-Authenticate:
+Bearer`. Authentication is checked before POST bodies are read, including large
+chunked pickle movement payloads. If no API key is configured, direct local/dev
+hosts keep the historical unauthenticated behavior.
+
 ## Local Transport Paths
 
 There are two local cases that are easy to confuse:
@@ -232,7 +285,9 @@ The host API is intentionally small:
 - `POST /agents/{id}/services`
 - `POST /agents/{id}/unadvertise-service`
 
-There is no authentication layer in this first runtime.
+API-key authentication is available for host HTTP endpoints, but it is
+coarse-grained per host. It does not yet provide per-agent authorization,
+per-operation scopes, or key rotation.
 
 ## Launch Config, Autostart, And Resident Services
 

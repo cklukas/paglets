@@ -272,11 +272,14 @@ class MeshRegistry:
                 f"ignoring mesh peer {ref.name} at {ref.url}: "
                 f"version {ref.code_version!r} != {self.code_version!r}"
             )
-            self._host.request_peer_git_update(
-                ref.url,
-                validate_health=True,
-                report_unreachable=False,
-            )
+            if not getattr(self._host, "relay_mode", False):
+                self._host.request_peer_git_update(
+                    ref.url,
+                    validate_health=True,
+                    report_unreachable=False,
+                )
+            else:
+                self._mark_ref_offline(ref, f"code version {ref.code_version!r} != {self.code_version!r}")
             return None
         if ref.url.rstrip("/") == self._host.address.rstrip("/"):
             return self.refresh_self()
@@ -310,7 +313,21 @@ class MeshRegistry:
                     f"ignoring mesh peer {health.get('name', normalized)} at {normalized}: "
                     f"version {health_version!r} != {self.code_version!r}"
                 )
-                self._host.request_peer_git_update(normalized, health=health)
+                if not getattr(self._host, "relay_mode", False):
+                    self._host.request_peer_git_update(normalized, health=health)
+                else:
+                    self._mark_ref_offline(
+                        HostRef(
+                            name=str(health.get("name") or _name_from_url(normalized)),
+                            url=str(health.get("address") or normalized).rstrip("/"),
+                            code_version=health_version,
+                            online=False,
+                            last_seen=time.time(),
+                            active_count=int(health.get("active_count", 0)),
+                            inactive_count=int(health.get("inactive_count", 0)),
+                        ),
+                        f"code version {health_version!r} != {self.code_version!r}",
+                    )
                 return self.hosts(include_self=True)
             remote_ref = HostRef(
                 name=str(health.get("name") or _name_from_url(normalized)),
@@ -464,6 +481,22 @@ class MeshRegistry:
                     error=error,
                 )
             self._hosts[normalized] = existing
+
+    def _mark_ref_offline(self, ref: HostRef, error: str) -> None:
+        normalized = normalize_host_url(ref.url)
+        if normalized == self._host.address.rstrip("/"):
+            return
+        with self._lock:
+            self._hosts[normalized] = HostRef(
+                name=ref.name,
+                url=normalized,
+                code_version=ref.code_version,
+                online=False,
+                last_seen=ref.last_seen or time.time(),
+                active_count=ref.active_count,
+                inactive_count=ref.inactive_count,
+                error=error,
+            )
 
     def refresh_self(self) -> HostRef:
         with self._host._lock:

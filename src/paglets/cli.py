@@ -24,6 +24,13 @@ from .storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.connect_to and args.auto_update_from_git:
+        parser.error("--auto-update-from-git cannot be used with --connect-to")
+    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+    if args.api_key_env and not api_key:
+        parser.error(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+    if (args.connect_to or args.public_url) and not api_key:
+        parser.error("--public-url and --connect-to require --api-key-env")
     reexec_args = list(argv) if argv is not None else sys.argv[1:]
     restart_requested = threading.Event()
     git_repo_root: Path | None = None
@@ -72,14 +79,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     bind_host = args.bind_public if args.bind_public is not None else args.host
+    mesh_multicast = args.mesh_multicast
+    mesh_lan_discovery = args.mesh_lan_discovery
+    if args.connect_to:
+        mesh_multicast = False if mesh_multicast is None else mesh_multicast
+        mesh_lan_discovery = False if mesh_lan_discovery is None else mesh_lan_discovery
+    else:
+        mesh_multicast = True if mesh_multicast is None else mesh_multicast
+        mesh_lan_discovery = True if mesh_lan_discovery is None else mesh_lan_discovery
     host = Host(
         name=args.name,
         host=bind_host,
         port=args.port,
+        api_key=api_key,
+        public_url=args.public_url,
+        connect_to=args.connect_to,
         mesh=args.mesh,
         peers=args.peer,
-        mesh_multicast=args.mesh_multicast,
-        mesh_lan_discovery=args.mesh_lan_discovery,
+        mesh_multicast=mesh_multicast,
+        mesh_lan_discovery=mesh_lan_discovery,
         mesh_version=args.mesh_version,
         persistence_dir=args.persistence_dir,
         persistent_storage_quota_bytes=args.persistent_storage_quota,
@@ -102,11 +120,11 @@ def main(argv: list[str] | None = None) -> int:
     if host.mesh.version_warning:
         print(f"paglets host warning: {host.mesh.version_warning}", file=sys.stderr, flush=True)
     print(
-        f"paglets host {host.name!r} listening at {host.address} "
+        f"paglets host {host.name!r} {'connected via' if args.connect_to else 'listening at'} {args.connect_to or host.address} "
         f"(mesh {'on' if args.mesh else 'off'}, version {host.mesh.code_version})",
         flush=True,
     )
-    if args.auto_update_from_git:
+    if args.auto_update_from_git and not getattr(host, "relay_mode", False):
         host.broadcast_git_update(
             targets=_auto_update_discovery_targets(host.port),
             validate_targets=True,
@@ -169,15 +187,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mesh-multicast",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Enable UDP multicast mesh beacons",
     )
     parser.add_argument(
         "--mesh-lan-discovery",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help="Enable TCP LAN discovery for paglets hosts when multicast/seed peers are incomplete",
     )
+    parser.add_argument("--public-url", default=None, help="Externally reachable base URL, e.g. https://host/paglets")
+    parser.add_argument("--connect-to", default=None, help="Relay base URL for outbound-only connect mode")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
     parser.add_argument(
