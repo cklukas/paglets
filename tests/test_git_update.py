@@ -102,6 +102,38 @@ def test_git_update_blocks_restart_when_uv_sync_fails(tmp_path: Path, monkeypatc
     assert result.error == "sync failed"
 
 
+def test_git_update_can_defer_dependency_sync_until_reexec(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    old_head = "a" * 40
+    new_head = "b" * 40
+    uv_sync_calls = 0
+
+    def fake_run_git(args, _repo_root, *, timeout=git_update.GIT_COMMAND_TIMEOUT_SECONDS):
+        if args == ["rev-parse", "HEAD"]:
+            return git_update.GitCommandResult(0, f"{new_head}\n")
+        if args == ["status", "--porcelain"]:
+            return git_update.GitCommandResult(0)
+        if args in (["fetch"], ["pull"]):
+            return git_update.GitCommandResult(0)
+        return git_update.GitCommandResult(1, stderr=f"unexpected git args {args!r}")
+
+    def fake_uv_sync(_repo_root):
+        nonlocal uv_sync_calls
+        uv_sync_calls += 1
+        return git_update.GitCommandResult(1, stderr="sync should be deferred")
+
+    monkeypatch.setattr(git_update, "_run_git", fake_run_git)
+    monkeypatch.setattr(git_update, "_run_uv_sync", fake_uv_sync)
+
+    result = git_update.update_checkout(repo, process_start_head=old_head, sync_dependencies=False)
+
+    assert result.ok is True
+    assert result.restart_required is True
+    assert result.uv_sync_run is False
+    assert uv_sync_calls == 0
+
+
 def test_git_update_lock_removes_stale_dead_owner(tmp_path: Path, monkeypatch):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)

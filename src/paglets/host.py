@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, is_dataclass, replace
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -582,6 +583,7 @@ class Host:
             self.git_repo_root,
             process_start_head=self.git_process_start_head,
             target_hash=target_hash,
+            sync_dependencies=os.name != "nt",
         )
         status = result.to_wire()
         status.update(

@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
             update_result = git_update.update_checkout(
                 git_repo_root,
                 process_start_head=git_process_start_head,
+                sync_dependencies=not _defer_uv_sync_until_reexec(),
             )
         except git_update.GitUpdateError as exc:
             print(f"paglets-host: git auto-update failed: {exc}", file=sys.stderr)
@@ -128,6 +129,10 @@ def _auto_update_discovery_targets(port: int) -> list[str]:
     discovered = discover_mesh_entry_servers(timeout=1.0)
     discovered.extend(discover_lan_entry_servers(ports={port}, timeout=0.25))
     return [server.url for server in discovered if _auto_update_discovery_target_allowed(server.url, port)]
+
+
+def _defer_uv_sync_until_reexec() -> bool:
+    return os.name == "nt"
 
 
 def _auto_update_discovery_target_allowed(url: str, port: int) -> bool:

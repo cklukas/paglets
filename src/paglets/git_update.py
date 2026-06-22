@@ -252,6 +252,7 @@ def update_checkout(
     process_start_head: str,
     target_hash: str | None = None,
     lock_timeout: float = GIT_UPDATE_LOCK_TIMEOUT_SECONDS,
+    sync_dependencies: bool = True,
 ) -> GitUpdateResult:
     repo_path = Path(repo_root).resolve()
     target = (target_hash or "").strip()
@@ -368,7 +369,7 @@ def update_checkout(
             changed = after_head != before_head
             restart_required = after_head != process_start_head
             uv_sync_run = False
-            if restart_required:
+            if restart_required and sync_dependencies:
                 uv_sync_run = True
                 sync = _run_uv_sync(repo_path)
                 stdout_parts.append(sync.stdout)

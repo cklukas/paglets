@@ -105,7 +105,7 @@ def test_host_cli_reexecutes_runtime_git_restart_from_main_thread(tmp_path: Path
     monkeypatch.setattr(
         host_cli.git_update,
         "update_checkout",
-        lambda repo, *, process_start_head: git_update.GitUpdateResult(
+        lambda repo, *, process_start_head, **_kwargs: git_update.GitUpdateResult(
             ok=True,
             status="current",
             repo_root=str(repo),
@@ -140,7 +140,7 @@ def test_host_cli_cancels_auto_update_when_checkout_is_dirty(tmp_path: Path, mon
     monkeypatch.setattr(
         host_cli.git_update,
         "update_checkout",
-        lambda repo, *, process_start_head: git_update.GitUpdateResult(
+        lambda repo, *, process_start_head, **_kwargs: git_update.GitUpdateResult(
             ok=False,
             status="dirty-worktree",
             repo_root=str(repo),
@@ -179,7 +179,7 @@ def test_git_update_endpoint_is_disabled_by_default(tmp_path: Path):
 def test_git_update_endpoint_stores_missing_hash_failure(tmp_path: Path, monkeypatch):
     old_head = "a" * 40
 
-    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0):
+    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0, **_kwargs):
         return git_update.GitUpdateResult(
             ok=False,
             status="target-missing",
@@ -212,7 +212,7 @@ def test_git_update_endpoint_schedules_restart_when_head_changes(tmp_path: Path,
     new_head = "b" * 40
     restarted = threading.Event()
 
-    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0):
+    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0, **_kwargs):
         return git_update.GitUpdateResult(
             ok=True,
             status="updated",
@@ -247,7 +247,7 @@ def test_requesting_host_reports_remote_update_failure(tmp_path: Path, monkeypat
     old_head = "a" * 40
     messages: list[str] = []
 
-    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0):
+    def fake_update_checkout(repo_root, *, process_start_head, target_hash=None, lock_timeout=0, **_kwargs):
         return git_update.GitUpdateResult(
             ok=False,
             status="target-missing",

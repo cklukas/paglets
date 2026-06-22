@@ -161,6 +161,12 @@ paglets.cli ...`. This avoids Windows-specific failures caused by replacing the
 process from a worker thread or by reusing a Python executable path that `uv
 sync` just recreated.
 
+On Windows, auto-update defers the explicit `uv sync` step until that re-exec
+path. This avoids trying to replace the currently running
+`.venv\Scripts\paglets-host.exe` console wrapper, which Windows keeps locked
+while the host process is active. The checkout is still pulled first, and the
+restart still goes through `uv run python -m paglets.cli ...`.
+
 ## Runtime API
 
 Participating hosts expose update metadata in `/health`:
