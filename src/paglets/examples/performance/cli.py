@@ -3,29 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from typing import Any
 
+from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
     select_reachable_entry_server,
 )
 from paglets.remote.client import HostClient
-from paglets.core.messages import Message
-from .agent import (
+from paglets.remote.proxy import PagletProxy
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+
+from .kernels import parse_size
+from .models import (
     DEFAULT_BENCHMARK_DURATION_SECONDS,
     DEFAULT_DISK_SIZE_BYTES,
     DEFAULT_LOCK_TIMEOUT_SECONDS,
     BenchmarkMetric,
     BenchmarkRequest,
     HostBenchmarkResult,
-    parse_size,
 )
-from paglets.remote.proxy import PagletProxy
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,15 +57,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=120.0, help="Seconds to wait for mesh benchmark replies")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
-    parser.add_argument("--duration", type=float, default=DEFAULT_BENCHMARK_DURATION_SECONDS, help="Seconds per CPU/memory kernel")
-    parser.add_argument("--disk-size", default=_format_size(DEFAULT_DISK_SIZE_BYTES), help="Temporary file size per tested volume")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
+    parser.add_argument(
+        "--duration", type=float, default=DEFAULT_BENCHMARK_DURATION_SECONDS, help="Seconds per CPU/memory kernel"
+    )
+    parser.add_argument(
+        "--disk-size", default=_format_size(DEFAULT_DISK_SIZE_BYTES), help="Temporary file size per tested volume"
+    )
     parser.add_argument("--workers", type=int, default=0, help="Multi-core worker count; default is logical CPU count")
     parser.add_argument("--path", action="append", default=[], help="Disk path to benchmark; repeat for multiple paths")
     parser.add_argument("--no-cpu", action="store_true", help="Skip CPU benchmarks")
     parser.add_argument("--no-memory", action="store_true", help="Skip memory benchmarks")
     parser.add_argument("--no-disk", action="store_true", help="Skip disk benchmarks")
-    parser.add_argument("--lock-timeout", type=float, default=DEFAULT_LOCK_TIMEOUT_SECONDS, help="Seconds to wait for local benchmark lock")
+    parser.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=DEFAULT_LOCK_TIMEOUT_SECONDS,
+        help="Seconds to wait for local benchmark lock",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print skipped disk targets and cleanup diagnostics")
     parser.add_argument("--debug", action="store_true", help="Print verbose benchmark diagnostics")
     return parser
@@ -115,14 +128,10 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
             if reply.get("done"):
                 return summary
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proxy.send(Message("cleanup"))
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             proxy.dispose()
-        except Exception:
-            pass
 
 
 def _print_text(summary: dict[str, Any], *, verbose: bool = False) -> None:

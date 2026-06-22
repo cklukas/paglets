@@ -2,12 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields, is_dataclass
 import importlib
 import inspect
-from pathlib import Path
 import sys
-from typing import Any, Iterator
+from collections.abc import Iterator
+from dataclasses import MISSING, dataclass, fields, is_dataclass
+from pathlib import Path
+from typing import Any
 
 from paglets.core.agent import Paglet
 from paglets.remote.admin import AgentDiscoveryConfig

@@ -5,9 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from paglets.core.agent import ACTIVE, Paglet, PagletState
-from paglets.core.itinerary import EXECUTE_ON_ARRIVAL, EXECUTE_ON_DEFAULT, EXECUTE_ON_DISPATCH, ItineraryAgentMixin, ItineraryTask, TaskItineraryPlan
-from paglets.runtime.host import Host
+from paglets.core.itinerary import (
+    EXECUTE_ON_ARRIVAL,
+    EXECUTE_ON_DEFAULT,
+    EXECUTE_ON_DISPATCH,
+    ItineraryAgentMixin,
+    ItineraryTask,
+    TaskItineraryPlan,
+)
 from paglets.core.messages import Message
+from paglets.runtime.host import Host
 
 try:
     from .support import local_hosts, run_importable_main
@@ -57,9 +64,7 @@ class CirculateAgent(ItineraryAgentMixin, Paglet[CirculateState]):
 
     def execute_itinerary_task(self, task: ItineraryTask, phase: str, event=None):
         if task.name == "record-host":
-            self.state.report.append(
-                f"task:{phase}:record-host:{self.context.name}:{self.context.address}"
-            )
+            self.state.report.append(f"task:{phase}:record-host:{self.context.name}:{self.context.address}")
         elif task.name == "count-proxies":
             count = len(self.context.get_proxies(ACTIVE))
             self.state.report.append(f"task:{phase}:active-proxies:{self.context.name}:{count}")

@@ -2,140 +2,39 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-import base64
-from dataclasses import dataclass, field
+import contextlib
 import json
-import os
-import statistics
 import threading
 import time
-from typing import Any
 import uuid
+from dataclasses import dataclass, field
+from typing import Any
 
 from paglets.core.agent import Paglet, PagletState, state_locked
-from paglets.remote.mesh import HostRef
 from paglets.core.messages import Message
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
-from paglets.remote.transfer import TransferTicket
 
-
-DEFAULT_CLOCK_PROBES = 5
-DEFAULT_DIGITS = 1
-DEFAULT_TIMEOUT_SECONDS = 600.0
-CONTINUE_DELAY_SECONDS = 0.1
-MESH_BENCHMARK_STORAGE_DIR = "mesh-benchmark"
-
-
-@dataclass(frozen=True, slots=True)
-class MeshBenchmarkRequest:
-    repeats: int = 1
-    payload_size_bytes: int = 0
-    include_self: bool = True
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
-    digits: int = DEFAULT_DIGITS
-    clock_probes: int = DEFAULT_CLOCK_PROBES
-
-
-@dataclass(frozen=True, slots=True)
-class MeshBenchmarkHost:
-    name: str
-    url: str
-
-
-@dataclass(frozen=True, slots=True)
-class MeshRouteEdge:
-    source_name: str
-    source_url: str
-    target_name: str
-    target_url: str
-    repeat: int
-    sequence: int
-
-
-@dataclass(frozen=True, slots=True)
-class ClockOffsetSample:
-    host_name: str
-    host_url: str
-    entry_host_name: str
-    entry_host_url: str
-    offset_seconds: float
-    rtt_seconds: float
-    sampled_at: float
-
-
-@dataclass(frozen=True, slots=True)
-class ClockOffsetSummary:
-    host_name: str
-    host_url: str
-    entry_host_name: str
-    entry_host_url: str
-    sample_count: int
-    median_offset_seconds: float
-    mean_offset_seconds: float
-    best_rtt_offset_seconds: float
-    best_rtt_seconds: float
-
-
-@dataclass(frozen=True, slots=True)
-class MessageTimingSummary:
-    host_name: str
-    host_url: str
-    entry_host_name: str
-    entry_host_url: str
-    sample_count: int
-    median_rtt_seconds: float
-    mean_rtt_seconds: float
-    best_rtt_seconds: float
-    worst_rtt_seconds: float
-
-
-@dataclass(frozen=True, slots=True)
-class PayloadTransferSpeedSummary:
-    host_name: str
-    host_url: str
-    relation: str
-    sample_count: int
-    payload_bytes: int
-    elapsed_seconds: float
-    bytes_per_second: float
-
-
-@dataclass(frozen=True, slots=True)
-class MeshTravelRecord:
-    run_id: str
-    sequence: int
-    repeat: int
-    source_name: str
-    source_url: str
-    target_name: str
-    target_url: str
-    source_wall_start: float
-    source_wall_end: float
-    elapsed_seconds: float
-    payload_size_bytes: int
-    clock_offset: ClockOffsetSummary | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MeshBenchmarkSummary:
-    run_id: str
-    entry_host_name: str
-    entry_host_url: str
-    hosts: list[MeshBenchmarkHost] = field(default_factory=list)
-    records: list[MeshTravelRecord] = field(default_factory=list)
-    matrix_seconds: dict[str, dict[str, float]] = field(default_factory=dict)
-    clock_offsets: list[ClockOffsetSummary] = field(default_factory=list)
-    clock_samples: list[ClockOffsetSample] = field(default_factory=list)
-    message_timings: list[MessageTimingSummary] = field(default_factory=list)
-    payload_transfer_speeds: list[PayloadTransferSpeedSummary] = field(default_factory=list)
-    movement_count: int = 0
-    measured_round_trip_seconds: float = 0.0
-    setup_seconds: float = 0.0
-    total_elapsed_seconds: float = 0.0
-    measured_overhead_seconds: float = 0.0
-    overall_benchmark_seconds: float = 0.0
-    average_elapsed_seconds: float = 0.0
-    errors: dict[str, str] = field(default_factory=dict)
+from .analysis import (
+    _ordered_hosts,
+    _read_record_list,
+    _storage_path,
+    benchmark_transfer_ticket,
+    build_route_edges,
+    build_summary,
+    entry_time_for_local_reference,
+    local_minus_entry_offset,
+    normalize_request,
+    random_ascii,
+    summarize_clock_samples,
+)
+from .models import (
+    CONTINUE_DELAY_SECONDS,
+    ClockOffsetSample,
+    MeshBenchmarkHost,
+    MeshBenchmarkRequest,
+    MeshRouteEdge,
+    MeshTravelRecord,
+)
 
 
 @dataclass
@@ -561,10 +460,8 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
         coordinator = self.context.get_proxy(self.state.coordinator_agent_id, self.state.coordinator_host_url)
         if coordinator is not None:
             coordinator.send(Message("traveler_done", {"summary": dataclass_to_wire(summary)}))
-        try:
+        with contextlib.suppress(Exception):
             self.context.host.dispose(self.agent_id)
-        except Exception:
-            pass
 
     def _record_local_error(self, error: str) -> None:
         with self.locked_state() as state:
@@ -580,281 +477,3 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
                 coordinator.send(Message("traveler_error", {"host": self.context.name, "error": error}))
         except Exception:
             pass
-
-
-def normalize_request(request: MeshBenchmarkRequest) -> MeshBenchmarkRequest:
-    return MeshBenchmarkRequest(
-        repeats=max(1, int(request.repeats)),
-        payload_size_bytes=max(0, int(request.payload_size_bytes)),
-        include_self=bool(request.include_self),
-        timeout_seconds=max(0.1, float(request.timeout_seconds)),
-        digits=max(0, int(request.digits)),
-        clock_probes=max(1, int(request.clock_probes)),
-    )
-
-
-def benchmark_transfer_ticket(target_url: str, request: MeshBenchmarkRequest) -> TransferTicket:
-    return TransferTicket(destination=target_url, timeout=max(0.1, float(request.timeout_seconds)))
-
-
-def build_route_edges(
-    hosts: list[MeshBenchmarkHost],
-    *,
-    repeats: int,
-    include_self: bool,
-) -> list[MeshRouteEdge]:
-    if not hosts:
-        return []
-    route = _eulerian_vertex_route([host.name for host in hosts], start=hosts[0].name, include_self=include_self)
-    by_name = {host.name: host for host in hosts}
-    edges: list[MeshRouteEdge] = []
-    sequence = 0
-    for repeat in range(max(1, repeats)):
-        for source_name, target_name in zip(route, route[1:]):
-            if not include_self and source_name == target_name:
-                continue
-            source = by_name[source_name]
-            target = by_name[target_name]
-            edges.append(
-                MeshRouteEdge(
-                    source_name=source.name,
-                    source_url=source.url,
-                    target_name=target.name,
-                    target_url=target.url,
-                    repeat=repeat,
-                    sequence=sequence,
-                )
-            )
-            sequence += 1
-    return edges
-
-
-def build_summary(
-    *,
-    run_id: str,
-    entry_host: MeshBenchmarkHost,
-    hosts: list[MeshBenchmarkHost],
-    records: list[MeshTravelRecord],
-    clock_samples: list[ClockOffsetSample],
-    measured_round_trip_seconds: float,
-    setup_seconds: float = 0.0,
-    overall_benchmark_seconds: float | None = None,
-    errors: dict[str, str] | None = None,
-) -> MeshBenchmarkSummary:
-    matrix = aggregate_matrix(records, hosts)
-    offsets = aggregate_clock_offsets(clock_samples)
-    message_timings = aggregate_message_timings(clock_samples)
-    payload_transfer_speeds = aggregate_payload_transfer_speeds(records, hosts)
-    movement_count = len(records)
-    total_elapsed = sum(record.elapsed_seconds for record in records)
-    average = statistics.fmean(record.elapsed_seconds for record in records) if records else 0.0
-    return MeshBenchmarkSummary(
-        run_id=run_id,
-        entry_host_name=entry_host.name,
-        entry_host_url=entry_host.url,
-        hosts=hosts,
-        records=sorted(records, key=lambda record: record.sequence),
-        matrix_seconds=matrix,
-        clock_offsets=offsets,
-        clock_samples=clock_samples,
-        message_timings=message_timings,
-        payload_transfer_speeds=payload_transfer_speeds,
-        movement_count=movement_count,
-        measured_round_trip_seconds=measured_round_trip_seconds,
-        setup_seconds=setup_seconds,
-        total_elapsed_seconds=total_elapsed,
-        measured_overhead_seconds=max(0.0, measured_round_trip_seconds - total_elapsed),
-        overall_benchmark_seconds=(
-            measured_round_trip_seconds if overall_benchmark_seconds is None else overall_benchmark_seconds
-        ),
-        average_elapsed_seconds=average,
-        errors=errors or {},
-    )
-
-
-def aggregate_matrix(records: list[MeshTravelRecord], hosts: list[MeshBenchmarkHost]) -> dict[str, dict[str, float]]:
-    values: dict[tuple[str, str], list[float]] = {}
-    for record in records:
-        values.setdefault((record.source_name, record.target_name), []).append(record.elapsed_seconds)
-    matrix: dict[str, dict[str, float]] = {host.name: {} for host in hosts}
-    for source in hosts:
-        row = matrix[source.name]
-        for target in hosts:
-            samples = values.get((source.name, target.name), [])
-            if samples:
-                row[target.name] = statistics.fmean(samples)
-    return matrix
-
-
-def aggregate_clock_offsets(samples: list[ClockOffsetSample]) -> list[ClockOffsetSummary]:
-    grouped: dict[str, list[ClockOffsetSample]] = {}
-    for sample in samples:
-        grouped.setdefault(sample.host_name, []).append(sample)
-    summaries: list[ClockOffsetSummary] = []
-    for host_name, host_samples in sorted(grouped.items()):
-        best = min(host_samples, key=lambda sample: sample.rtt_seconds)
-        summaries.append(
-            ClockOffsetSummary(
-                host_name=host_name,
-                host_url=best.host_url,
-                entry_host_name=best.entry_host_name,
-                entry_host_url=best.entry_host_url,
-                sample_count=len(host_samples),
-                median_offset_seconds=statistics.median(sample.offset_seconds for sample in host_samples),
-                mean_offset_seconds=statistics.fmean(sample.offset_seconds for sample in host_samples),
-                best_rtt_offset_seconds=best.offset_seconds,
-                best_rtt_seconds=best.rtt_seconds,
-            )
-        )
-    return summaries
-
-
-def aggregate_message_timings(samples: list[ClockOffsetSample]) -> list[MessageTimingSummary]:
-    grouped: dict[str, list[ClockOffsetSample]] = {}
-    for sample in samples:
-        grouped.setdefault(sample.host_name, []).append(sample)
-    summaries: list[MessageTimingSummary] = []
-    for host_name, host_samples in sorted(grouped.items()):
-        best = min(host_samples, key=lambda sample: sample.rtt_seconds)
-        worst = max(host_samples, key=lambda sample: sample.rtt_seconds)
-        summaries.append(
-            MessageTimingSummary(
-                host_name=host_name,
-                host_url=best.host_url,
-                entry_host_name=best.entry_host_name,
-                entry_host_url=best.entry_host_url,
-                sample_count=len(host_samples),
-                median_rtt_seconds=statistics.median(sample.rtt_seconds for sample in host_samples),
-                mean_rtt_seconds=statistics.fmean(sample.rtt_seconds for sample in host_samples),
-                best_rtt_seconds=best.rtt_seconds,
-                worst_rtt_seconds=worst.rtt_seconds,
-            )
-        )
-    return summaries
-
-
-def aggregate_payload_transfer_speeds(
-    records: list[MeshTravelRecord],
-    hosts: list[MeshBenchmarkHost],
-) -> list[PayloadTransferSpeedSummary]:
-    grouped: dict[tuple[str, str], list[MeshTravelRecord]] = {}
-    for record in records:
-        if record.payload_size_bytes <= 0 or record.elapsed_seconds <= 0:
-            continue
-        relation = "self" if record.source_url.rstrip("/") == record.target_url.rstrip("/") else "other"
-        grouped.setdefault((record.target_name, relation), []).append(record)
-
-    by_name = {host.name: host for host in hosts}
-    summaries: list[PayloadTransferSpeedSummary] = []
-    for (host_name, relation), host_records in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
-        payload_bytes = sum(max(0, int(record.payload_size_bytes)) for record in host_records)
-        elapsed_seconds = sum(max(0.0, float(record.elapsed_seconds)) for record in host_records)
-        if elapsed_seconds <= 0:
-            continue
-        host = by_name.get(host_name, MeshBenchmarkHost(host_name, host_records[0].target_url))
-        summaries.append(
-            PayloadTransferSpeedSummary(
-                host_name=host.name,
-                host_url=host.url,
-                relation=relation,
-                sample_count=len(host_records),
-                payload_bytes=payload_bytes,
-                elapsed_seconds=elapsed_seconds,
-                bytes_per_second=payload_bytes / elapsed_seconds,
-            )
-        )
-    return summaries
-
-
-def summarize_clock_samples(samples: list[ClockOffsetSample]) -> ClockOffsetSummary | None:
-    return aggregate_clock_offsets(samples)[0] if samples else None
-
-
-def entry_time_for_local_reference(local_reference: float, samples: list[ClockOffsetSample]) -> float:
-    if not samples:
-        return local_reference
-    best = min(samples, key=lambda sample: sample.rtt_seconds)
-    return local_reference - best.offset_seconds
-
-
-def local_minus_entry_offset(
-    local_send: float,
-    local_receive: float,
-    entry_receive: float,
-    entry_send: float,
-) -> float:
-    return ((local_send - entry_receive) + (local_receive - entry_send)) / 2.0
-
-
-def random_ascii(size: int) -> str:
-    if size <= 0:
-        return ""
-    random_bytes = os.urandom((size * 3 + 3) // 4)
-    return base64.b64encode(random_bytes).decode("ascii")[:size]
-
-
-def parse_size(value: str) -> int:
-    text = value.strip()
-    if not text:
-        raise ValueError("size cannot be empty")
-    unit = text[-1].upper()
-    if unit in {"K", "M", "G"}:
-        number = text[:-1]
-        multiplier = {"K": 1024, "M": 1024**2, "G": 1024**3}[unit]
-    else:
-        number = text[:-1] if unit == "B" else text
-        multiplier = 1
-    try:
-        amount = float(number)
-    except ValueError as exc:
-        raise ValueError(f"invalid size {value!r}") from exc
-    if amount < 0:
-        raise ValueError("size must be non-negative")
-    return int(amount * multiplier)
-
-
-def _eulerian_vertex_route(host_names: list[str], *, start: str, include_self: bool) -> list[str]:
-    adjacency: dict[str, list[str]] = {}
-    for source in sorted(host_names, reverse=True):
-        targets = [target for target in sorted(host_names, reverse=True) if include_self or target != source]
-        adjacency[source] = targets
-    stack = [start]
-    circuit: list[str] = []
-    while stack:
-        vertex = stack[-1]
-        targets = adjacency.get(vertex, [])
-        if targets:
-            stack.append(targets.pop())
-        else:
-            circuit.append(stack.pop())
-    return list(reversed(circuit))
-
-
-def _ordered_hosts(hosts: list[HostRef], *, entry_name: str, entry_url: str) -> list[MeshBenchmarkHost]:
-    seen: set[str] = set()
-    ordered: list[MeshBenchmarkHost] = [MeshBenchmarkHost(entry_name, entry_url.rstrip("/"))]
-    seen.add(entry_url.rstrip("/"))
-    for host in sorted(hosts, key=lambda item: item.name):
-        url = host.url.rstrip("/")
-        if url in seen:
-            continue
-        ordered.append(MeshBenchmarkHost(host.name, url))
-        seen.add(url)
-    return ordered
-
-
-def _storage_path(run_id: str) -> str:
-    return f"{MESH_BENCHMARK_STORAGE_DIR}/{run_id}.json"
-
-
-def _read_record_list(storage: Any, path: str) -> list[Any]:
-    try:
-        raw = storage.read_bytes(path).decode("utf-8")
-        records = json.loads(raw)
-        return records if isinstance(records, list) else []
-    except FileNotFoundError:
-        return []
-    except Exception as exc:
-        if "No such file or directory" in str(exc):
-            return []
-        raise

@@ -2,12 +2,12 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
-from paglets.runtime.envelope import PagletEnvelope
 from paglets.core.messages import Message
+from paglets.runtime.envelope import PagletEnvelope
 
 
 @dataclass(slots=True)
@@ -20,7 +20,7 @@ class DeactivationPolicy:
     activate_at: float | None = None
 
     @classmethod
-    def after(cls, seconds: float, **kwargs: Any) -> "DeactivationPolicy":
+    def after(cls, seconds: float, **kwargs: Any) -> DeactivationPolicy:
         return cls(activate_at=time.time() + seconds, **kwargs)
 
     def to_wire(self) -> dict[str, Any]:
@@ -32,7 +32,7 @@ class DeactivationPolicy:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any] | None) -> "DeactivationPolicy":
+    def from_wire(cls, payload: dict[str, Any] | None) -> DeactivationPolicy:
         payload = payload or {}
         activate_at = payload.get("activate_at")
         return cls(
@@ -61,7 +61,7 @@ class DeactivationRequest:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any] | None) -> "DeactivationRequest":
+    def from_wire(cls, payload: dict[str, Any] | None) -> DeactivationRequest:
         payload = payload or {}
         policy_payload = payload.get("policy")
         return cls(
@@ -88,7 +88,7 @@ class QueuedMessage:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "QueuedMessage":
+    def from_wire(cls, payload: dict[str, Any]) -> QueuedMessage:
         return cls(
             message=Message.from_wire(payload["message"]),
             oneway=bool(payload.get("oneway", False)),
@@ -121,14 +121,11 @@ class InactiveRecord:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "InactiveRecord":
+    def from_wire(cls, payload: dict[str, Any]) -> InactiveRecord:
         return cls(
             envelope=PagletEnvelope.from_wire(payload["envelope"]),
             policy=DeactivationPolicy.from_wire(payload.get("policy")),
             request=DeactivationRequest.from_wire(payload.get("request")),
             deactivated_at=float(payload.get("deactivated_at", time.time())),
-            queued_messages=[
-                QueuedMessage.from_wire(item)
-                for item in payload.get("queued_messages", [])
-            ],
+            queued_messages=[QueuedMessage.from_wire(item) for item in payload.get("queued_messages", [])],
         )

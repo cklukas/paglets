@@ -3,21 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 
+from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
     select_reachable_entry_server,
 )
 from paglets.remote.client import HostClient
-from paglets.core.messages import Message
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.serde import dataclass_to_wire
-from .agent import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
 
+from .models import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
 
@@ -65,8 +66,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--start", type=int, default=0, help="Zero-based decimal digit position after the point")
     parser.add_argument("--digits", type=int, default=16, help="Number of decimal digits to compute")
     parser.add_argument("--batch-size", type=int, default=1, help="Chudnovsky terms per worker batch")
-    parser.add_argument("--max-in-flight", type=int, default=0, help="Global in-flight batch cap; 0 uses free load slots")
-    parser.add_argument("--max-workers-per-host", type=int, default=0, help="Per-host worker cap; 0 uses free load slots")
+    parser.add_argument(
+        "--max-in-flight", type=int, default=0, help="Global in-flight batch cap; 0 uses free load slots"
+    )
+    parser.add_argument(
+        "--max-workers-per-host", type=int, default=0, help="Per-host worker cap; 0 uses free load slots"
+    )
     parser.add_argument("--timeout", type=float, default=0.0, help="Whole-job timeout in seconds; 0 disables it")
     parser.add_argument(
         "--stream-chunk-size",
@@ -81,11 +86,15 @@ def _parser() -> argparse.ArgumentParser:
         help="HTTP request timeout in seconds for coordinator calls",
     )
     parser.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
-    parser.add_argument("--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent (unused for scheduling)")
+    parser.add_argument(
+        "--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent (unused for scheduling)"
+    )
     parser.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
     parser.add_argument("--min-work-free", type=_parse_size, default=0, help="Minimum free work storage, e.g. 1G")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
     return parser
 
 
@@ -133,7 +142,7 @@ def _run_stream(
                         "after_digits": cursor,
                         "wait_timeout": 0.5,
                         "max_digits": stream_chunk_size,
-                    }
+                    },
                 )
             )
             summary = dict(reply.get("summary") or {})
@@ -164,14 +173,10 @@ def _create_coordinator(entry: ServerRef, *, client: HostClient) -> PagletProxy:
 
 
 def _cleanup_coordinator(proxy: PagletProxy) -> None:
-    try:
+    with contextlib.suppress(Exception):
         proxy.send(Message("cleanup"))
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         proxy.dispose()
-    except Exception:
-        pass
 
 
 def _print_stream_header(request: PiComputeRequest) -> None:

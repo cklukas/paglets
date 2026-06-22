@@ -12,7 +12,8 @@ the behavior you need; the root `paglets` package and topic package
 
 `paglets.runtime`
 : Host execution internals: host supervision, child-process control, mailbox
-  delivery, movement envelopes, and resource cleanup.
+  delivery, movement envelopes, HTTP routing, relay delivery, bind-address
+  resolution, and resource cleanup.
 
 `paglets.remote`
 : Remote communication: HTTP client, proxies, transfer tickets, transport
@@ -77,4 +78,3 @@ import Message` are intentionally unsupported.
 - [Persistence](persistence.md), [Services](services.md),
   [Serialization](serialization.md), [Configuration](configuration.md), and
   [Tooling](tooling.md) cover supporting subsystems.
-

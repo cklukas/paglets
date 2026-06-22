@@ -16,9 +16,24 @@ delivery, transfer envelopes, and runtime resource cleanup.
 ## Main Modules
 
 `paglets.runtime.host`
-: The orchestration center. `Host` owns active child controllers, inactive
-  records, service records, storage roots, mesh state, relay queues, HTTP
-  handlers, authentication, placement, and lifecycle operations.
+: The orchestration center. `Host` is the public runtime facade and owns active
+  child controllers, inactive records, service records, storage roots, mesh
+  state, authentication, placement, and lifecycle operations.
+
+`paglets.runtime.http_api`
+: Contains the host HTTP server and request handler. It maps endpoint shape,
+  authentication, JSON control payloads, binary movement payloads, admin calls,
+  and relay HTTP endpoints onto `Host` methods without owning host state.
+
+`paglets.runtime.relay`
+: Contains relay/connect-mode state, relay delivery queues, polling,
+  acknowledgements, local relay URL submission, and client registration loops.
+  `Host` mixes this behavior in while keeping the public facade at
+  `paglets.runtime.host.Host`.
+
+`paglets.runtime.binding`
+: Resolves bind hosts, public host names, auto LAN addresses, and
+  `--bind-public` behavior for the host CLI/runtime boundary.
 
 `paglets.runtime.process_runtime`
 : Implements the parent/child process protocol. The parent sends lifecycle and
@@ -47,6 +62,11 @@ Same-host movement bypasses HTTP and delivers the envelope directly to the
 local host instance. Different host processes on the same machine still use the
 HTTP transport path over loopback.
 
+HTTP routing and relay mechanics deliberately live outside `host.py`; they
+delegate into the host facade and do not define a second public runtime object.
+This keeps endpoint behavior stable while making the implementation easier to
+read and test.
+
 The child process must be able to import the paglet class and state class by
 qualified name. Classes defined in `__main__`, REPL sessions, or temporary
 scripts are not valid paglet classes.
@@ -54,6 +74,12 @@ scripts are not valid paglet classes.
 ## API Reference
 
 ::: paglets.runtime.host
+
+::: paglets.runtime.http_api
+
+::: paglets.runtime.relay
+
+::: paglets.runtime.binding
 
 ::: paglets.runtime.process_runtime
 
@@ -68,4 +94,3 @@ scripts are not valid paglet classes.
 - [Core](core.md) covers the paglet programming model.
 - [Remote](remote.md) covers HTTP transport and proxies.
 - [Persistence](persistence.md) covers inactive records and storage.
-

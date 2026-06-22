@@ -2,13 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import socket
 import time
+from dataclasses import dataclass, field
 
-from paglets.runtime.host import Host
-from paglets.core.messages import Message
 from paglets.core.agent import Paglet, PagletState
+from paglets.core.messages import Message
+from paglets.runtime.host import Host
 
 try:
     from .support import run_importable_main

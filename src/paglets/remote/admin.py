@@ -2,21 +2,20 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import ipaddress
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import ipaddress
 from pathlib import Path
-import socket
 from time import perf_counter
 from typing import Any
 from urllib.parse import urlencode
 
-from paglets.remote.client import HostClient
 from paglets.core.errors import RemoteHostError
-from paglets.remote.mesh import HostRef, MESH_MULTICAST_GROUP, MESH_MULTICAST_PORT, decode_mesh_beacon
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope, enum_from_wire, require_enum
-
+from paglets.remote.client import HostClient
+from paglets.remote.mesh import MESH_MULTICAST_GROUP, MESH_MULTICAST_PORT, HostRef, decode_mesh_beacon
 
 DEFAULT_LAN_DISCOVERY_TIMEOUT_SECONDS = 0.25
 DEFAULT_LAN_DISCOVERY_WORKERS = 64
@@ -153,13 +152,9 @@ def _ambient_entry_candidates() -> list[ServerRef]:
     candidates: list[ServerRef] = []
     lan_host = detect_lan_host()
     for port in sorted(ports):
-        candidates.append(
-            ServerRef("local", f"http://127.0.0.1:{port}", enabled=True, local_start=True)
-        )
+        candidates.append(ServerRef("local", f"http://127.0.0.1:{port}", enabled=True, local_start=True))
         if not lan_host.startswith("127."):
-            candidates.append(
-                ServerRef("local-lan", f"http://{lan_host}:{port}", enabled=True, local_start=False)
-            )
+            candidates.append(ServerRef("local-lan", f"http://{lan_host}:{port}", enabled=True, local_start=False))
     candidates.extend(discover_mesh_entry_servers(timeout=0.75))
     candidates.extend(discover_lan_entry_servers(ports=ports))
     return candidates
@@ -216,12 +211,7 @@ def discover_lan_entry_servers(
     if not probe_ports:
         return []
 
-    targets = [
-        (str(candidate), port)
-        for candidate in network.hosts()
-        if candidate != address
-        for port in probe_ports
-    ]
+    targets = [(str(candidate), port) for candidate in network.hosts() if candidate != address for port in probe_ports]
     if not targets:
         return []
 

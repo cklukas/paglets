@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import http.client
 import pickle
-from multiprocessing import resource_tracker, shared_memory
 import threading
-from typing import Any
 import uuid
+from multiprocessing import resource_tracker, shared_memory
+from typing import Any
 
 from paglets.core.errors import HostError
-
 
 PICKLE_CONTENT_TYPE = "application/x-paglets-pickle"
 LOCAL_PICKLE_CHUNK_BYTES = 1024 * 1024
@@ -72,10 +72,8 @@ def release_local_pickle_sender(stream_or_token: dict[str, Any] | str) -> None:
     with _LOCAL_PICKLE_STREAMS_LOCK:
         handles = _LOCAL_PICKLE_STREAMS.pop(token, [])
     for handle in handles:
-        try:
+        with contextlib.suppress(Exception):
             handle.close()
-        except Exception:
-            pass
 
 
 def receive_local_pickle(stream: dict[str, Any]) -> Any:
@@ -309,10 +307,8 @@ class SharedMemoryPickleWriter:
 
     def _close_handles(self) -> None:
         for handle in self._handles:
-            try:
+            with contextlib.suppress(Exception):
                 handle.close()
-            except Exception:
-                pass
         self._handles = []
         self._current = None
 
@@ -330,8 +326,7 @@ class SharedMemoryPickleReader:
         self._closed = False
         try:
             self._handles = [
-                shared_memory.SharedMemory(name=str(segment["name"]), create=False)
-                for segment in self._segments_meta
+                shared_memory.SharedMemory(name=str(segment["name"]), create=False) for segment in self._segments_meta
             ]
         except Exception:
             self.close(unlink=False)
@@ -388,16 +383,12 @@ class SharedMemoryPickleReader:
                     pass
                 except Exception:
                     pass
-            try:
+            with contextlib.suppress(Exception):
                 handle.close()
-            except Exception:
-                pass
         self._handles = []
         self._closed = True
 
 
 def _unregister_shared_memory(handle: shared_memory.SharedMemory) -> None:
-    try:
+    with contextlib.suppress(Exception):
         resource_tracker.unregister(handle._name, "shared_memory")
-    except Exception:
-        pass

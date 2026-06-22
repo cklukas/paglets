@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
-from pathlib import Path
+import contextlib
 import shutil
 import threading
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from paglets.core.messages import Message
 from paglets.core.agent import Paglet, PagletState
+from paglets.core.messages import Message
 
 try:
     from .support import local_hosts, run_importable_main
@@ -76,10 +77,8 @@ class DiskSurveyPaglet(Paglet[DiskSurveyState]):
                 )
             )
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self.context.host.dispose(self.agent_id)
-            except Exception:
-                pass
 
     def handle_message(self, message: Message):
         if message.kind == "survey":
@@ -220,9 +219,7 @@ def volume_paths() -> list[Path]:
         paths.update(
             path
             for path in volumes_dir.iterdir()
-            if path.is_dir()
-            and not path.name.startswith(".")
-            and not path.name.startswith("com.apple.")
+            if path.is_dir() and not path.name.startswith(".") and not path.name.startswith("com.apple.")
         )
     proc_mounts = Path("/proc/mounts")
     if proc_mounts.exists():

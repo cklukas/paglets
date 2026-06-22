@@ -2,12 +2,12 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import time
-from typing import Any, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
-from paglets.remote.client import HostClient
 from paglets.core.runtime_values import ResidentLifecycle, ServiceScope, require_enum
+from paglets.remote.client import HostClient
 from paglets.services.contracts import ServiceContract
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -42,14 +42,14 @@ class ResidentServiceSpec:
 class ServiceLease:
     """TTL-backed lease that keeps a managed resident service active."""
 
-    handle: "ServiceHandle"
+    handle: ServiceHandle
     lease_id: str
     host_url: str
     expires_at: float
     client: HostClient = field(default_factory=HostClient)
     _released: bool = False
 
-    def __enter__(self) -> "ServiceHandle":
+    def __enter__(self) -> ServiceHandle:
         return self.handle
 
     def __exit__(self, exc_type, exc, tb) -> None:

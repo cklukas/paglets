@@ -2,13 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from contextlib import contextmanager
 import importlib
-from pathlib import Path
 import socket
 import sys
 import tempfile
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 from paglets.runtime.host import Host
 

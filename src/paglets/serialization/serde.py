@@ -2,10 +2,10 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
-from enum import Enum
 import importlib
 import types
+from dataclasses import fields, is_dataclass
+from enum import Enum
 from pathlib import Path, PurePath
 from typing import Any, get_args, get_origin, get_type_hints
 
@@ -22,9 +22,7 @@ def qualified_name(obj: type | object) -> str:
     if not module or not qualname:
         raise SerializationError(f"Cannot qualify {obj!r}")
     if "<locals>" in qualname:
-        raise SerializationError(
-            f"{module}:{qualname} is local and cannot be imported on another host"
-        )
+        raise SerializationError(f"{module}:{qualname} is local and cannot be imported on another host")
     return f"{module}:{qualname}"
 
 
@@ -148,10 +146,7 @@ def _from_wire_value(annotation: Any, value: Any) -> Any:
     if origin is dict:
         key_type = args[0] if args else str
         value_type = args[1] if len(args) > 1 else Any
-        return {
-            _coerce_key(key_type, key): _from_wire_value(value_type, item)
-            for key, item in value.items()
-        }
+        return {_coerce_key(key_type, key): _from_wire_value(value_type, item) for key, item in value.items()}
 
     if isinstance(annotation, type):
         if is_dataclass(annotation):

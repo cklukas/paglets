@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 from paglets.core.errors import SerializationError
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 
 
 @dataclass

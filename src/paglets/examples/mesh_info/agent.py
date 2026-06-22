@@ -2,19 +2,19 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
-from paglets.services.resident import ResidentServiceSpec
 from paglets.core.runtime_values import ResidentLifecycle, ServiceScope
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
 from paglets.services.contracts import ServiceContract, ServiceOperation
-from ..system_info import GET_DISK, GET_LOAD, GET_SUMMARY, SERVER_INFO, DiskRequest, LoadRequest
+from paglets.services.resident import ResidentServiceSpec
 
+from ..system_info import GET_DISK, GET_LOAD, GET_SUMMARY, SERVER_INFO, DiskRequest, LoadRequest
 
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 5.0
 DEFAULT_GOSSIP_INTERVAL_SECONDS = 2.0
@@ -326,7 +326,9 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
         except Exception as exc:
             errors.append(f"load: {exc}")
         try:
-            summary = self.require_contract(SERVER_INFO, operation=GET_SUMMARY, scope=ServiceScope.LOCAL).call(GET_SUMMARY)
+            summary = self.require_contract(SERVER_INFO, operation=GET_SUMMARY, scope=ServiceScope.LOCAL).call(
+                GET_SUMMARY
+            )
         except Exception as exc:
             errors.append(f"summary: {exc}")
         work_path = self.work_dir()

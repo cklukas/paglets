@@ -43,7 +43,7 @@ class PagletEnvelope:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "PagletEnvelope":
+    def from_wire(cls, payload: dict[str, Any]) -> PagletEnvelope:
         return cls(
             kind=enum_from_wire(payload["kind"], EnvelopeKind, "kind"),
             agent_id=payload["agent_id"],

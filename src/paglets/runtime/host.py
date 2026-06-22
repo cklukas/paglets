@@ -2,41 +2,42 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field, is_dataclass, replace
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
-import hmac
+import contextlib
 import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
-from pathlib import Path
 import queue
 import shutil
-import socket
 import threading
 import time
 import uuid
-from typing import Any, Callable, Sequence
-from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, is_dataclass, replace
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlencode, urlparse
 
 import paglets.tooling.git_update as git_update
-from paglets.core.agent import ACTIVE, INACTIVE, Paglet, PagletState
-from paglets.remote.client import HostClient
-from paglets.core.context_events import ContextEvent, ContextEventLog, ContextListener
-from paglets.runtime.envelope import PagletEnvelope
-from paglets.core.errors import AuthenticationError, ForbiddenError, HostError, InvalidAgentError, NotHandledError, PagletCrashedError, PagletError, PagletInactiveError, RemoteHostError, ServiceNotFoundError, TransferError
-from paglets.core.events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
-from paglets.runtime.mailbox import MessageMailbox
-from paglets.remote.mesh import HostRef, MeshRegistry
-from paglets.core.messages import DEACTIVATE, UNQUEUED_PRIORITY, Message, ReplySet
-from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord, QueuedMessage
-from paglets.runtime.process_runtime import ChildProcessController, make_child_config
-from paglets.remote.proxy import PagletProxy
-from paglets.remote.references import PagletProxyRef
-from paglets.services.resident import (
-    DEFAULT_SERVICE_LEASE_TTL_SECONDS,
-    RESIDENT_SERVICE_METADATA_KEY,
-    ServiceLease,
+from paglets.config.startup import (
+    LaunchConfig,
+    LaunchConfigSyncResult,
+    ResolvedResidentService,
+    resolve_resident_service,
+    resolve_startup_agent,
 )
+from paglets.core.agent import ACTIVE, INACTIVE, Paglet, PagletState
+from paglets.core.context_events import ContextEvent, ContextEventLog, ContextListener
+from paglets.core.errors import (
+    HostError,
+    InvalidAgentError,
+    PagletCrashedError,
+    PagletError,
+    PagletInactiveError,
+    RemoteHostError,
+    ServiceNotFoundError,
+    TransferError,
+)
+from paglets.core.events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
+from paglets.core.messages import DEACTIVATE, UNQUEUED_PRIORITY, Message, ReplySet
 from paglets.core.runtime_values import (
     ArrivalMode,
     EnvelopeKind,
@@ -46,13 +47,30 @@ from paglets.core.runtime_values import (
     enum_from_wire,
     require_enum,
 )
+from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord, QueuedMessage
+from paglets.persistence.storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES, ManagedStorage
+from paglets.remote.client import HostClient
+from paglets.remote.mesh import HostRef, MeshRegistry
+from paglets.remote.proxy import PagletProxy
+from paglets.remote.references import PagletProxyRef
+from paglets.remote.transfer import TransferTicket
+from paglets.remote.transport import json_safe
+from paglets.runtime.binding import _bind_host_specs, _resolve_bind_hosts, _resolve_public_host
+from paglets.runtime.envelope import PagletEnvelope
+from paglets.runtime.http_api import PagletHTTPServer as _PagletHTTPServer
+from paglets.runtime.http_api import RequestHandler as _RequestHandler
+from paglets.runtime.mailbox import MessageMailbox
+from paglets.runtime.process_runtime import ChildProcessController, make_child_config
+from paglets.runtime.relay import RelayDelivery as _RelayDelivery
+from paglets.runtime.relay import RelayMixin, _is_relay_transport_url
+from paglets.runtime.relay import RelayNode as _RelayNode
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 from paglets.services.contracts import ServiceContract, ServiceHandle, ServiceRecord, ServiceRegistry
-from paglets.config.startup import LaunchConfig, LaunchConfigSyncResult, ResolvedResidentService, resolve_resident_service, resolve_startup_agent
-from paglets.persistence.storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES, ManagedStorage
-from paglets.remote.transfer import TransferTicket
-from paglets.remote.transport import PICKLE_CONTENT_TYPE, json_safe, load_http_pickle_payload
-
+from paglets.services.resident import (
+    DEFAULT_SERVICE_LEASE_TTL_SECONDS,
+    RESIDENT_SERVICE_METADATA_KEY,
+    ServiceLease,
+)
 
 HOST_CAPABILITIES = [
     "agents:list",
@@ -88,61 +106,6 @@ RELAY_QUEUE_LIMIT = 1024
 DEFAULT_PERSISTENCE_ROOT = Path.home() / ".paglets" / "hosts"
 
 
-def _resolve_bind_host(host: str) -> str:
-    value = str(host).strip()
-    if value.casefold() == "auto":
-        return _auto_lan_host()
-    return value
-
-
-def _bind_host_specs(host: str | Sequence[str]) -> list[str]:
-    values = [host] if isinstance(host, str) else list(host)
-    specs = [str(value).strip() for value in values if str(value).strip()]
-    if not specs:
-        raise ValueError("at least one bind host is required")
-    return specs
-
-
-def _resolve_bind_hosts(host: str | Sequence[str]) -> list[str]:
-    values = _bind_host_specs(host)
-    resolved: list[str] = []
-    for value in values:
-        bind_host = _resolve_bind_host(value)
-        if bind_host not in resolved:
-            resolved.append(bind_host)
-    return resolved
-
-
-def _resolve_public_host(bind_host: str) -> str:
-    if bind_host in {"0.0.0.0", ""}:
-        return _auto_lan_host()
-    return bind_host
-
-
-def _auto_lan_host() -> str:
-    """Return the local IP used for outbound LAN/default-route traffic."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            address = sock.getsockname()[0]
-            if address and not address.startswith("127."):
-                return address
-    except OSError:
-        pass
-
-    try:
-        hostname = socket.gethostname()
-        for family, _type, _proto, _canonname, sockaddr in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            if family != socket.AF_INET:
-                continue
-            address = sockaddr[0]
-            if address and not address.startswith("127."):
-                return address
-    except OSError:
-        pass
-    return "127.0.0.1"
-
-
 @dataclass(slots=True)
 class _ManagedResidentService:
     agent_cls: type[Paglet]
@@ -160,30 +123,7 @@ class _ManagedResidentService:
     last_used: float = field(default_factory=time.time)
 
 
-@dataclass(slots=True)
-class _RelayNode:
-    name: str
-    health: dict[str, Any]
-    last_seen: float = field(default_factory=time.time)
-    online: bool = True
-    active_polls: int = 0
-    in_flight: int = 0
-    last_poll_started: float = 0.0
-    last_poll_finished: float = 0.0
-    last_error: str | None = None
-
-
-@dataclass(slots=True)
-class _RelayDelivery:
-    delivery_id: str
-    target: str
-    kind: str
-    payload: dict[str, Any]
-    future: Future[dict[str, Any]]
-    created_at: float = field(default_factory=time.time)
-
-
-class Host:
+class Host(RelayMixin):
     """A paglet host/context served over a small JSON HTTP API.
 
     One process can run one host. For development, one Python process can also
@@ -238,7 +178,9 @@ class Host:
         self.bind_host = self.bind_hosts[0]
         self.public_host = _resolve_public_host(self.bind_host)
         self.port = int(port)
-        self.address = self._connect_relay_url() if self.connect_to else (self.public_url or f"http://{self.public_host}:{port}")
+        self.address = (
+            self._connect_relay_url() if self.connect_to else (self.public_url or f"http://{self.public_host}:{port}")
+        )
         self.client = client or HostClient(api_key=api_key)
         if api_key and getattr(self.client, "api_key", None) is None:
             self.client.api_key = api_key
@@ -274,7 +216,9 @@ class Host:
         self._relay_queues: dict[str, queue.Queue[_RelayDelivery]] = {}
         self._relay_pending: dict[str, _RelayDelivery] = {}
         self.relay_offline_after = max(0.1, float(relay_offline_after))
-        self.relay_delivery_timeout = 10.0 if relay_delivery_timeout is None else max(0.01, float(relay_delivery_timeout))
+        self.relay_delivery_timeout = (
+            10.0 if relay_delivery_timeout is None else max(0.01, float(relay_delivery_timeout))
+        )
         self.relay_queue_limit = max(1, int(relay_queue_limit))
         self.auto_update_from_git = bool(auto_update_from_git)
         self.git_repo_root = Path(git_repo_root).resolve() if git_repo_root is not None else None
@@ -302,14 +246,6 @@ class Host:
         )
         self._load_inactive_records()
 
-    def _connect_relay_url(self) -> str:
-        if not self.connect_to:
-            return self.public_url or f"http://{self.public_host}:{self.port}"
-        return f"{self.connect_to.rstrip('/')}/relay/hosts/{quote(self.name, safe='')}"
-
-    # ------------------------------------------------------------------
-    # Server lifecycle
-    # ------------------------------------------------------------------
     def start_background(self) -> None:
         if self.connect_to:
             self._start_connect_background()
@@ -385,7 +321,7 @@ class Host:
         self._start_relay_client()
         self._emit("context-start")
 
-    def _open_http_servers(self, bind_hosts: list[str], port: int) -> list["_PagletHTTPServer"]:
+    def _open_http_servers(self, bind_hosts: list[str], port: int) -> list[_PagletHTTPServer]:
         servers: list[_PagletHTTPServer] = []
         try:
             for index, bind_host in enumerate(bind_hosts):
@@ -397,7 +333,7 @@ class Host:
             raise
         return servers
 
-    def _install_http_servers(self, servers: list["_PagletHTTPServer"], bind_hosts: list[str]) -> None:
+    def _install_http_servers(self, servers: list[_PagletHTTPServer], bind_hosts: list[str]) -> None:
         _actual_host, actual_port = servers[0].server_address[:2]
         self.bind_hosts = list(bind_hosts)
         self.bind_host = self.bind_hosts[0]
@@ -422,7 +358,7 @@ class Host:
 
     def _shutdown_http_servers(
         self,
-        servers: list["_PagletHTTPServer"],
+        servers: list[_PagletHTTPServer],
         threads: list[threading.Thread],
     ) -> None:
         for running_server in servers:
@@ -646,514 +582,6 @@ class Host:
         self.mesh.register_wire(payload)
         return self.mesh.hosts(include_self=True)
 
-    def relay_connect(self, payload: dict[str, Any]) -> dict[str, Any]:
-        health = dict(payload.get("health") or payload)
-        name = str(health.get("name") or payload.get("name") or "").strip()
-        if not name:
-            raise HostError("Relay connection requires a host name")
-        address = str(health.get("address") or f"{self.address.rstrip('/')}/relay/hosts/{quote(name, safe='')}").rstrip("/")
-        health["name"] = name
-        health["address"] = address
-        health.setdefault("code_version", self.mesh.code_version)
-        health.setdefault("active_count", 0)
-        health.setdefault("inactive_count", 0)
-        now = time.time()
-        with self._lock:
-            existing = self._relay_nodes.get(name)
-            if existing is None:
-                existing = _RelayNode(name=name, health=health, last_seen=now, online=True)
-                self._relay_nodes[name] = existing
-            else:
-                existing.health = health
-                existing.last_seen = now
-                existing.online = True
-                existing.last_error = None
-            self._relay_queues.setdefault(name, queue.Queue(maxsize=self.relay_queue_limit))
-        self._register_relay_node_ref(existing)
-        return {"hosts": [ref.to_wire() for ref in self.mesh.hosts(include_self=True)]}
-
-    def relay_host_health(self, target: str) -> dict[str, Any]:
-        name = unquote(target)
-        if name == self.name:
-            return self.health()
-        with self._lock:
-            node = self._relay_nodes.get(name)
-            if node is not None:
-                self._expire_relay_node_locked(node)
-        if node is None or not node.online:
-            raise RemoteHostError(self._relay_target_error(name, node))
-        return dict(node.health)
-
-    def relay_diagnostics(self) -> dict[str, Any]:
-        now = time.time()
-        with self._lock:
-            for node in self._relay_nodes.values():
-                self._expire_relay_node_locked(node, now=now)
-            nodes = [
-                {
-                    "name": node.name,
-                    "online": node.online,
-                    "last_seen": node.last_seen,
-                    "last_seen_age": max(0.0, now - node.last_seen),
-                    "active_polls": node.active_polls,
-                    "queue_depth": self._relay_queues.get(node.name).qsize() if node.name in self._relay_queues else 0,
-                    "in_flight": node.in_flight,
-                    "last_error": node.last_error,
-                }
-                for node in self._relay_nodes.values()
-            ]
-        return {"nodes": sorted(nodes, key=lambda item: str(item["name"]))}
-
-    def _relay_node_ref(self, node: _RelayNode) -> HostRef:
-        return HostRef(
-            name=node.name,
-            url=str(node.health.get("address") or f"{self.address.rstrip('/')}/relay/hosts/{quote(node.name, safe='')}").rstrip("/"),
-            code_version=str(node.health.get("code_version") or self.mesh.code_version),
-            online=node.online,
-            last_seen=node.last_seen,
-            active_count=int(node.health.get("active_count", 0)),
-            inactive_count=int(node.health.get("inactive_count", 0)),
-            error=node.last_error,
-        )
-
-    def _register_relay_node_ref(self, node: _RelayNode) -> None:
-        self.mesh.register(self._relay_node_ref(node))
-
-    def _expire_relay_node_locked(self, node: _RelayNode, *, now: float | None = None) -> None:
-        current = time.time() if now is None else now
-        age = current - node.last_seen
-        if node.online and age > self.relay_offline_after:
-            node.online = False
-            node.last_error = f"Relay target {node.name!r} is offline/not polling (last seen {age:.3f}s ago)"
-            self._register_relay_node_ref(node)
-            self._emit(
-                "relay-target-offline",
-                data={"target": node.name, "stage": "relay-preflight", "last_seen_age": age},
-                error=node.last_error,
-            )
-
-    def _relay_target_error(self, target: str, node: _RelayNode | None) -> str:
-        if node is None:
-            return f"Relay target {target!r} is not connected"
-        if node.last_error:
-            return node.last_error
-        age = time.time() - node.last_seen
-        return f"Relay target {target!r} is offline/not polling (last seen {age:.3f}s ago)"
-
-    def relay_poll(self, node_name: str, *, timeout: float = 25.0) -> dict[str, Any]:
-        name = unquote(node_name)
-        delivery: _RelayDelivery | None = None
-        with self._lock:
-            node = self._relay_nodes.get(name)
-            if node is not None:
-                node.last_seen = time.time()
-                node.online = True
-                node.active_polls += 1
-                node.last_poll_started = node.last_seen
-                node.last_error = None
-                self._register_relay_node_ref(node)
-            delivery_queue = self._relay_queues.setdefault(name, queue.Queue(maxsize=self.relay_queue_limit))
-        try:
-            delivery = delivery_queue.get(timeout=max(0.0, timeout))
-        except queue.Empty:
-            return {"delivery": None}
-        finally:
-            with self._lock:
-                node = self._relay_nodes.get(name)
-                if node is not None:
-                    node.active_polls = max(0, node.active_polls - 1)
-                    node.last_seen = time.time()
-                    node.last_poll_finished = node.last_seen
-                    self._register_relay_node_ref(node)
-        if delivery is None:
-            return {"delivery": None}
-        with self._lock:
-            node = self._relay_nodes.get(name)
-            if node is not None:
-                node.in_flight += 1
-        self._emit(
-            "relay-delivery-dispatched",
-            data={"delivery_id": delivery.delivery_id, "target": delivery.target, "kind": delivery.kind},
-        )
-        return {
-            "delivery": {
-                "delivery_id": delivery.delivery_id,
-                "kind": delivery.kind,
-                "payload": delivery.payload,
-            }
-        }
-
-    def relay_ack(self, delivery_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            delivery = self._relay_pending.pop(delivery_id, None)
-        if delivery is None:
-            return {"ok": True, "duplicate": True}
-        with self._lock:
-            node = self._relay_nodes.get(delivery.target)
-            if node is not None:
-                node.in_flight = max(0, node.in_flight - 1)
-        if payload.get("ok", True):
-            delivery.future.set_result(dict(payload))
-        else:
-            delivery.future.set_exception(_relay_error_from_ack(payload))
-        self._emit(
-            "relay-delivery-ack",
-            data={
-                "delivery_id": delivery.delivery_id,
-                "target": delivery.target,
-                "kind": delivery.kind,
-                "ok": bool(payload.get("ok", True)),
-                "error": str(payload.get("error") or ""),
-            },
-        )
-        return {"ok": True}
-
-    def relay_api(
-        self,
-        target: str,
-        method: str,
-        path: str,
-        payload: dict[str, Any],
-        *,
-        timeout: float = 10.0,
-    ) -> Any:
-        response = self._relay_submit(
-            unquote(target),
-            "api",
-            {"method": method, "path": path, "payload": dict(payload)},
-            timeout=timeout,
-        )
-        return response.get("result")
-
-    def relay_receive_envelope(self, target: str, envelope: PagletEnvelope, *, timeout: float | None = None) -> dict[str, Any]:
-        return self._relay_submit(
-            unquote(target),
-            "envelope",
-            {"envelope": envelope.to_wire()},
-            timeout=self.relay_delivery_timeout if timeout is None else timeout,
-        )
-
-    def relay_receive_creation(self, target: str, payload: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
-        return self._relay_submit(
-            unquote(target),
-            "creation",
-            {"creation": dict(payload)},
-            timeout=self.relay_delivery_timeout if timeout is None else timeout,
-        )
-
-    def relay_deliver_message(
-        self,
-        target: str,
-        agent_id: str,
-        message: Message,
-        *,
-        oneway: bool = False,
-        activate_if_inactive: bool = True,
-        no_delay: bool = False,
-        timeout: float | None = None,
-    ) -> Any:
-        response = self._relay_submit(
-            unquote(target),
-            "message",
-            {
-                "agent_id": agent_id,
-                "message": message.to_wire(),
-                "oneway": oneway,
-                "activate_if_inactive": activate_if_inactive,
-                "no_delay": no_delay,
-            },
-            timeout=self.relay_delivery_timeout if timeout is None else timeout,
-        )
-        return response.get("result")
-
-    def _relay_submit(self, target: str, kind: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
-        with self._lock:
-            node = self._relay_nodes.get(target)
-            if node is not None:
-                self._expire_relay_node_locked(node)
-            delivery_queue = self._relay_queues.setdefault(target, queue.Queue(maxsize=self.relay_queue_limit))
-            queue_depth = delivery_queue.qsize()
-        if node is None or not node.online:
-            message = self._relay_target_error(target, node)
-            data = {"target": target, "kind": kind, "stage": "relay-preflight"}
-            self._emit("relay-target-offline", data=data, error=message)
-            self._emit("transfer-failed", data={"destination": target, **data}, error=message)
-            raise RemoteHostError(message)
-        if delivery_queue.full():
-            message = f"Relay target {target!r} queue is full ({self.relay_queue_limit} deliveries)"
-            data = {"target": target, "kind": kind, "stage": "relay-queue", "queue_depth": queue_depth}
-            self._emit("relay-target-offline", data=data, error=message)
-            self._emit("transfer-failed", data={"destination": target, **data}, error=message)
-            raise RemoteHostError(message)
-        delivery_id = uuid.uuid4().hex
-        future: Future[dict[str, Any]] = Future()
-        delivery = _RelayDelivery(
-            delivery_id=delivery_id,
-            target=target,
-            kind=kind,
-            payload=payload,
-            future=future,
-        )
-        with self._lock:
-            self._relay_pending[delivery_id] = delivery
-        try:
-            delivery_queue.put_nowait(delivery)
-        except queue.Full as exc:
-            with self._lock:
-                self._relay_pending.pop(delivery_id, None)
-            message = f"Relay target {target!r} queue is full ({self.relay_queue_limit} deliveries)"
-            self._emit(
-                "transfer-failed",
-                data={"destination": target, "stage": "relay-queue", "queue_depth": self.relay_queue_limit},
-                error=message,
-            )
-            raise RemoteHostError(message) from exc
-        self._emit(
-            "relay-delivery-enqueued",
-            data={
-                "delivery_id": delivery_id,
-                "target": target,
-                "kind": kind,
-                "stage": "relay-queue",
-                "timeout": max(0.01, timeout),
-                "queue_depth": queue_depth + 1,
-            },
-        )
-        try:
-            response = future.result(timeout=max(0.01, timeout))
-        except FutureTimeoutError as exc:
-            with self._lock:
-                self._relay_pending.pop(delivery_id, None)
-                node = self._relay_nodes.get(target)
-                if node is not None:
-                    node.in_flight = max(0, node.in_flight - 1)
-                    node.last_error = f"delivery {delivery_id} timed out"
-            message = f"Relay delivery to {target!r} timed out after {max(0.01, timeout):.3f}s"
-            self._emit(
-                "relay-delivery-timeout",
-                data={
-                    "delivery_id": delivery_id,
-                    "target": target,
-                    "kind": kind,
-                    "stage": "relay-ack",
-                    "timeout": max(0.01, timeout),
-                },
-                error=message,
-            )
-            self._emit(
-                "transfer-failed",
-                data={"destination": target, "stage": "relay-ack", "timeout": max(0.01, timeout)},
-                error=message,
-            )
-            raise RemoteHostError(message) from exc
-        if not response.get("ok", True):
-            message = str(response.get("error") or "Relay delivery failed")
-            self._emit(
-                "transfer-failed",
-                data={"destination": target, "stage": "relay-forward", "kind": kind, "delivery_id": delivery_id},
-                error=message,
-            )
-            raise RemoteHostError(message)
-        return response
-
-    def _start_relay_client(self) -> None:
-        if not self.connect_to:
-            return
-        self._relay_stop.clear()
-        self._relay_client_thread = threading.Thread(
-            target=self._relay_client_loop,
-            name=f"paglets-relay-client-{self.name}",
-            daemon=True,
-        )
-        self._relay_client_thread.start()
-
-    def _stop_relay_client(self) -> None:
-        self._relay_stop.set()
-        thread = self._relay_client_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
-        self._relay_client_thread = None
-
-    def _relay_client_loop(self) -> None:
-        assert self.connect_to is not None
-        while not self._relay_stop.is_set():
-            try:
-                self._relay_register_once()
-                response = self.client.get_json(
-                    f"{self.connect_to.rstrip('/')}/relay/poll/{quote(self.name, safe='')}?timeout=25",
-                    timeout=35.0,
-                )
-                delivery = response.get("delivery") if isinstance(response, dict) else None
-                if isinstance(delivery, dict):
-                    self._handle_relay_delivery(delivery)
-            except Exception as exc:
-                self._emit("relay-client-error", error=str(exc))
-                self._relay_stop.wait(1.0)
-
-    def _relay_register_once(self) -> None:
-        assert self.connect_to is not None
-        response = self.client.post_json(
-            f"{self.connect_to.rstrip('/')}/relay/connect",
-            {"health": self.health()},
-            timeout=5.0,
-        )
-        hosts = response.get("hosts", []) if isinstance(response, dict) else []
-        if isinstance(hosts, list):
-            for item in hosts:
-                if isinstance(item, dict):
-                    try:
-                        self.mesh.register_wire(item)
-                    except (KeyError, TypeError, ValueError):
-                        continue
-
-    def _handle_relay_delivery(self, delivery: dict[str, Any]) -> None:
-        assert self.connect_to is not None
-        delivery_id = str(delivery["delivery_id"])
-        payload = dict(delivery.get("payload") or {})
-        try:
-            kind = str(delivery["kind"])
-            if kind == "envelope":
-                proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
-                ack = {"ok": True, "proxy": proxy.to_wire()}
-            elif kind == "creation":
-                proxy = self._receive_creation(dict(payload["creation"]))
-                ack = {"ok": True, "proxy": proxy.to_wire()}
-            elif kind == "api":
-                result = self._relay_local_api(
-                    str(payload["method"]),
-                    str(payload["path"]),
-                    dict(payload.get("payload") or {}),
-                )
-                ack = {"ok": True, "result": result}
-            elif kind == "message":
-                result = self.deliver_message(
-                    str(payload["agent_id"]),
-                    Message.from_wire(payload["message"]),
-                    oneway=bool(payload.get("oneway", False)),
-                    activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
-                    no_delay=bool(payload.get("no_delay", False)),
-                )
-                ack = {"ok": True, "result": result}
-            else:
-                raise HostError(f"Unknown relay delivery kind {kind!r}")
-        except Exception as exc:
-            ack = {"ok": False, "error_type": exc.__class__.__name__, "error": str(exc)}
-        self.client.post_json(f"{self.connect_to.rstrip('/')}/relay/ack/{delivery_id}", ack, timeout=5.0)
-
-    def _relay_local_api(self, method: str, path: str, payload: dict[str, Any]) -> Any:
-        parsed = urlparse(path)
-        parts = [part for part in parsed.path.split("/") if part]
-        query = parse_qs(parsed.query)
-
-        if method == "GET" and parts == ["health"]:
-            return self.health()
-        if method == "GET" and parts == ["hosts"]:
-            return {"hosts": [ref.to_wire() for ref in self.list_hosts(include_self=True)]}
-        if method == "POST" and parts == ["hosts", "join"]:
-            return {"hosts": [ref.to_wire() for ref in self.join_mesh(payload)]}
-        if method == "GET" and parts == ["events"]:
-            since = int((query.get("since") or ["0"])[0])
-            limit = int((query.get("limit") or ["100"])[0])
-            return {"events": [event.to_wire() for event in self.list_events(since=since, limit=limit)]}
-        if method == "GET" and parts == ["services"]:
-            name = (query.get("name") or [None])[0]
-            capability = (query.get("capability") or [None])[0]
-            scope = enum_from_wire((query.get("scope") or [ServiceScope.LOCAL.value])[0], ServiceScope, "scope")
-            records = (
-                self._services.lookup_all(name, capability, scope=ServiceScope.MESH)
-                if scope is ServiceScope.MESH
-                else self._services.lookup_all(name, capability)
-            )
-            return {"services": [record.to_wire() for record in records]}
-        if method == "POST" and parts == ["services", "leases"]:
-            return self.acquire_resident_service_lease(
-                str(payload["agent_id"]),
-                str(payload["service_name"]),
-                ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)),
-            )
-        if method == "POST" and len(parts) == 4 and parts[:2] == ["services", "leases"] and parts[3] == "release":
-            return self.release_resident_service_lease(parts[2])
-        if method == "GET" and parts == ["agents"]:
-            state = (query.get("state") or ["active"])[0]
-            if state == "all":
-                return {"agents": self.list_agents(active=True, inactive=True)}
-            if state == "inactive":
-                return {"agents": self.list_agents(active=False, inactive=True)}
-            return {"agents": self.list_agents(active=True, inactive=False)}
-        if method == "POST" and parts == ["agents"]:
-            if "envelope" in payload:
-                proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
-            else:
-                proxy = self._receive_creation(payload)
-            return {"proxy": proxy.to_wire()}
-
-        if len(parts) >= 2 and parts[0] == "agents":
-            agent_id = parts[1]
-            if method == "GET" and len(parts) == 3 and parts[2] == "state":
-                return self._state_payload(agent_id)
-            if method == "GET" and len(parts) == 2:
-                with self._lock:
-                    agent = self._agents.get(agent_id)
-                    if agent is not None:
-                        return self._summary(agent)
-                    inactive = self._inactive.get(agent_id)
-                    if inactive is not None:
-                        return self._inactive_summary(inactive)
-                raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
-            if method == "POST" and len(parts) == 3:
-                action = parts[2]
-                if action == "messages":
-                    message = Message.from_wire(payload["message"])
-                    result = self.deliver_message(
-                        agent_id,
-                        message,
-                        oneway=bool(payload.get("oneway", False)),
-                        activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
-                        no_delay=bool(payload.get("no_delay", False)),
-                    )
-                    return {"result": result}
-                if action == "dispatch":
-                    target = TransferTicket.from_wire(payload["ticket"]) if "ticket" in payload else payload["target"]
-                    proxy = self.dispatch(agent_id, target)
-                    return {"proxy": proxy.to_wire()}
-                if action == "clone":
-                    if "ticket" in payload:
-                        proxy = self.clone(agent_id, target=TransferTicket.from_wire(payload["ticket"]))
-                    else:
-                        proxy = self.clone(agent_id, target=payload.get("target"))
-                    return {"proxy": proxy.to_wire()}
-                if action == "retract":
-                    proxy = self._retract_to(agent_id, payload["target"])
-                    return {"proxy": proxy.to_wire()}
-                if action == "deactivate":
-                    proxy = self.deactivate(agent_id, DeactivationRequest.from_wire(payload.get("request")))
-                    return {"proxy": proxy.to_wire(), "ok": True}
-                if action == "activate":
-                    proxy = self.activate(agent_id)
-                    return {"proxy": proxy.to_wire()}
-                if action == "dispose":
-                    self.dispose(agent_id)
-                    return {"ok": True}
-                if action == "services":
-                    record = self.advertise_service(
-                        agent_id,
-                        str(payload["name"]),
-                        capabilities=payload.get("capabilities"),
-                        metadata=payload.get("metadata"),
-                        scope=enum_from_wire(
-                            payload.get("scope") or ServiceScope.LOCAL.value,
-                            ServiceScope,
-                            "scope",
-                        ),
-                        ttl=float(payload["ttl"]) if payload.get("ttl") is not None else None,
-                    )
-                    return {"service": record.to_wire()}
-                if action == "unadvertise-service":
-                    removed = self.unadvertise_service(str(payload["name"]), agent_id=agent_id)
-                    return {"services": [record.to_wire() for record in removed]}
-
-        raise HostError(f"No relay route for {method} {path}")
-
     def handle_git_update_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.auto_update_from_git or self.git_repo_root is None:
             status = {
@@ -1236,7 +664,12 @@ class Host:
                     return failure
                 return None
             if not isinstance(probed, dict):
-                failure = {"ok": False, "status": "invalid-health", "error": f"unexpected health {probed!r}", "url": normalized}
+                failure = {
+                    "ok": False,
+                    "status": "invalid-health",
+                    "error": f"unexpected health {probed!r}",
+                    "url": normalized,
+                }
                 self._report_git_update_failure(normalized, failure)
                 return failure
             health = probed
@@ -1247,7 +680,9 @@ class Host:
                 {
                     "name": health.get("name", url) if health else url,
                     "url": health.get("address", url) if health else url,
-                    "code_version": health.get("code_version", self.mesh.code_version) if health else self.mesh.code_version,
+                    "code_version": health.get("code_version", self.mesh.code_version)
+                    if health
+                    else self.mesh.code_version,
                     "online": True,
                     "last_seen": time.time(),
                     "active_count": health.get("active_count", 0) if health else 0,
@@ -1279,11 +714,22 @@ class Host:
                 if not response.get("ok"):
                     self._report_git_update_failure(normalized, response)
                 return response
-            failure = {"ok": False, "status": "invalid-response", "error": f"unexpected response {response!r}", "url": normalized}
+            failure = {
+                "ok": False,
+                "status": "invalid-response",
+                "error": f"unexpected response {response!r}",
+                "url": normalized,
+            }
             self._report_git_update_failure(normalized, failure)
             return failure
         except Exception as exc:
-            failure = {"ok": False, "status": "request-failed", "error": str(exc), "target_hash": target, "url": normalized}
+            failure = {
+                "ok": False,
+                "status": "request-failed",
+                "error": str(exc),
+                "target_hash": target,
+                "url": normalized,
+            }
             self._report_git_update_failure(normalized, failure)
             return failure
 
@@ -1358,7 +804,9 @@ class Host:
         if error:
             pieces.append(error)
         if status == "target-missing":
-            pieces.append("The commit may not have been pushed yet; run git push and restart this host to broadcast again.")
+            pieces.append(
+                "The commit may not have been pushed yet; run git push and restart this host to broadcast again."
+            )
         stderr = _trim_git_output(str(response.get("stderr") or ""))
         stdout = _trim_git_output(str(response.get("stdout") or ""))
         if stderr:
@@ -1579,7 +1027,9 @@ class Host:
         with self._lock:
             self._inactive[agent_id] = record
         self._remove_active_agent(agent_id, expected=None, terminate=True)
-        self._emit("deactivate", agent_id=agent_id, class_name=envelope.agent_class_name, data={"reason": request.reason})
+        self._emit(
+            "deactivate", agent_id=agent_id, class_name=envelope.agent_class_name, data={"reason": request.reason}
+        )
         return PagletProxy(self.address, agent_id, self.client)
 
     def activate(self, agent_id: str) -> PagletProxy:
@@ -1609,7 +1059,9 @@ class Host:
                 raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
             self._delete_inactive_record(agent_id)
             self._cleanup_agent_work_dir(agent_id)
-            self._emit("dispose", agent_id=agent_id, class_name=inactive.envelope.agent_class_name, data={"active": False})
+            self._emit(
+                "dispose", agent_id=agent_id, class_name=inactive.envelope.agent_class_name, data={"active": False}
+            )
             return
         record.request("dispose_prepare", {"reason": "dispose"})
         self._cleanup_agent_work_dir(agent_id)
@@ -1697,7 +1149,11 @@ class Host:
         for proxy in self.get_proxies(ACTIVE):
             if proxy.agent_id in exclude:
                 continue
-            message = Message.from_wire(kind.to_wire()) if isinstance(kind, Message) else Message(kind=kind, args=args or {}, sender=self.address)
+            message = (
+                Message.from_wire(kind.to_wire())
+                if isinstance(kind, Message)
+                else Message(kind=kind, args=args or {}, sender=self.address)
+            )
             if message.sender is None:
                 message.sender = self.address
             reply_set.add_future_reply(proxy.send_future(message))
@@ -1742,7 +1198,9 @@ class Host:
         if self._is_local_transfer_target(target_info):
             response = self._receive_local_envelope_response(envelope)
         else:
-            response = self.client.post_pickle(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
+            response = self.client.post_pickle(
+                f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()}
+            )
         self._remove_active_agent(agent_id, record, terminate=True)
         self._emit("retract", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
@@ -1787,7 +1245,12 @@ class Host:
             )
             record.request_lifecycle("arrival", dataclass_to_wire(event))
             record.ready = True
-            self._emit("arrival", agent_id=record.agent_id, class_name=record.agent_class_name, data={"kind": envelope.kind.value})
+            self._emit(
+                "arrival",
+                agent_id=record.agent_id,
+                class_name=record.agent_class_name,
+                data={"kind": envelope.kind.value},
+            )
             record.wait_for_run_complete_or_departure()
         elif envelope.kind is EnvelopeKind.CLONE:
             event = CloneEvent(
@@ -1803,7 +1266,12 @@ class Host:
             )
             record.request_lifecycle("clone", dataclass_to_wire(event))
             record.ready = True
-            self._emit("clone", agent_id=record.agent_id, class_name=record.agent_class_name, data={"source_agent_id": envelope.clone_of})
+            self._emit(
+                "clone",
+                agent_id=record.agent_id,
+                class_name=record.agent_class_name,
+                data={"source_agent_id": envelope.clone_of},
+            )
         elif envelope.kind is EnvelopeKind.ACTIVATION:
             event = PersistencyEvent(
                 agent_id=record.agent_id,
@@ -2128,9 +1596,13 @@ class Host:
     def _preflight_transfer(self, ticket: TransferTicket) -> dict[str, Any]:
         url = ticket.destination.rstrip("/")
         try:
-            info = self.health() if url == self.address.rstrip("/") else self.client.get_json(
-                f"{url}/health",
-                timeout=ticket.timeout,
+            info = (
+                self.health()
+                if url == self.address.rstrip("/")
+                else self.client.get_json(
+                    f"{url}/health",
+                    timeout=ticket.timeout,
+                )
             )
         except Exception as exc:
             self._emit("transfer-failed", data={"destination": url, "stage": "preflight"}, error=str(exc))
@@ -2138,8 +1610,7 @@ class Host:
         code_version = str(info.get("code_version") or "")
         if ticket.expected_code_version is not None and code_version != ticket.expected_code_version:
             message = (
-                f"Transfer target {url} has code version {code_version!r}, "
-                f"expected {ticket.expected_code_version!r}"
+                f"Transfer target {url} has code version {code_version!r}, expected {ticket.expected_code_version!r}"
             )
             self._emit("transfer-failed", data={"destination": url, "stage": "preflight"}, error=message)
             raise TransferError(message)
@@ -2237,7 +1708,9 @@ class Host:
             state = dataclass_from_wire(state_cls, payload.get("state") or {})
             host_url = payload.get("host_url")
             if host_url is not None and str(host_url).rstrip("/") != self.address.rstrip("/"):
-                proxy = self.create_remote(str(host_url), agent_cls, state, init=payload.get("init"), agent_id=payload.get("agent_id"))
+                proxy = self.create_remote(
+                    str(host_url), agent_cls, state, init=payload.get("init"), agent_id=payload.get("agent_id")
+                )
             else:
                 proxy = self.create(agent_cls, state, init=payload.get("init"), agent_id=payload.get("agent_id"))
             return {"proxy": proxy.to_wire()}
@@ -2285,11 +1758,17 @@ class Host:
             record = ServiceRecord.from_wire(payload["record"])
             host_url = record.host_url or record.proxy.host_url
             if host_url.rstrip("/") == self.address.rstrip("/"):
-                lease = self.acquire_resident_service_lease(record.proxy.agent_id, record.name, ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)))
+                lease = self.acquire_resident_service_lease(
+                    record.proxy.agent_id, record.name, ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS))
+                )
             else:
                 lease = self.client.post_json(
                     f"{host_url.rstrip('/')}/services/leases",
-                    {"agent_id": record.proxy.agent_id, "service_name": record.name, "ttl": float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS))},
+                    {
+                        "agent_id": record.proxy.agent_id,
+                        "service_name": record.name,
+                        "ttl": float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)),
+                    },
                 )
             return {"lease_id": lease["lease_id"], "expires_at": lease["expires_at"], "host_url": host_url}
         if op == "health":
@@ -2427,17 +1906,13 @@ class Host:
         raise HostError(f"Unknown storage operation {op!r}")
 
     def _clear_work_root(self) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(self._work_root)
-        except FileNotFoundError:
-            pass
         self._work_root.mkdir(parents=True, exist_ok=True)
 
     def _cleanup_agent_work_dir(self, agent_id: str) -> None:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             shutil.rmtree(self._work_path(agent_id))
-        except FileNotFoundError:
-            pass
 
     def _work_path(self, agent_id: str) -> Path:
         return self._work_root / self._safe_storage_name(agent_id)
@@ -2513,7 +1988,9 @@ class Host:
         )
         record = ChildProcessController(
             config,
-            host_call_handler=lambda op, payload, child_id=agent_id: self._handle_child_host_call(child_id, op, payload),
+            host_call_handler=lambda op, payload, child_id=agent_id: self._handle_child_host_call(
+                child_id, op, payload
+            ),
             crash_handler=self._handle_child_crash,
         )
         mailbox = MessageMailbox(
@@ -2724,11 +2201,7 @@ class Host:
 
     def _activate_startup_records(self) -> None:
         with self._lock:
-            startup_ids = [
-                agent_id
-                for agent_id, record in self._inactive.items()
-                if record.policy.activate_on_startup
-            ]
+            startup_ids = [agent_id for agent_id, record in self._inactive.items() if record.policy.activate_on_startup]
         for agent_id in startup_ids:
             try:
                 self.activate(agent_id)
@@ -2757,7 +2230,10 @@ class Host:
             return
         for startup_agent in config.startup_agents:
             if not startup_agent.enabled:
-                self._emit("startup-agent-skip", data={"reason": "disabled", "use": startup_agent.use, "class": startup_agent.class_name})
+                self._emit(
+                    "startup-agent-skip",
+                    data={"reason": "disabled", "use": startup_agent.use, "class": startup_agent.class_name},
+                )
                 continue
             try:
                 resolved = resolve_startup_agent(startup_agent)
@@ -2843,9 +2319,7 @@ class Host:
     def _next_activation_delay(self) -> float:
         with self._lock:
             activate_at_values = [
-                record.policy.activate_at
-                for record in self._inactive.values()
-                if record.policy.activate_at is not None
+                record.policy.activate_at for record in self._inactive.values() if record.policy.activate_at is not None
             ]
         if not activate_at_values:
             return 1.0
@@ -2971,304 +2445,8 @@ class _RemoteResourceRegistry:
         self._host._require_agent(self._agent_id).cleanup_resources(reason=reason)
 
 
-class _PagletHTTPServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def __init__(self, server_address: tuple[str, int], handler_cls: type[BaseHTTPRequestHandler], host_runtime: Host):
-        super().__init__(server_address, handler_cls)
-        self.host_runtime = host_runtime
-
-
-class _RequestHandler(BaseHTTPRequestHandler):
-    server: _PagletHTTPServer
-
-    def log_message(self, format: str, *args: Any) -> None:  # keep examples/tests quiet
-        return
-
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler name
-        self._handle("GET")
-
-    def do_POST(self) -> None:  # noqa: N802 - stdlib handler name
-        self._handle("POST")
-
-    def _handle(self, method: str) -> None:
-        try:
-            self._require_auth()
-            payload = self._read_payload() if method == "POST" else {}
-            result = self._route(method, self.path, payload)
-            self._write_json(200, result)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            return
-        except AuthenticationError as exc:
-            self._write_error(401, exc, authenticate=True)
-        except ForbiddenError as exc:
-            self._write_error(403, exc)
-        except NotHandledError as exc:
-            self._write_error(422, exc)
-        except InvalidAgentError as exc:
-            self._write_error(404, exc)
-        except PagletError as exc:
-            self._write_error(400, exc)
-        except Exception as exc:  # pragma: no cover - defensive server boundary
-            self._write_error(500, RemoteHostError(str(exc)))
-
-    def _require_auth(self) -> None:
-        expected = self.server.host_runtime.api_key
-        if not expected:
-            return
-        header = str(self.headers.get("Authorization") or "")
-        scheme, _, value = header.partition(" ")
-        if scheme.casefold() != "bearer" or not value or not hmac.compare_digest(value, expected):
-            raise AuthenticationError("Authentication required")
-
-    def _route(self, method: str, path: str, payload: dict[str, Any]) -> Any:
-        host = self.server.host_runtime
-        parsed = urlparse(path)
-        parts = [part for part in parsed.path.split("/") if part]
-        query = parse_qs(parsed.query)
-        public_path_parts = _public_path_parts(host.public_url)
-        if public_path_parts and parts[: len(public_path_parts)] == public_path_parts:
-            parts = parts[len(public_path_parts):]
-
-        if method == "GET" and parts == ["health"]:
-            return host.health()
-        if method == "GET" and parts == ["hosts"]:
-            return {"hosts": [ref.to_wire() for ref in host.list_hosts(include_self=True)]}
-        if method == "POST" and parts == ["hosts", "join"]:
-            return {"hosts": [ref.to_wire() for ref in host.join_mesh(payload)]}
-        if method == "POST" and parts == ["admin", "git-update"]:
-            if host.relay_mode:
-                raise ForbiddenError("Git auto-update is disabled in relay mode")
-            return host.handle_git_update_request(payload)
-        if method == "POST" and parts == ["relay", "connect"]:
-            return host.relay_connect(payload)
-        if method == "GET" and len(parts) == 3 and parts[:2] == ["relay", "poll"]:
-            timeout = float((query.get("timeout") or ["25"])[0])
-            return host.relay_poll(parts[2], timeout=timeout)
-        if method == "POST" and len(parts) == 3 and parts[:2] == ["relay", "ack"]:
-            return host.relay_ack(parts[2], payload)
-        if method == "GET" and parts == ["relay", "diagnostics"]:
-            return host.relay_diagnostics()
-        if method == "GET" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "health":
-            return host.relay_host_health(parts[2])
-        if method == "POST" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents":
-            if "envelope" in payload:
-                envelope = PagletEnvelope.from_wire(payload["envelope"])
-                response = host.relay_receive_envelope(
-                    parts[2],
-                    envelope,
-                    timeout=_relay_payload_timeout(payload, envelope=envelope, fallback=host.relay_delivery_timeout),
-                )
-            else:
-                response = host.relay_receive_creation(
-                    parts[2],
-                    payload,
-                    timeout=_relay_payload_timeout(payload, fallback=host.relay_delivery_timeout),
-                )
-            return {"proxy": response["proxy"]}
-        if method == "POST" and len(parts) == 6 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents" and parts[5] == "messages":
-            message = Message.from_wire(payload["message"])
-            result = host.relay_deliver_message(
-                parts[2],
-                parts[4],
-                message,
-                oneway=bool(payload.get("oneway", False)),
-                activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
-                no_delay=bool(payload.get("no_delay", False)),
-                timeout=_relay_payload_timeout(payload, fallback=host.relay_delivery_timeout),
-            )
-            return {"result": result}
-        if len(parts) >= 3 and parts[:2] == ["relay", "hosts"]:
-            relay_path = "/" + "/".join(parts[3:])
-            if parsed.query:
-                relay_path = f"{relay_path}?{parsed.query}"
-            return host.relay_api(parts[2], method, relay_path, payload)
-        if method == "GET" and parts == ["events"]:
-            since = int((query.get("since") or ["0"])[0])
-            limit = int((query.get("limit") or ["100"])[0])
-            return {"events": [event.to_wire() for event in host.list_events(since=since, limit=limit)]}
-        if method == "GET" and parts == ["services"]:
-            name = (query.get("name") or [None])[0]
-            capability = (query.get("capability") or [None])[0]
-            scope = enum_from_wire((query.get("scope") or [ServiceScope.LOCAL.value])[0], ServiceScope, "scope")
-            if scope is ServiceScope.MESH:
-                records = host._services.lookup_all(name, capability, scope=ServiceScope.MESH)
-            else:
-                records = host._services.lookup_all(name, capability)
-            return {
-                "services": [
-                    record.to_wire()
-                    for record in records
-                ]
-            }
-        if method == "POST" and parts == ["services", "leases"]:
-            return host.acquire_resident_service_lease(
-                str(payload["agent_id"]),
-                str(payload["service_name"]),
-                ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)),
-            )
-        if method == "POST" and len(parts) == 4 and parts[:2] == ["services", "leases"] and parts[3] == "release":
-            return host.release_resident_service_lease(parts[2])
-        if method == "GET" and parts == ["agents"]:
-            state = (query.get("state") or ["active"])[0]
-            if state == "all":
-                return {"agents": host.list_agents(active=True, inactive=True)}
-            if state == "inactive":
-                return {"agents": host.list_agents(active=False, inactive=True)}
-            return {"agents": host.list_agents(active=True, inactive=False)}
-        if method == "POST" and parts == ["agents"]:
-            if "envelope" in payload:
-                proxy = host._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
-            else:
-                proxy = host._receive_creation(payload)
-            return {"proxy": proxy.to_wire()}
-
-        if len(parts) >= 2 and parts[0] == "agents":
-            agent_id = parts[1]
-            if method == "GET" and len(parts) == 3 and parts[2] == "state":
-                return host._state_payload(agent_id)
-            if method == "GET" and len(parts) == 2:
-                with host._lock:
-                    agent = host._agents.get(agent_id)
-                    if agent is not None:
-                        return host._summary(agent)
-                    inactive = host._inactive.get(agent_id)
-                    if inactive is not None:
-                        return host._inactive_summary(inactive)
-                raise InvalidAgentError(f"No paglet {agent_id!r} on {host.name}")
-            if method == "POST" and len(parts) == 3:
-                action = parts[2]
-                if action == "messages":
-                    message = Message.from_wire(payload["message"])
-                    result = host.deliver_message(
-                        agent_id,
-                        message,
-                        oneway=bool(payload.get("oneway", False)),
-                        activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
-                        no_delay=bool(payload.get("no_delay", False)),
-                    )
-                    return {"result": result}
-                if action == "dispatch":
-                    target = TransferTicket.from_wire(payload["ticket"]) if "ticket" in payload else payload["target"]
-                    proxy = host.dispatch(agent_id, target)
-                    return {"proxy": proxy.to_wire()}
-                if action == "clone":
-                    if "ticket" in payload:
-                        proxy = host.clone(agent_id, target=TransferTicket.from_wire(payload["ticket"]))
-                    else:
-                        proxy = host.clone(agent_id, target=payload.get("target"))
-                    return {"proxy": proxy.to_wire()}
-                if action == "retract":
-                    proxy = host._retract_to(agent_id, payload["target"])
-                    return {"proxy": proxy.to_wire()}
-                if action == "deactivate":
-                    proxy = host.deactivate(agent_id, DeactivationRequest.from_wire(payload.get("request")))
-                    return {"proxy": proxy.to_wire(), "ok": True}
-                if action == "activate":
-                    proxy = host.activate(agent_id)
-                    return {"proxy": proxy.to_wire()}
-                if action == "dispose":
-                    host.dispose(agent_id)
-                    return {"ok": True}
-                if action == "services":
-                    record = host.advertise_service(
-                        agent_id,
-                        str(payload["name"]),
-                        capabilities=payload.get("capabilities"),
-                        metadata=payload.get("metadata"),
-                        scope=enum_from_wire(
-                            payload.get("scope") or ServiceScope.LOCAL.value,
-                            ServiceScope,
-                            "scope",
-                        ),
-                        ttl=float(payload["ttl"]) if payload.get("ttl") is not None else None,
-                    )
-                    return {"service": record.to_wire()}
-                if action == "unadvertise-service":
-                    removed = host.unadvertise_service(str(payload["name"]), agent_id=agent_id)
-                    return {"services": [record.to_wire() for record in removed]}
-
-        raise HostError(f"No route for {method} {path}")
-
-    def _read_payload(self) -> dict[str, Any]:
-        content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().casefold()
-        if content_type == PICKLE_CONTENT_TYPE:
-            return load_http_pickle_payload(self.headers, self.rfile)
-        length = int(self.headers.get("Content-Length") or 0)
-        if length == 0:
-            return {}
-        raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8"))
-
-    def _write_json(self, status: int, payload: Any, *, extra_headers: dict[str, str] | None = None) -> None:
-        raw = json.dumps(json_safe(payload)).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        for name, value in (extra_headers or {}).items():
-            self.send_header(name, value)
-        self.send_header("Content-Length", str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
-
-    def _write_error(self, status: int, exc: Exception, *, authenticate: bool = False) -> None:
-        try:
-            headers = {"WWW-Authenticate": "Bearer"} if authenticate else None
-            self._write_json(status, {"error_type": exc.__class__.__name__, "error": str(exc)}, extra_headers=headers)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
-            return
-
-
 def _trim_git_output(value: str, *, limit: int = 500) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
         return text
     return f"{text[:limit]}..."
-
-
-def _public_path_parts(public_url: str | None) -> list[str]:
-    if not public_url:
-        return []
-    return [part for part in urlparse(public_url).path.split("/") if part]
-
-
-def _relay_payload_timeout(
-    payload: dict[str, Any],
-    *,
-    envelope: PagletEnvelope | None = None,
-    fallback: float,
-) -> float:
-    if payload.get("timeout") is not None:
-        return float(payload["timeout"])
-    if envelope is not None:
-        ticket_payload = envelope.metadata.get("transfer_ticket")
-        if isinstance(ticket_payload, dict) and ticket_payload.get("timeout") is not None:
-            return float(ticket_payload["timeout"])
-    return float(fallback)
-
-
-def _is_relay_transport_url(url: str) -> bool:
-    return "/relay/hosts/" in urlparse(url).path
-
-
-def _relay_error_from_ack(payload: dict[str, Any]) -> PagletError:
-    message = str(payload.get("error") or "Relay delivery failed")
-    error_type = str(payload.get("error_type") or "RemoteHostError")
-    if error_type == "TransferError":
-        return TransferError(message)
-    if error_type == "InvalidAgentError":
-        return InvalidAgentError(message)
-    if error_type == "PagletInactiveError":
-        return PagletInactiveError(message)
-    if error_type == "PagletCrashedError":
-        return PagletCrashedError(message)
-    if error_type == "NotHandledError":
-        return NotHandledError(message)
-    if error_type == "ForbiddenError":
-        return ForbiddenError(message)
-    if error_type == "AuthenticationError":
-        return AuthenticationError(message)
-    if error_type == "ServiceNotFoundError":
-        return ServiceNotFoundError(message)
-    if error_type == "HostError":
-        return HostError(message)
-    return RemoteHostError(message)

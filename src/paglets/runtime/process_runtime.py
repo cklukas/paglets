@@ -2,22 +2,21 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from concurrent.futures import Future
-from dataclasses import dataclass, is_dataclass
+import contextlib
 import multiprocessing as mp
-from multiprocessing.connection import Connection
-from pathlib import Path
-import os
 import queue
 import signal
 import threading
 import time
-from typing import Any, Callable
 import uuid
+from collections.abc import Callable
+from concurrent.futures import Future
+from dataclasses import dataclass, is_dataclass
+from multiprocessing.connection import Connection
+from pathlib import Path
+from typing import Any
 
 from paglets.core.agent import NOT_HANDLED, Paglet, PagletContext
-from paglets.remote.client import HostClient
-from paglets.runtime.envelope import PagletEnvelope
 from paglets.core.errors import (
     AuthenticationError,
     ForbiddenError,
@@ -26,7 +25,6 @@ from paglets.core.errors import (
     LifecycleError,
     NotHandledError,
     PagletCrashedError,
-    PagletError,
     PagletInactiveError,
     RemoteHostError,
     ServiceContractError,
@@ -35,14 +33,11 @@ from paglets.core.errors import (
 )
 from paglets.core.events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from paglets.core.messages import Message
+from paglets.core.runtime_values import ServiceScope
 from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest
+from paglets.persistence.storage import StorageQuotaError, StorageStatus
+from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
-from paglets.remote.references import PagletProxyRef
-from paglets.runtime.resources import ResourceCleanupError
-from paglets.core.runtime_values import ServiceScope, enum_from_wire
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
-from paglets.services.contracts import ServiceRecord
-from paglets.persistence.storage import ManagedStorage, StorageQuotaError, StorageStatus
 from paglets.remote.transfer import TransferTicket
 from paglets.remote.transport import (
     receive_local_pickle,
@@ -50,7 +45,8 @@ from paglets.remote.transport import (
     start_local_pickle_sender,
     wait_for_local_pickle_senders,
 )
-
+from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
+from paglets.services.contracts import ServiceRecord
 
 _ERROR_TYPES: dict[str, type[Exception]] = {
     "AuthenticationError": AuthenticationError,
@@ -92,7 +88,7 @@ class ChildProcessController:
         config: ChildConfig,
         *,
         host_call_handler: Callable[[str, dict[str, Any]], Any],
-        crash_handler: Callable[["ChildProcessController"], None],
+        crash_handler: Callable[[ChildProcessController], None],
     ):
         self.config = config
         self.agent_id = config.agent_id
@@ -217,15 +213,11 @@ class ChildProcessController:
         if self._closed.is_set():
             return
         if graceful:
-            try:
+            with contextlib.suppress(Exception):
                 self.request("shutdown", timeout=timeout)
-            except Exception:
-                pass
         self._closed.set()
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
     def terminate(self, *, timeout: float = 2.0, kill_timeout: float = 1.0) -> None:
         self.shutdown(graceful=True, timeout=timeout)
@@ -273,10 +265,8 @@ class ChildProcessController:
         except OSError:
             pass
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self.process.join(timeout=0.5)
-            except Exception:
-                pass
             self.exitcode = self._safe_exitcode()
             self._close_process_handle()
             if not self.departing and self.exitcode not in (0, None):
@@ -419,10 +409,8 @@ class _ChildEndpoint:
 
     def close(self) -> None:
         self._closed.set()
-        try:
+        with contextlib.suppress(Exception):
             self._conn.close()
-        except Exception:
-            pass
 
     def request_exit(self) -> None:
         self._requests.put(None)
@@ -474,7 +462,7 @@ class _ChildEndpoint:
 
 
 class _ChildMeshFacade:
-    def __init__(self, host: "_ChildHostFacade"):
+    def __init__(self, host: _ChildHostFacade):
         self._host = host
 
     @property
@@ -707,7 +695,9 @@ class _ChildHostFacade:
     def dispose(self, agent_id: str) -> None:
         self._require_self(agent_id)
         agent = self._require_agent()
-        agent.on_disposing(PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="dispose"))
+        agent.on_disposing(
+            PersistencyEvent(agent_id=agent_id, host_name=self.name, host_address=self.address, reason="dispose")
+        )
         agent.resources.cleanup(reason="dispose")
         self._call_with_state(
             "complete_dispose",
@@ -892,10 +882,8 @@ def make_child_config(
 
 
 def _child_main(config: ChildConfig, conn: Connection) -> None:
-    try:
+    with contextlib.suppress(Exception):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-    except Exception:
-        pass
     _set_process_title(config.process_title)
     endpoint = _ChildEndpoint(conn)
     reader = endpoint.start_reader()
@@ -1081,10 +1069,8 @@ def _run_agent_async(agent: Paglet, endpoint: _ChildEndpoint) -> None:
         try:
             agent.run()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 endpoint._send({"type": "event", "event": "run_complete"})
-            except Exception:
-                pass
 
     threading.Thread(target=run, name=f"paglets-run-{agent.agent_id[:8]}", daemon=True).start()
 
@@ -1123,10 +1109,8 @@ def _state_stream_token(payload: Any) -> str:
 def _handle_local_pickle_stream_event(message: dict[str, Any]) -> None:
     if message.get("event") != "local_pickle_stream_received":
         return
-    try:
+    with contextlib.suppress(Exception):
         release_local_pickle_sender(str(message.get("token") or ""))
-    except Exception:
-        pass
 
 
 def _mobility_event(agent_id: str, payload: dict[str, Any]) -> MobilityEvent:

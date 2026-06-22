@@ -2,12 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
 import heapq
 import itertools
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import Any
 
 from paglets.core.messages import Message
 

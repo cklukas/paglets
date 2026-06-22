@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 EXECUTE_ON_ARRIVAL = "arrival"
 EXECUTE_ON_DISPATCH = "dispatch"
 EXECUTE_ON_REVERTING = "reverting"
@@ -189,11 +188,7 @@ class TaskItineraryPlan(ItineraryPlan):
         if self._default_enabled_for_phase(phase):
             tasks.extend(self.default_tasks)
         if destination is not None:
-            tasks.extend(
-                task
-                for task in self.destination_tasks.get(destination, [])
-                if task.execution == phase
-            )
+            tasks.extend(task for task in self.destination_tasks.get(destination, []) if task.execution == phase)
         return tasks
 
     def _default_enabled_for_phase(self, phase: str) -> bool:

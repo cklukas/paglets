@@ -2,32 +2,33 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import threading
+import time
+import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import is_dataclass
 from functools import wraps
-import threading
-import time
-from typing import Any, ClassVar, Concatenate, Generic, ParamSpec, TypeVar, TYPE_CHECKING
-import uuid
+from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Generic, ParamSpec, TypeVar
 
 from paglets.core.errors import HostError, NotHandledError
 from paglets.core.events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from paglets.core.messages import Message, ReplySet
+from paglets.core.runtime_values import ServiceScope
 from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest
 from paglets.runtime.resources import ResourceRegistry
-from paglets.core.runtime_values import ServiceScope
 
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
-    from paglets.runtime.host import Host
+
+    from paglets.persistence.storage import ManagedStorage
     from paglets.remote.mesh import HostRef
     from paglets.remote.proxy import PagletProxy
     from paglets.remote.references import PagletProxyRef
-    from paglets.services.resident import ServiceLease
-    from paglets.services.contracts import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord
-    from paglets.persistence.storage import ManagedStorage
     from paglets.remote.transfer import TransferTicket
+    from paglets.runtime.host import Host
+    from paglets.services.contracts import ServiceContract, ServiceHandle, ServiceOperation, ServiceRecord
+    from paglets.services.resident import ServiceLease
 
 
 ACTIVE = 0x1
@@ -69,7 +70,7 @@ def state_locked(method: Callable[Concatenate[PagletT, P], ReturnT]) -> Callable
 class PagletContext:
     """Host-provided environment visible to a running paglet."""
 
-    def __init__(self, host: "Host", agent_id: str | None = None):
+    def __init__(self, host: Host, agent_id: str | None = None):
         self._host = host
         self._agent_id = agent_id
 
@@ -82,21 +83,21 @@ class PagletContext:
         return self._host.address
 
     @property
-    def host(self) -> "Host":
+    def host(self) -> Host:
         return self._host
 
     @property
     def agent_id(self) -> str | None:
         return self._agent_id
 
-    def get_proxy(self, agent_id: str, host_url: str | None = None) -> "PagletProxy | None":
+    def get_proxy(self, agent_id: str, host_url: str | None = None) -> PagletProxy | None:
         if host_url is None or host_url.rstrip("/") == self.address.rstrip("/"):
             return self._host.get_proxy(agent_id)
         from paglets.remote.proxy import PagletProxy
 
         return PagletProxy(host_url=host_url, agent_id=agent_id, client=self._host.client)
 
-    def get_proxies(self, state: int = ACTIVE) -> list["PagletProxy"]:
+    def get_proxies(self, state: int = ACTIVE) -> list[PagletProxy]:
         return self._host.get_proxies(state)
 
     def get_property(self, key: str, default: Any = None) -> Any:
@@ -107,45 +108,45 @@ class PagletContext:
 
     def create_paglet(
         self,
-        agent_cls: type["Paglet"],
+        agent_cls: type[Paglet],
         state: PagletState | None = None,
         *,
         init: Any = None,
         host_url: str | None = None,
-    ) -> "PagletProxy":
+    ) -> PagletProxy:
         if host_url is not None and host_url.rstrip("/") != self.address.rstrip("/"):
             return self._host.create_remote(host_url, agent_cls, state, init=init)
         return self._host.create(agent_cls, state, init=init)
 
-    def dispatch(self, agent_id: str, target: str | "TransferTicket") -> "PagletProxy":
+    def dispatch(self, agent_id: str, target: str | TransferTicket) -> PagletProxy:
         return self._host.dispatch(agent_id, target)
 
-    def clone(self, agent_id: str, target: str | "TransferTicket" | None = None) -> "PagletProxy":
+    def clone(self, agent_id: str, target: str | TransferTicket | None = None) -> PagletProxy:
         return self._host.clone(agent_id, target=target)
 
     def deactivate(
         self,
         agent_id: str,
         request: DeactivationRequest | None = None,
-    ) -> "PagletProxy":
+    ) -> PagletProxy:
         return self._host.deactivate(agent_id, request=request)
 
-    def available_hosts(self, *, online_only: bool = True, include_self: bool = True) -> list["HostRef"]:
+    def available_hosts(self, *, online_only: bool = True, include_self: bool = True) -> list[HostRef]:
         return self._host.mesh.hosts(online_only=online_only, include_self=include_self)
 
-    def host_status(self, name_or_url: str) -> "HostRef | None":
+    def host_status(self, name_or_url: str) -> HostRef | None:
         return self._host.mesh.lookup(name_or_url)
 
     def is_host_online(self, name_or_url: str) -> bool:
         return self._host.mesh.is_online(name_or_url)
 
-    def wait_for_host(self, name_or_url: str, *, timeout: float = 10.0, interval: float = 0.25) -> "HostRef":
+    def wait_for_host(self, name_or_url: str, *, timeout: float = 10.0, interval: float = 0.25) -> HostRef:
         return self._host.mesh.wait_for_host(name_or_url, timeout=timeout, interval=interval)
 
-    def dispatch_to(self, agent_id: str, name_or_url: str) -> "PagletProxy":
+    def dispatch_to(self, agent_id: str, name_or_url: str) -> PagletProxy:
         return self.dispatch(agent_id, self._host.mesh.resolve_url(name_or_url))
 
-    def clone_to(self, agent_id: str, name_or_url: str) -> "PagletProxy":
+    def clone_to(self, agent_id: str, name_or_url: str) -> PagletProxy:
         return self.clone(agent_id, self._host.mesh.resolve_url(name_or_url))
 
     def send(self, target_agent_id: str, message: Message, *, host_url: str | None = None) -> Any:
@@ -156,7 +157,9 @@ class PagletContext:
             message.sender = self.address
         return proxy.send(message)
 
-    def multicast(self, kind: str | Message, args: dict[str, Any] | None = None, *, exclude: set[str] | None = None) -> ReplySet:
+    def multicast(
+        self, kind: str | Message, args: dict[str, Any] | None = None, *, exclude: set[str] | None = None
+    ) -> ReplySet:
         return self._host.multicast_message(kind, args, exclude=exclude)
 
     def advertise_service(
@@ -168,7 +171,7 @@ class PagletContext:
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         agent_id: str | None = None,
-    ) -> "ServiceRecord":
+    ) -> ServiceRecord:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
             raise HostError("advertise_service requires an attached paglet or explicit agent_id")
@@ -181,7 +184,7 @@ class PagletContext:
             ttl=ttl,
         )
 
-    def unadvertise_service(self, name: str, *, agent_id: str | None = None) -> list["ServiceRecord"]:
+    def unadvertise_service(self, name: str, *, agent_id: str | None = None) -> list[ServiceRecord]:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
             raise HostError("unadvertise_service requires an attached paglet or explicit agent_id")
@@ -193,7 +196,7 @@ class PagletContext:
         *,
         capability: str | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "PagletProxyRef | None":
+    ) -> PagletProxyRef | None:
         record = self._host.lookup_service(name, capability=capability, scope=scope)
         return record.proxy if record is not None else None
 
@@ -203,18 +206,18 @@ class PagletContext:
         *,
         capability: str | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> list["ServiceRecord"]:
+    ) -> list[ServiceRecord]:
         return self._host.lookup_services(name, capability=capability, scope=scope)
 
     def advertise_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         metadata: dict[str, Any] | None = None,
         agent_id: str | None = None,
-    ) -> "ServiceRecord":
+    ) -> ServiceRecord:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
             raise HostError("advertise_contract requires an attached paglet or explicit agent_id")
@@ -229,21 +232,21 @@ class PagletContext:
 
     def lookup_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "ServiceHandle | None":
+    ) -> ServiceHandle | None:
         handles = self.lookup_contracts(contract, operation=operation, scope=scope)
         return handles[0] if handles else None
 
     def lookup_contracts(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> list["ServiceHandle"]:
+    ) -> list[ServiceHandle]:
         from paglets.services.contracts import ServiceHandle
 
         if operation is not None:
@@ -257,29 +260,28 @@ class PagletContext:
 
     def require_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "ServiceHandle":
-        from paglets.services.contracts import ServiceNotFoundError
+    ) -> ServiceHandle:
+        from paglets.core.errors import ServiceNotFoundError
 
         handle = self.lookup_contract(contract, operation=operation, scope=scope)
         if handle is None:
             operation_text = f" operation {operation.name!r}" if operation is not None else ""
-            raise ServiceNotFoundError(
-                f"No service contract {contract.name!r} version {contract.version!r}{operation_text} found in {scope} scope"
-            )
+            contract_text = f"contract {contract.name!r} version {contract.version!r}{operation_text}"
+            raise ServiceNotFoundError(f"No service {contract_text} found in {scope} scope")
         return handle
 
     def lease_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float = 60.0,
-    ) -> "ServiceLease":
+    ) -> ServiceLease:
         handle = self.require_contract(contract, operation=operation, scope=scope)
         lease = self._host.lease_service_handle(handle, ttl=ttl)
         if self._agent_id is not None:
@@ -296,7 +298,7 @@ class PagletContext:
             raise HostError("resources requires an attached paglet or explicit agent_id")
         return self._host.resources_for(owner_id)
 
-    def work_dir(self, *, create: bool = True, agent_id: str | None = None) -> "Path":
+    def work_dir(self, *, create: bool = True, agent_id: str | None = None) -> Path:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
             raise HostError("work_dir requires an attached paglet or explicit agent_id")
@@ -307,7 +309,7 @@ class PagletContext:
         *,
         quota_bytes: int | None = None,
         agent_id: str | None = None,
-    ) -> "ManagedStorage":
+    ) -> ManagedStorage:
         owner_id = agent_id or self._agent_id
         if owner_id is None:
             raise HostError("persistent_storage requires an attached paglet or explicit agent_id")
@@ -412,22 +414,22 @@ class Paglet(Generic[StateT]):
             self._state_condition.notify_all()
 
     # Convenience operations available from inside lifecycle/message handlers.
-    def dispatch(self, target: str | "TransferTicket") -> "PagletProxy":
+    def dispatch(self, target: str | TransferTicket) -> PagletProxy:
         proxy = self.context.dispatch(self.agent_id, target)
         self._last_proxy = proxy
         return proxy
 
-    def clone(self, target: str | "TransferTicket" | None = None) -> "PagletProxy":
+    def clone(self, target: str | TransferTicket | None = None) -> PagletProxy:
         proxy = self.context.clone(self.agent_id, target)
         self._last_proxy = proxy
         return proxy
 
-    def dispatch_to(self, name_or_url: str) -> "PagletProxy":
+    def dispatch_to(self, name_or_url: str) -> PagletProxy:
         proxy = self.context.dispatch_to(self.agent_id, name_or_url)
         self._last_proxy = proxy
         return proxy
 
-    def clone_to(self, name_or_url: str) -> "PagletProxy":
+    def clone_to(self, name_or_url: str) -> PagletProxy:
         proxy = self.context.clone_to(self.agent_id, name_or_url)
         self._last_proxy = proxy
         return proxy
@@ -438,7 +440,7 @@ class Paglet(Generic[StateT]):
         reason: str = "deactivate",
         policy: DeactivationPolicy | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> "PagletProxy":
+    ) -> PagletProxy:
         proxy = self.context.deactivate(
             self.agent_id,
             DeactivationRequest(
@@ -454,7 +456,9 @@ class Paglet(Generic[StateT]):
     def send(self, target_agent_id: str, message: Message, *, host_url: str | None = None) -> Any:
         return self.context.send(target_agent_id, message, host_url=host_url)
 
-    def multicast(self, kind: str | Message, args: dict[str, Any] | None = None, *, include_self: bool = True) -> ReplySet:
+    def multicast(
+        self, kind: str | Message, args: dict[str, Any] | None = None, *, include_self: bool = True
+    ) -> ReplySet:
         exclude = None if include_self else {self.agent_id}
         return self.context.multicast(kind, args, exclude=exclude)
 
@@ -475,7 +479,7 @@ class Paglet(Generic[StateT]):
         metadata: dict[str, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
-    ) -> "ServiceRecord":
+    ) -> ServiceRecord:
         return self.context.advertise_service(
             name,
             capabilities=capabilities,
@@ -485,7 +489,7 @@ class Paglet(Generic[StateT]):
             agent_id=self.agent_id,
         )
 
-    def unadvertise_service(self, name: str) -> list["ServiceRecord"]:
+    def unadvertise_service(self, name: str) -> list[ServiceRecord]:
         return self.context.unadvertise_service(name, agent_id=self.agent_id)
 
     def lookup_service(
@@ -494,7 +498,7 @@ class Paglet(Generic[StateT]):
         *,
         capability: str | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "PagletProxyRef | None":
+    ) -> PagletProxyRef | None:
         return self.context.lookup_service(name, capability=capability, scope=scope)
 
     def lookup_services(
@@ -503,17 +507,17 @@ class Paglet(Generic[StateT]):
         *,
         capability: str | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> list["ServiceRecord"]:
+    ) -> list[ServiceRecord]:
         return self.context.lookup_services(name, capability=capability, scope=scope)
 
     def advertise_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> "ServiceRecord":
+    ) -> ServiceRecord:
         return self.context.advertise_contract(
             contract,
             scope=scope,
@@ -524,45 +528,45 @@ class Paglet(Generic[StateT]):
 
     def lookup_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "ServiceHandle | None":
+    ) -> ServiceHandle | None:
         return self.context.lookup_contract(contract, operation=operation, scope=scope)
 
     def lookup_contracts(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> list["ServiceHandle"]:
+    ) -> list[ServiceHandle]:
         return self.context.lookup_contracts(contract, operation=operation, scope=scope)
 
     def require_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
-    ) -> "ServiceHandle":
+    ) -> ServiceHandle:
         return self.context.require_contract(contract, operation=operation, scope=scope)
 
     def lease_contract(
         self,
-        contract: "ServiceContract",
+        contract: ServiceContract,
         *,
-        operation: "ServiceOperation[Any, Any] | None" = None,
+        operation: ServiceOperation[Any, Any] | None = None,
         scope: ServiceScope = ServiceScope.LOCAL,
         ttl: float = 60.0,
-    ) -> "ServiceLease":
+    ) -> ServiceLease:
         return self.context.lease_contract(contract, operation=operation, scope=scope, ttl=ttl)
 
-    def work_dir(self, *, create: bool = True) -> "Path":
+    def work_dir(self, *, create: bool = True) -> Path:
         return self.context.work_dir(create=create, agent_id=self.agent_id)
 
-    def persistent_storage(self, *, quota_bytes: int | None = None) -> "ManagedStorage":
+    def persistent_storage(self, *, quota_bytes: int | None = None) -> ManagedStorage:
         return self.context.persistent_storage(quota_bytes=quota_bytes, agent_id=self.agent_id)
 
     @staticmethod

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 from paglets.core.errors import LifecycleError
-
 
 Cleanup = Callable[[], None]
 

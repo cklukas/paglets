@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import argparse
-from ipaddress import ip_address
 import os
-from pathlib import Path, PureWindowsPath
 import shutil
 import signal
 import sys
 import threading
+from ipaddress import ip_address
+from pathlib import Path, PureWindowsPath
 from urllib.parse import urlparse
 
 import paglets.tooling.git_update as git_update
-from paglets.remote.admin import discover_lan_entry_servers, discover_mesh_entry_servers
-from paglets.core.errors import PagletError
-from paglets.runtime.host import Host
-from paglets.core.runtime_values import LaunchConfigSyncAction
 from paglets.config.startup import DEFAULT_LAUNCH_CONFIG_PATH, load_launch_config, sync_launch_config
+from paglets.core.errors import PagletError
+from paglets.core.runtime_values import LaunchConfigSyncAction
 from paglets.persistence.storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES
+from paglets.remote.admin import discover_lan_entry_servers, discover_mesh_entry_servers
+from paglets.runtime.host import Host
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
         if sync_result.action in (LaunchConfigSyncAction.COPIED, LaunchConfigSyncAction.UPDATED):
             print(f"paglets host: {sync_result.message}", file=sys.stderr, flush=True)
             if sync_result.backup_path is not None:
-                print(f"paglets host: previous launch config moved to {sync_result.backup_path}", file=sys.stderr, flush=True)
+                print(
+                    f"paglets host: previous launch config moved to {sync_result.backup_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         launch_config = load_launch_config(launch_config_path)
     except PagletError as exc:
         print(f"paglets-host: {exc}", file=sys.stderr)
@@ -122,8 +126,9 @@ def main(argv: list[str] | None = None) -> int:
     host.start_background()
     if host.mesh.version_warning:
         print(f"paglets host warning: {host.mesh.version_warning}", file=sys.stderr, flush=True)
+    mode = "connected via" if args.connect_to else "listening at"
     print(
-        f"paglets host {host.name!r} {'connected via' if args.connect_to else 'listening at'} {args.connect_to or host.address} "
+        f"paglets host {host.name!r} {mode} {args.connect_to or host.address} "
         f"(mesh {'on' if args.mesh else 'off'}, version {host.mesh.code_version})",
         flush=True,
     )
@@ -182,11 +187,15 @@ def _parser() -> argparse.ArgumentParser:
         const="auto",
         default=None,
         metavar="HOST",
-        help="Bind to the detected LAN IP, refresh it if it changes, or bind to HOST; repeat for multiple explicit hosts",
+        help=(
+            "Bind to the detected LAN IP, refresh it if it changes, or bind to HOST; repeat for multiple explicit hosts"
+        ),
     )
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     parser.add_argument("--peer", action="append", default=[], help="Peer host URL to join; repeatable")
-    parser.add_argument("--mesh", action=argparse.BooleanOptionalAction, default=True, help="Enable host mesh discovery")
+    parser.add_argument(
+        "--mesh", action=argparse.BooleanOptionalAction, default=True, help="Enable host mesh discovery"
+    )
     parser.add_argument(
         "--mesh-multicast",
         action=argparse.BooleanOptionalAction,
@@ -219,7 +228,9 @@ def _parser() -> argparse.ArgumentParser:
         default=1024,
         help="Maximum queued relay deliveries per connected host",
     )
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
     parser.add_argument(

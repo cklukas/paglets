@@ -20,6 +20,14 @@ Runtime infrastructure lives in topic packages such as `paglets.core`,
 `paglets.runtime`, `paglets.remote`, and `paglets.services`. Example agents live
 under `paglets.examples.*` so their imports make that boundary explicit.
 
+The larger examples are split the same way internally: request/result
+dataclasses live in `models.py`, pure computation or analysis helpers live in
+focused modules such as `chudnovsky.py`, `local_search.py`, `kernels.py`, and
+`analysis.py`, and mobile-agent orchestration stays in `agent.py`. Package-level
+example imports such as `from paglets.examples.compute import PiComputeRequest`
+remain available for examples, while runtime imports still use explicit topic
+modules.
+
 ## Running The Examples
 
 Start two same-version hosts:

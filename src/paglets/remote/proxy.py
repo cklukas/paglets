@@ -2,16 +2,17 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-import time
 from typing import Any
 
 from paglets.core.agent import ACTIVE, INACTIVE
-from paglets.remote.client import HostClient
 from paglets.core.errors import PagletError
 from paglets.core.messages import FUTURE, ONEWAY, FutureReply, Message
 from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest
+from paglets.remote.client import HostClient
 from paglets.remote.references import PagletProxyRef
 from paglets.remote.transfer import TransferTicket
 
@@ -43,7 +44,7 @@ class PagletProxy:
         return PagletProxyRef.from_proxy(self)
 
     @classmethod
-    def from_wire(cls, payload: dict[str, str], client: HostClient | None = None) -> "PagletProxy":
+    def from_wire(cls, payload: dict[str, str], client: HostClient | None = None) -> PagletProxy:
         return cls(
             host_url=payload["host_url"],
             agent_id=payload["agent_id"],
@@ -145,7 +146,7 @@ class PagletProxy:
             )
         )
 
-    def dispatch(self, target: str | TransferTicket) -> "PagletProxy":
+    def dispatch(self, target: str | TransferTicket) -> PagletProxy:
         ticket = TransferTicket.from_target(target)
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/dispatch"),
@@ -179,10 +180,11 @@ class PagletProxy:
 
     def _find_active_same_agent_proxy(self, fallback_host_url: str) -> dict[str, str] | None:
         hosts = [fallback_host_url]
-        try:
-            hosts.extend(str(item.get("url") or item.get("address") or "") for item in self.client.get_json(f"{self.host_url.rstrip('/')}/hosts").get("hosts", []))
-        except PagletError:
-            pass
+        with contextlib.suppress(PagletError):
+            hosts.extend(
+                str(item.get("url") or item.get("address") or "")
+                for item in self.client.get_json(f"{self.host_url.rstrip('/')}/hosts").get("hosts", [])
+            )
         for host_url in dict.fromkeys(host.rstrip("/") for host in hosts if host):
             try:
                 info = self.client.get_json(_agent_url(host_url, self.agent_id), timeout=0.2)
@@ -192,7 +194,7 @@ class PagletProxy:
                 return {"host_url": host_url, "agent_id": self.agent_id}
         return None
 
-    def clone(self, target: str | TransferTicket | None = None) -> "PagletProxy":
+    def clone(self, target: str | TransferTicket | None = None) -> PagletProxy:
         payload = {"target": None} if target is None else {"ticket": TransferTicket.from_target(target).to_wire()}
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/clone"),
@@ -206,7 +208,7 @@ class PagletProxy:
         reason: str = "deactivate",
         policy: DeactivationPolicy | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> "PagletProxy":
+    ) -> PagletProxy:
         response = self.client.post_json(
             _agent_url(self.host_url, self.agent_id, "/deactivate"),
             {
@@ -220,7 +222,7 @@ class PagletProxy:
         )
         return PagletProxy.from_wire(response["proxy"], self.client)
 
-    def activate(self) -> "PagletProxy":
+    def activate(self) -> PagletProxy:
         response = self.client.post_json(_agent_url(self.host_url, self.agent_id, "/activate"), {})
         return PagletProxy.from_wire(response["proxy"], self.client)
 

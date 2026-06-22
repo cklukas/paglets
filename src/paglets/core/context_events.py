@@ -2,11 +2,11 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field
 import threading
 import time
-from typing import Any, Callable, Protocol
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ class ContextEvent:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "ContextEvent":
+    def from_wire(cls, payload: dict[str, Any]) -> ContextEvent:
         return cls(
             event_id=int(payload["event_id"]),
             kind=str(payload["kind"]),
@@ -58,8 +58,7 @@ class ContextEvent:
 
 
 class ContextListener(Protocol):
-    def __call__(self, event: ContextEvent) -> None:
-        ...
+    def __call__(self, event: ContextEvent) -> None: ...
 
 
 class ContextEventLog:

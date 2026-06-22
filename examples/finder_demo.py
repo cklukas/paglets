@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paglets.runtime.host import Host
-from paglets.core.messages import Message
 from paglets.core.agent import Paglet, PagletState
+from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope
+from paglets.runtime.host import Host
 
 try:
     from .support import local_hosts, run_importable_main

@@ -2,12 +2,11 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
-import shutil
 
 from paglets.core.errors import PagletError
-
 
 DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES = 10 * 1024 * 1024
 

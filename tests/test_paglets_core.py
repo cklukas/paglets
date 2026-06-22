@@ -3,20 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import socket
 
 import pytest
 
-from paglets.runtime.host import Host
-from paglets.core.messages import Message
 from paglets.core.agent import Paglet, PagletState
 from paglets.core.errors import NotHandledError
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+from paglets.core.messages import Message
+from paglets.runtime.host import Host
+from tests.support import free_port
 
 
 @dataclass

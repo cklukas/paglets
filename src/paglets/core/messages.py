@@ -2,13 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from concurrent.futures import Future
 import threading
 import time
 import uuid
-from typing import Any, Iterator
-
+from collections.abc import Iterator
+from concurrent.futures import Future
+from dataclasses import dataclass, field
+from typing import Any
 
 SYNCHRONOUS = 0
 FUTURE = 1
@@ -53,11 +53,11 @@ class Message:
             return self.arg
         return self.args.get(name, default)
 
-    def set_arg(self, name: str, value: Any) -> "Message":
+    def set_arg(self, name: str, value: Any) -> Message:
         self.args[name] = value
         return self
 
-    def same_kind(self, kind: str | "Message") -> bool:
+    def same_kind(self, kind: str | Message) -> bool:
         return self.kind == (kind.kind if isinstance(kind, Message) else kind)
 
     def increase_priority(self) -> None:
@@ -82,7 +82,7 @@ class Message:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "Message":
+    def from_wire(cls, payload: dict[str, Any]) -> Message:
         return cls(
             kind=payload["kind"],
             args=dict(payload.get("args") or {}),
@@ -109,7 +109,7 @@ class FutureReply:
         self._reply_sets: list[ReplySet] = []
         self._future.add_done_callback(lambda _: self._notify_reply_sets())
 
-    def added_to(self, reply_set: "ReplySet") -> None:
+    def added_to(self, reply_set: ReplySet) -> None:
         self._reply_sets.append(reply_set)
         if self.is_available():
             reply_set.done(self)

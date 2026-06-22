@@ -7,6 +7,8 @@
 - Provide the `paglets-host` command-line entry point.
 - Discover importable paglet classes in configured paths.
 - Keep trusted host meshes aligned with git auto-update.
+- Provide repository quality gates through ruff, pyright, pytest, MkDocs, and
+  CLI smoke checks.
 
 ## Main Modules
 
@@ -30,6 +32,16 @@ console-script wrapper on Windows.
 
 Git auto-update only runs for trusted direct hosts. Relay/connect mode disables
 auto-update because connect-mode hosts do not accept inbound update requests.
+
+The repository CI runs the same commands expected locally:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run pyright
+uv run pytest
+uv run --extra docs mkdocs build --strict
+```
 
 ## API Reference
 

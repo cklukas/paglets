@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from typing import Any
 
+from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
     select_reachable_entry_server,
 )
 from paglets.remote.client import HostClient
-from paglets.core.messages import Message
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
-from .agent import (
+
+from .models import (
     DEFAULT_DRAIN_WAIT_SECONDS,
     DEFAULT_SEARCH_TIMEOUT_SECONDS,
     SEARCH_TYPES,
@@ -60,12 +62,23 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Search files across a paglets mesh with mobile agents")
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
-    parser.add_argument("--host", action="append", default=[], help="Restrict search to a mesh host name or URL; repeatable")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_SEARCH_TIMEOUT_SECONDS, help="Seconds to wait for mesh replies")
-    parser.add_argument("--poll-interval", type=float, default=DEFAULT_DRAIN_WAIT_SECONDS, help="Seconds each drain call may wait for new events")
+    parser.add_argument(
+        "--host", action="append", default=[], help="Restrict search to a mesh host name or URL; repeatable"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_SEARCH_TIMEOUT_SECONDS, help="Seconds to wait for mesh replies"
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=DEFAULT_DRAIN_WAIT_SECONDS,
+        help="Seconds each drain call may wait for new events",
+    )
     parser.add_argument("--drain-limit", type=int, default=200, help=argparse.SUPPRESS)
     parser.add_argument("--type-list", action="store_true", help="List supported file type filters and exit")
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="Print final machine-readable summary JSON")
     output.add_argument("--jsonl", action="store_true", help="Stream machine-readable event JSON lines")
@@ -91,35 +104,62 @@ def _parser() -> argparse.ArgumentParser:
 
 def _add_common_search_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-i", "--ignore-case", action="store_true", help="Case-insensitive search")
-    parser.add_argument("-S", "--smart-case", action="store_true", help="Case-insensitive unless the pattern has uppercase letters")
+    parser.add_argument(
+        "-S", "--smart-case", action="store_true", help="Case-insensitive unless the pattern has uppercase letters"
+    )
     parser.add_argument("-F", "--fixed-strings", action="store_true", help="Treat the pattern as a literal string")
     parser.add_argument("-w", "--word-regexp", action="store_true", help="Only match whole words")
-    parser.add_argument("-g", "--glob", dest="globs", action="append", default=[], help="Include or exclude paths; prefix with ! to exclude")
-    parser.add_argument("-t", "--type", dest="type_names", action="append", default=[], help="Only search a supported file type")
-    parser.add_argument("-T", "--type-not", dest="type_not_names", action="append", default=[], help="Exclude a supported file type")
+    parser.add_argument(
+        "-g",
+        "--glob",
+        dest="globs",
+        action="append",
+        default=[],
+        help="Include or exclude paths; prefix with ! to exclude",
+    )
+    parser.add_argument(
+        "-t", "--type", dest="type_names", action="append", default=[], help="Only search a supported file type"
+    )
+    parser.add_argument(
+        "-T", "--type-not", dest="type_not_names", action="append", default=[], help="Exclude a supported file type"
+    )
     parser.add_argument("--hidden", action="store_true", help="Search hidden files and directories")
     parser.add_argument("--no-ignore", action="store_true", help="Do not use .gitignore, .ignore, or .fdignore files")
-    parser.add_argument("--ignore-file", dest="ignore_files", action="append", default=[], help="Additional ignore file name to read in each directory")
+    parser.add_argument(
+        "--ignore-file",
+        dest="ignore_files",
+        action="append",
+        default=[],
+        help="Additional ignore file name to read in each directory",
+    )
     parser.add_argument("--follow", action="store_true", help="Follow symbolic links while traversing")
     parser.add_argument("--max-depth", type=int, default=None, help="Maximum directory depth below each root")
-    parser.add_argument("--max-file-size", default="0", help="Skip content files larger than this size, e.g. 10M; 0 disables")
+    parser.add_argument(
+        "--max-file-size", default="0", help="Skip content files larger than this size, e.g. 10M; 0 disables"
+    )
     parser.add_argument("--encoding", default="utf-8", help="Text encoding for content search")
     parser.add_argument("--text", action="store_true", help="Search binary-looking files as text")
     parser.add_argument("--absolute-path", action="store_true", help="Print absolute paths")
-    parser.add_argument("--max-results-per-host", type=int, default=0, help="Stop emitting after this many hits per host")
+    parser.add_argument(
+        "--max-results-per-host", type=int, default=0, help="Stop emitting after this many hits per host"
+    )
 
 
 def _add_grep_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-A", "--after-context", type=int, default=0, help="Print lines after each match")
     parser.add_argument("-B", "--before-context", type=int, default=0, help="Print lines before each match")
     parser.add_argument("-C", "--context", type=int, default=None, help="Print lines before and after each match")
-    parser.add_argument("-n", "--line-number", action=argparse.BooleanOptionalAction, default=True, help="Print line numbers")
+    parser.add_argument(
+        "-n", "--line-number", action=argparse.BooleanOptionalAction, default=True, help="Print line numbers"
+    )
     parser.add_argument("--column", action="store_true", help="Print first match column")
     parser.add_argument("-o", "--only-matching", action="store_true", help="Print only matching text")
     parser.add_argument("-c", "--count", action="store_true", help="Print matching-line counts per file")
     parser.add_argument("-l", "--files-with-matches", action="store_true", help="Print only paths with matches")
     parser.add_argument("--files-without-match", action="store_true", help="Print only paths without matches")
-    parser.add_argument("-m", "--max-count", type=int, default=0, help="Stop reading a file after this many matching lines")
+    parser.add_argument(
+        "-m", "--max-count", type=int, default=0, help="Stop reading a file after this many matching lines"
+    )
 
 
 def _search_request(args: argparse.Namespace) -> SearchRequest:
@@ -223,14 +263,10 @@ def _run_search(
             if reply.get("done"):
                 return dict(reply.get("summary") or {}), events
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proxy.send(Message("cleanup"))
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             proxy.dispose()
-        except Exception:
-            pass
 
 
 def _print_event(event: SearchEvent, *, use_color: bool) -> None:
@@ -252,7 +288,11 @@ def _print_event(event: SearchEvent, *, use_color: bool) -> None:
         parts.append(str(event.line_number))
     if event.column:
         parts.append(str(event.column))
-    text = _highlight(event.text, event.match_start, event.match_end, use_color=use_color) if event.event == "match" else event.text
+    text = (
+        _highlight(event.text, event.match_start, event.match_end, use_color=use_color)
+        if event.event == "match"
+        else event.text
+    )
     print(sep.join(parts) + sep + text)
 
 

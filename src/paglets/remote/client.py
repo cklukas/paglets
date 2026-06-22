@@ -12,8 +12,8 @@ from urllib.request import Request, urlopen
 from paglets.core.errors import (
     AuthenticationError,
     ForbiddenError,
-    InvalidAgentError,
     HostError,
+    InvalidAgentError,
     LifecycleError,
     NotHandledError,
     PagletCrashedError,
@@ -26,7 +26,6 @@ from paglets.core.errors import (
 )
 from paglets.persistence.storage import StorageQuotaError
 from paglets.remote.transport import PICKLE_CONTENT_TYPE, dump_http_chunked_pickle
-
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
     "AuthenticationError": AuthenticationError,
@@ -44,6 +43,7 @@ _ERROR_TYPES: dict[str, type[PagletError]] = {
     "StorageQuotaError": StorageQuotaError,
     "TransferError": TransferError,
 }
+
 
 class HostClient:
     """Tiny JSON HTTP client used by proxies and hosts."""

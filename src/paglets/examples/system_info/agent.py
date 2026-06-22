@@ -2,24 +2,25 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import contextlib
 import os
-from pathlib import Path
 import platform
 import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import psutil
 
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
-from paglets.services.resident import ResidentServiceSpec
 from paglets.core.runtime_values import ResidentLifecycle, ServiceScope
 from paglets.serialization.serde import dataclass_from_wire
 from paglets.services.contracts import EmptyPayload, ServiceContract, ServiceOperation
+from paglets.services.resident import ResidentServiceSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,10 +391,8 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
             if parent is not None:
                 parent.send(Message("child_result", payload))
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self.context.host.dispose(self.agent_id)
-            except Exception:
-                pass
 
     @state_locked
     def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:

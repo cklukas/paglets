@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 from typing import Any
 
+from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
     select_reachable_entry_server,
 )
 from paglets.remote.client import HostClient
-from paglets.core.messages import Message
 from paglets.remote.proxy import PagletProxy
+
 from .agent import (
     GET_DISK,
     GET_LOAD,
@@ -25,8 +27,6 @@ from .agent import (
     DiskRequest,
     LoadRequest,
     ProcessListRequest,
-    SystemInfoCollectorAgent,
-    SystemInfoCollectorState,
 )
 
 
@@ -57,7 +57,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait for mesh replies")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     load = subparsers.add_parser("load", help="Show CPU, memory, swap, and GPU load")
@@ -96,7 +98,9 @@ def _operation_request(args: argparse.Namespace):
     return GET_SUMMARY, GET_SUMMARY.encode_request()
 
 
-def _collect(entry: ServerRef, operation: str, request: dict[str, Any], *, timeout: float, client: HostClient) -> dict[str, Any]:
+def _collect(
+    entry: ServerRef, operation: str, request: dict[str, Any], *, timeout: float, client: HostClient
+) -> dict[str, Any]:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
@@ -123,10 +127,8 @@ def _collect(entry: ServerRef, operation: str, request: dict[str, Any], *, timeo
             if reply.get("done"):
                 return summary
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proxy.dispose()
-        except Exception:
-            pass
 
 
 def _print_text(summary: dict[str, Any], operation: str) -> None:

@@ -24,13 +24,13 @@ class TransferTicket:
         require_enum(self.arrival_mode, ArrivalMode, "arrival_mode")
 
     @classmethod
-    def from_target(cls, target: str | "TransferTicket") -> "TransferTicket":
+    def from_target(cls, target: str | TransferTicket) -> TransferTicket:
         if isinstance(target, cls):
             return target
         return cls(destination=target)
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "TransferTicket":
+    def from_wire(cls, payload: dict[str, Any]) -> TransferTicket:
         return cls(
             destination=str(payload["destination"]),
             timeout=float(payload.get("timeout", 10.0)),
@@ -38,9 +38,7 @@ class TransferTicket:
             retry_interval=float(payload.get("retry_interval", 0.25)),
             required_capabilities=tuple(str(item) for item in payload.get("required_capabilities", [])),
             expected_code_version=(
-                str(payload["expected_code_version"])
-                if payload.get("expected_code_version") is not None
-                else None
+                str(payload["expected_code_version"]) if payload.get("expected_code_version") is not None else None
             ),
             arrival_mode=enum_from_wire(
                 payload.get("arrival_mode") or ArrivalMode.ACTIVATE.value,

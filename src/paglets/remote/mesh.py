@@ -2,17 +2,17 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-import ipaddress
 import importlib.metadata
+import ipaddress
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -56,7 +56,7 @@ class HostRef:
         return payload
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "HostRef":
+    def from_wire(cls, payload: dict[str, Any]) -> HostRef:
         return cls(
             name=str(payload["name"]),
             url=normalize_host_url(str(payload.get("url") or payload.get("address") or "")),
@@ -135,7 +135,7 @@ class MeshRegistry:
 
     def __init__(
         self,
-        host_runtime: "Host",
+        host_runtime: Host,
         *,
         enabled: bool = True,
         peers: list[str] | None = None,
@@ -269,8 +269,7 @@ class MeshRegistry:
     def register(self, ref: HostRef) -> HostRef | None:
         if ref.code_version != self.code_version:
             self._debug(
-                f"ignoring mesh peer {ref.name} at {ref.url}: "
-                f"version {ref.code_version!r} != {self.code_version!r}"
+                f"ignoring mesh peer {ref.name} at {ref.url}: version {ref.code_version!r} != {self.code_version!r}"
             )
             if not getattr(self._host, "relay_mode", False):
                 self._host.request_peer_git_update(
@@ -412,10 +411,7 @@ class MeshRegistry:
             return []
         network = ipaddress.ip_network(f"{lan_host}/24", strict=False)
         targets = [
-            (str(candidate), port)
-            for candidate in network.hosts()
-            if candidate != address
-            for port in probe_ports
+            (str(candidate), port) for candidate in network.hosts() if candidate != address for port in probe_ports
         ]
         if not targets:
             return []

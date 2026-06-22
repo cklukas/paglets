@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from paglets.core.messages import Message, ReplySet
 from paglets.core.agent import Paglet, PagletState
+from paglets.core.messages import Message, ReplySet
 
 try:
     from .support import local_hosts, run_importable_main
@@ -44,12 +44,7 @@ def main() -> None:
         future = proxies[0].send_future(Message("echo", arg="future"))
         print("future:", future.get_reply(timeout=2))
 
-        reply_set = ReplySet(
-            [
-                proxy.send_future(Message("echo", {"value": "reply-set"}))
-                for proxy in proxies
-            ]
-        )
+        reply_set = ReplySet([proxy.send_future(Message("echo", {"value": "reply-set"})) for proxy in proxies])
         print("reply set:")
         for reply in reply_set:
             print(f"  - {reply.get_reply()}")

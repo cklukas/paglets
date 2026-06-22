@@ -16,11 +16,11 @@ class PagletProxyRef:
     agent_id: str
 
     @classmethod
-    def from_proxy(cls, proxy: Any) -> "PagletProxyRef":
+    def from_proxy(cls, proxy: Any) -> PagletProxyRef:
         return cls(host_url=proxy.host_url, agent_id=proxy.agent_id)
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "PagletProxyRef":
+    def from_wire(cls, payload: dict[str, Any]) -> PagletProxyRef:
         return cls(host_url=str(payload["host_url"]), agent_id=str(payload["agent_id"]))
 
     def to_wire(self) -> dict[str, str]:

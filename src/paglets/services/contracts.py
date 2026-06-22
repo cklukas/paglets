@@ -2,17 +2,16 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, is_dataclass
-import time
 from typing import Any, Generic, TypeVar
 
-from paglets.core.errors import SerializationError, ServiceContractError, ServiceNotFoundError
+from paglets.core.errors import SerializationError, ServiceContractError
 from paglets.core.messages import Message
-from paglets.remote.references import PagletProxyRef
 from paglets.core.runtime_values import ServiceScope, enum_from_wire, require_enum
+from paglets.remote.references import PagletProxyRef
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
-
 
 CONTRACT_METADATA_KEY = "paglets.service_contract"
 _ROUTE_DEFAULT_UNSET = object()
@@ -143,7 +142,7 @@ class ServiceContract:
         merged[CONTRACT_METADATA_KEY] = self.metadata()
         return merged
 
-    def matches_record(self, record: "ServiceRecord") -> bool:
+    def matches_record(self, record: ServiceRecord) -> bool:
         return (
             record.name == self.name
             and tuple(record.capabilities) == self.capabilities
@@ -175,12 +174,14 @@ class ServiceHandle:
     """Resolved typed service client for one advertised service record."""
 
     contract: ServiceContract
-    record: "ServiceRecord"
+    record: ServiceRecord
     context_or_client: Any = None
 
     def __post_init__(self) -> None:
         if not self.contract.matches_record(self.record):
-            raise ServiceContractError(f"Service record {self.record.name!r} does not match contract {self.contract.name!r}")
+            raise ServiceContractError(
+                f"Service record {self.record.name!r} does not match contract {self.contract.name!r}"
+            )
 
     def call(
         self,
@@ -258,7 +259,7 @@ class ServiceRecord:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> "ServiceRecord":
+    def from_wire(cls, payload: dict[str, Any]) -> ServiceRecord:
         return cls(
             name=str(payload["name"]),
             proxy=PagletProxyRef.from_wire(payload["proxy"]),

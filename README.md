@@ -1,5 +1,10 @@
 # paglets
 
+[![CI](https://github.com/cklukas/paglets/actions/workflows/ci.yml/badge.svg)](https://github.com/cklukas/paglets/actions/workflows/ci.yml)
+[![Docs](https://github.com/cklukas/paglets/actions/workflows/docs.yml/badge.svg)](https://cklukas.github.io/paglets/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 `paglets` is a compact Python re-imagining of the Java Aglets idea: mobile,
 object-oriented agents with lifecycle events, message passing, proxy-based
 control, and explicit serializable state.
@@ -109,6 +114,13 @@ The project documentation is published with GitHub Pages from a GitHub Actions
 artifact, without a separate documentation branch:
 
 <https://cklukas.github.io/paglets/>
+
+Useful documentation entry points:
+
+- [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets/)
+- [Example Agents](https://cklukas.github.io/paglets/examples/)
+- [Usage Ideas](https://cklukas.github.io/paglets/usage-ideas/)
+- [Technical Overview](https://cklukas.github.io/paglets/technical/overview/)
 
 Run the demos:
 

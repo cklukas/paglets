@@ -8,13 +8,14 @@ import os
 import sys
 import time
 
+from paglets.core.runtime_values import ServiceScope
 from paglets.remote.admin import (
     ServerRef,
     select_reachable_entry_server,
 )
 from paglets.remote.client import HostClient
-from paglets.core.runtime_values import ServiceScope
 from paglets.services.contracts import ServiceHandle, ServiceRecord
+
 from .agent import (
     GET_LANDSCAPE,
     MESH_INFO,
@@ -63,16 +64,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=20.0, help="HTTP timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
+    parser.add_argument(
+        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     summary = subparsers.add_parser("summary", help="Show known fresh mesh snapshots")
-    summary.add_argument("--max-age", type=float, default=0.0, help="Freshness cutoff in seconds; 0 uses service default")
+    summary.add_argument(
+        "--max-age", type=float, default=0.0, help="Freshness cutoff in seconds; 0 uses service default"
+    )
     summary.add_argument("--limit", type=int, default=0, help="Maximum hosts to print")
 
     targets = subparsers.add_parser("targets", help="Show ranked eligible compute targets")
     targets.add_argument("--limit", type=int, default=5, help="Maximum targets to print")
-    targets.add_argument("--max-age", type=float, default=0.0, help="Freshness cutoff in seconds; 0 uses service default")
+    targets.add_argument(
+        "--max-age", type=float, default=0.0, help="Freshness cutoff in seconds; 0 uses service default"
+    )
     targets.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
     targets.add_argument("--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent")
     targets.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
@@ -121,7 +128,7 @@ def _print_summary(reply) -> None:
         errors = "; ".join(snapshot.errors)
         print(
             f"{snapshot.host_name:<14} {age:>5.1f}s {snapshot.cpu_percent:>6.1f} "
-        f"{snapshot.load_per_cpu:>8.3f} {_bytes(snapshot.memory_available_bytes):>10} "
+            f"{snapshot.load_per_cpu:>8.3f} {_bytes(snapshot.memory_available_bytes):>10} "
             f"{_bytes(snapshot.work_free_bytes):>10} {snapshot.active_count:>6} "
             f"{snapshot.inactive_count:>8} {errors}"
         )

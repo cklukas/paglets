@@ -2,17 +2,17 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from dataclasses import dataclass
+import contextlib
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import psutil
-
 
 GIT_COMMAND_TIMEOUT_SECONDS = 300.0
 UV_SYNC_TIMEOUT_SECONDS = 600.0
@@ -88,7 +88,7 @@ class GitUpdateLock:
         self.path = git_common_dir(self.repo_root) / GIT_UPDATE_LOCK_NAME
         self._acquired = False
 
-    def __enter__(self) -> "GitUpdateLock":
+    def __enter__(self) -> GitUpdateLock:
         self.acquire()
         return self
 
@@ -108,8 +108,7 @@ class GitUpdateLock:
                     continue
                 if time.monotonic() >= deadline:
                     raise GitUpdateError(
-                        f"Timed out waiting for git update lock at {self.path}; "
-                        f"{self._lock_description()}"
+                        f"Timed out waiting for git update lock at {self.path}; {self._lock_description()}"
                     ) from None
                 time.sleep(GIT_UPDATE_LOCK_RETRY_SECONDS)
 
@@ -122,10 +121,8 @@ class GitUpdateLock:
             self._acquired = False
 
     def _write_owner_file(self) -> None:
-        try:
+        with contextlib.suppress(OSError):
             (self.path / "owner").write_text(f"pid={os.getpid()}\ntime={time.time()}\n", encoding="utf-8")
-        except OSError:
-            pass
 
     def _remove_stale_lock_if_needed(self) -> bool:
         owner = self._read_owner()
@@ -326,10 +323,7 @@ def update_checkout(
                     target,
                     stdout_parts,
                     stderr_parts,
-                    (
-                        f"requested commit {target} was not found after git fetch; "
-                        "it may not have been pushed yet"
-                    ),
+                    (f"requested commit {target} was not found after git fetch; it may not have been pushed yet"),
                 )
 
             pull = _run_git(["pull"], repo_path)
@@ -465,8 +459,7 @@ def _run_git(args: list[str], repo_root: Path, *, timeout: float = GIT_COMMAND_T
         completed = subprocess.run(
             ["git", "-C", str(repo_root), *args],
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout,
         )
@@ -486,8 +479,7 @@ def _run_uv_sync(repo_root: Path, *, timeout: float = UV_SYNC_TIMEOUT_SECONDS) -
             ["uv", "sync"],
             cwd=repo_root,
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=timeout,
         )

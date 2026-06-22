@@ -3,31 +3,29 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 import time
 from typing import Any
 
+from paglets.core.messages import Message
 from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
-from paglets.core.messages import Message
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
-from .agent import (
+
+from .analysis import normalize_request, parse_size
+from .models import (
     DEFAULT_CLOCK_PROBES,
     DEFAULT_DIGITS,
     DEFAULT_TIMEOUT_SECONDS,
     ClockOffsetSummary,
-    MessageTimingSummary,
-    MeshBenchmarkCoordinatorAgent,
-    MeshBenchmarkCoordinatorState,
-    MeshBenchmarkHost,
     MeshBenchmarkRequest,
     MeshBenchmarkSummary,
+    MessageTimingSummary,
     PayloadTransferSpeedSummary,
-    normalize_request,
-    parse_size,
 )
 
 
@@ -67,7 +65,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeats", type=int, default=1, help="Repeat the directed mesh route this many times")
     parser.add_argument("--payload-size", default="0", help="Random ASCII payload size, e.g. 64K, 128K, 1M")
     parser.add_argument("--exclude-self", action="store_true", help="Skip self-pair movements such as A->A")
-    parser.add_argument("--digits", type=int, default=DEFAULT_DIGITS, help="Digits after the decimal point in text output")
+    parser.add_argument(
+        "--digits", type=int, default=DEFAULT_DIGITS, help="Digits after the decimal point in text output"
+    )
     parser.add_argument(
         "--clock-probes",
         type=int,
@@ -118,10 +118,8 @@ def _run(entry: ServerRef, request: MeshBenchmarkRequest, *, client: HostClient)
                 return latest
             time.sleep(0.25)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             proxy.dispose()
-        except Exception:
-            pass
 
 
 def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self: bool) -> str:
@@ -129,12 +127,11 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
     lines = [f"unit: {unit_name}", ""]
     lines.extend(_matrix_table(summary, multiplier=multiplier, digits=digits, include_self=include_self))
     lines.append("")
-    lines.append(f"average travel time: {_format_decimal(summary.average_elapsed_seconds * multiplier, digits)} {unit_name}")
-    lines.append(f"sum measured travel time: {_format_duration(summary.total_elapsed_seconds, digits)}")
     lines.append(
-        f"measured round trip time: "
-        f"{_format_duration(summary.measured_round_trip_seconds, digits)}"
+        f"average travel time: {_format_decimal(summary.average_elapsed_seconds * multiplier, digits)} {unit_name}"
     )
+    lines.append(f"sum measured travel time: {_format_duration(summary.total_elapsed_seconds, digits)}")
+    lines.append(f"measured round trip time: {_format_duration(summary.measured_round_trip_seconds, digits)}")
     lines.append(f"measured route overhead: {_format_duration(summary.measured_overhead_seconds, digits)}")
     lines.append(f"setup time before first movement: {_format_duration(summary.setup_seconds, digits)}")
     lines.append(f"measured movements: {summary.movement_count}")
@@ -160,7 +157,9 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
 
 
 def _is_summary_payload(payload: dict[str, Any]) -> bool:
-    return bool(payload.get("run_id") and payload.get("hosts") is not None and payload.get("matrix_seconds") is not None)
+    return bool(
+        payload.get("run_id") and payload.get("hosts") is not None and payload.get("matrix_seconds") is not None
+    )
 
 
 def _print_errors(errors: dict[str, str]) -> None:
@@ -321,10 +320,7 @@ def _format_bits_per_second(value: float, digits: int) -> str:
 
 
 def _format_transfer_speed(bytes_per_second: float, digits: int) -> str:
-    return (
-        f"{_format_bytes_per_second(bytes_per_second, digits)} / "
-        f"{_format_bits_per_second(bytes_per_second, digits)}"
-    )
+    return f"{_format_bytes_per_second(bytes_per_second, digits)} / {_format_bits_per_second(bytes_per_second, digits)}"
 
 
 if __name__ == "__main__":  # pragma: no cover

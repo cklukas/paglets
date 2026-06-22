@@ -3,20 +3,22 @@
 """Packaged mesh filesystem search example."""
 
 from .agent import (
-    HostSearchSummary,
     MeshSearchAgent,
     MeshSearchState,
+)
+from .local_search import run_local_search
+from .models import (
+    SEARCH_TYPES,
+    HostSearchSummary,
     SearchEvent,
     SearchRequest,
-    SEARCH_TYPES,
-    run_local_search,
 )
 
 __all__ = [
+    "SEARCH_TYPES",
     "HostSearchSummary",
     "MeshSearchAgent",
     "MeshSearchState",
-    "SEARCH_TYPES",
     "SearchEvent",
     "SearchRequest",
     "run_local_search",

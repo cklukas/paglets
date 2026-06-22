@@ -2,17 +2,16 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import sys
+import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib import resources
 from pathlib import Path
-import shutil
-import sys
-import tomllib
-from typing import Any, Callable, TextIO
+from typing import Any, TextIO
 
 from paglets.core.errors import HostError, SerializationError
-from paglets.services.resident import ResidentServiceSpec
 from paglets.core.runtime_values import (
     LaunchConfigSyncAction,
     ResidentLifecycle,
@@ -21,7 +20,7 @@ from paglets.core.runtime_values import (
     require_enum,
 )
 from paglets.serialization.serde import dataclass_from_wire, resolve_qualified_name
-
+from paglets.services.resident import ResidentServiceSpec
 
 DEFAULT_LAUNCH_CONFIG_PATH = Path.home() / ".paglets" / "launch.toml"
 DEFAULT_DEMO_CONFIG_ID = "paglets-default-launch"
@@ -187,9 +186,13 @@ def sync_launch_config(
     if interactive is None:
         interactive = sys.stdin.isatty()
     if not interactive:
+        update_hint = (
+            f"keeping existing {config_path}. Run paglets-host with --yes to update "
+            "or --no-sync-launch-config to suppress."
+        )
         print(
             f"paglets host warning: bundled launch config {bundled_id} version {bundled_version} is available; "
-            f"keeping existing {config_path}. Run paglets-host with --yes to update or --no-sync-launch-config to suppress.",
+            f"{update_hint}",
             file=out,
             flush=True,
         )
@@ -199,10 +202,14 @@ def sync_launch_config(
             "bundled launch config update available",
         )
 
-    answer = input_func(
-        f"Bundled paglets launch config {bundled_id} version {bundled_version} is available. "
-        f"Replace {config_path} and move the old file aside? [y/N] "
-    ).strip().lower()
+    answer = (
+        input_func(
+            f"Bundled paglets launch config {bundled_id} version {bundled_version} is available. "
+            f"Replace {config_path} and move the old file aside? [y/N] "
+        )
+        .strip()
+        .lower()
+    )
     if answer not in {"y", "yes"}:
         return LaunchConfigSyncResult(LaunchConfigSyncAction.SKIPPED, config_path, "launch config update declined")
 
@@ -307,7 +314,9 @@ def _launch_config_from_payload(payload: dict[str, Any], path: Path) -> LaunchCo
     return LaunchConfig(
         path=path,
         demo_config_id=str(launch["demo_config_id"]) if launch.get("demo_config_id") is not None else None,
-        demo_config_version=str(launch["demo_config_version"]) if launch.get("demo_config_version") is not None else None,
+        demo_config_version=str(launch["demo_config_version"])
+        if launch.get("demo_config_version") is not None
+        else None,
         sync_demo_config=bool(launch.get("sync_demo_config", True)),
         startup_agents=tuple(_startup_agent_from_payload(item, path) for item in raw_agents),
         resident_services=tuple(_resident_service_from_payload(item, path) for item in raw_resident_services),
@@ -351,9 +360,7 @@ def _resident_service_from_payload(payload: Any, path: Path) -> ResidentServiceC
         agent_id=str(payload["agent_id"]) if payload.get("agent_id") is not None else None,
         singleton=bool(payload.get("singleton", True)),
         lifecycle=(
-            _enum_from_config(lifecycle, ResidentLifecycle, "lifecycle", path)
-            if lifecycle is not None
-            else None
+            _enum_from_config(lifecycle, ResidentLifecycle, "lifecycle", path) if lifecycle is not None else None
         ),
         scope=_enum_from_config(scope, ServiceScope, "scope", path) if scope is not None else None,
         idle_timeout=float(idle_timeout) if idle_timeout is not None else None,

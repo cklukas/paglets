@@ -1,0 +1,52 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install project
+        run: uv sync --extra dev --extra docs
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Build documentation
+        run: uv run --extra docs mkdocs build --strict
+
+      - name: Smoke-test command line entry points
+        run: |
+          uv run paglets-host --help
+          uv run paglets-mesh-benchmark --help
+          uv run paglets-mesh-info --help
+          uv run paglets-perf-test --help
+          uv run paglets-pi-compute --help
+          uv run paglets-search --help
+          uv run paglets-sysinfo --help
