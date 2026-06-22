@@ -115,6 +115,7 @@ def _run_stream(
     proxy = _create_coordinator(entry, client=client)
     summary: dict = {}
     cursor = 0
+    printed_digits = 0
     stream_chunk_size = max(0, int(stream_chunk_size))
     try:
         proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
@@ -135,10 +136,12 @@ def _run_stream(
             if new_decimal_digits:
                 _write_stream_digits(new_decimal_digits, stream_chunk_size=stream_chunk_size)
                 cursor = max(cursor, int(reply.get("cursor") or 0))
+                printed_digits += len(new_decimal_digits)
             if reply.get("done"):
                 break
         sys.stdout.write("\n")
         _print_status(summary)
+        _print_run_diagnostics(summary, printed_digits)
         return summary
     finally:
         _cleanup_coordinator(proxy)
@@ -208,6 +211,20 @@ def _print_status(summary: dict) -> None:
         print("\ncleanup errors:")
         for key, error in sorted(summary["cleanup_errors"].items()):
             print(f"  - {key}: {error}")
+
+
+def _print_run_diagnostics(summary: dict, printed_digits: int) -> None:
+    if summary.get("errors"):
+        return
+    terms = int(summary.get("terms", 0))
+    completed_terms = int(summary.get("completed_terms", 0))
+    pending = int(summary.get("pending", 0))
+    in_flight = int(summary.get("in_flight", 0))
+    done = bool(summary.get("done"))
+
+    if done and pending == 0 and in_flight == 0 and completed_terms >= terms:
+        print("pi compute diagnostic: all batches received", file=sys.stderr)
+    print(f"pi compute diagnostic: digits printed={printed_digits}", file=sys.stderr)
 
 
 def _parse_size(value: str) -> int:

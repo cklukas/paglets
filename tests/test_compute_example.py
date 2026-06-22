@@ -579,6 +579,38 @@ def test_pi_compute_cli_streams_text_output(tmp_path: Path, capsys, monkeypatch)
         assert result == 0
         output = capsys.readouterr().out
         assert output.splitlines()[0] == "3.14159265"
+        assert "3.14159265" in output
+    finally:
+        host.stop()
+
+
+def test_pi_compute_cli_streams_diagnostics(tmp_path: Path, capsys, monkeypatch):
+    launch_config = _launch_config(tmp_path)
+    host = _host("alpha", tmp_path / "alpha", launch_config=launch_config)
+    host.start_background()
+    try:
+        monkeypatch.setattr(
+            "paglets.examples.compute.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", host.address),
+        )
+
+        result = pi_main(
+            [
+                "--timeout",
+                "5",
+                "--digits",
+                "4",
+                "--batch-size",
+                "1",
+                "--max-cpu-percent",
+                "100",
+            ]
+        )
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert "pi compute diagnostic: all batches received" in captured.err
+        assert "pi compute diagnostic: digits printed=4" in captured.err
     finally:
         host.stop()
 
