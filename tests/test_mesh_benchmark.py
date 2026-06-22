@@ -19,6 +19,7 @@ from paglets.examples.mesh_benchmark import (
     aggregate_clock_offsets,
     aggregate_matrix,
     aggregate_message_timings,
+    benchmark_transfer_ticket,
     build_route_edges,
     entry_time_for_local_reference,
     local_minus_entry_offset,
@@ -89,6 +90,15 @@ def test_cli_default_digits_is_one_decimal_place():
     args = _parser().parse_args([])
 
     assert args.digits == 1
+
+
+def test_benchmark_transfer_ticket_uses_request_timeout_for_large_payload_moves():
+    request = MeshBenchmarkRequest(timeout_seconds=180.0)
+
+    ticket = benchmark_transfer_ticket("http://beta", request)
+
+    assert ticket.destination == "http://beta"
+    assert ticket.timeout == 180.0
 
 
 def test_mesh_benchmark_dataclasses_round_trip_through_wire():

@@ -298,7 +298,8 @@ uncounted collection round and prints a Markdown matrix where row `A`, column
 `B` is the average A->B travel time. Timing uses request/reply probes against
 the stable starter clock at dispatch and arrival points, and clock-offset plus
 message round-trip diagnostics are reported versus the entry host. The output
-also reports the overall benchmark time from start through collection.
+also reports the overall benchmark time from start through collection. For large
+payloads, `--timeout` applies to both the whole run and each movement transfer.
 
 Search files across online same-version mesh hosts with a mobile agent:
 

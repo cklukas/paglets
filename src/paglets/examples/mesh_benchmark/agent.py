@@ -16,11 +16,12 @@ from ...agent import Paglet, PagletState, state_locked
 from ...mesh import HostRef
 from ...messages import Message
 from ...serde import dataclass_from_wire, dataclass_to_wire
+from ...transfer import TransferTicket
 
 
 DEFAULT_CLOCK_PROBES = 5
 DEFAULT_DIGITS = 1
-DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_TIMEOUT_SECONDS = 600.0
 CONTINUE_DELAY_SECONDS = 0.1
 MESH_BENCHMARK_STORAGE_DIR = "mesh-benchmark"
 
@@ -330,6 +331,7 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
                 state.collection_index = 0
                 state.awaiting_timing = False
                 state.pending_edge = {}
+                state.payload = ""
                 phase_changed = True
             else:
                 edge_wire = dict(state.route_edges[state.route_index])
@@ -348,7 +350,7 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             state.pending_edge = dict(edge_wire)
             state.pending_edge["source_wall_start"] = source_wall_start
             state.clock_samples.extend(dataclass_to_wire(sample) for sample in start_samples)
-        self.dispatch(edge.target_url)
+        self.dispatch(benchmark_transfer_ticket(edge.target_url, request))
 
     def _complete_arrival(self) -> None:
         with self.locked_state() as state:
@@ -386,7 +388,8 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             else:
                 target = ""
         if target:
-            self.dispatch(target)
+            request = dataclass_from_wire(MeshBenchmarkRequest, dict(self.state.request))
+            self.dispatch(benchmark_transfer_ticket(target, request))
             return
         self._finish()
 
@@ -564,6 +567,10 @@ def normalize_request(request: MeshBenchmarkRequest) -> MeshBenchmarkRequest:
         digits=max(0, int(request.digits)),
         clock_probes=max(1, int(request.clock_probes)),
     )
+
+
+def benchmark_transfer_ticket(target_url: str, request: MeshBenchmarkRequest) -> TransferTicket:
+    return TransferTicket(destination=target_url, timeout=max(0.1, float(request.timeout_seconds)))
 
 
 def build_route_edges(
