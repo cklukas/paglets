@@ -11,6 +11,8 @@ The runtime intentionally uses a Python-friendly mobility model:
 - only dataclass state moves between hosts;
 - control calls use a JSON HTTP API, while paglet movement uses a binary HTTP
   state payload to avoid JSON encoding large mobile state;
+- large state is streamed for host-to-host movement and host/child process
+  handoff, while JSON remains the small control-plane format;
 - lifecycle hooks resume behavior after create, dispatch, clone, retract, or
   activation;
 - deactivation persists inactive paglets to disk until activation;

@@ -506,8 +506,10 @@ samples.
 `--payload-size` adds random printable state to the mobile traveler. This uses
 the same binary paglet movement envelope as any other large paglet state, so the
 benchmark exercises the normal dispatch path rather than a benchmark-specific
-bulk-transfer shortcut. For very large payloads, increase `--timeout`; the value
-is used for the overall benchmark deadline and for each movement transfer.
+bulk-transfer shortcut. The same runtime path streams state through HTTP and
+through the host/child process handoff. For very large payloads, increase
+`--timeout`; the value is used for the overall benchmark deadline and for each
+movement transfer.
 
 Timing is based on the stable starter clock. Before each dispatch, the traveler
 probes the starter, estimates entry-host time for the local instant immediately

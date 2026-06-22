@@ -10,6 +10,7 @@ from pathlib import Path, PurePath
 from typing import Any, get_args, get_origin, get_type_hints
 
 from .errors import SerializationError
+from .transport import restore_binary_tag
 
 
 def qualified_name(obj: type | object) -> str:
@@ -47,7 +48,7 @@ def resolve_qualified_name(name: str) -> Any:
 
 
 def dataclass_to_wire(instance: Any) -> dict[str, Any]:
-    """Serialize a dataclass instance to a JSON-compatible dict.
+    """Serialize a dataclass instance to explicit movement/control values.
 
     This is intentionally one approach: paglet state is explicit dataclass state.
     Runtime fields on the paglet object itself are transient and never move.
@@ -91,6 +92,10 @@ def _to_wire_value(value: Any) -> Any:
         return str(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytearray(value)
     if isinstance(value, list):
         return [_to_wire_value(item) for item in value]
     if isinstance(value, tuple):
@@ -105,7 +110,7 @@ def _to_wire_value(value: Any) -> Any:
         return {str(key): _to_wire_value(item) for key, item in value.items()}
     raise SerializationError(
         f"Unsupported state value {value!r} of type {type(value).__name__}; "
-        "use dataclasses, primitives, lists, sets, tuples, dicts, enums, or pathlib paths"
+        "use dataclasses, primitives, bytes, bytearray, lists, sets, tuples, dicts, enums, or pathlib paths"
     )
 
 
@@ -115,7 +120,7 @@ def _from_wire_value(annotation: Any, value: Any) -> Any:
     if value is None:
         return None
     if annotation is Any or annotation is object:
-        return value
+        return restore_binary_tag(value)
     if annotation is PagletProxyRef:
         return PagletProxyRef.from_wire(value)
 
@@ -155,10 +160,16 @@ def _from_wire_value(annotation: Any, value: Any) -> Any:
             return annotation(value)
         if issubclass(annotation, PurePath):
             return Path(value)
+        if annotation is bytes:
+            restored = restore_binary_tag(value)
+            return bytes(restored)
+        if annotation is bytearray:
+            restored = restore_binary_tag(value)
+            return bytearray(restored)
         if annotation in (str, int, float, bool):
             return annotation(value)
 
-    return value
+    return restore_binary_tag(value)
 
 
 def _from_union(args: tuple[Any, ...], value: Any) -> Any:

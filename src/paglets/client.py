@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import pickle
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -24,6 +23,7 @@ from .errors import (
     TransferError,
 )
 from .storage import StorageQuotaError
+from .transport import PICKLE_CONTENT_TYPE, dump_http_chunked_pickle
 
 
 _ERROR_TYPES: dict[str, type[PagletError]] = {
@@ -40,9 +40,6 @@ _ERROR_TYPES: dict[str, type[PagletError]] = {
     "StorageQuotaError": StorageQuotaError,
     "TransferError": TransferError,
 }
-
-PICKLE_CONTENT_TYPE = "application/x-paglets-pickle"
-
 
 class HostClient:
     """Tiny JSON HTTP client used by proxies and hosts."""
@@ -66,11 +63,7 @@ class HostClient:
             connection.putheader("Accept", "application/json")
             connection.putheader("Transfer-Encoding", "chunked")
             connection.endheaders()
-            writer = _ChunkedRequestWriter(connection)
-            try:
-                pickle.dump(payload, writer, protocol=pickle.HIGHEST_PROTOCOL)
-            finally:
-                writer.close()
+            dump_http_chunked_pickle(connection, payload)
             response = connection.getresponse()
             raw = response.read().decode("utf-8")
             if response.status >= 400:
@@ -121,28 +114,3 @@ def _request_target(parsed: Any) -> str:
     if parsed.query:
         return f"{target}?{parsed.query}"
     return target
-
-
-class _ChunkedRequestWriter:
-    def __init__(self, connection: http.client.HTTPConnection):
-        self._connection = connection
-        self._closed = False
-
-    def write(self, data: bytes) -> int:
-        if self._closed:
-            raise ValueError("chunked request writer is closed")
-        if not data:
-            return 0
-        view = memoryview(data)
-        self._connection.send(f"{len(view):X}\r\n".encode("ascii"))
-        self._connection.send(view)
-        self._connection.send(b"\r\n")
-        return len(view)
-
-    def flush(self) -> None:
-        return None
-
-    def close(self) -> None:
-        if not self._closed:
-            self._connection.send(b"0\r\n\r\n")
-            self._closed = True

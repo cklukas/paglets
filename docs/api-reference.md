@@ -94,6 +94,10 @@ This page is generated from the Python source using `mkdocstrings`.
 
 ::: paglets.serde
 
+## Transport Internals
+
+::: paglets.transport
+
 ## Persistency
 
 ::: paglets.persistency

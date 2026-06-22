@@ -49,6 +49,8 @@ This first implementation intentionally uses **one approach**:
 - runtime fields on the agent instance are transient;
 - host control messages use a tiny JSON HTTP API, while paglet movement sends
   state through a binary HTTP payload to avoid JSON encoding large mobile state;
+- large paglet state is streamed through both host-to-host transport and the
+  host/child process boundary instead of being embedded in JSON control calls;
 - every active paglet instance runs in its own child Python process;
 - migration works equally across different machines or between two host processes
   on the same Mac using different ports.
@@ -650,14 +652,16 @@ Supported state values include:
 - `str`, `int`, `float`, `bool`, `None`;
 - `list`, `tuple`, `set`, `dict`;
 - `Enum` values;
-- `pathlib.Path` values.
+- `pathlib.Path` values;
+- `bytes` and `bytearray` values.
 
 Everything stored directly on the `Paglet` object is intentionally transient and
 will be rebuilt by `__init__`, `on_arrival`, `on_clone`, or `run` on the target
 host. This is the modern Python equivalent of explicit mobile object state: no
 call-stack transfer, no socket/thread/GPU-context migration. Movement uses a
-binary state envelope; message arguments and replies should still stay
-JSON-compatible.
+streamed pickle state envelope, so binary state moves natively. JSON state
+inspection and inactive-record persistence project binary values as tagged
+base64 objects; message arguments and replies should still stay JSON-compatible.
 
 ## Same-machine multi-host development
 

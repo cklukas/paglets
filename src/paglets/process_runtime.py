@@ -42,6 +42,7 @@ from .serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resol
 from .services import ServiceRecord
 from .storage import ManagedStorage, StorageQuotaError, StorageStatus
 from .transfer import TransferTicket
+from .transport import receive_local_pickle, start_local_pickle_sender, wait_for_local_pickle_senders
 
 
 _ERROR_TYPES: dict[str, type[Exception]] = {
@@ -68,8 +69,9 @@ class ChildConfig:
     agent_id: str
     agent_class_name: str
     state_class_name: str
-    state: dict[str, Any]
     process_title: str
+    state: dict[str, Any] | None = None
+    state_stream: dict[str, Any] | None = None
 
 
 class ChildProcessController:
@@ -86,7 +88,7 @@ class ChildProcessController:
         self.agent_id = config.agent_id
         self.agent_class_name = config.agent_class_name
         self.state_class_name = config.state_class_name
-        self.state: dict[str, Any] = dict(config.state)
+        self.state: dict[str, Any] = dict(config.state or {})
         self.resource_status: dict[str, bool] = {}
         self.ready = False
         self.crashed = False
@@ -275,7 +277,8 @@ class ChildProcessController:
         if future is None:
             return
         if message.get("ok", False):
-            future.set_result(message.get("payload"))
+            payload = _materialize_state_stream(message.get("payload"))
+            future.set_result(payload)
             return
         future.set_exception(_error_from_wire(message.get("error") or {}))
 
@@ -283,7 +286,8 @@ class ChildProcessController:
         request_id = str(message.get("id") or "")
         op = str(message.get("op") or "")
         try:
-            payload = self._host_call_handler(op, dict(message.get("payload") or {}))
+            request_payload = _materialize_state_stream(dict(message.get("payload") or {}))
+            payload = self._host_call_handler(op, request_payload)
             if op in {"complete_dispatch", "complete_deactivate", "complete_dispose"}:
                 self._has_terminal_message_result = True
                 self._terminal_message_result = payload.get("proxy") if isinstance(payload, dict) else None
@@ -348,7 +352,7 @@ class _ChildEndpoint:
         return self._requests.get()
 
     def reply_ok(self, request_id: str, payload: Any) -> None:
-        self._send({"type": "reply", "id": request_id, "ok": True, "payload": payload})
+        self._send({"type": "reply", "id": request_id, "ok": True, "payload": _stream_state_payload(payload)})
 
     def reply_error(self, request_id: str, exc: Exception) -> None:
         self._send({"type": "reply", "id": request_id, "ok": False, "error": _error_to_wire(exc)})
@@ -361,7 +365,7 @@ class _ChildEndpoint:
         self._send({"type": "host_call", "id": request_id, "op": op, "payload": payload or {}})
         reply = inbox.get()
         if reply.get("ok", False):
-            return reply.get("payload")
+            return _materialize_state_stream(reply.get("payload"))
         raise _error_from_wire(reply.get("error") or {})
 
     def close(self) -> None:
@@ -412,7 +416,7 @@ class _ChildEndpoint:
             if message.get("op") == "state":
                 payload = _agent_snapshot(self.agent)
             else:
-                payload = {"resources": self.agent.resources.status(), "state": dataclass_to_wire(self.agent.state)}
+                payload = {"resources": self.agent.resources.status()}
             self.reply_ok(request_id, payload)
         except Exception as exc:
             self.reply_error(request_id, exc)
@@ -480,6 +484,11 @@ class _ChildHostFacade:
     def _call(self, op: str, payload: dict[str, Any] | None = None) -> Any:
         return self._endpoint.host_call(op, payload or {})
 
+    def _call_with_state(self, op: str, payload: dict[str, Any], state: Any) -> Any:
+        streamed = dict(payload)
+        streamed["state_stream"] = start_local_pickle_sender(dataclass_to_wire(state))
+        return self._call(op, streamed)
+
     def get_proxy(self, agent_id: str, host_url: str | None = None) -> PagletProxy | None:
         if host_url is not None and host_url.rstrip("/") != self.address.rstrip("/"):
             return PagletProxy(host_url.rstrip("/"), agent_id, self.client)
@@ -508,16 +517,16 @@ class _ChildHostFacade:
         state_cls = agent_cls.state_class()
         if state is None:
             state = state_cls()  # type: ignore[call-arg]
-        payload = self._call(
+        payload = self._call_with_state(
             "create_paglet",
             {
                 "agent_class_name": qualified_name(agent_cls),
                 "state_class_name": qualified_name(state_cls),
-                "state": dataclass_to_wire(state),
                 "init": init,
                 "agent_id": agent_id,
                 "host_url": None,
             },
+            state,
         )
         return PagletProxy.from_wire(payload["proxy"], self.client)
 
@@ -533,16 +542,16 @@ class _ChildHostFacade:
         state_cls = agent_cls.state_class()
         if state is None:
             state = state_cls()  # type: ignore[call-arg]
-        payload = self._call(
+        payload = self._call_with_state(
             "create_paglet",
             {
                 "agent_class_name": qualified_name(agent_cls),
                 "state_class_name": qualified_name(state_cls),
-                "state": dataclass_to_wire(state),
                 "init": init,
                 "agent_id": agent_id,
                 "host_url": target,
             },
+            state,
         )
         return PagletProxy.from_wire(payload["proxy"], self.client)
 
@@ -565,14 +574,14 @@ class _ChildHostFacade:
             )
         )
         agent.resources.cleanup(reason="dispatch")
-        payload = self._call(
+        payload = self._call_with_state(
             "complete_dispatch",
             {
                 "ticket": ticket.to_wire(),
                 "target_info": target_info,
-                "state": dataclass_to_wire(agent.state),
                 "resources": agent.resources.status(),
             },
+            agent.state,
         )
         self._terminal = True
         self._endpoint.request_exit()
@@ -597,14 +606,14 @@ class _ChildHostFacade:
             target_host_address=target_info["address"],
         )
         agent.on_cloning(event)
-        payload = self._call(
+        payload = self._call_with_state(
             "complete_clone",
             {
                 "ticket": ticket.to_wire(),
                 "target_info": target_info,
                 "clone_id": clone_id,
-                "state": dataclass_to_wire(agent.state),
             },
+            agent.state,
         )
         agent.on_cloned(event)
         return PagletProxy.from_wire(payload["proxy"], self.client)
@@ -627,14 +636,14 @@ class _ChildHostFacade:
             )
         )
         agent.resources.cleanup(reason="deactivate")
-        payload = self._call(
+        payload = self._call_with_state(
             "complete_deactivate",
             {
                 "request": request.to_wire(),
                 "policy": policy.to_wire(),
-                "state": dataclass_to_wire(agent.state),
                 "resources": agent.resources.status(),
             },
+            agent.state,
         )
         self._terminal = True
         self._endpoint.request_exit()
@@ -647,7 +656,10 @@ class _ChildHostFacade:
         agent.resources.cleanup(reason="dispose")
         self._call(
             "complete_dispose",
-            {"state": dataclass_to_wire(agent.state), "resources": agent.resources.status()},
+            {
+                "state_stream": start_local_pickle_sender(dataclass_to_wire(agent.state)),
+                "resources": agent.resources.status(),
+            },
         )
         self._terminal = True
         self._endpoint.request_exit()
@@ -817,8 +829,8 @@ def make_child_config(
         agent_id=agent_id,
         agent_class_name=agent_class_name,
         state_class_name=state_class_name,
-        state=dict(state),
         process_title=title,
+        state_stream=start_local_pickle_sender(dict(state)),
     )
 
 
@@ -836,7 +848,11 @@ def _child_main(config: ChildConfig, conn: Connection) -> None:
         raise HostError(f"{config.agent_class_name} is not a Paglet subclass")
     if not is_dataclass(state_cls):
         raise HostError(f"{config.state_class_name} is not a dataclass state")
-    state = dataclass_from_wire(state_cls, config.state)
+    if config.state_stream is not None:
+        state_wire = receive_local_pickle(config.state_stream)
+    else:
+        state_wire = config.state or {}
+    state = dataclass_from_wire(state_cls, state_wire)
     agent = agent_cls(state=state, agent_id=config.agent_id)
     facade = _ChildHostFacade(endpoint, config)
     facade.attach_agent(agent)
@@ -862,6 +878,7 @@ def _child_main(config: ChildConfig, conn: Connection) -> None:
                     break
     finally:
         endpoint.close()
+        wait_for_local_pickle_senders()
         reader.join(timeout=0.2)
 
 
@@ -997,6 +1014,22 @@ def _agent_snapshot(agent: Paglet) -> dict[str, Any]:
     with agent.locked_state() as state:
         state_wire = dataclass_to_wire(state)
     return {"state": state_wire, "resources": agent.resources.status()}
+
+
+def _stream_state_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict) or "state" not in payload:
+        return payload
+    streamed = dict(payload)
+    streamed["state_stream"] = start_local_pickle_sender(streamed.pop("state"))
+    return streamed
+
+
+def _materialize_state_stream(payload: Any) -> Any:
+    if not isinstance(payload, dict) or "state_stream" not in payload:
+        return payload
+    materialized = dict(payload)
+    materialized["state"] = receive_local_pickle(dict(materialized.pop("state_stream") or {}))
+    return materialized
 
 
 def _mobility_event(agent_id: str, payload: dict[str, Any]) -> MobilityEvent:

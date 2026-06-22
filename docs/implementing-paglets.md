@@ -22,8 +22,12 @@ class Traveller(Paglet[TravellerState]):
     State = TravellerState
 ```
 
-State values must be JSON-compatible after dataclass serialization. That keeps
-movement between hosts explicit and inspectable.
+State values should be ordinary dataclass-serializable Python values: nested
+dataclasses, primitives, collections, enums, paths, `bytes`, and `bytearray`.
+Movement keeps binary values native in the streamed pickle envelope. JSON state
+inspection projects binary values as tagged base64 objects, so messages and
+message replies should still use JSON-compatible data unless both sides
+explicitly agree on another representation.
 
 Active paglets run in child Python processes started with the `spawn` method.
 Both the paglet class and the state class must be importable by module path, for

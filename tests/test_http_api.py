@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import io
 import json
 from pathlib import Path
@@ -10,11 +11,30 @@ import time
 
 import paglets.client as client_module
 import paglets.host as host_module
-from paglets import Host, Message
+import paglets.process_runtime as process_runtime
+import paglets.transport as transport_module
+from paglets import Host, Message, Paglet, PagletState
 from paglets.cli import _parser as host_cli_parser
 from paglets.client import HostClient
-from paglets.serde import dataclass_to_wire, qualified_name
+from paglets.serde import dataclass_from_wire, dataclass_to_wire, qualified_name
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
+
+
+@dataclass
+class BinaryTravelState(PagletState):
+    payload: bytes = b""
+    marker: bytearray = field(default_factory=bytearray)
+
+
+class BinaryTravelAgent(Paglet[BinaryTravelState]):
+    State = BinaryTravelState
+
+    def handle_message(self, message: Message):
+        if message.kind == "go":
+            return self.dispatch(message.args["target"]).to_wire()
+        if message.kind == "clone":
+            return self.clone(target=message.args["target"]).to_wire()
+        return self.not_handled()
 
 
 class RecordingClient(HostClient):
@@ -102,8 +122,8 @@ def test_binary_pickle_transport_streams_without_dumps_or_loads(tmp_path: Path, 
     def fail_loads(*_args, **_kwargs):
         raise AssertionError("host should stream with pickle.load, not pickle.loads")
 
-    monkeypatch.setattr("paglets.client.pickle.dumps", fail_dumps)
-    monkeypatch.setattr("paglets.host.pickle.loads", fail_loads)
+    monkeypatch.setattr("paglets.transport.pickle.dumps", fail_dumps)
+    monkeypatch.setattr("paglets.transport.pickle.loads", fail_loads)
     host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
     host.start_background()
     try:
@@ -163,7 +183,7 @@ def test_post_pickle_uses_chunked_stream_without_content_length(monkeypatch):
     assert connection.headers["Transfer-Encoding"] == "chunked"
     assert "Content-Length" not in connection.headers
     assert connection.body.endswith(b"0\r\n\r\n")
-    payload = pickle.load(host_module._ChunkedRequestReader(io.BytesIO(connection.body)))
+    payload = pickle.load(transport_module.ChunkedRequestReader(io.BytesIO(connection.body)))
     assert payload == {"value": "x" * 1024}
 
 
@@ -183,6 +203,81 @@ def test_dispatch_uses_binary_pickle_payload_for_paglet_movement(tmp_path: Path)
 
     assert any(url == f"{beta.address}/agents" for url in client.pickle_posts)
     assert state["state"]["last_message"] == "x" * (1024 * 1024)
+
+
+def test_child_startup_streams_state_outside_process_config():
+    state = {"payload": b"x" * (2 * 1024 * 1024)}
+
+    config = process_runtime.make_child_config(
+        host_name="alpha",
+        host_address="http://127.0.0.1:1",
+        agent_id="agent",
+        agent_class_name=qualified_name(BinaryTravelAgent),
+        state_class_name=qualified_name(BinaryTravelState),
+        state=state,
+    )
+
+    assert config.state is None
+    assert config.state_stream is not None
+    assert transport_module.receive_local_pickle(config.state_stream) == state
+
+
+def test_child_host_call_state_payload_uses_local_pickle_stream():
+    payload = {"state": {"payload": b"x" * (2 * 1024 * 1024)}, "small": True}
+
+    streamed = process_runtime._stream_state_payload(payload)
+
+    assert "state" not in streamed
+    assert streamed["small"] is True
+    assert "state_stream" in streamed
+    assert process_runtime._materialize_state_stream(streamed) == payload
+
+
+def test_binary_state_json_projection_and_dataclass_restore(tmp_path: Path):
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    host.start_background()
+    try:
+        proxy = host.create(
+            BinaryTravelAgent,
+            BinaryTravelState(payload=b"\x00payload", marker=bytearray(b"\x01marker")),
+        )
+        state_payload = host.client.get_json(f"{host.address}/agents/{proxy.agent_id}/state")
+        restored = dataclass_from_wire(BinaryTravelState, state_payload["state"])
+    finally:
+        host.stop()
+
+    assert state_payload["state"]["payload"] == {"__paglets_binary__": "bytes", "base64": "AHBheWxvYWQ="}
+    assert state_payload["state"]["marker"] == {"__paglets_binary__": "bytearray", "base64": "AW1hcmtlcg=="}
+    assert restored.payload == b"\x00payload"
+    assert restored.marker == bytearray(b"\x01marker")
+
+
+def test_large_binary_state_moves_clones_and_reactivates(tmp_path: Path):
+    payload = b"x" * (16 * 1024 * 1024)
+    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    beta = Host(name="beta", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "beta")
+    alpha.start_background()
+    beta.start_background()
+    try:
+        original = alpha.create(BinaryTravelAgent, BinaryTravelState(payload=payload, marker=bytearray(b"m")))
+
+        clone_wire = original.send(Message("clone", {"target": beta.address}))
+        clone_state = beta.get_state(clone_wire["agent_id"], BinaryTravelState)
+
+        remote_wire = original.send(Message("go", {"target": beta.address}))
+        remote = beta.get_proxy(remote_wire["agent_id"])
+        assert remote is not None
+        remote.deactivate()
+        beta.activate(remote.agent_id)
+        moved_state = beta.get_state(remote.agent_id, BinaryTravelState)
+    finally:
+        beta.stop()
+        alpha.stop()
+
+    assert clone_state.payload == payload
+    assert clone_state.marker == bytearray(b"m")
+    assert moved_state.payload == payload
+    assert moved_state.marker == bytearray(b"m")
 
 
 def test_binary_payload_encoding_benchmark_avoids_json_transport_cost():
