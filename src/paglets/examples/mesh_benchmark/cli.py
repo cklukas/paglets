@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from typing import Any
 
 from ...admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
@@ -38,9 +39,11 @@ def main(argv: list[str] | None = None) -> int:
         summary_payload = dict(result.get("summary") or {})
         if args.json:
             print(json.dumps(summary_payload, indent=2, sort_keys=True))
-        elif summary_payload:
+        elif _is_summary_payload(summary_payload):
             summary = dataclass_from_wire(MeshBenchmarkSummary, summary_payload)
             print(_format_markdown(summary, digits=request.digits, include_self=request.include_self))
+        elif summary_payload.get("errors"):
+            _print_errors(dict(summary_payload["errors"]))
         else:
             print("paglets-mesh-benchmark: no summary returned", file=sys.stderr)
         errors = dict(result.get("errors") or {})
@@ -99,9 +102,10 @@ def _run(entry: ServerRef, request: MeshBenchmarkRequest, *, client: HostClient)
         proxy.send(Message("start", {"request": dataclass_to_wire(request)}))
         latest: dict[str, Any] = {}
         while True:
-            latest = dict(proxy.send(Message("drain", {"wait_timeout": 0.5})) or {})
+            latest = dict(proxy.send(Message("drain", {"wait_timeout": 0.0})) or {})
             if latest.get("done"):
                 return latest
+            time.sleep(0.25)
     finally:
         try:
             proxy.dispose()
@@ -130,6 +134,16 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
         for host, error in sorted(summary.errors.items()):
             lines.append(f"- {host}: {error}")
     return "\n".join(lines)
+
+
+def _is_summary_payload(payload: dict[str, Any]) -> bool:
+    return bool(payload.get("run_id") and payload.get("hosts") is not None and payload.get("matrix_seconds") is not None)
+
+
+def _print_errors(errors: dict[str, str]) -> None:
+    print("errors:")
+    for host, error in sorted(errors.items()):
+        print(f"- {host}: {error}")
 
 
 def _matrix_table(

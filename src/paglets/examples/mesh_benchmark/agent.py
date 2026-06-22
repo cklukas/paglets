@@ -202,16 +202,6 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
 
     def drain(self, *, wait_timeout: float) -> dict[str, Any]:
         self._expire_if_needed()
-
-        def ready(state: MeshBenchmarkCoordinatorState) -> bool:
-            return state.done
-
-        timeout = max(0.0, wait_timeout)
-        with self.locked_state() as state:
-            if state.deadline > 0:
-                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
-        self.wait_state(ready, timeout=timeout)
-        self._expire_if_needed()
         return self.summary()
 
     @state_locked
@@ -246,7 +236,19 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
                 return
             state.done = True
             state.errors["timeout"] = "timed out waiting for mesh benchmark traveler"
+            traveler_proxy = dict(state.traveler_proxy)
         self.notify_all_state_changed()
+        self._dispose_traveler(traveler_proxy)
+
+    def _dispose_traveler(self, proxy_wire: dict[str, str]) -> None:
+        if not proxy_wire:
+            return
+        try:
+            proxy = self.context.get_proxy(str(proxy_wire["agent_id"]), str(proxy_wire["host_url"]))
+            if proxy is not None:
+                proxy.dispose()
+        except Exception:
+            pass
 
 
 class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
