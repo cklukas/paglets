@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, is_dataclass, replace
 import json
+import pickle
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from . import git_update
 from .agent import ACTIVE, INACTIVE, Paglet, PagletState
-from .client import HostClient
+from .client import HostClient, PICKLE_CONTENT_TYPE
 from .context_events import ContextEvent, ContextEventLog, ContextListener
 from .envelope import PagletEnvelope
 from .errors import HostError, InvalidAgentError, NotHandledError, PagletCrashedError, PagletError, PagletInactiveError, RemoteHostError, ServiceNotFoundError, TransferError
@@ -885,7 +886,7 @@ class Host:
         state_cls = agent_cls.state_class()
         if state is None:
             state = state_cls()  # type: ignore[call-arg]
-        response = self.client.post_json(
+        response = self.client.post_pickle(
             f"{target.rstrip('/')}/agents",
             {
                 "agent_class_name": qualified_name(agent_cls),
@@ -1150,7 +1151,7 @@ class Host:
         record.cleanup_resources(reason="retract")
         self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.RETRACT, target_info)
-        response = self.client.post_json(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
+        response = self.client.post_pickle(f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()})
         self._remove_active_agent(agent_id, record, terminate=True)
         self._emit("retract", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
@@ -1574,7 +1575,7 @@ class Host:
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                return self.client.post_json(url, {"envelope": envelope.to_wire()}, timeout=ticket.timeout)
+                return self.client.post_pickle(url, {"envelope": envelope.to_wire()}, timeout=ticket.timeout)
             except Exception as exc:
                 last_error = exc
                 self._emit(
@@ -2349,7 +2350,7 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         try:
-            payload = self._read_json() if method == "POST" else {}
+            payload = self._read_payload() if method == "POST" else {}
             result = self._route(method, self.path, payload)
             self._write_json(200, result)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -2484,12 +2485,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
 
         raise HostError(f"No route for {method} {path}")
 
-    def _read_json(self) -> dict[str, Any]:
+    def _read_payload(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
         if length == 0:
             return {}
-        raw = self.rfile.read(length).decode("utf-8")
-        return json.loads(raw)
+        raw = self.rfile.read(length)
+        content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().casefold()
+        if content_type == PICKLE_CONTENT_TYPE:
+            payload = pickle.loads(raw)
+            if not isinstance(payload, dict):
+                raise HostError(f"Expected pickle payload dict, got {type(payload).__name__}")
+            return payload
+        return json.loads(raw.decode("utf-8"))
 
     def _write_json(self, status: int, payload: Any) -> None:
         raw = json.dumps(payload).encode("utf-8")

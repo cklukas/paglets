@@ -501,6 +501,11 @@ destination hosts as columns. Cell A/B contains only A->B samples; cell B/A
 contains only B->A samples. When self-visits are disabled, diagonal cells are
 shown as `-`.
 
+`--payload-size` adds random printable state to the mobile traveler. This uses
+the same binary paglet movement envelope as any other large paglet state, so the
+benchmark exercises the normal dispatch path rather than a benchmark-specific
+bulk-transfer shortcut.
+
 Timing is based on the stable starter clock. Before each dispatch, the traveler
 probes the starter, estimates entry-host time for the local instant immediately
 before `dispatch()`, and carries that timestamp with the traveler. On arrival,

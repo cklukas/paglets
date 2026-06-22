@@ -2,11 +2,11 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 import json
-import random
+import os
 import statistics
-import string
 import threading
 import time
 from typing import Any
@@ -718,8 +718,8 @@ def local_minus_entry_offset(
 def random_ascii(size: int) -> str:
     if size <= 0:
         return ""
-    alphabet = string.ascii_letters + string.digits
-    return "".join(random.choice(alphabet) for _ in range(size))
+    random_bytes = os.urandom((size * 3 + 3) // 4)
+    return base64.b64encode(random_bytes).decode("ascii")[:size]
 
 
 def parse_size(value: str) -> int:

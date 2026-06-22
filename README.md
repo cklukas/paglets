@@ -47,7 +47,8 @@ This first implementation intentionally uses **one approach**:
 - no authentication or code upload is attempted;
 - only a dataclass state object moves between hosts;
 - runtime fields on the agent instance are transient;
-- hosts communicate with a tiny JSON HTTP API;
+- host control messages use a tiny JSON HTTP API, while paglet movement sends
+  state through a binary HTTP payload to avoid JSON encoding large mobile state;
 - every active paglet instance runs in its own child Python process;
 - migration works equally across different machines or between two host processes
   on the same Mac using different ports.
@@ -639,8 +640,8 @@ in importable Python classes instead of moving code objects between hosts.
 
 ## State serialization rules
 
-`paglets` serializes dataclass fields to JSON-compatible values. Supported state
-values include:
+`paglets` serializes dataclass fields to explicit wire-compatible values.
+Supported state values include:
 
 - nested dataclasses;
 - `str`, `int`, `float`, `bool`, `None`;
@@ -651,7 +652,9 @@ values include:
 Everything stored directly on the `Paglet` object is intentionally transient and
 will be rebuilt by `__init__`, `on_arrival`, `on_clone`, or `run` on the target
 host. This is the modern Python equivalent of explicit mobile object state: no
-call-stack transfer, no socket/thread/GPU-context migration.
+call-stack transfer, no socket/thread/GPU-context migration. Movement uses a
+binary state envelope; message arguments and replies should still stay
+JSON-compatible.
 
 ## Same-machine multi-host development
 

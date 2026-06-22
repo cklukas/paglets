@@ -2,12 +2,27 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import pickle
+import time
 
 import paglets.host as host_module
 from paglets import Host, Message
 from paglets.cli import _parser as host_cli_parser
+from paglets.client import HostClient
+from paglets.serde import dataclass_to_wire, qualified_name
 from tests.test_paglets_core import TravelAgent, TravelState, free_port
+
+
+class RecordingClient(HostClient):
+    def __init__(self):
+        super().__init__()
+        self.pickle_posts: list[str] = []
+
+    def post_pickle(self, url: str, payload: dict, *, timeout: float | None = None):
+        self.pickle_posts.append(url)
+        return super().post_pickle(url, payload, timeout=timeout)
 
 
 def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
@@ -52,6 +67,77 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
     assert active_state["state"]["last_message"] == "hello"
     assert inactive_state["active"] is False
     assert inactive_state["state"]["last_message"] == "hello"
+
+
+def test_host_accepts_binary_pickle_create_payload(tmp_path: Path):
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    large_value = "x" * (1024 * 1024)
+    host.start_background()
+    try:
+        response = host.client.post_pickle(
+            f"{host.address}/agents",
+            {
+                "agent_class_name": qualified_name(TravelAgent),
+                "state_class_name": qualified_name(TravelState),
+                "state": dataclass_to_wire(TravelState(last_message=large_value)),
+                "init": "seed",
+                "agent_id": None,
+            },
+        )
+        proxy = host.get_proxy(response["proxy"]["agent_id"])
+        assert proxy is not None
+        state = host.client.get_json(f"{host.address}/agents/{proxy.agent_id}/state")
+    finally:
+        host.stop()
+
+    assert state["state"]["last_message"] == large_value
+
+
+def test_dispatch_uses_binary_pickle_payload_for_paglet_movement(tmp_path: Path):
+    client = RecordingClient()
+    alpha = Host(name="alpha", host="127.0.0.1", port=free_port(), client=client, persistence_dir=tmp_path / "alpha")
+    beta = Host(name="beta", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "beta")
+    alpha.start_background()
+    beta.start_background()
+    try:
+        proxy = alpha.create(TravelAgent, TravelState(last_message="x" * (1024 * 1024)))
+        remote = proxy.dispatch(beta.address)
+        state = beta.client.get_json(f"{beta.address}/agents/{remote.agent_id}/state")
+    finally:
+        beta.stop()
+        alpha.stop()
+
+    assert any(url == f"{beta.address}/agents" for url in client.pickle_posts)
+    assert state["state"]["last_message"] == "x" * (1024 * 1024)
+
+
+def test_binary_payload_encoding_benchmark_avoids_json_transport_cost():
+    wire = {
+        "envelope": {
+            "kind": "dispatch",
+            "agent_id": "agent",
+            "agent_class_name": qualified_name(TravelAgent),
+            "state_class_name": qualified_name(TravelState),
+            "state": dataclass_to_wire(TravelState(last_message="x" * (4 * 1024 * 1024))),
+            "source_host_name": "alpha",
+            "source_host_address": "http://alpha",
+            "target_host_name": "beta",
+            "target_host_address": "http://beta",
+            "clone_of": None,
+            "metadata": {},
+        }
+    }
+
+    started = time.perf_counter()
+    binary = pickle.dumps(wire, protocol=pickle.HIGHEST_PROTOCOL)
+    pickle_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    json_payload = json.dumps(wire).encode("utf-8")
+    json_seconds = time.perf_counter() - started
+
+    assert pickle.loads(binary) == wire
+    assert len(binary) < len(json_payload)
+    assert pickle_seconds < json_seconds
 
 
 def test_host_public_bind_resolves_to_lan_host(tmp_path: Path, monkeypatch):
