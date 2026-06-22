@@ -2,11 +2,13 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import pickle
 import time
 
+import paglets.client as client_module
 import paglets.host as host_module
 from paglets import Host, Message
 from paglets.cli import _parser as host_cli_parser
@@ -91,6 +93,78 @@ def test_host_accepts_binary_pickle_create_payload(tmp_path: Path):
         host.stop()
 
     assert state["state"]["last_message"] == large_value
+
+
+def test_binary_pickle_transport_streams_without_dumps_or_loads(tmp_path: Path, monkeypatch):
+    def fail_dumps(*_args, **_kwargs):
+        raise AssertionError("post_pickle should stream with pickle.dump, not pickle.dumps")
+
+    def fail_loads(*_args, **_kwargs):
+        raise AssertionError("host should stream with pickle.load, not pickle.loads")
+
+    monkeypatch.setattr("paglets.client.pickle.dumps", fail_dumps)
+    monkeypatch.setattr("paglets.host.pickle.loads", fail_loads)
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    host.start_background()
+    try:
+        response = host.client.post_pickle(
+            f"{host.address}/agents",
+            {
+                "agent_class_name": qualified_name(TravelAgent),
+                "state_class_name": qualified_name(TravelState),
+                "state": dataclass_to_wire(TravelState(last_message="x" * (1024 * 1024))),
+                "init": "seed",
+                "agent_id": None,
+            },
+        )
+    finally:
+        host.stop()
+
+    assert "proxy" in response
+
+
+def test_post_pickle_uses_chunked_stream_without_content_length(monkeypatch):
+    class FakeResponse:
+        status = 200
+
+        def read(self):
+            return b'{"ok": true}'
+
+    class FakeConnection:
+        def __init__(self):
+            self.headers: dict[str, str] = {}
+            self.body = bytearray()
+
+        def putrequest(self, method, target):
+            self.method = method
+            self.target = target
+
+        def putheader(self, name, value):
+            self.headers[name] = value
+
+        def endheaders(self):
+            return None
+
+        def send(self, data):
+            self.body.extend(data)
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            return None
+
+    connection = FakeConnection()
+    monkeypatch.setattr(client_module, "_connection", lambda *_args, **_kwargs: connection)
+
+    result = HostClient().post_pickle("http://example.test/agents", {"value": "x" * 1024})
+
+    assert result == {"ok": True}
+    assert connection.headers["Transfer-Encoding"] == "chunked"
+    assert "Content-Length" not in connection.headers
+    assert connection.body.endswith(b"0\r\n\r\n")
+    payload = pickle.load(host_module._ChunkedRequestReader(io.BytesIO(connection.body)))
+    assert payload == {"value": "x" * 1024}
 
 
 def test_dispatch_uses_binary_pickle_payload_for_paglet_movement(tmp_path: Path):
