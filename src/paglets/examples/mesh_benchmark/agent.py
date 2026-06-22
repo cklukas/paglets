@@ -19,7 +19,7 @@ from ...serde import dataclass_from_wire, dataclass_to_wire
 
 
 DEFAULT_CLOCK_PROBES = 5
-DEFAULT_DIGITS = 3
+DEFAULT_DIGITS = 1
 DEFAULT_TIMEOUT_SECONDS = 120.0
 CONTINUE_DELAY_SECONDS = 0.1
 MESH_BENCHMARK_STORAGE_DIR = "mesh-benchmark"

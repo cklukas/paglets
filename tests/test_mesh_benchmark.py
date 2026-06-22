@@ -20,7 +20,7 @@ from paglets.examples.mesh_benchmark import (
     build_route_edges,
     parse_size,
 )
-from paglets.examples.mesh_benchmark.cli import _format_markdown, main as mesh_benchmark_main
+from paglets.examples.mesh_benchmark.cli import _format_markdown, _parser, main as mesh_benchmark_main
 from paglets.serde import dataclass_from_wire, dataclass_to_wire
 from tests.test_paglets_core import free_port
 
@@ -79,6 +79,12 @@ def test_parse_size_accepts_binary_units_and_zero():
     assert parse_size("64K") == 64 * 1024
     assert parse_size("128K") == 128 * 1024
     assert parse_size("1M") == 1024 * 1024
+
+
+def test_cli_default_digits_is_one_decimal_place():
+    args = _parser().parse_args([])
+
+    assert args.digits == 1
 
 
 def test_mesh_benchmark_dataclasses_round_trip_through_wire():
