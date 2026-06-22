@@ -307,4 +307,4 @@ def run_survey(parent, *, timeout: float) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run_importable_main("examples.disk_survey_demo"))
+    raise SystemExit(run_importable_main("demos.disk_survey_demo"))

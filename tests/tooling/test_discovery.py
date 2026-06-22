@@ -15,13 +15,13 @@ def test_default_examples_discovery_finds_paglet_classes():
     class_names = {record.class_name for record in result.agent_classes}
 
     assert result.errors == []
-    assert "examples.start_hello_demo:FirstPaglet" in class_names
-    assert "examples.start_hello_demo:VanillaPaglet" in class_names
-    assert "examples.mobility_events_demo:MobilityEventsPaglet" in class_names
-    assert "examples.finder_demo:TravellerPaglet" in class_names
-    assert "examples.itinerary_demo:CirculateAgent" in class_names
-    assert "examples.clone_workers_demo:SumWorkerAgent" in class_names
-    assert "examples.simple_master_slave_demo:MasterAgent" in class_names
+    assert "demos.start_hello_demo:FirstPaglet" in class_names
+    assert "demos.start_hello_demo:VanillaPaglet" in class_names
+    assert "demos.mobility_events_demo:MobilityEventsPaglet" in class_names
+    assert "demos.finder_demo:TravellerPaglet" in class_names
+    assert "demos.itinerary_demo:CirculateAgent" in class_names
+    assert "demos.clone_workers_demo:SumWorkerAgent" in class_names
+    assert "demos.simple_master_slave_demo:MasterAgent" in class_names
     assert all("State" not in record.display_name for record in result.agent_classes)
 
 
@@ -40,7 +40,7 @@ def test_module_discovery_returns_state_details_and_templates():
 
 
 def test_path_discovery_reports_bad_sources_without_aborting(tmp_path):
-    good_path = Path(__file__).resolve().parents[2] / "examples"
+    good_path = Path(__file__).resolve().parents[2] / "demos"
     result = discover_agent_classes(
         AgentDiscoveryConfig(
             paths=[str(good_path), str(tmp_path / "missing")],
@@ -48,7 +48,7 @@ def test_path_discovery_reports_bad_sources_without_aborting(tmp_path):
         )
     )
 
-    assert any(record.class_name == "examples.start_hello_demo:FirstPaglet" for record in result.agent_classes)
+    assert any(record.class_name == "demos.start_hello_demo:FirstPaglet" for record in result.agent_classes)
     assert any("not_a_real_paglets_module" in error for error in result.errors)
     assert any("Discovery path does not exist" in error for error in result.errors)
 
@@ -56,7 +56,7 @@ def test_path_discovery_reports_bad_sources_without_aborting(tmp_path):
 def test_discovered_example_paglet_can_be_created_through_http():
     result = discover_agent_classes(default_agent_discovery_config())
     record = next(
-        record for record in result.agent_classes if record.class_name == "examples.start_hello_demo:FirstPaglet"
+        record for record in result.agent_classes if record.class_name == "demos.start_hello_demo:FirstPaglet"
     )
     host = Host(name="alpha", host="127.0.0.1", port=free_port())
     host.start_background()

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from paglets.core.errors import SerializationError
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 
 
 @dataclass
@@ -58,7 +58,7 @@ def test_dataclass_state_round_trip_preserves_declared_fields():
 
 def test_qualified_names_resolve_importable_classes():
     name = qualified_name(ComplexState)
-    assert name == "tests.test_serde:ComplexState"
+    assert name == "tests.test_codec:ComplexState"
     assert resolve_qualified_name(name) is ComplexState
 
 

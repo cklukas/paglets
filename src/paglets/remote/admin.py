@@ -89,8 +89,8 @@ def normalize_discovery_path(path: str, *, base_path: Path | str | None = None) 
 
 def default_agent_discovery_config() -> AgentDiscoveryConfig:
     repo_root = Path(__file__).resolve().parents[3]
-    examples_path = repo_root / "examples"
-    paths = [str(examples_path)] if examples_path.exists() else []
+    demos_path = repo_root / "demos"
+    paths = [str(demos_path)] if demos_path.exists() else []
     return AgentDiscoveryConfig(paths=paths, modules=[])
 
 

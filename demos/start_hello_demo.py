@@ -19,7 +19,7 @@ class FirstState(PagletState):
 
 
 class FirstPaglet(Paglet[FirstState]):
-    """Python conversion of examples/start/FirstAglet.java."""
+    """Python conversion of demos/start/FirstAglet.java."""
 
     State = FirstState
 
@@ -38,7 +38,7 @@ class VanillaState(PagletState):
 
 
 class VanillaPaglet(Paglet[VanillaState]):
-    """Python conversion of examples/simple/VanillaAglet.java."""
+    """Python conversion of demos/simple/VanillaAglet.java."""
 
     State = VanillaState
 
@@ -57,4 +57,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.start_hello_demo")
+    run_importable_main("demos.start_hello_demo")

@@ -8,7 +8,13 @@ import pytest
 
 
 def test_flat_module_imports_are_removed() -> None:
-    for module_name in ("paglets.host", "paglets.messages", "paglets.admin", "paglets.serde"):
+    for module_name in (
+        "paglets.host",
+        "paglets.messages",
+        "paglets.admin",
+        "paglets.serde",
+        "paglets.serialization.serde",
+    ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(module_name)
 
@@ -22,7 +28,7 @@ def test_topic_module_imports_are_available() -> None:
     from paglets.core.messages import Message
     from paglets.remote.admin import PagletsAdminClient
     from paglets.runtime.host import Host
-    from paglets.serialization.serde import dataclass_to_wire
+    from paglets.serialization.codec import dataclass_to_wire
 
     assert Host.__name__ == "Host"
     assert Message.__name__ == "Message"

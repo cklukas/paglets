@@ -19,7 +19,7 @@ from paglets.core.runtime_values import (
     enum_from_wire,
     require_enum,
 )
-from paglets.serialization.serde import dataclass_from_wire, resolve_qualified_name
+from paglets.serialization.codec import dataclass_from_wire, resolve_qualified_name
 from paglets.services.resident import ResidentServiceSpec
 
 DEFAULT_LAUNCH_CONFIG_PATH = Path.home() / ".paglets" / "launch.toml"

@@ -13,12 +13,26 @@ theme:
     - content.code.copy
 
 nav:
-  - Home: index.md
-  - Implementing Paglets: implementing-paglets.md
-  - Example Agents: examples.md
-  - Git Auto-Update: git-auto-update.md
-  - Usage Ideas: usage-ideas.md
-  - Technical:
+  - Getting Started:
+      - Overview: index.md
+      - Implementing Paglets: implementing-paglets.md
+      - Usage Ideas: usage-ideas.md
+  - Examples:
+      - Overview: examples/index.md
+      - Server Info: examples/system-info.md
+      - Mesh Info: examples/mesh-info.md
+      - Pi Compute: examples/compute.md
+      - Search: examples/search.md
+      - Performance Benchmark: examples/performance.md
+      - Mesh Movement Benchmark: examples/mesh-benchmark.md
+      - Source-Tree Demos: examples/source-tree-demos.md
+  - Operations:
+      - Overview: operations/index.md
+      - Host CLI: operations/host-cli.md
+      - Configuration: operations/configuration.md
+      - Local Multi-Host Development: operations/local-multi-host.md
+      - Git Auto-Update: git-auto-update.md
+  - Technical Reference:
       - Overview: technical/overview.md
       - Core: technical/core.md
       - Runtime: technical/runtime.md
@@ -28,7 +42,9 @@ nav:
       - Serialization: technical/serialization.md
       - Configuration: technical/configuration.md
       - Tooling: technical/tooling.md
-  - Glossary: glossary.md
+  - Project:
+      - Status And Limitations: project/status.md
+      - Glossary: glossary.md
 
 plugins:
   - search

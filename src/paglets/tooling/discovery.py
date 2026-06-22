@@ -12,7 +12,7 @@ from typing import Any
 
 from paglets.core.agent import Paglet
 from paglets.remote.admin import AgentDiscoveryConfig
-from paglets.serialization.serde import _to_wire_value, qualified_name
+from paglets.serialization.codec import _to_wire_value, qualified_name
 
 
 @dataclass(frozen=True, slots=True)

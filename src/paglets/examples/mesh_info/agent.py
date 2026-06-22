@@ -10,7 +10,7 @@ from typing import Any
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ResidentLifecycle, ServiceScope
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from paglets.services.contracts import ServiceContract, ServiceOperation
 from paglets.services.resident import ResidentServiceSpec
 

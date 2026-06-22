@@ -102,7 +102,7 @@ def test_normalize_server_url_adds_http_scheme():
 
 def test_default_agent_discovery_config_points_at_examples_when_present():
     config = default_agent_discovery_config()
-    examples_path = str(Path(__file__).resolve().parents[2] / "examples")
+    examples_path = str(Path(__file__).resolve().parents[2] / "demos")
 
     assert examples_path in config.paths
 

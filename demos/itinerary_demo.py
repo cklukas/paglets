@@ -121,4 +121,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.itinerary_demo")
+    run_importable_main("demos.itinerary_demo")

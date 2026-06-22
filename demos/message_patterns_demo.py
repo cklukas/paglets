@@ -56,4 +56,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.message_patterns_demo")
+    run_importable_main("demos.message_patterns_demo")

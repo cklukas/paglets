@@ -90,4 +90,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.simple_master_slave_demo")
+    run_importable_main("demos.simple_master_slave_demo")

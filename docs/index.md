@@ -129,7 +129,7 @@ diagnostics, ending with the overall benchmark time.
 Run the disk survey demo:
 
 ```bash
-uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
+uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
 ```
 
 ## Documentation Map
@@ -137,7 +137,7 @@ uv run python examples/disk_survey_demo.py --hosts alpha beta gamma
 - [Implementing Paglets](implementing-paglets.md): how to write paglet classes,
   state objects, lifecycle hooks, message handlers, movement, and mesh-aware
   behavior.
-- [Example Agents](examples.md): detailed explanations of packaged example
+- [Example Agents](examples/index.md): detailed explanations of packaged example
   agents, including `server-info`, `mesh-info`, Pi compute,
   `paglets-perf-test`, and `paglets-mesh-benchmark`.
 - [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,

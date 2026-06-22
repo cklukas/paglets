@@ -11,7 +11,7 @@ from paglets.core.errors import SerializationError, ServiceContractError
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope, enum_from_wire, require_enum
 from paglets.remote.references import PagletProxyRef
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, qualified_name, resolve_qualified_name
 
 CONTRACT_METADATA_KEY = "paglets.service_contract"
 _ROUTE_DEFAULT_UNSET = object()

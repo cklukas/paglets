@@ -31,7 +31,7 @@ from paglets.examples.performance.models import (
 )
 from paglets.remote.admin import ServerRef
 from paglets.runtime.host import Host
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from tests.support import free_port
 
 

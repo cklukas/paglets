@@ -10,6 +10,7 @@ from pathlib import Path, PurePath
 from typing import Any, get_args, get_origin, get_type_hints
 
 from paglets.core.errors import SerializationError
+from paglets.core.wire import WirePayload, WireValue
 from paglets.remote.transport import restore_binary_tag
 
 
@@ -45,7 +46,7 @@ def resolve_qualified_name(name: str) -> Any:
     return obj
 
 
-def dataclass_to_wire(instance: Any) -> dict[str, Any]:
+def dataclass_to_wire(instance: Any) -> WirePayload:
     """Serialize a dataclass instance to explicit movement/control values.
 
     This is intentionally one approach: paglet state is explicit dataclass state.
@@ -57,7 +58,7 @@ def dataclass_to_wire(instance: Any) -> dict[str, Any]:
     return {field.name: _to_wire_value(getattr(instance, field.name)) for field in fields(instance)}
 
 
-def dataclass_from_wire(cls: type, payload: dict[str, Any]) -> Any:
+def dataclass_from_wire(cls: type, payload: WirePayload) -> Any:
     """Restore a dataclass instance from a wire dict."""
 
     if not is_dataclass(cls) or not isinstance(cls, type):
@@ -77,7 +78,7 @@ def dataclass_from_wire(cls: type, payload: dict[str, Any]) -> Any:
         raise SerializationError(f"Could not construct {cls!r} from {payload!r}") from exc
 
 
-def _to_wire_value(value: Any) -> Any:
+def _to_wire_value(value: Any) -> WireValue:
     from paglets.remote.references import PagletProxyRef
 
     if isinstance(value, PagletProxyRef):
@@ -112,7 +113,7 @@ def _to_wire_value(value: Any) -> Any:
     )
 
 
-def _from_wire_value(annotation: Any, value: Any) -> Any:
+def _from_wire_value(annotation: Any, value: WireValue) -> Any:
     from paglets.remote.references import PagletProxyRef
 
     if value is None:

@@ -12,7 +12,7 @@ resolution.
 
 ## Main Modules
 
-`paglets.serialization.serde`
+`paglets.serialization.codec`
 : Implements `qualified_name`, `resolve_qualified_name`,
   `dataclass_to_wire`, and `dataclass_from_wire`.
 
@@ -27,7 +27,7 @@ inspection and service messages use dataclass wire conversion.
 
 ## API Reference
 
-::: paglets.serialization.serde
+::: paglets.serialization.codec
 
 ## Related Pages
 

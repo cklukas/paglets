@@ -2,8 +2,8 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from examples.disk_survey_demo import DiskSurveyPaglet, DiskSurveyState, run_survey
-from examples.support import local_hosts
+from demos.disk_survey_demo import DiskSurveyPaglet, DiskSurveyState, run_survey
+from demos.support import local_hosts
 
 
 def test_disk_survey_paglet_clones_to_advertised_hosts_and_collects_findings():

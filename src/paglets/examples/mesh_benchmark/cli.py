@@ -14,7 +14,7 @@ from paglets.core.messages import Message
 from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
 from .analysis import normalize_request, parse_size
 from .models import (

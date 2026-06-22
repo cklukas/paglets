@@ -35,6 +35,10 @@ and the shared value types used across the runtime.
 : Provides shared enums such as `ServiceScope`, `ResidentLifecycle`,
   `ArrivalMode`, `EnvelopeKind`, and `LaunchConfigSyncAction`.
 
+`paglets.core.wire`
+: Defines shared aliases for JSON/pickle-safe wire payloads used by messages,
+  serialization, and runtime protocol boundaries.
+
 `paglets.core.errors`
 : Defines the exception hierarchy used across runtime, remote, persistence, and
   service code.
@@ -68,6 +72,8 @@ shared dataclass state with the paglet lock.
 
 ::: paglets.core.runtime_values
 
+::: paglets.core.wire
+
 ::: paglets.core.errors
 
 ## Related Pages
@@ -75,4 +81,3 @@ shared dataclass state with the paglet lock.
 - [Runtime](runtime.md) covers host supervision and child processes.
 - [Remote](remote.md) covers proxy calls and message transport.
 - [Serialization](serialization.md) covers dataclass wire conversion.
-

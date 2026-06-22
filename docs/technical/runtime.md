@@ -20,6 +20,24 @@ delivery, transfer envelopes, and runtime resource cleanup.
   child controllers, inactive records, service records, storage roots, mesh
   state, authentication, placement, and lifecycle operations.
 
+`paglets.runtime.lifecycle`
+: Contains the `Host` movement and lifecycle flows: create, dispatch, clone,
+  retract, deactivate, activate, dispose, transfer tickets, and movement
+  envelope handling.
+
+`paglets.runtime.resident_services`
+: Contains resident service declaration, activation, service leasing, registry
+  lookup, and idle shutdown behavior.
+
+`paglets.runtime.child_calls`
+: Routes host calls arriving from child processes and completes child-initiated
+  dispatch, clone, deactivate, dispose, service, storage, and messaging
+  operations.
+
+`paglets.runtime.inactive_records`
+: Loads and writes inactive records, schedules activation, drains queued
+  messages, and deactivates active paglets during shutdown.
+
 `paglets.runtime.http_api`
 : Contains the host HTTP server and request handler. It maps endpoint shape,
   authentication, JSON control payloads, binary movement payloads, admin calls,
@@ -36,9 +54,14 @@ delivery, transfer envelopes, and runtime resource cleanup.
   `--bind-public` behavior for the host CLI/runtime boundary.
 
 `paglets.runtime.process_runtime`
-: Implements the parent/child process protocol. The parent sends lifecycle and
-  message commands over a private pipe; large state payloads cross through
-  one-shot shared-memory pickle streams.
+: Compatibility facade for the split process runtime modules.
+
+`paglets.runtime.process_controller`, `paglets.runtime.child_endpoint`,
+`paglets.runtime.child_facade`, `paglets.runtime.child_bootstrap`, and
+`paglets.runtime.process_protocol`
+: Implement parent-side child process control, child pipe protocol handling,
+  child-visible host/storage facades, process bootstrap, and shared protocol
+  values.
 
 `paglets.runtime.mailbox`
 : Implements queued delivery, priority ordering, mailbox status, and wait/notify
@@ -75,6 +98,14 @@ scripts are not valid paglet classes.
 
 ::: paglets.runtime.host
 
+::: paglets.runtime.lifecycle
+
+::: paglets.runtime.resident_services
+
+::: paglets.runtime.child_calls
+
+::: paglets.runtime.inactive_records
+
 ::: paglets.runtime.http_api
 
 ::: paglets.runtime.relay
@@ -82,6 +113,16 @@ scripts are not valid paglet classes.
 ::: paglets.runtime.binding
 
 ::: paglets.runtime.process_runtime
+
+::: paglets.runtime.process_controller
+
+::: paglets.runtime.child_endpoint
+
+::: paglets.runtime.child_facade
+
+::: paglets.runtime.child_bootstrap
+
+::: paglets.runtime.process_protocol
 
 ::: paglets.runtime.mailbox
 

@@ -12,7 +12,7 @@ from typing import Any
 
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
-from paglets.serialization.serde import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
 from .analysis import (
     _ordered_hosts,

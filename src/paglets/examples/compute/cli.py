@@ -16,7 +16,7 @@ from paglets.remote.admin import (
 )
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
-from paglets.serialization.serde import dataclass_to_wire
+from paglets.serialization.codec import dataclass_to_wire
 
 from .models import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
 

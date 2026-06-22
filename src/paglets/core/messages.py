@@ -10,6 +10,8 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any
 
+from paglets.core.wire import WirePayload
+
 SYNCHRONOUS = 0
 FUTURE = 1
 ONEWAY = 2
@@ -39,7 +41,7 @@ class Message:
     """
 
     kind: str
-    args: dict[str, Any] = field(default_factory=dict)
+    args: WirePayload = field(default_factory=dict)
     arg: Any = None
     sender: str | None = None
     reply_to: str | None = None
@@ -68,7 +70,7 @@ class Message:
         if self.priority > MIN_PRIORITY:
             self.priority -= 1
 
-    def to_wire(self) -> dict[str, Any]:
+    def to_wire(self) -> WirePayload:
         return {
             "kind": self.kind,
             "args": self.args,
@@ -82,7 +84,7 @@ class Message:
         }
 
     @classmethod
-    def from_wire(cls, payload: dict[str, Any]) -> Message:
+    def from_wire(cls, payload: WirePayload) -> Message:
         return cls(
             kind=payload["kind"],
             args=dict(payload.get("args") or {}),

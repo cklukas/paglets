@@ -417,7 +417,7 @@ progress.
 
 ## Keep Imports Stable
 
-Movement sends class names like `examples.disk_survey_demo:DiskSurveyPaglet`.
+Movement sends class names like `demos.disk_survey_demo:DiskSurveyPaglet`.
 Every target host must be able to import the same module and class name.
 
 Use package modules, not ad-hoc script-only code, for paglets that should move

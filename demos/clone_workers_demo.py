@@ -91,4 +91,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.clone_workers_demo")
+    run_importable_main("demos.clone_workers_demo")

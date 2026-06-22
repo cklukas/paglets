@@ -67,4 +67,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.finder_demo")
+    run_importable_main("demos.finder_demo")

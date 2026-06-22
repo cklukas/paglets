@@ -20,7 +20,7 @@ class MobilityState(PagletState):
 
 
 class MobilityEventsPaglet(Paglet[MobilityState]):
-    """Python conversion of examples/events/MobilityEvents.java."""
+    """Python conversion of demos/events/MobilityEvents.java."""
 
     State = MobilityState
 
@@ -63,4 +63,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_importable_main("examples.mobility_events_demo")
+    run_importable_main("demos.mobility_events_demo")
