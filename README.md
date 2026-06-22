@@ -300,6 +300,8 @@ the stable starter clock at dispatch and arrival points, and clock-offset plus
 message round-trip diagnostics are reported versus the entry host. The output
 also reports the overall benchmark time from start through collection. For large
 payloads, `--timeout` applies to both the whole run and each movement transfer.
+When `--repeats` is greater than one, matrix cells are per-direction averages;
+the sum line below the matrix covers all repeated measured movements.
 
 Search files across online same-version mesh hosts with a mobile agent:
 

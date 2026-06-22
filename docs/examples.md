@@ -499,7 +499,9 @@ The text output is Markdown that is also padded for plain terminal reading. It
 prints one timing unit before the matrix, then reports source hosts as rows and
 destination hosts as columns. Cell A/B contains only A->B samples; cell B/A
 contains only B->A samples. When self-visits are disabled, diagonal cells are
-shown as `-`.
+shown as `-`. With `--repeats`, matrix cells are averages for that exact
+direction; the sum line below the matrix covers all repeated measured movement
+samples.
 
 `--payload-size` adds random printable state to the mobile traveler. This uses
 the same binary paglet movement envelope as any other large paglet state, so the

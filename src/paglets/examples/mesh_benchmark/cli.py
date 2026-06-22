@@ -120,10 +120,13 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
     lines.extend(_matrix_table(summary, multiplier=multiplier, digits=digits, include_self=include_self))
     lines.append("")
     lines.append(f"average travel time: {_format_decimal(summary.average_elapsed_seconds * multiplier, digits)} {unit_name}")
+    lines.append(f"sum measured travel time: {_format_duration(summary.total_elapsed_seconds, digits)}")
     lines.append(
         f"measured round trip time: "
-        f"{_format_decimal(summary.measured_round_trip_seconds * multiplier, digits)} {unit_name}"
+        f"{_format_duration(summary.measured_round_trip_seconds, digits)}"
     )
+    lines.append(f"measured route overhead: {_format_duration(summary.measured_overhead_seconds, digits)}")
+    lines.append(f"setup time before first movement: {_format_duration(summary.setup_seconds, digits)}")
     lines.append(f"measured movements: {summary.movement_count}")
     if summary.clock_offsets:
         lines.append("")

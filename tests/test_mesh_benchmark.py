@@ -21,6 +21,7 @@ from paglets.examples.mesh_benchmark import (
     aggregate_message_timings,
     benchmark_transfer_ticket,
     build_route_edges,
+    build_summary,
     entry_time_for_local_reference,
     local_minus_entry_offset,
     parse_size,
@@ -181,6 +182,28 @@ def test_message_timing_aggregation_reports_median_mean_best_and_worst_rtt():
     assert summary.worst_rtt_seconds == 0.009
 
 
+def test_summary_separates_setup_measured_travel_and_route_overhead():
+    hosts = [MeshBenchmarkHost("alpha", "http://alpha"), MeshBenchmarkHost("beta", "http://beta")]
+    records = [_record("alpha", "beta", 0.010), _record("beta", "alpha", 0.020)]
+
+    summary = build_summary(
+        run_id="run",
+        entry_host=hosts[0],
+        hosts=hosts,
+        records=records,
+        clock_samples=[],
+        measured_round_trip_seconds=0.050,
+        setup_seconds=0.200,
+        overall_benchmark_seconds=0.300,
+    )
+
+    assert summary.total_elapsed_seconds == pytest.approx(0.030)
+    assert summary.measured_overhead_seconds == pytest.approx(0.020)
+    assert summary.setup_seconds == pytest.approx(0.200)
+    assert summary.measured_round_trip_seconds == pytest.approx(0.050)
+    assert summary.overall_benchmark_seconds == pytest.approx(0.300)
+
+
 def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
     hosts = [MeshBenchmarkHost("alpha", "http://alpha"), MeshBenchmarkHost("beta", "http://beta")]
     samples = [_sample("beta", 0.002, 0.001)]
@@ -195,6 +218,9 @@ def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
         message_timings=aggregate_message_timings(samples),
         movement_count=2,
         measured_round_trip_seconds=0.010,
+        setup_seconds=0.004,
+        total_elapsed_seconds=0.003579,
+        measured_overhead_seconds=0.006421,
         overall_benchmark_seconds=0.020,
         average_elapsed_seconds=0.0017895,
     )
@@ -206,7 +232,10 @@ def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
     assert "| alpha     |     - | 1.234 |" in output
     assert "| beta      | 2.345 |     - |" in output
     assert "average travel time: 1.790 ms" in output
+    assert "sum measured travel time: 3.579 ms" in output
     assert "measured round trip time: 10.000 ms" in output
+    assert "measured route overhead: 6.421 ms" in output
+    assert "setup time before first movement: 4.000 ms" in output
     assert "measured movements: 2" in output
     assert "clock offsets vs entry:" in output
     assert "message passing times vs entry:" in output

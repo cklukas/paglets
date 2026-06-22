@@ -118,6 +118,9 @@ class MeshBenchmarkSummary:
     message_timings: list[MessageTimingSummary] = field(default_factory=list)
     movement_count: int = 0
     measured_round_trip_seconds: float = 0.0
+    setup_seconds: float = 0.0
+    total_elapsed_seconds: float = 0.0
+    measured_overhead_seconds: float = 0.0
     overall_benchmark_seconds: float = 0.0
     average_elapsed_seconds: float = 0.0
     errors: dict[str, str] = field(default_factory=dict)
@@ -147,6 +150,7 @@ class MeshBenchmarkTravelerState(PagletState):
     pending_edge: dict[str, Any] = field(default_factory=dict)
     awaiting_timing: bool = False
     arrival_local_time: float = 0.0
+    overall_started_at: float = 0.0
     measured_started_at: float = 0.0
     measured_finished_at: float = 0.0
     coordinator_agent_id: str = ""
@@ -198,7 +202,7 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
             hosts=[dataclass_to_wire(host) for host in hosts],
             route_edges=[dataclass_to_wire(edge) for edge in route_edges],
             payload=random_ascii(request.payload_size_bytes),
-            measured_started_at=started_at,
+            overall_started_at=started_at,
             coordinator_agent_id=self.agent_id,
             coordinator_host_url=self.context.address,
         )
@@ -335,6 +339,8 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
                 phase_changed = True
             else:
                 edge_wire = dict(state.route_edges[state.route_index])
+                if state.route_index == 0:
+                    state.measured_started_at = time.time()
                 state.pending_edge = edge_wire
                 state.route_index += 1
                 state.awaiting_timing = True
@@ -522,8 +528,13 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             samples = [dataclass_from_wire(ClockOffsetSample, dict(item)) for item in state.clock_samples]
             errors = dict(state.errors)
             run_id = state.run_id
-            measured_round_trip_seconds = max(0.0, state.measured_finished_at - state.measured_started_at)
-            overall_benchmark_seconds = max(0.0, time.time() - state.measured_started_at)
+            setup_seconds = max(0.0, state.measured_started_at - state.overall_started_at)
+            measured_round_trip_seconds = (
+                max(0.0, state.measured_finished_at - state.measured_started_at)
+                if state.measured_started_at > 0
+                else 0.0
+            )
+            overall_benchmark_seconds = max(0.0, time.time() - state.overall_started_at)
         summary = build_summary(
             run_id=run_id,
             entry_host=hosts[0],
@@ -531,6 +542,7 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             records=records,
             clock_samples=samples,
             measured_round_trip_seconds=measured_round_trip_seconds,
+            setup_seconds=setup_seconds,
             overall_benchmark_seconds=overall_benchmark_seconds,
             errors=errors,
         )
@@ -613,6 +625,7 @@ def build_summary(
     records: list[MeshTravelRecord],
     clock_samples: list[ClockOffsetSample],
     measured_round_trip_seconds: float,
+    setup_seconds: float = 0.0,
     overall_benchmark_seconds: float | None = None,
     errors: dict[str, str] | None = None,
 ) -> MeshBenchmarkSummary:
@@ -620,6 +633,7 @@ def build_summary(
     offsets = aggregate_clock_offsets(clock_samples)
     message_timings = aggregate_message_timings(clock_samples)
     movement_count = len(records)
+    total_elapsed = sum(record.elapsed_seconds for record in records)
     average = statistics.fmean(record.elapsed_seconds for record in records) if records else 0.0
     return MeshBenchmarkSummary(
         run_id=run_id,
@@ -633,6 +647,9 @@ def build_summary(
         message_timings=message_timings,
         movement_count=movement_count,
         measured_round_trip_seconds=measured_round_trip_seconds,
+        setup_seconds=setup_seconds,
+        total_elapsed_seconds=total_elapsed,
+        measured_overhead_seconds=max(0.0, measured_round_trip_seconds - total_elapsed),
         overall_benchmark_seconds=(
             measured_round_trip_seconds if overall_benchmark_seconds is None else overall_benchmark_seconds
         ),
