@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from ...admin import (
@@ -25,7 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        client = HostClient(timeout=max(1.0, float(args.request_timeout)))
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env and not api_key:
+            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        client = HostClient(timeout=max(1.0, float(args.request_timeout)), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = PiComputeRequest(
             start=max(0, args.start),
@@ -81,6 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
     parser.add_argument("--min-work-free", type=_parse_size, default=0, help="Minimum free work storage, e.g. 1G")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
     return parser
 
 

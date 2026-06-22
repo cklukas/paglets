@@ -275,6 +275,19 @@ UDP multicast and LAN probing are disabled by default in connect mode, and
 `--auto-update-from-git` is rejected there. In relay mode, the git update API is
 disabled even when the API key is valid.
 
+Packaged example CLIs accept the same `--api-key-env` option when their entry
+host is protected by a bearer key, for example:
+
+```bash
+uv run paglets-mesh-benchmark --entry alpha --api-key-env PAGLETS_API_KEY
+uv run paglets-search --entry alpha --api-key-env PAGLETS_API_KEY grep TODO .
+uv run paglets-pi-compute --entry alpha --api-key-env PAGLETS_API_KEY --digits 16
+```
+
+Paglet classes do not need relay-specific code. They should keep using
+`PagletContext`, proxies, service handles, `create_paglet`, `dispatch`, and
+`clone`; the host transport decides whether a target URL is direct or relayed.
+
 For trusted lab meshes where every host runs from a git checkout, add
 `--auto-update-from-git` to `paglets-host`. The checkout must be clean; if
 `git status --porcelain` reports uncommitted or untracked files, startup is

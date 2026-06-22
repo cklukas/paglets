@@ -19,6 +19,8 @@ from .agent import NOT_HANDLED, Paglet, PagletContext
 from .client import HostClient
 from .envelope import PagletEnvelope
 from .errors import (
+    AuthenticationError,
+    ForbiddenError,
     HostError,
     InvalidAgentError,
     LifecycleError,
@@ -51,6 +53,8 @@ from .transport import (
 
 
 _ERROR_TYPES: dict[str, type[Exception]] = {
+    "AuthenticationError": AuthenticationError,
+    "ForbiddenError": ForbiddenError,
     "HostError": HostError,
     "InvalidAgentError": InvalidAgentError,
     "LifecycleError": LifecycleError,
@@ -77,6 +81,7 @@ class ChildConfig:
     process_title: str
     state: dict[str, Any] | None = None
     state_stream: dict[str, Any] | None = None
+    host_api_key: str | None = None
 
 
 class ChildProcessController:
@@ -514,7 +519,7 @@ class _ChildHostFacade:
         self.name = config.host_name
         self.address = config.host_address
         self.agent_id = config.agent_id
-        self.client = HostClient()
+        self.client = HostClient(api_key=config.host_api_key)
         self.mesh = _ChildMeshFacade(self)
         self._message_condition = threading.Condition()
         self._agent: Paglet | None = None
@@ -869,6 +874,7 @@ def make_child_config(
     agent_class_name: str,
     state_class_name: str,
     state: dict[str, Any],
+    host_api_key: str | None = None,
 ) -> ChildConfig:
     if agent_class_name.startswith("__main__:") or state_class_name.startswith("__main__:"):
         raise HostError("Process-isolated paglets must be importable by module path, not __main__")
@@ -876,6 +882,7 @@ def make_child_config(
     return ChildConfig(
         host_name=host_name,
         host_address=host_address,
+        host_api_key=host_api_key,
         agent_id=agent_id,
         agent_class_name=agent_class_name,
         state_class_name=state_class_name,

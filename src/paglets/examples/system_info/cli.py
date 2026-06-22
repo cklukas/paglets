@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from typing import Any
@@ -34,7 +35,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        client = HostClient(timeout=args.timeout)
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env and not api_key:
+            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        client = HostClient(timeout=args.timeout, api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         operation, request = _operation_request(args)
         summary = _collect(entry, operation.name, request, timeout=args.timeout, client=client)
@@ -53,6 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait for mesh replies")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     load = subparsers.add_parser("load", help="Show CPU, memory, swap, and GPU load")

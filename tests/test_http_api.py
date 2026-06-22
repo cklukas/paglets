@@ -18,7 +18,7 @@ import paglets.client as client_module
 import paglets.host as host_module
 import paglets.process_runtime as process_runtime
 import paglets.transport as transport_module
-from paglets import Host, Message, Paglet, PagletState
+from paglets import Host, Message, Paglet, PagletState, ServiceScope
 from paglets import PagletProxy
 from paglets.cli import main as host_cli_main
 from paglets.cli import _parser as host_cli_parser
@@ -243,6 +243,24 @@ def test_relay_connect_mode_dispatch_and_bidirectional_messages(tmp_path: Path):
         receiver_from_beta = PagletProxy(laptop.address, receiver.agent_id, beta.client)
         assert receiver_from_beta.send(Message("remember", {"value": "from-beta"})) == "remembered:from-beta"
         assert laptop.get_state(receiver.agent_id, TravelState).last_message == "from-beta"
+
+        created = laptop.create_remote(
+            beta.address,
+            TravelAgent,
+            TravelState(last_message="created-through-relay"),
+            init="relay-create",
+        )
+        assert created.host_url == beta.address
+        assert created.info()["host"] == "B"
+        assert created.send(Message("remember", {"value": "created-on-beta"})) == "remembered:created-on-beta"
+        assert beta.get_state(created.agent_id, TravelState).last_message == "created-on-beta"
+
+        beta.advertise_service(created.agent_id, "relay.travel", capabilities=["remember"], scope=ServiceScope.MESH)
+        services = laptop.lookup_services("relay.travel", capability="remember", scope=ServiceScope.MESH)
+        assert [service.proxy.agent_id for service in services] == [created.agent_id]
+
+        created.dispose()
+        assert beta.get_proxy(created.agent_id) is None
     finally:
         laptop.stop()
         beta.stop()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -36,7 +37,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a command is required unless --type-list is used")
 
     try:
-        client = HostClient(timeout=max(1.0, args.timeout + 5.0))
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env and not api_key:
+            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        client = HostClient(timeout=max(1.0, args.timeout + 5.0), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _search_request(args)
         summary, events = _run_search(entry, request, args, client=client)
@@ -61,6 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_DRAIN_WAIT_SECONDS, help="Seconds each drain call may wait for new events")
     parser.add_argument("--drain-limit", type=int, default=200, help=argparse.SUPPRESS)
     parser.add_argument("--type-list", action="store_true", help="List supported file type filters and exit")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="Print final machine-readable summary JSON")
     output.add_argument("--jsonl", action="store_true", help="Stream machine-readable event JSON lines")

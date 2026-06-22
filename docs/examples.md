@@ -93,6 +93,13 @@ Direct local examples can still run without an API key. For proxied or shared
 networks, start hosts with `--api-key-env` and use the relay setup from the main
 guide so the HTTP API requires bearer authentication.
 
+All packaged example CLIs that contact an entry host accept `--api-key-env`,
+including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-pi-compute`,
+`paglets-perf-test`, `paglets-mesh-benchmark`, and `paglets-search`. The paglet
+classes themselves do not need relay-specific branches; use normal context,
+proxy, service, creation, clone, and dispatch APIs and the host transport
+forwards relayed URLs transparently.
+
 ## Server Info
 
 `server-info` demonstrates the resident-service pattern:

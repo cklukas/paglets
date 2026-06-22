@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -32,7 +33,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        client = HostClient(timeout=max(1.0, args.timeout + 10.0))
+        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env and not api_key:
+            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        client = HostClient(timeout=max(1.0, args.timeout + 10.0), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _benchmark_request(args)
         summary = _collect(entry, request, timeout=args.timeout, client=client)
@@ -51,6 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=120.0, help="Seconds to wait for mesh benchmark replies")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets bearer API key")
     parser.add_argument("--duration", type=float, default=DEFAULT_BENCHMARK_DURATION_SECONDS, help="Seconds per CPU/memory kernel")
     parser.add_argument("--disk-size", default=_format_size(DEFAULT_DISK_SIZE_BYTES), help="Temporary file size per tested volume")
     parser.add_argument("--workers", type=int, default=0, help="Multi-core worker count; default is logical CPU count")

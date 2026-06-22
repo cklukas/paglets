@@ -365,6 +365,110 @@ def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path
         alpha.stop()
 
 
+def test_paglets_mesh_benchmark_uses_relay_without_intermediate_arrival(tmp_path: Path, capsys, monkeypatch):
+    port = free_port()
+    public_url = f"http://127.0.0.1:{port}/paglets"
+    alpha = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=port,
+        api_key="secret",
+        public_url=public_url,
+        mesh_version="mesh-benchmark-relay-test",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    beta = Host(
+        "beta",
+        api_key="secret",
+        connect_to=public_url,
+        mesh_version="mesh-benchmark-relay-test",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+        persistence_dir=tmp_path / "beta",
+    )
+    gamma = Host(
+        "gamma",
+        api_key="secret",
+        connect_to=public_url,
+        mesh_version="mesh-benchmark-relay-test",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+        persistence_dir=tmp_path / "gamma",
+    )
+    alpha.start_background()
+    beta.start_background()
+    gamma.start_background()
+    try:
+        _wait_for(lambda: alpha.mesh.lookup("beta") is not None and alpha.mesh.lookup("gamma") is not None)
+        monkeypatch.setenv("PAGLETS_API_KEY", "secret")
+        monkeypatch.setattr(
+            "paglets.examples.mesh_benchmark.cli._select_entry_server",
+            lambda *, entry_name, client: ServerRef("alpha", public_url),
+        )
+
+        result = mesh_benchmark_main(
+            [
+                "--entry",
+                "alpha",
+                "--timeout",
+                "30",
+                "--json",
+                "--repeats",
+                "1",
+                "--payload-size",
+                "0",
+                "--clock-probes",
+                "1",
+                "--exclude-self",
+                "--api-key-env",
+                "PAGLETS_API_KEY",
+            ]
+        )
+
+        assert result == 0
+        payload = json.loads(capsys.readouterr().out)
+        records = payload["records"]
+        assert payload["errors"] == {}
+        assert payload["movement_count"] == 3 * (3 - 1)
+        assert {host["name"] for host in payload["hosts"]} == {"alpha", "beta", "gamma"}
+        assert {(record["source_name"], record["target_name"]) for record in records} == {
+            ("alpha", "beta"),
+            ("alpha", "gamma"),
+            ("beta", "alpha"),
+            ("beta", "gamma"),
+            ("gamma", "alpha"),
+            ("gamma", "beta"),
+        }
+        assert all("/relay/hosts/alpha" not in record["source_url"] for record in records)
+        assert all("/relay/hosts/alpha" not in record["target_url"] for record in records)
+
+        traveler_arrivals_on_alpha = [
+            event
+            for event in alpha.list_events(since=0, limit=1000)
+            if event.kind == "arrival"
+            and event.class_name == "paglets.examples.mesh_benchmark.agent:MeshBenchmarkTravelerAgent"
+        ]
+        logical_alpha_arrivals = [record for record in records if record["target_name"] == "alpha"]
+        assert len(traveler_arrivals_on_alpha) == len(logical_alpha_arrivals)
+    finally:
+        gamma.stop()
+        beta.stop()
+        alpha.stop()
+
+
+def _wait_for(predicate, *, timeout: float = 5.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("timed out waiting for condition")
+
+
 def _record(source: str, target: str, elapsed: float, *, payload_size_bytes: int = 0) -> MeshTravelRecord:
     return MeshTravelRecord(
         run_id="run",

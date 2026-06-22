@@ -700,11 +700,36 @@ class Host:
             delivery.future.set_exception(RemoteHostError(str(payload.get("error") or "Relay delivery failed")))
         return {"ok": True}
 
+    def relay_api(
+        self,
+        target: str,
+        method: str,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float = 10.0,
+    ) -> Any:
+        response = self._relay_submit(
+            unquote(target),
+            "api",
+            {"method": method, "path": path, "payload": dict(payload)},
+            timeout=timeout,
+        )
+        return response.get("result")
+
     def relay_receive_envelope(self, target: str, envelope: PagletEnvelope, *, timeout: float = 10.0) -> dict[str, Any]:
         return self._relay_submit(
             unquote(target),
             "envelope",
             {"envelope": envelope.to_wire()},
+            timeout=timeout,
+        )
+
+    def relay_receive_creation(self, target: str, payload: dict[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
+        return self._relay_submit(
+            unquote(target),
+            "creation",
+            {"creation": dict(payload)},
             timeout=timeout,
         )
 
@@ -820,6 +845,16 @@ class Host:
             if kind == "envelope":
                 proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
                 ack = {"ok": True, "proxy": proxy.to_wire()}
+            elif kind == "creation":
+                proxy = self._receive_creation(dict(payload["creation"]))
+                ack = {"ok": True, "proxy": proxy.to_wire()}
+            elif kind == "api":
+                result = self._relay_local_api(
+                    str(payload["method"]),
+                    str(payload["path"]),
+                    dict(payload.get("payload") or {}),
+                )
+                ack = {"ok": True, "result": result}
             elif kind == "message":
                 result = self.deliver_message(
                     str(payload["agent_id"]),
@@ -834,6 +869,120 @@ class Host:
         except Exception as exc:
             ack = {"ok": False, "error_type": exc.__class__.__name__, "error": str(exc)}
         self.client.post_json(f"{self.connect_to.rstrip('/')}/relay/ack/{delivery_id}", ack, timeout=5.0)
+
+    def _relay_local_api(self, method: str, path: str, payload: dict[str, Any]) -> Any:
+        parsed = urlparse(path)
+        parts = [part for part in parsed.path.split("/") if part]
+        query = parse_qs(parsed.query)
+
+        if method == "GET" and parts == ["health"]:
+            return self.health()
+        if method == "GET" and parts == ["hosts"]:
+            return {"hosts": [ref.to_wire() for ref in self.list_hosts(include_self=True)]}
+        if method == "POST" and parts == ["hosts", "join"]:
+            return {"hosts": [ref.to_wire() for ref in self.join_mesh(payload)]}
+        if method == "GET" and parts == ["events"]:
+            since = int((query.get("since") or ["0"])[0])
+            limit = int((query.get("limit") or ["100"])[0])
+            return {"events": [event.to_wire() for event in self.list_events(since=since, limit=limit)]}
+        if method == "GET" and parts == ["services"]:
+            name = (query.get("name") or [None])[0]
+            capability = (query.get("capability") or [None])[0]
+            scope = enum_from_wire((query.get("scope") or [ServiceScope.LOCAL.value])[0], ServiceScope, "scope")
+            records = (
+                self._services.lookup_all(name, capability, scope=ServiceScope.MESH)
+                if scope is ServiceScope.MESH
+                else self._services.lookup_all(name, capability)
+            )
+            return {"services": [record.to_wire() for record in records]}
+        if method == "POST" and parts == ["services", "leases"]:
+            return self.acquire_resident_service_lease(
+                str(payload["agent_id"]),
+                str(payload["service_name"]),
+                ttl=float(payload.get("ttl", DEFAULT_SERVICE_LEASE_TTL_SECONDS)),
+            )
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["services", "leases"] and parts[3] == "release":
+            return self.release_resident_service_lease(parts[2])
+        if method == "GET" and parts == ["agents"]:
+            state = (query.get("state") or ["active"])[0]
+            if state == "all":
+                return {"agents": self.list_agents(active=True, inactive=True)}
+            if state == "inactive":
+                return {"agents": self.list_agents(active=False, inactive=True)}
+            return {"agents": self.list_agents(active=True, inactive=False)}
+        if method == "POST" and parts == ["agents"]:
+            if "envelope" in payload:
+                proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
+            else:
+                proxy = self._receive_creation(payload)
+            return {"proxy": proxy.to_wire()}
+
+        if len(parts) >= 2 and parts[0] == "agents":
+            agent_id = parts[1]
+            if method == "GET" and len(parts) == 3 and parts[2] == "state":
+                return self._state_payload(agent_id)
+            if method == "GET" and len(parts) == 2:
+                with self._lock:
+                    agent = self._agents.get(agent_id)
+                    if agent is not None:
+                        return self._summary(agent)
+                    inactive = self._inactive.get(agent_id)
+                    if inactive is not None:
+                        return self._inactive_summary(inactive)
+                raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
+            if method == "POST" and len(parts) == 3:
+                action = parts[2]
+                if action == "messages":
+                    message = Message.from_wire(payload["message"])
+                    result = self.deliver_message(
+                        agent_id,
+                        message,
+                        oneway=bool(payload.get("oneway", False)),
+                        activate_if_inactive=bool(payload.get("activate_if_inactive", True)),
+                        no_delay=bool(payload.get("no_delay", False)),
+                    )
+                    return {"result": result}
+                if action == "dispatch":
+                    target = TransferTicket.from_wire(payload["ticket"]) if "ticket" in payload else payload["target"]
+                    proxy = self.dispatch(agent_id, target)
+                    return {"proxy": proxy.to_wire()}
+                if action == "clone":
+                    if "ticket" in payload:
+                        proxy = self.clone(agent_id, target=TransferTicket.from_wire(payload["ticket"]))
+                    else:
+                        proxy = self.clone(agent_id, target=payload.get("target"))
+                    return {"proxy": proxy.to_wire()}
+                if action == "retract":
+                    proxy = self._retract_to(agent_id, payload["target"])
+                    return {"proxy": proxy.to_wire()}
+                if action == "deactivate":
+                    proxy = self.deactivate(agent_id, DeactivationRequest.from_wire(payload.get("request")))
+                    return {"proxy": proxy.to_wire(), "ok": True}
+                if action == "activate":
+                    proxy = self.activate(agent_id)
+                    return {"proxy": proxy.to_wire()}
+                if action == "dispose":
+                    self.dispose(agent_id)
+                    return {"ok": True}
+                if action == "services":
+                    record = self.advertise_service(
+                        agent_id,
+                        str(payload["name"]),
+                        capabilities=payload.get("capabilities"),
+                        metadata=payload.get("metadata"),
+                        scope=enum_from_wire(
+                            payload.get("scope") or ServiceScope.LOCAL.value,
+                            ServiceScope,
+                            "scope",
+                        ),
+                        ttl=float(payload["ttl"]) if payload.get("ttl") is not None else None,
+                    )
+                    return {"service": record.to_wire()}
+                if action == "unadvertise-service":
+                    removed = self.unadvertise_service(str(payload["name"]), agent_id=agent_id)
+                    return {"services": [record.to_wire() for record in removed]}
+
+        raise HostError(f"No relay route for {method} {path}")
 
     def handle_git_update_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.auto_update_from_git or self.git_repo_root is None:
@@ -2163,6 +2312,7 @@ class Host:
         config = make_child_config(
             host_name=self.name,
             host_address=self.address,
+            host_api_key=self.api_key,
             agent_id=agent_id,
             agent_class_name=agent_class_name,
             state_class_name=state_class_name,
@@ -2707,13 +2857,18 @@ class _RequestHandler(BaseHTTPRequestHandler):
         if method == "GET" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "health":
             return host.relay_host_health(parts[2])
         if method == "POST" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents":
-            if "envelope" not in payload:
-                raise HostError("Relay agent route requires an envelope")
-            response = host.relay_receive_envelope(
-                parts[2],
-                PagletEnvelope.from_wire(payload["envelope"]),
-                timeout=float(payload.get("timeout", 10.0)),
-            )
+            if "envelope" in payload:
+                response = host.relay_receive_envelope(
+                    parts[2],
+                    PagletEnvelope.from_wire(payload["envelope"]),
+                    timeout=float(payload.get("timeout", 10.0)),
+                )
+            else:
+                response = host.relay_receive_creation(
+                    parts[2],
+                    payload,
+                    timeout=float(payload.get("timeout", 10.0)),
+                )
             return {"proxy": response["proxy"]}
         if method == "POST" and len(parts) == 6 and parts[:2] == ["relay", "hosts"] and parts[3] == "agents" and parts[5] == "messages":
             message = Message.from_wire(payload["message"])
@@ -2727,6 +2882,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 timeout=float(payload.get("timeout", 10.0)),
             )
             return {"result": result}
+        if len(parts) >= 3 and parts[:2] == ["relay", "hosts"]:
+            relay_path = "/" + "/".join(parts[3:])
+            if parsed.query:
+                relay_path = f"{relay_path}?{parsed.query}"
+            return host.relay_api(parts[2], method, relay_path, payload)
         if method == "GET" and parts == ["events"]:
             since = int((query.get("since") or ["0"])[0])
             limit = int((query.get("limit") or ["100"])[0])
