@@ -11,13 +11,17 @@ from paglets import Host
 from paglets.admin import ServerRef
 from paglets.examples.mesh_benchmark import (
     ClockOffsetSample,
+    MessageTimingSummary,
     MeshBenchmarkHost,
     MeshBenchmarkRequest,
     MeshBenchmarkSummary,
     MeshTravelRecord,
     aggregate_clock_offsets,
     aggregate_matrix,
+    aggregate_message_timings,
     build_route_edges,
+    entry_time_for_local_reference,
+    local_minus_entry_offset,
     parse_size,
 )
 from paglets.examples.mesh_benchmark.cli import _format_markdown, _parser, main as mesh_benchmark_main
@@ -97,6 +101,19 @@ def test_mesh_benchmark_dataclasses_round_trip_through_wire():
         entry_host_url="http://alpha",
         hosts=[MeshBenchmarkHost("alpha", "http://alpha")],
         records=[_record("alpha", "alpha", 0.001)],
+        message_timings=[
+            MessageTimingSummary(
+                host_name="alpha",
+                host_url="http://alpha",
+                entry_host_name="alpha",
+                entry_host_url="http://alpha",
+                sample_count=1,
+                median_rtt_seconds=0.001,
+                mean_rtt_seconds=0.001,
+                best_rtt_seconds=0.001,
+                worst_rtt_seconds=0.001,
+            )
+        ],
     )
     assert dataclass_from_wire(MeshBenchmarkSummary, dataclass_to_wire(summary)) == summary
 
@@ -117,8 +134,46 @@ def test_clock_offset_aggregation_reports_median_mean_and_best_rtt():
     assert summary.best_rtt_seconds == 0.010
 
 
+def test_local_reference_converts_to_entry_time_using_best_rtt_offset():
+    samples = [
+        _sample("beta", 0.250, 0.100),
+        _sample("beta", 0.240, 0.010),
+        _sample("beta", 0.260, 0.050),
+    ]
+
+    assert entry_time_for_local_reference(100.0, samples) == pytest.approx(99.760)
+
+
+def test_ntp_style_offset_is_local_minus_entry():
+    offset = local_minus_entry_offset(
+        local_send=100.000,
+        local_receive=100.020,
+        entry_receive=99.760,
+        entry_send=99.760,
+    )
+
+    assert offset == pytest.approx(0.250)
+
+
+def test_message_timing_aggregation_reports_median_mean_best_and_worst_rtt():
+    samples = [
+        _sample("beta", 0.003, 0.003),
+        _sample("beta", 0.009, 0.009),
+        _sample("beta", 0.006, 0.006),
+    ]
+
+    [summary] = aggregate_message_timings(samples)
+
+    assert summary.sample_count == 3
+    assert summary.median_rtt_seconds == 0.006
+    assert summary.mean_rtt_seconds == pytest.approx(0.006)
+    assert summary.best_rtt_seconds == 0.003
+    assert summary.worst_rtt_seconds == 0.009
+
+
 def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
     hosts = [MeshBenchmarkHost("alpha", "http://alpha"), MeshBenchmarkHost("beta", "http://beta")]
+    samples = [_sample("beta", 0.002, 0.001)]
     summary = MeshBenchmarkSummary(
         run_id="run",
         entry_host_name="alpha",
@@ -126,9 +181,11 @@ def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
         hosts=hosts,
         records=[_record("alpha", "beta", 0.001234), _record("beta", "alpha", 0.002345)],
         matrix_seconds={"alpha": {"beta": 0.001234}, "beta": {"alpha": 0.002345}},
-        clock_offsets=aggregate_clock_offsets([_sample("beta", 0.002, 0.001)]),
+        clock_offsets=aggregate_clock_offsets(samples),
+        message_timings=aggregate_message_timings(samples),
         movement_count=2,
         measured_round_trip_seconds=0.010,
+        overall_benchmark_seconds=0.020,
         average_elapsed_seconds=0.0017895,
     )
 
@@ -142,6 +199,10 @@ def test_markdown_rendering_aligns_directional_matrix_and_missing_diagonal():
     assert "measured round trip time: 10.000 ms" in output
     assert "measured movements: 2" in output
     assert "clock offsets vs entry:" in output
+    assert "message passing times vs entry:" in output
+    assert "| host | samples | median round trip | average round trip | best round trip | worst round trip |" in output
+    assert "| beta |       1 |          1.000 ms |           1.000 ms |        1.000 ms |         1.000 ms |" in output
+    assert output.endswith("overall benchmark time: 20.000 ms")
 
 
 def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path: Path, capsys, monkeypatch):
@@ -195,6 +256,8 @@ def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path
         assert set(payload["matrix_seconds"]) == {"alpha", "beta"}
         assert set(payload["matrix_seconds"]["alpha"]) == {"alpha", "beta"}
         assert set(payload["matrix_seconds"]["beta"]) == {"alpha", "beta"}
+        assert payload["message_timings"]
+        assert payload["overall_benchmark_seconds"] >= payload["measured_round_trip_seconds"]
         assert payload["errors"] == {}
     finally:
         beta.stop()

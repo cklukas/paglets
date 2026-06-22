@@ -18,6 +18,7 @@ from .agent import (
     DEFAULT_DIGITS,
     DEFAULT_TIMEOUT_SECONDS,
     ClockOffsetSummary,
+    MessageTimingSummary,
     MeshBenchmarkCoordinatorAgent,
     MeshBenchmarkCoordinatorState,
     MeshBenchmarkHost,
@@ -128,11 +129,17 @@ def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self
         lines.append("")
         lines.append("clock offsets vs entry:")
         lines.extend(_clock_table(summary.clock_offsets, digits=digits))
+    if summary.message_timings:
+        lines.append("")
+        lines.append("message passing times vs entry:")
+        lines.extend(_message_timing_table(summary.message_timings, digits=digits))
     if summary.errors:
         lines.append("")
         lines.append("errors:")
         for host, error in sorted(summary.errors.items()):
             lines.append(f"- {host}: {error}")
+    lines.append("")
+    lines.append(f"overall benchmark time: {_format_duration(summary.overall_benchmark_seconds, digits)}")
     return "\n".join(lines)
 
 
@@ -182,7 +189,26 @@ def _clock_table(offsets: list[ClockOffsetSummary], *, digits: int) -> list[str]
                 f"{_format_decimal(offset.best_rtt_seconds * rtt_multiplier, digits)} {rtt_unit}",
             ]
         )
-    return _aligned_markdown_table(["host", "median offset", "samples", "best rtt"], rows)
+    return _aligned_markdown_table(["host", "median offset", "samples", "best round trip"], rows)
+
+
+def _message_timing_table(timings: list[MessageTimingSummary], *, digits: int) -> list[str]:
+    rows: list[list[str]] = []
+    for timing in timings:
+        rows.append(
+            [
+                timing.host_name,
+                str(timing.sample_count),
+                _format_duration(timing.median_rtt_seconds, digits),
+                _format_duration(timing.mean_rtt_seconds, digits),
+                _format_duration(timing.best_rtt_seconds, digits),
+                _format_duration(timing.worst_rtt_seconds, digits),
+            ]
+        )
+    return _aligned_markdown_table(
+        ["host", "samples", "median round trip", "average round trip", "best round trip", "worst round trip"],
+        rows,
+    )
 
 
 def _aligned_markdown_table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -233,6 +259,11 @@ def _format_decimal(value: float, digits: int) -> str:
 
 def _format_signed(value: float, digits: int) -> str:
     return f"{value:+.{max(0, digits)}f}"
+
+
+def _format_duration(seconds: float, digits: int) -> str:
+    unit, multiplier = _select_duration_unit(seconds)
+    return f"{_format_decimal(seconds * multiplier, digits)} {unit}"
 
 
 if __name__ == "__main__":  # pragma: no cover

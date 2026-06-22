@@ -295,8 +295,9 @@ and sends a mobile traveler through every directed host pair. The traveler
 stores hop timings in destination-local persistent storage, then performs an
 uncounted collection round and prints a Markdown matrix where row `A`, column
 `B` is the average A->B travel time. Timing uses request/reply probes against
-the stable starter clock, and clock-offset diagnostics are reported versus the
-entry host.
+the stable starter clock at dispatch and arrival points, and clock-offset plus
+message round-trip diagnostics are reported versus the entry host. The output
+also reports the overall benchmark time from start through collection.
 
 Search files across online same-version mesh hosts with a mobile agent:
 

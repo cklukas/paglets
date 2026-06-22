@@ -502,15 +502,22 @@ contains only B->A samples. When self-visits are disabled, diagonal cells are
 shown as `-`.
 
 Timing is based on the stable starter clock. Before each dispatch, the traveler
-probes the starter for entry-host time; after arrival, it probes the starter
-again and stores the elapsed entry-clock interval in destination-local
-persistent storage. At the end, the traveler performs an uncounted collection
-round, clears the run's local storage files, and sends the summary back to the
-starter.
+probes the starter, estimates entry-host time for the local instant immediately
+before `dispatch()`, and carries that timestamp with the traveler. On arrival,
+the traveler captures its local arrival time before the delayed continuation,
+then uses the next starter probe batch to convert that captured arrival instant
+back to entry-host time. The stored per-hop duration excludes the post-arrival
+probe time and the continuation delay. At the end, the traveler performs an
+uncounted collection round, clears the run's local storage files, and sends the
+summary back to the starter.
 
 Clock diagnostics use repeated request/reply probes against the starter. The
 displayed value is the median host-minus-entry offset; JSON output also
-includes raw samples, mean offset, and best-RTT offset.
+includes raw samples, mean offset, and the offset from the best round-trip
+probe. The same probe samples are aggregated into a separate message passing
+table with median, average, best, and worst request/reply round-trip times
+versus the starter. The final line reports the overall benchmark time from
+start through the collection round.
 
 ## Mesh Search
 

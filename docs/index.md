@@ -73,7 +73,8 @@ summary centrally.
 `paglets-mesh-benchmark` measures mobile-agent movement itself. A starter
 paglet remains on the entry host while a traveler visits every directed host
 pair, stores per-hop timings locally on arrival, then collects and prints a
-directional Markdown matrix plus clock-offset diagnostics.
+directional Markdown matrix plus clock-offset and message round-trip
+diagnostics, ending with the overall benchmark time.
 
 Run the disk survey demo:
 

@@ -76,6 +76,19 @@ class ClockOffsetSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageTimingSummary:
+    host_name: str
+    host_url: str
+    entry_host_name: str
+    entry_host_url: str
+    sample_count: int
+    median_rtt_seconds: float
+    mean_rtt_seconds: float
+    best_rtt_seconds: float
+    worst_rtt_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class MeshTravelRecord:
     run_id: str
     sequence: int
@@ -101,8 +114,10 @@ class MeshBenchmarkSummary:
     matrix_seconds: dict[str, dict[str, float]] = field(default_factory=dict)
     clock_offsets: list[ClockOffsetSummary] = field(default_factory=list)
     clock_samples: list[ClockOffsetSample] = field(default_factory=list)
+    message_timings: list[MessageTimingSummary] = field(default_factory=list)
     movement_count: int = 0
     measured_round_trip_seconds: float = 0.0
+    overall_benchmark_seconds: float = 0.0
     average_elapsed_seconds: float = 0.0
     errors: dict[str, str] = field(default_factory=dict)
 
@@ -130,6 +145,7 @@ class MeshBenchmarkTravelerState(PagletState):
     payload: str = ""
     pending_edge: dict[str, Any] = field(default_factory=dict)
     awaiting_timing: bool = False
+    arrival_local_time: float = 0.0
     measured_started_at: float = 0.0
     measured_finished_at: float = 0.0
     coordinator_agent_id: str = ""
@@ -257,8 +273,10 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
     State = MeshBenchmarkTravelerState
 
     def run(self) -> None:
+        arrival_local_time = time.time()
         with self.locked_state() as state:
             if state.awaiting_timing:
+                state.arrival_local_time = arrival_local_time
                 self._schedule_complete_arrival()
             elif state.phase == "collect":
                 self._schedule_continue()
@@ -325,10 +343,11 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
 
         edge = dataclass_from_wire(MeshRouteEdge, edge_wire)
         request = dataclass_from_wire(MeshBenchmarkRequest, dict(self.state.request))
-        entry_start, _entry_start_rtt = self._estimate_entry_time(count=request.clock_probes)
+        source_wall_start, start_samples = self._probe_entry_time(count=request.clock_probes)
         with self.locked_state() as state:
             state.pending_edge = dict(edge_wire)
-            state.pending_edge["source_wall_start"] = entry_start
+            state.pending_edge["source_wall_start"] = source_wall_start
+            state.clock_samples.extend(dataclass_to_wire(sample) for sample in start_samples)
         self.dispatch(edge.target_url)
 
     def _complete_arrival(self) -> None:
@@ -337,16 +356,20 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
                 return
             edge_wire = dict(state.pending_edge)
             request = dataclass_from_wire(MeshBenchmarkRequest, dict(state.request))
+            arrival_local_time = state.arrival_local_time or time.time()
         edge = dataclass_from_wire(MeshRouteEdge, edge_wire)
         source_wall_start = float(edge_wire.get("source_wall_start", 0.0))
-        entry_time, entry_rtt = self._estimate_entry_time(count=request.clock_probes)
+        entry_time, arrival_samples = self._probe_entry_time(
+            count=request.clock_probes,
+            local_reference=arrival_local_time,
+        )
         elapsed = max(0.0, entry_time - source_wall_start)
         self._record_arrival_timing(
             edge,
             source_wall_start=source_wall_start,
             source_wall_end=entry_time,
             elapsed_seconds=elapsed,
-            source_probe_rtt_seconds=entry_rtt,
+            clock_samples=arrival_samples,
             request=request,
         )
         self._continue()
@@ -374,7 +397,7 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             state.awaiting_timing = False
             state.pending_edge = {}
         edge = dataclass_from_wire(MeshRouteEdge, edge_wire)
-        clock_samples = self._probe_clock(request.clock_probes)
+        _entry_time, clock_samples = self._probe_entry_time(count=request.clock_probes)
         clock_summary = summarize_clock_samples(clock_samples)
         record = MeshTravelRecord(
             run_id=self.state.run_id,
@@ -401,10 +424,9 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
         source_wall_start: float,
         source_wall_end: float,
         elapsed_seconds: float,
-        source_probe_rtt_seconds: float,
+        clock_samples: list[ClockOffsetSample],
         request: MeshBenchmarkRequest,
     ) -> None:
-        clock_samples = self._probe_clock(request.clock_probes)
         clock_summary = summarize_clock_samples(clock_samples)
         record = MeshTravelRecord(
             run_id=self.state.run_id,
@@ -424,19 +446,24 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
         with self.locked_state() as state:
             state.awaiting_timing = False
             state.pending_edge = {}
+            state.arrival_local_time = 0.0
             state.clock_samples.extend(dataclass_to_wire(sample) for sample in clock_samples)
-            if source_probe_rtt_seconds > 0:
-                state.errors.pop("source-clock", None)
 
-    def _estimate_entry_time(self, *, count: int) -> tuple[float, float]:
+    def _probe_entry_time(
+        self,
+        *,
+        count: int,
+        local_reference: float | None = None,
+    ) -> tuple[float, list[ClockOffsetSample]]:
         with self.locked_state() as state:
             coordinator_agent_id = state.coordinator_agent_id
             coordinator_host_url = state.coordinator_host_url
         proxy = self.context.get_proxy(coordinator_agent_id, coordinator_host_url)
         if proxy is None:
-            return time.time(), 0.0
-        best_time = time.time()
-        best_rtt = float("inf")
+            reference = time.time() if local_reference is None else local_reference
+            return reference, []
+        samples: list[ClockOffsetSample] = []
+        entry_host = self._entry_host()
         for _ in range(max(1, int(count))):
             local_send = time.time()
             reply = proxy.send(Message("clock_probe", {"client_sent_at": local_send}))
@@ -444,41 +471,19 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             entry_receive = float(reply.get("received_at", 0.0))
             entry_send = float(reply.get("sent_at", entry_receive))
             rtt = max(0.0, (local_receive - local_send) - (entry_send - entry_receive))
-            entry_minus_local = ((entry_receive - local_send) + (entry_send - local_receive)) / 2.0
-            entry_time_at_receive = local_receive + entry_minus_local
-            if rtt < best_rtt:
-                best_time = entry_time_at_receive
-                best_rtt = rtt
-        return best_time, 0.0 if best_rtt == float("inf") else best_rtt
-
-    def _probe_clock(self, count: int) -> list[ClockOffsetSample]:
-        with self.locked_state() as state:
-            coordinator_agent_id = state.coordinator_agent_id
-            coordinator_host_url = state.coordinator_host_url
-        coordinator = self.context.get_proxy(coordinator_agent_id, coordinator_host_url)
-        if coordinator is None:
-            return []
-        samples: list[ClockOffsetSample] = []
-        for _ in range(max(1, int(count))):
-            local_send = time.time()
-            reply = coordinator.send(Message("clock_probe", {"client_sent_at": local_send}))
-            local_receive = time.time()
-            entry_receive = float(reply.get("received_at", 0.0))
-            entry_send = float(reply.get("sent_at", entry_receive))
-            rtt = max(0.0, (local_receive - local_send) - (entry_send - entry_receive))
-            offset = ((local_send - entry_receive) + (local_receive - entry_send)) / 2.0
             samples.append(
                 ClockOffsetSample(
                     host_name=self.context.name,
                     host_url=self.context.address,
-                    entry_host_name=self._entry_host().name,
+                    entry_host_name=entry_host.name,
                     entry_host_url=coordinator_host_url,
-                    offset_seconds=offset,
+                    offset_seconds=local_minus_entry_offset(local_send, local_receive, entry_receive, entry_send),
                     rtt_seconds=rtt,
                     sampled_at=local_receive,
                 )
             )
-        return samples
+        reference = time.time() if local_reference is None else local_reference
+        return entry_time_for_local_reference(reference, samples), samples
 
     def _entry_host(self) -> MeshBenchmarkHost:
         with self.locked_state() as state:
@@ -509,13 +514,13 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
 
     def _finish(self) -> None:
         with self.locked_state() as state:
-            request = dataclass_from_wire(MeshBenchmarkRequest, dict(state.request))
             hosts = [dataclass_from_wire(MeshBenchmarkHost, dict(host)) for host in state.hosts]
             records = [dataclass_from_wire(MeshTravelRecord, dict(item)) for item in state.collected_records]
             samples = [dataclass_from_wire(ClockOffsetSample, dict(item)) for item in state.clock_samples]
             errors = dict(state.errors)
             run_id = state.run_id
             measured_round_trip_seconds = max(0.0, state.measured_finished_at - state.measured_started_at)
+            overall_benchmark_seconds = max(0.0, time.time() - state.measured_started_at)
         summary = build_summary(
             run_id=run_id,
             entry_host=hosts[0],
@@ -523,6 +528,7 @@ class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):
             records=records,
             clock_samples=samples,
             measured_round_trip_seconds=measured_round_trip_seconds,
+            overall_benchmark_seconds=overall_benchmark_seconds,
             errors=errors,
         )
         coordinator = self.context.get_proxy(self.state.coordinator_agent_id, self.state.coordinator_host_url)
@@ -600,10 +606,12 @@ def build_summary(
     records: list[MeshTravelRecord],
     clock_samples: list[ClockOffsetSample],
     measured_round_trip_seconds: float,
+    overall_benchmark_seconds: float | None = None,
     errors: dict[str, str] | None = None,
 ) -> MeshBenchmarkSummary:
     matrix = aggregate_matrix(records, hosts)
     offsets = aggregate_clock_offsets(clock_samples)
+    message_timings = aggregate_message_timings(clock_samples)
     movement_count = len(records)
     average = statistics.fmean(record.elapsed_seconds for record in records) if records else 0.0
     return MeshBenchmarkSummary(
@@ -615,8 +623,12 @@ def build_summary(
         matrix_seconds=matrix,
         clock_offsets=offsets,
         clock_samples=clock_samples,
+        message_timings=message_timings,
         movement_count=movement_count,
         measured_round_trip_seconds=measured_round_trip_seconds,
+        overall_benchmark_seconds=(
+            measured_round_trip_seconds if overall_benchmark_seconds is None else overall_benchmark_seconds
+        ),
         average_elapsed_seconds=average,
         errors=errors or {},
     )
@@ -659,8 +671,48 @@ def aggregate_clock_offsets(samples: list[ClockOffsetSample]) -> list[ClockOffse
     return summaries
 
 
+def aggregate_message_timings(samples: list[ClockOffsetSample]) -> list[MessageTimingSummary]:
+    grouped: dict[str, list[ClockOffsetSample]] = {}
+    for sample in samples:
+        grouped.setdefault(sample.host_name, []).append(sample)
+    summaries: list[MessageTimingSummary] = []
+    for host_name, host_samples in sorted(grouped.items()):
+        best = min(host_samples, key=lambda sample: sample.rtt_seconds)
+        worst = max(host_samples, key=lambda sample: sample.rtt_seconds)
+        summaries.append(
+            MessageTimingSummary(
+                host_name=host_name,
+                host_url=best.host_url,
+                entry_host_name=best.entry_host_name,
+                entry_host_url=best.entry_host_url,
+                sample_count=len(host_samples),
+                median_rtt_seconds=statistics.median(sample.rtt_seconds for sample in host_samples),
+                mean_rtt_seconds=statistics.fmean(sample.rtt_seconds for sample in host_samples),
+                best_rtt_seconds=best.rtt_seconds,
+                worst_rtt_seconds=worst.rtt_seconds,
+            )
+        )
+    return summaries
+
+
 def summarize_clock_samples(samples: list[ClockOffsetSample]) -> ClockOffsetSummary | None:
     return aggregate_clock_offsets(samples)[0] if samples else None
+
+
+def entry_time_for_local_reference(local_reference: float, samples: list[ClockOffsetSample]) -> float:
+    if not samples:
+        return local_reference
+    best = min(samples, key=lambda sample: sample.rtt_seconds)
+    return local_reference - best.offset_seconds
+
+
+def local_minus_entry_offset(
+    local_send: float,
+    local_receive: float,
+    entry_receive: float,
+    entry_send: float,
+) -> float:
+    return ((local_send - entry_receive) + (local_receive - entry_send)) / 2.0
 
 
 def random_ascii(size: int) -> str:
