@@ -679,7 +679,11 @@ beta = Host("beta", host="127.0.0.1", port=9002)
 ```
 
 They are separate paglet contexts. Dispatching from `alpha` to `beta` uses the
-same HTTP envelope as dispatching to another machine.
+same chunked pickle HTTP envelope as dispatching to another machine, just over
+loopback TCP. A self-targeting move within one host runtime is the case that
+bypasses HTTP/TCP; the host directly receives the transfer envelope, while large
+state crossing the host/child process boundary uses one-shot shared-memory
+pickle segments.
 
 ## Project layout
 

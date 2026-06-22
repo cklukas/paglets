@@ -14,7 +14,8 @@ The runtime intentionally uses a Python-friendly mobility model:
 - large state is streamed for host-to-host movement and shared-memory local
   host/child handoff, while JSON remains the small control-plane format;
 - same-host movement bypasses HTTP/TCP and delivers the serialized envelope
-  directly inside the local host;
+  directly inside the local host; different host processes on the same machine
+  still communicate over loopback HTTP;
 - lifecycle hooks resume behavior after create, dispatch, clone, retract, or
   activation;
 - deactivation persists inactive paglets to disk until activation;

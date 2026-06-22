@@ -97,6 +97,28 @@ For dispatch and retract, the source host removes the original after successful
 delivery. For clone, the source host keeps the original and the target receives a
 new agent ID.
 
+## Local Transport Paths
+
+There are two local cases that are easy to confuse:
+
+- Same host runtime: the target URL is this host's own published address.
+  Dispatch, clone, and retract skip HTTP/TCP and hand the `PagletEnvelope`
+  directly to the same `Host` instance. The receiving side still starts a fresh
+  child process for the arriving paglet, so lifecycle behavior matches a normal
+  move.
+- Same machine, different host processes: two hosts on `127.0.0.1` with
+  different ports are separate runtimes. Movement between them still uses the
+  chunked pickle `POST /agents` path, just over loopback TCP.
+
+Shared memory is used for the parent/child process boundary inside one host,
+not as a general replacement for host-to-host transport. When a child starts,
+when the host snapshots active state, or when a child asks the host to complete
+create, dispatch, clone, deactivate, or dispose, the dataclass state is pickled
+into one-shot `multiprocessing.shared_memory` segments. The pipe message carries
+only control metadata plus the shared-memory segment names, sizes, and token.
+The receiver unpickles from those segments, unlinks them, and acknowledges the
+token so the sender can release its handles.
+
 ## Messaging Flow
 
 ```mermaid
@@ -125,7 +147,10 @@ child runtime still processes lifecycle/message commands serially.
 Child processes can also send host calls over the same pipe. These calls cover
 context operations such as service lookup, storage reads and writes, remote
 paglet creation, dispatch, clone, deactivate, dispose, mesh status, and event
-emission. No extra TCP or UDP ports are opened for parent/child IPC.
+emission. When these calls include large state payloads, the state travels
+through the local shared-memory stream described above. Ordinary `Message`
+arguments and replies stay on the normal control path and should remain
+JSON-compatible. No extra TCP or UDP ports are opened for parent/child IPC.
 
 ## State And Handler Concurrency
 
