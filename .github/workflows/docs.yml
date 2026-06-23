@@ -39,6 +39,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+        with:
+          cache-suffix: docs
 
       - name: Install documentation dependencies
         run: uv sync --extra docs

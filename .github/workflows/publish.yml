@@ -27,6 +27,8 @@ jobs:
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
+        with:
+          cache-suffix: publish
 
       - name: Install project
         run: uv sync --dev --extra docs
