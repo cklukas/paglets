@@ -3,14 +3,23 @@
 
 cff-version: 1.2.0
 message: "If you use paglets, please cite the introduction / overview paper."
-type: article
-title: "Paglets: Explicit-State Mobile Agents for Python Host Meshes"
+type: software
+title: "paglets"
 authors:
   - family-names: "Klukas"
     given-names: "Christian"
     orcid: "https://orcid.org/0000-0001-7956-0294"
-doi: "10.5281/zenodo.20820155"
 date-released: "2026-06-23"
-url: "https://doi.org/10.5281/zenodo.20820155"
-abstract: "Application note introducing paglets, a Python Aglets-inspired mobile object runtime."
+url: "https://github.com/cklukas/paglets"
 license: "MIT"
+preferred-citation:
+  type: article
+  title: "Paglets: Explicit-State Mobile Agents for Python Host Meshes"
+  authors:
+    - family-names: "Klukas"
+      given-names: "Christian"
+      orcid: "https://orcid.org/0000-0001-7956-0294"
+  doi: "10.5281/zenodo.20820155"
+  date-released: "2026-06-23"
+  url: "https://doi.org/10.5281/zenodo.20820155"
+  abstract: "Application note introducing paglets, a Python Aglets-inspired mobile object runtime."
