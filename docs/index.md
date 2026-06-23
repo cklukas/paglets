@@ -1,3 +1,5 @@
+<img src="repository-open-graph-1280x640.png" alt="paglets social preview" width="640" align="right">
+
 # paglets
 
 `paglets` is a compact Python runtime inspired by Java Aglets. A paglet is a

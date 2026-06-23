@@ -1,3 +1,5 @@
+<img src="docs/repository-open-graph-1280x640.png" alt="paglets social preview" width="640" align="right">
+
 # paglets
 
 [![CI](https://github.com/cklukas/paglets/actions/workflows/ci.yml/badge.svg)](https://github.com/cklukas/paglets/actions/workflows/ci.yml)
