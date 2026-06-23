@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
 import threading
 import time
 from collections import namedtuple
@@ -33,6 +34,13 @@ from paglets.remote.admin import ServerRef
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from tests.support import free_port
+
+
+def _daemon_cpu_benchmark_worker(queue):
+    before = mp.current_process().daemon
+    result = benchmark_cpu(duration_seconds=0.01, workers=1)
+    after = mp.current_process().daemon
+    queue.put((before, after, [metric.name for metric in result.multi_core], result.errors))
 
 
 def test_benchmark_dataclasses_round_trip_through_wire():
@@ -77,6 +85,22 @@ def test_cpu_and_memory_benchmarks_return_positive_rates():
     memory = benchmark_memory(duration_seconds=0.01)
     assert memory.metrics
     assert all(metric.bytes_per_second > 0 for metric in memory.metrics)
+
+
+def test_cpu_benchmark_runs_multi_core_kernels_from_daemon_process():
+    context = mp.get_context("spawn")
+    queue = context.Queue()
+    process = context.Process(target=_daemon_cpu_benchmark_worker, args=(queue,), daemon=True)
+
+    process.start()
+    process.join(30)
+
+    assert process.exitcode == 0
+    before, after, metric_names, errors = queue.get_nowait()
+    assert before is True
+    assert after is True
+    assert metric_names == ["integer-multi", "float-multi", "sha256-multi"]
+    assert errors == []
 
 
 def test_disk_discovery_skips_special_readonly_unwritable_and_duplicate_volumes(tmp_path, monkeypatch):

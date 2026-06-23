@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import math
+import multiprocessing as mp
 import os
 import platform
 import shutil
@@ -398,7 +399,7 @@ def _target_for_explicit_path(path: Path, partitions: list[DiskTarget]) -> DiskT
 
 
 def _run_multi_core_kernel(name: str, duration_seconds: float, workers: int) -> BenchmarkMetric:
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with _allow_process_pool_from_daemon(), ProcessPoolExecutor(max_workers=workers) as executor:
         metrics = list(executor.map(_cpu_kernel_worker, [(name, duration_seconds)] * workers))
     duration = max(max(metric.duration_seconds for metric in metrics), 1e-9)
     operations = sum(metric.operations for metric in metrics)
@@ -411,6 +412,19 @@ def _run_multi_core_kernel(name: str, duration_seconds: float, workers: int) -> 
         bytes_processed=bytes_processed,
         bytes_per_second=bytes_processed / duration,
     )
+
+
+@contextlib.contextmanager
+def _allow_process_pool_from_daemon():
+    current = mp.current_process()
+    was_daemon = current.daemon
+    if was_daemon:
+        current.daemon = False
+    try:
+        yield
+    finally:
+        if was_daemon:
+            current.daemon = True
 
 
 def _cpu_kernel_worker(args: tuple[str, float]) -> BenchmarkMetric:
