@@ -6,7 +6,8 @@
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Application note PDF](https://github.com/cklukas/paglets/releases/download/paper-2026-06-23/paglets-application-note.pdf)
+[Application note PDF](https://cklukas.github.io/paglets/paglets-application-note.pdf)
+([download](https://github.com/cklukas/paglets/releases/download/paper-2026-06-23/paglets-application-note.pdf))
 | [PyPI package](https://pypi.org/project/paglets/)
 
 `paglets` is a compact Python re-imagining of the Java Aglets mobile-agent idea: stateful objects with identity, lifecycle hooks, message passing, proxies, movement between hosts, durable deactivation, resident services, and explicit dataclass state serialization.

@@ -4,7 +4,8 @@
 mobile object with explicit dataclass state, lifecycle hooks, message handling,
 and proxy-based control.
 
-Resources: [application note PDF](https://github.com/cklukas/paglets/releases/download/paper-2026-06-23/paglets-application-note.pdf)
+Resources: [application note PDF](https://cklukas.github.io/paglets/paglets-application-note.pdf)
+([download](https://github.com/cklukas/paglets/releases/download/paper-2026-06-23/paglets-application-note.pdf))
 and [PyPI package](https://pypi.org/project/paglets/).
 
 The runtime intentionally uses a Python-friendly mobility model:
