@@ -4,12 +4,15 @@
 name: Paper
 
 "on":
-  push: {}
+  push:
+    branches:
+      - overview-paper
   pull_request: {}
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: write
+  contents: write
 
 jobs:
   build:
@@ -43,3 +46,36 @@ jobs:
           name: paglets-application-note
           path: papers/paglets-application-note/build/paglets-application-note.pdf
           if-no-files-found: error
+
+      - name: Publish paper release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PDF_PATH: papers/paglets-application-note/build/paglets-application-note.pdf
+        run: |
+          set -euo pipefail
+
+          release_date="$(date -u +%F)"
+          release_tag="paper-${release_date}"
+          release_title="Paglets application note ${release_date}"
+          release_notes="Application note PDF built from overview-paper commit ${GITHUB_SHA}."
+
+          if gh release view "${release_tag}" >/dev/null 2>&1; then
+            gh release upload "${release_tag}" "${PDF_PATH}" --clobber
+            gh release edit "${release_tag}" \
+              --title "${release_title}" \
+              --notes "${release_notes}"
+          else
+            gh release create "${release_tag}" "${PDF_PATH}" \
+              --target "${GITHUB_SHA}" \
+              --title "${release_title}" \
+              --notes "${release_notes}"
+          fi
+
+          echo "Published ${PDF_PATH} to release ${release_tag}."
+
+      - name: Refresh documentation site
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run docs.yml --ref main
