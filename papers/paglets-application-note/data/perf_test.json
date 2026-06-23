@@ -1,0 +1,395 @@
+{
+  "cleanup_errors": {},
+  "errors": {},
+  "pending_hosts": [],
+  "results": {
+    "mac-studio": {
+      "host_url": "http://mac-studio.local:8765",
+      "result": {
+        "cpu": {
+          "errors": [],
+          "logical_cpus": 10,
+          "multi_core": [
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.0034529580007074,
+              "name": "integer-multi",
+              "operations": 174940000,
+              "operations_per_second": 87319245.15690985
+            },
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.004929999999149,
+              "name": "float-multi",
+              "operations": 210680000,
+              "operations_per_second": 105080975.39569433
+            },
+            {
+              "bytes_per_second": 17196115716.184982,
+              "bytes_processed": 34392776704,
+              "duration_seconds": 2.0000317089998134,
+              "name": "sha256-multi",
+              "operations": 493922,
+              "operations_per_second": 246957.08461892494
+            }
+          ],
+          "physical_cpus": 10,
+          "single_core": [
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.0006200000007084,
+              "name": "integer",
+              "operations": 25890000,
+              "operations_per_second": 12940988.293624394
+            },
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.000433334000263,
+              "name": "float",
+              "operations": 26680000,
+              "operations_per_second": 13337110.288323404
+            },
+            {
+              "bytes_per_second": 2189949171.279464,
+              "bytes_processed": 4379922432,
+              "duration_seconds": 2.000011000000086,
+              "name": "sha256",
+              "operations": 62901,
+              "operations_per_second": 31450.32702320002
+            }
+          ],
+          "workers": 10
+        },
+        "disk": {
+          "errors": [],
+          "skipped": [
+            {
+              "device": "/dev/disk3s1s1",
+              "filesystem": "apfs",
+              "path": "/",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk3s6",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/VM",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk3s2",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/Preboot",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk3s4",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/Update",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk1s2",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/xarts",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk1s1",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/iSCPreboot",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk1s3",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/Hardware",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk3s5",
+              "filesystem": "apfs",
+              "path": "/System/Volumes/Data",
+              "reason": "not writable"
+            },
+            {
+              "device": "/dev/disk5s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23A343",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk7s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23F77",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk9s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Cryptex/Images/bundle/SimRuntimeBundle-BB968D93-418E-4AD4-BD6C-C65898D96A53",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk11s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_22C150",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk13s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23C54",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk15s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Cryptex/Images/bundle/SimRuntimeBundle-4EC0D80F-5232-4389-AA19-397A307A6DB7",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk17s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/watchOS_22S99",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk19s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Cryptex/Images/bundle/SimRuntimeBundle-B9BA19AE-492C-4091-B9DE-F9FBCDA8DE86",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk21s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_22E238",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk23s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Cryptex/Images/bundle/SimRuntimeBundle-596012B3-F0B9-484B-B5F3-6970972A85E3",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk25s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/tvOS_22K154",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk27s1",
+              "filesystem": "apfs",
+              "path": "/Library/Developer/CoreSimulator/Volumes/iOS_23E254a",
+              "reason": "read-only volume"
+            },
+            {
+              "device": "/dev/disk3s1s1",
+              "filesystem": "apfs",
+              "path": "/var/folders/5c/hcgywzl17jjdpr0vsnpvmpyc0000gn/T",
+              "reason": "duplicate volume"
+            }
+          ],
+          "volumes": [
+            {
+              "benchmark_size_bytes": 67108864,
+              "device": "/dev/disk3s1s1",
+              "filesystem": "apfs",
+              "free_bytes_before": 77515591680,
+              "fsync_seconds": 0.0024440830002276925,
+              "metadata_files_per_second": 7922.7795209859705,
+              "path": "/Users/klukas/.paglets/benchmarks",
+              "read_bytes_per_second": 17736466162.1164,
+              "read_seconds": 0.00378366600125446,
+              "total_bytes": 494384795648,
+              "write_bytes_per_second": 3142260466.6725993,
+              "write_seconds": 0.021356874998673447
+            }
+          ]
+        },
+        "errors": [],
+        "host_name": "mac-studio",
+        "host_url": "http://mac-studio.local:8765",
+        "lock_wait_seconds": 0.0007859590004954953,
+        "memory": {
+          "errors": [],
+          "metrics": [
+            {
+              "bytes_per_second": 46214341849.57677,
+              "bytes_processed": 92434071552,
+              "duration_seconds": 2.0001165840003523,
+              "name": "memory-copy",
+              "operations": 11019,
+              "operations_per_second": 5509.178858944984
+            },
+            {
+              "bytes_per_second": 417106016.0369831,
+              "bytes_processed": 838860800,
+              "duration_seconds": 2.0111452909986838,
+              "name": "memory-scan",
+              "operations": 100,
+              "operations_per_second": 49.72291183912552
+            }
+          ]
+        },
+        "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+        "python_version": "3.14.6"
+      }
+    },
+    "windows11": {
+      "host_url": "http://windows11.local:8765",
+      "result": {
+        "cpu": {
+          "errors": [],
+          "logical_cpus": 12,
+          "multi_core": [
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.002357299992582,
+              "name": "integer-multi",
+              "operations": 86610000,
+              "operations_per_second": 43254018.65107734
+            },
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.001916199995321,
+              "name": "float-multi",
+              "operations": 96740000,
+              "operations_per_second": 48323701.06212542
+            },
+            {
+              "bytes_per_second": 3233786921.9689245,
+              "bytes_processed": 6468325376,
+              "duration_seconds": 2.0002323999942746,
+              "name": "sha256-multi",
+              "operations": 92893,
+              "operations_per_second": 46441.10354390115
+            }
+          ],
+          "physical_cpus": 6,
+          "single_core": [
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.000971200002823,
+              "name": "integer",
+              "operations": 16510000,
+              "operations_per_second": 8250993.317633311
+            },
+            {
+              "bytes_per_second": 0.0,
+              "bytes_processed": 0,
+              "duration_seconds": 2.0005442000110634,
+              "name": "float",
+              "operations": 19940000,
+              "operations_per_second": 9967287.900907027
+            },
+            {
+              "bytes_per_second": 534663751.4974361,
+              "bytes_processed": 1069338624,
+              "duration_seconds": 2.0000207999983104,
+              "name": "sha256",
+              "operations": 15357,
+              "operations_per_second": 7678.420144436985
+            }
+          ],
+          "workers": 12
+        },
+        "disk": {
+          "errors": [],
+          "skipped": [
+            {
+              "device": "C:\\",
+              "filesystem": "NTFS",
+              "path": "C:\\Users\\Christian Klukas\\.paglets\\benchmarks",
+              "reason": "duplicate volume"
+            },
+            {
+              "device": "C:\\",
+              "filesystem": "NTFS",
+              "path": "C:\\Users\\CHRIST~1\\AppData\\Local\\Temp",
+              "reason": "duplicate volume"
+            }
+          ],
+          "volumes": [
+            {
+              "benchmark_size_bytes": 67108864,
+              "device": "C:\\",
+              "filesystem": "NTFS",
+              "free_bytes_before": 180778328064,
+              "fsync_seconds": 0.1749268999992637,
+              "metadata_files_per_second": 1746.1789238673816,
+              "path": "C:\\",
+              "read_bytes_per_second": 1871240627.625264,
+              "read_seconds": 0.0358632999996189,
+              "total_bytes": 1022671114240,
+              "write_bytes_per_second": 4064444983.814888,
+              "write_seconds": 0.01651119999587536
+            },
+            {
+              "benchmark_size_bytes": 67108864,
+              "device": "D:\\",
+              "filesystem": "NTFS",
+              "free_bytes_before": 4923675922432,
+              "fsync_seconds": 0.7958942999975989,
+              "metadata_files_per_second": 2844.3028614679074,
+              "path": "D:\\",
+              "read_bytes_per_second": 1803628389.1355069,
+              "read_seconds": 0.03720769999199547,
+              "total_bytes": 8001427599360,
+              "write_bytes_per_second": 3903879745.920636,
+              "write_seconds": 0.0171903000009479
+            },
+            {
+              "benchmark_size_bytes": 67108864,
+              "device": "E:\\",
+              "filesystem": "NTFS",
+              "free_bytes_before": 346809143296,
+              "fsync_seconds": 0.00042470000335015357,
+              "metadata_files_per_second": 513.1678879905609,
+              "path": "E:\\",
+              "read_bytes_per_second": 1910893615.8502736,
+              "read_seconds": 0.035119100008159876,
+              "total_bytes": 1000202039296,
+              "write_bytes_per_second": 19619972.44677843,
+              "write_seconds": 3.420436200001859
+            }
+          ]
+        },
+        "errors": [],
+        "host_name": "windows11",
+        "host_url": "http://windows11.local:8765",
+        "lock_wait_seconds": 0.001342299990938045,
+        "memory": {
+          "errors": [],
+          "metrics": [
+            {
+              "bytes_per_second": 15506530079.912052,
+              "bytes_processed": 31021072384,
+              "duration_seconds": 2.0005167000053916,
+              "name": "memory-copy",
+              "operations": 3698,
+              "operations_per_second": 1848.522434224135
+            },
+            {
+              "bytes_per_second": 247963167.27020603,
+              "bytes_processed": 503316480,
+              "duration_seconds": 2.0298034000006737,
+              "name": "memory-scan",
+              "operations": 60,
+              "operations_per_second": 29.559513005042795
+            }
+          ]
+        },
+        "platform": "Windows-11-10.0.26200-SP0",
+        "python_version": "3.14.6"
+      }
+    }
+  }
+}

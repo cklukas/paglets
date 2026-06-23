@@ -1,0 +1,45 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+name: Paper
+
+"on":
+  push: {}
+  pull_request: {}
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build application note
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install TeX dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnuplot-nox \
+            jq \
+            latexmk \
+            lmodern \
+            texlive-fonts-extra \
+            texlive-bibtex-extra \
+            texlive-fonts-recommended \
+            texlive-latex-base \
+            texlive-latex-extra \
+            texlive-latex-recommended
+
+      - name: Build paper
+        run: make -C papers/paglets-application-note
+
+      - name: Upload PDF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: paglets-application-note
+          path: papers/paglets-application-note/build/paglets-application-note.pdf
+          if-no-files-found: error

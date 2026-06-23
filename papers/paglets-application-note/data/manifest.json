@@ -1,0 +1,288 @@
+{
+  "created_at": "2026-06-23T09:01:03.885704+00:00",
+  "payloads": [
+    {
+      "bytes": 0,
+      "label": "0"
+    },
+    {
+      "bytes": 1048576,
+      "label": "1M"
+    },
+    {
+      "bytes": 4194304,
+      "label": "4M"
+    },
+    {
+      "bytes": 16777216,
+      "label": "16M"
+    },
+    {
+      "bytes": 67108864,
+      "label": "64M"
+    },
+    {
+      "bytes": 268435456,
+      "label": "256M"
+    },
+    {
+      "bytes": 536870912,
+      "label": "512M"
+    },
+    {
+      "bytes": 1073741824,
+      "label": "1G"
+    }
+  ],
+  "results_dir": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314",
+  "runs": [
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-perf-test",
+        "--duration",
+        "2.0",
+        "--disk-size",
+        "64M",
+        "--timeout",
+        "300.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 26.96922,
+      "finished_at": "2026-06-23T09:01:30.855961+00:00",
+      "json_valid": true,
+      "name": "perf",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/perf_test.json",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:01:03.886741+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "0",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 22.528702,
+      "finished_at": "2026-06-23T09:01:53.385797+00:00",
+      "json_valid": true,
+      "name": "mesh-0",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_0.json",
+      "payload_bytes": 0,
+      "payload_label": "0",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:01:30.857095+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "1M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 22.959044,
+      "finished_at": "2026-06-23T09:02:16.346712+00:00",
+      "json_valid": true,
+      "name": "mesh-1M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_1048576.json",
+      "payload_bytes": 1048576,
+      "payload_label": "1M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:01:53.387668+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "4M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 23.116346,
+      "finished_at": "2026-06-23T09:02:39.465345+00:00",
+      "json_valid": true,
+      "name": "mesh-4M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_4194304.json",
+      "payload_bytes": 4194304,
+      "payload_label": "4M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:02:16.348999+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "16M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 27.312926,
+      "finished_at": "2026-06-23T09:03:06.780144+00:00",
+      "json_valid": true,
+      "name": "mesh-16M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_16777216.json",
+      "payload_bytes": 16777216,
+      "payload_label": "16M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:02:39.467218+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "64M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 41.195252,
+      "finished_at": "2026-06-23T09:03:47.977444+00:00",
+      "json_valid": true,
+      "name": "mesh-64M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_67108864.json",
+      "payload_bytes": 67108864,
+      "payload_label": "64M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:03:06.782192+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "256M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 106.344027,
+      "finished_at": "2026-06-23T09:05:34.323421+00:00",
+      "json_valid": true,
+      "name": "mesh-256M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_268435456.json",
+      "payload_bytes": 268435456,
+      "payload_label": "256M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:03:47.979394+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "512M",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 200.972533,
+      "finished_at": "2026-06-23T09:08:55.297959+00:00",
+      "json_valid": true,
+      "name": "mesh-512M",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_536870912.json",
+      "payload_bytes": 536870912,
+      "payload_label": "512M",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:05:34.325426+00:00",
+      "stderr": null
+    },
+    {
+      "command": [
+        "uv",
+        "run",
+        "paglets-mesh-benchmark",
+        "--repeats",
+        "10",
+        "--payload-size",
+        "1G",
+        "--clock-probes",
+        "7",
+        "--timeout",
+        "7200.0",
+        "--json",
+        "--entry",
+        "mac-studio"
+      ],
+      "elapsed_seconds": 419.41882,
+      "finished_at": "2026-06-23T09:15:54.719169+00:00",
+      "json_valid": true,
+      "name": "mesh-1G",
+      "output": "/Users/klukas/git/paglets/test_results/paper_payload_1g_dense_py314/mesh_results_1073741824.json",
+      "payload_bytes": 1073741824,
+      "payload_label": "1G",
+      "returncode": 0,
+      "started_at": "2026-06-23T09:08:55.300349+00:00",
+      "stderr": null
+    }
+  ]
+}
