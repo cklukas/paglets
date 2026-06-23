@@ -1,0 +1,113 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install project
+        run: uv sync --dev --extra docs
+
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          tag_version = tag[1:] if tag.startswith("v") else tag
+          if tag_version != version:
+              raise SystemExit(f"tag {tag!r} does not match pyproject version {version!r}")
+          PY
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Build documentation
+        run: uv run --extra docs mkdocs build --strict
+
+      - name: Build package
+        run: uv build
+
+      - name: Check package metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Smoke-test wheel installation
+        run: |
+          python -m venv /tmp/paglets-wheel-smoke
+          /tmp/paglets-wheel-smoke/bin/python -m pip install dist/*.whl
+          /tmp/paglets-wheel-smoke/bin/python - <<'PY'
+          import importlib.metadata
+          import paglets
+
+          assert importlib.metadata.version("paglets")
+          assert paglets.__doc__
+          PY
+          /tmp/paglets-wheel-smoke/bin/paglets-host --help
+          /tmp/paglets-wheel-smoke/bin/paglets-mesh-benchmark --help
+          /tmp/paglets-wheel-smoke/bin/paglets-mesh-info --help
+          /tmp/paglets-wheel-smoke/bin/paglets-perf-test --help
+          /tmp/paglets-wheel-smoke/bin/paglets-pi-compute --help
+          /tmp/paglets-wheel-smoke/bin/paglets-search --help
+          /tmp/paglets-wheel-smoke/bin/paglets-sysinfo --help
+
+      - name: Upload distribution artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: paglets-dist
+          path: dist/*
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/paglets/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: paglets-dist
+          path: dist
+
+      - name: Publish distribution
+        uses: pypa/gh-action-pypi-publish@release/v1

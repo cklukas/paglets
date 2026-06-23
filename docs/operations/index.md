@@ -7,4 +7,5 @@ Operational pages cover running hosts, forming local meshes, launch configuratio
 - [Host CLI](host-cli.md)
 - [Configuration](configuration.md)
 - [Local Multi-Host Development](local-multi-host.md)
+- [Package Releases](package-releases.md)
 - [Git Auto-Update](../git-auto-update.md)

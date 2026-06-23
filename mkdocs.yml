@@ -31,6 +31,7 @@ nav:
       - Host CLI: operations/host-cli.md
       - Configuration: operations/configuration.md
       - Local Multi-Host Development: operations/local-multi-host.md
+      - Package Releases: operations/package-releases.md
       - Git Auto-Update: git-auto-update.md
   - Technical Reference:
       - Overview: technical/overview.md
