@@ -1,4 +1,4 @@
-<img src="docs/repository-open-graph-1280x640.png" alt="paglets social preview" width="640" align="right">
+<img src="https://cklukas.github.io/paglets/repository-open-graph-1280x640.png" alt="paglets social preview" width="640">
 
 # paglets
 
