@@ -1,5 +1,55 @@
 # Changes
 
+## 1.0.0 - 2026-06-24
+
+### Breaking Changes
+
+- Moved built-in resident services from example packages into
+  `paglets.system.*`; imports from `paglets.examples.system_info` and
+  `paglets.examples.mesh_info` are no longer supported.
+- Updated bundled launch configuration to start built-in `server-info`,
+  `mesh-info`, `compute-slots`, and `user-info` services from the
+  `paglets.system` namespace.
+- Updated the `paglets-sysinfo` and `paglets-mesh-info` CLI entry points to use
+  the new system service packages.
+
+### Added
+
+- Added the built-in `compute-slots` scheduler service for coarse compute jobs
+  with candidate host preflight, local queueing, bounded spillover, startup
+  throttling, explicit CPU-core/RAM/temp-storage estimates, and scheduler status
+  inspection.
+- Added host-managed best-effort CPU affinity metadata and process reporting for
+  compute-slot leases.
+- Added the built-in `user-info` notification service for operator-facing
+  messages from paglets.
+- Added `ComputeJobPaglet` and `ComputeJobState` as a template-method base API
+  so compute job authors implement application work and result handling without
+  reimplementing scheduling protocol details.
+- Added the `paglets-analysis-jobs` example, including synthetic
+  pandas/scikit-learn analysis jobs, home-host result return, SQLite result
+  appends, and cross-process DB write locking.
+- Added `paglets-compute-slots` CLI commands for scheduler status and candidate
+  inspection.
+
+### Changed
+
+- Added `pandas` and `scikit-learn` as normal package dependencies for the
+  analysis jobs example.
+- Updated documentation navigation to separate operations, system services,
+  examples, technical reference, and project pages.
+- Added expandable Mermaid diagram overlays and source-linked embedded code
+  snippets in the MkDocs site.
+- Updated README quick-start examples to include compute-slot scheduling and the
+  analysis jobs demo.
+
+### Fixed
+
+- Fixed performance benchmark multi-core worker behavior.
+- Updated release and documentation publishing workflow metadata.
+- Refreshed citation, DOI, PyPI, social preview, and paper links in project
+  documentation.
+
 ## 0.1.0 - 2026-06-23
 
 Initial public package release.
