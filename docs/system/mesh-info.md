@@ -5,6 +5,10 @@ for each visible host. It samples local CPU, memory, swap, work-directory disk
 space, and active/inactive paglet counts, then exchanges bounded snapshot
 batches with peer `mesh-info` services.
 
+Snapshots also include host tags and properties advertised by
+`paglets-host --tag TAG --property KEY=VALUE`, so placement and diagnostics can
+use the same host-role vocabulary.
+
 The core contract is:
 
 ```python

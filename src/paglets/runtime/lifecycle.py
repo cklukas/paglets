@@ -2,14 +2,24 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
 import uuid
 from dataclasses import is_dataclass, replace
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from paglets.artifacts import (
+    ARTIFACT_MOVE,
+    ARTIFACT_STATUS_AVAILABLE,
+    ArtifactRef,
+    PagletFileRef,
+    file_sha256,
+    safe_target_filename,
+)
 from paglets.core.agent import Paglet, PagletState
 from paglets.core.errors import (
     HostError,
@@ -113,10 +123,25 @@ class _LifecycleMixin:
         )
         record.request_lifecycle("dispatching", dataclass_to_wire(event))
         record.cleanup_resources(reason="dispatch")
-        self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.DISPATCH, target_info, ticket=ticket)
-        response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        staged = self._stage_registered_files(
+            agent_id,
+            target_info,
+            target_agent_id=agent_id,
+            kind=EnvelopeKind.DISPATCH,
+        )
+        if staged:
+            envelope.metadata["registered_files"] = staged
+        try:
+            response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        except Exception:
+            self._cleanup_staged_registered_artifacts(staged)
+            raise
+        self._finalize_registered_file_departure(agent_id, staged, delete_moves=True)
+        self._cleanup_agent_work_dir(agent_id)
         self._remove_active_agent(agent_id, record, terminate=True)
+        with self._lock:
+            self._registered_files.pop(agent_id, None)
         self._emit("dispatch", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
 
@@ -145,7 +170,14 @@ class _LifecycleMixin:
             clone_of=agent_id,
             ticket=ticket,
         )
-        response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        staged = self._stage_registered_files(agent_id, target_info, target_agent_id=clone_id, kind=EnvelopeKind.CLONE)
+        if staged:
+            envelope.metadata["registered_files"] = staged
+        try:
+            response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        except Exception:
+            self._cleanup_staged_registered_artifacts(staged)
+            raise
         cloned_event = CloneEvent(
             agent_id=agent_id,
             host_name=self.name,
@@ -222,12 +254,16 @@ class _LifecycleMixin:
                 raise InvalidAgentError(f"No paglet {agent_id!r} on {self.name}")
             self._delete_inactive_record(agent_id)
             self._cleanup_agent_work_dir(agent_id)
+            with self._lock:
+                self._registered_files.pop(agent_id, None)
             self._emit(
                 "dispose", agent_id=agent_id, class_name=inactive.envelope.agent_class_name, data={"active": False}
             )
             return
         record.request("dispose_prepare", {"reason": "dispose"})
         self._cleanup_agent_work_dir(agent_id)
+        with self._lock:
+            self._registered_files.pop(agent_id, None)
         self._remove_active_agent(agent_id, record, terminate=True)
         if inactive is not None:
             self._delete_inactive_record(agent_id)
@@ -252,15 +288,30 @@ class _LifecycleMixin:
         )
         record.request_lifecycle("reverting", dataclass_to_wire(event))
         record.cleanup_resources(reason="retract")
-        self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.RETRACT, target_info)
-        if self._is_local_transfer_target(target_info):
-            response = self._receive_local_envelope_response(envelope)
-        else:
-            response = self.client.post_pickle(
-                f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()}
-            )
+        staged = self._stage_registered_files(
+            agent_id,
+            target_info,
+            target_agent_id=agent_id,
+            kind=EnvelopeKind.RETRACT,
+        )
+        if staged:
+            envelope.metadata["registered_files"] = staged
+        try:
+            if self._is_local_transfer_target(target_info):
+                response = self._receive_local_envelope_response(envelope)
+            else:
+                response = self.client.post_pickle(
+                    f"{target_info['address'].rstrip('/')}/agents", {"envelope": envelope.to_wire()}
+                )
+        except Exception:
+            self._cleanup_staged_registered_artifacts(staged)
+            raise
+        self._finalize_registered_file_departure(agent_id, staged, delete_moves=True)
+        self._cleanup_agent_work_dir(agent_id)
         self._remove_active_agent(agent_id, record, terminate=True)
+        with self._lock:
+            self._registered_files.pop(agent_id, None)
         self._emit("retract", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
         return PagletProxy.from_wire(response["proxy"], self.client)
 
@@ -270,6 +321,7 @@ class _LifecycleMixin:
         *,
         inactive_record: InactiveRecord | None = None,
     ) -> PagletProxy:
+        self._import_or_restore_registered_files(envelope)
         if inactive_record is None and self._arrival_mode(envelope) is ArrivalMode.INACTIVE:
             record = self._inactive_arrival_record(envelope)
             self._write_inactive_record(record)
@@ -502,6 +554,9 @@ class _LifecycleMixin:
         metadata: dict[str, Any] = {}
         if ticket is not None:
             metadata["transfer_ticket"] = ticket.to_wire()
+        registered = self._registered_file_metadata(record.agent_id)
+        if registered:
+            metadata["registered_files"] = registered
         return PagletEnvelope(
             kind=kind,
             agent_id=agent_id or record.agent_id,
@@ -550,3 +605,149 @@ class _LifecycleMixin:
         if isinstance(result, BaseException):
             raise result
         return result
+
+    def _registered_file_metadata(self, agent_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            refs = list(self._registered_files.get(agent_id, {}).values())
+        return [ref.to_wire() for ref in refs]
+
+    def _stage_registered_files(
+        self,
+        agent_id: str,
+        target_info: dict[str, Any],
+        *,
+        target_agent_id: str,
+        kind: EnvelopeKind,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            refs = [PagletFileRef.from_wire(ref.to_wire()) for ref in self._registered_files.get(agent_id, {}).values()]
+        staged: list[dict[str, Any]] = []
+        try:
+            for ref in refs:
+                path = Path(ref.current_path or ref.source_path)
+                if not path.is_file():
+                    raise TransferError(f"registered file {ref.name!r} is missing: {path}")
+                stat = path.stat()
+                ref.size_bytes = stat.st_size
+                ref.sha256 = file_sha256(path)
+                ref.current_host_name = self.name
+                ref.current_host_url = self.address
+                ref.current_path = str(path)
+                transfer_mode = "copy" if kind is EnvelopeKind.CLONE else ref.mode
+                if self._is_local_transfer_target(target_info):
+                    artifact = self.artifacts.create_from_path(
+                        path,
+                        owner_agent_id=target_agent_id,
+                        name=ref.name,
+                        expected_sha256=ref.sha256,
+                    ).ref
+                else:
+                    artifact = self.client.upload_artifact(
+                        str(target_info["address"]),
+                        path,
+                        owner_agent_id=target_agent_id,
+                        name=ref.name,
+                        expected_sha256=ref.sha256,
+                    )
+                staged.append(
+                    {
+                        "file": ref.to_wire(),
+                        "artifact": artifact.to_wire(),
+                        "transfer_mode": transfer_mode,
+                        "source_path": str(path),
+                    }
+                )
+        except Exception:
+            self._cleanup_staged_registered_artifacts(staged)
+            raise
+        return staged
+
+    def _cleanup_staged_registered_artifacts(self, staged: list[dict[str, Any]]) -> None:
+        for item in staged:
+            artifact_payload = item.get("artifact")
+            if not isinstance(artifact_payload, dict):
+                continue
+            with contextlib.suppress(Exception):
+                artifact = ArtifactRef.from_wire(artifact_payload)
+                self._delete_artifact_ref(artifact)
+
+    def _finalize_registered_file_departure(
+        self,
+        agent_id: str,
+        staged: list[dict[str, Any]],
+        *,
+        delete_moves: bool,
+    ) -> None:
+        if delete_moves:
+            for item in staged:
+                if str(item.get("transfer_mode") or "") != ARTIFACT_MOVE:
+                    continue
+                source_path = str(item.get("source_path") or "")
+                if source_path:
+                    with contextlib.suppress(FileNotFoundError):
+                        Path(source_path).unlink()
+        with self._lock:
+            self._registered_files.pop(agent_id, None)
+
+    def _import_or_restore_registered_files(self, envelope: PagletEnvelope) -> None:
+        raw_items = envelope.metadata.get("registered_files")
+        if not isinstance(raw_items, list):
+            return
+        if not raw_items:
+            with self._lock:
+                self._registered_files.pop(envelope.agent_id, None)
+            return
+        if not any(isinstance(item, dict) and isinstance(item.get("artifact"), dict) for item in raw_items):
+            refs = [PagletFileRef.from_wire(dict(item)) for item in raw_items if isinstance(item, dict)]
+            with self._lock:
+                self._registered_files[envelope.agent_id] = {ref.name: ref for ref in refs}
+            return
+        imported: list[PagletFileRef] = []
+        imported_paths: list[Path] = []
+        try:
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
+                file_payload = item.get("file") if isinstance(item.get("file"), dict) else item
+                artifact_payload = item.get("artifact")
+                if not isinstance(file_payload, dict) or not isinstance(artifact_payload, dict):
+                    continue
+                ref = PagletFileRef.from_wire(file_payload)
+                artifact = ArtifactRef.from_wire(artifact_payload)
+                work_dir = self._work_path(envelope.agent_id)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                target_path = work_dir / safe_target_filename(ref.name)
+                self._materialize_artifact_ref(artifact, target_path)
+                self._delete_artifact_ref(artifact)
+                ref.current_host_name = self.name
+                ref.current_host_url = self.address
+                ref.current_path = str(target_path)
+                ref.status = ARTIFACT_STATUS_AVAILABLE
+                ref.last_error = ""
+                imported.append(ref)
+                imported_paths.append(target_path)
+        except Exception as exc:
+            for path in imported_paths:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+            self._cleanup_agent_work_dir(envelope.agent_id)
+            for item in raw_items:
+                if isinstance(item, dict) and isinstance(item.get("artifact"), dict):
+                    with contextlib.suppress(Exception):
+                        self._delete_artifact_ref(ArtifactRef.from_wire(item["artifact"]))
+            raise TransferError(f"Could not import registered files for paglet {envelope.agent_id!r}: {exc}") from exc
+        with self._lock:
+            self._registered_files[envelope.agent_id] = {ref.name: ref for ref in imported}
+        envelope.metadata["registered_files"] = [ref.to_wire() for ref in imported]
+
+    def _materialize_artifact_ref(self, artifact: ArtifactRef, target_path: Path) -> None:
+        if artifact.host_url.rstrip("/") == self.address.rstrip("/"):
+            self.artifacts.export_to_path(artifact.artifact_id, target_path, expected_sha256=artifact.sha256)
+            return
+        self.client.download_artifact(artifact, target_path)
+
+    def _delete_artifact_ref(self, artifact: ArtifactRef) -> None:
+        if artifact.host_url.rstrip("/") == self.address.rstrip("/"):
+            self.artifacts.delete(artifact.artifact_id)
+            return
+        self.client.delete_artifact(artifact)

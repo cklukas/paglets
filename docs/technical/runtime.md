@@ -11,6 +11,8 @@ delivery, transfer envelopes, and runtime resource cleanup.
 - Run active paglets in spawned child Python processes.
 - Serialize active state over shared-memory streams at the host/child boundary.
 - Deliver queued messages through per-paglet mailboxes.
+- Store and clean up host-owned artifact blobs used for registered file
+  mobility and explicit artifact transfer.
 - Track resources that must be cleaned up during lifecycle transitions.
 
 ## Main Modules

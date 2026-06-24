@@ -58,3 +58,29 @@ probe. The same probe samples are aggregated into a separate message passing
 table with median, average, best, and worst request/reply round-trip times
 versus the starter. The final line reports the overall benchmark time from
 start through the collection round.
+
+Programmatic callers can use the typed starter operations and leave the
+traveler protocol internal to the example:
+
+```python
+from paglets.examples.mesh_benchmark import (
+    MESH_BENCHMARK_DRAIN,
+    MESH_BENCHMARK_START,
+    MeshBenchmarkCoordinatorAgent,
+    MeshBenchmarkDrainRequest,
+    MeshBenchmarkRequest,
+    MeshBenchmarkStartRequest,
+)
+from paglets.patterns.operations import OperationClient
+from paglets.serialization.codec import dataclass_to_wire
+
+coordinator = self.context.create_paglet(MeshBenchmarkCoordinatorAgent)
+client = OperationClient(coordinator)
+reply = client.call(
+    MESH_BENCHMARK_START,
+    MeshBenchmarkStartRequest(request=dataclass_to_wire(MeshBenchmarkRequest(repeats=1))),
+)
+
+while not reply.done:
+    reply = client.call(MESH_BENCHMARK_DRAIN, MeshBenchmarkDrainRequest(wait_timeout=0.5))
+```

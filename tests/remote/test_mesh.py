@@ -64,8 +64,25 @@ def test_hosts_endpoint_includes_self_and_code_version():
             "last_seen": pytest.approx(payload["hosts"][0]["last_seen"]),
             "active_count": 0,
             "inactive_count": 0,
+            "tags": [],
+            "properties": {},
         }
     ]
+
+
+def test_hosts_endpoint_and_mesh_refs_include_tags_and_properties():
+    host = _host("alpha", tags=["Linux", "gpu", "linux"], properties={"python": "3.12"})
+    host.start_background()
+    try:
+        health = host.client.get_json(f"{host.address}/health")
+        payload = host.client.get_json(f"{host.address}/hosts")
+    finally:
+        host.stop()
+
+    assert health["tags"] == ["gpu", "linux"]
+    assert health["properties"] == {"python": "3.12"}
+    assert payload["hosts"][0]["tags"] == ["gpu", "linux"]
+    assert payload["hosts"][0]["properties"] == {"python": "3.12"}
 
 
 def test_seeded_hosts_join_and_converge_on_same_version_peers():
@@ -315,6 +332,8 @@ def _host(
     version: str = "mesh-test",
     peers: list[str] | None = None,
     lan_discovery: bool = False,
+    tags: list[str] | None = None,
+    properties: dict[str, str] | None = None,
 ) -> Host:
     return Host(
         name=name,
@@ -328,4 +347,6 @@ def _host(
         mesh_gossip_interval=0.05,
         mesh_offline_after=0.2,
         persistence_dir=Path(tempfile.mkdtemp(prefix="paglets-test-")) / name,
+        tags=tags,
+        properties=properties,
     )

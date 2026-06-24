@@ -15,6 +15,15 @@ the behavior you need; the root `paglets` package and topic package
   delivery, movement envelopes, HTTP routing, relay delivery, bind-address
   resolution, and resource cleanup.
 
+`paglets.artifacts`
+: Binary artifact value types, host-owned blob storage, checksum helpers, and
+  registered-file metadata used by natural paglet file mobility.
+
+`paglets.patterns`
+: Additive typed helpers for common application paglets: request/result task
+  routing, multi-operation routing, mesh fan-out coordination, cursor drains,
+  non-fatal user-info notifications, and single-file mobility tasks.
+
 `paglets.remote`
 : Remote communication: HTTP client, proxies, transfer tickets, transport
   helpers, mesh membership, and administration clients.
@@ -78,6 +87,9 @@ import Message` are intentionally unsupported.
 
 - [Core](core.md) explains the paglet authoring model.
 - [Runtime](runtime.md) explains host and child-process behavior.
+- [Artifacts](artifacts.md) documents binary artifact types and storage.
+- [Patterns](patterns.md) documents typed task, operation, coordination, and
+  file mobility helpers.
 - [Remote](remote.md) explains proxies, transport, mesh, and admin clients.
 - [Persistence](persistence.md), [Services](services.md),
   [Serialization](serialization.md), [Configuration](configuration.md), and

@@ -6,6 +6,7 @@ import contextlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from paglets.core.agent import ACTIVE, INACTIVE
@@ -129,6 +130,41 @@ class PagletProxy:
             timeout=timeout,
         )
 
+    def send_artifact(
+        self,
+        message: Message,
+        path: str | Path,
+        *,
+        arg_name: str = "artifact",
+        move: bool = False,
+        name: str | None = None,
+        compression: str = "",
+        timeout: float | None = None,
+    ) -> Any:
+        source = Path(path)
+        artifact = self.client.upload_artifact(
+            self.host_url,
+            source,
+            owner_agent_id=self.agent_id,
+            name=name,
+            compression=compression,
+            timeout=timeout,
+        )
+        try:
+            wire = message.to_wire()
+            args = dict(wire.get("args") or {})
+            args[arg_name] = artifact.to_wire()
+            wire["args"] = args
+            result = self.send(Message.from_wire(wire), timeout=timeout)
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.client.delete_artifact(artifact)
+            raise
+        if move:
+            with contextlib.suppress(FileNotFoundError):
+                source.unlink()
+        return result
+
     def send_future(
         self,
         message: Message,
@@ -157,7 +193,9 @@ class PagletProxy:
     def _settled_same_agent_proxy_result(self, result: Any) -> Any:
         if not isinstance(result, dict):
             return result
-        if str(result.get("agent_id") or "") != self.agent_id or "host_url" not in result:
+        if set(result) != {"host_url", "agent_id"}:
+            return result
+        if str(result.get("agent_id") or "") != self.agent_id:
             return result
         deadline = time.monotonic() + 2.0
         stable_since: float | None = None

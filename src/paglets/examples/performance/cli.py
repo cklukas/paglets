@@ -9,7 +9,7 @@ import os
 import sys
 from typing import Any
 
-from paglets.core.messages import Message
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
@@ -19,6 +19,13 @@ from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
+from .agent import (
+    PERFORMANCE_CLEANUP,
+    PERFORMANCE_COLLECT,
+    PERFORMANCE_DRAIN,
+    PerformanceCollectRequest,
+    PerformanceDrainRequest,
+)
 from .kernels import parse_size
 from .models import (
     DEFAULT_BENCHMARK_DURATION_SECONDS,
@@ -111,25 +118,21 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
         {},
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
+    operations = OperationClient(proxy)
     try:
-        proxy.send(
-            Message(
-                "collect",
-                {
-                    "request": dataclass_to_wire(request),
-                    "timeout": timeout,
-                },
-            )
+        operations.call(
+            PERFORMANCE_COLLECT,
+            PerformanceCollectRequest(request=dataclass_to_wire(request), timeout=timeout),
         )
         summary: dict[str, Any] = {}
         while True:
-            reply = proxy.send(Message("drain", {"wait_timeout": 0.5}))
-            summary = dict(reply.get("summary") or {})
-            if reply.get("done"):
+            reply = operations.call(PERFORMANCE_DRAIN, PerformanceDrainRequest(wait_timeout=0.5))
+            summary = dict(reply.summary)
+            if reply.done:
                 return summary
     finally:
         with contextlib.suppress(Exception):
-            proxy.send(Message("cleanup"))
+            operations.call(PERFORMANCE_CLEANUP)
         with contextlib.suppress(Exception):
             proxy.dispose()
 

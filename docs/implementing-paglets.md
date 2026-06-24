@@ -25,9 +25,8 @@ class Traveller(Paglet[TravellerState]):
 State values should be ordinary dataclass-serializable Python values: nested
 dataclasses, primitives, collections, enums, paths, `bytes`, and `bytearray`.
 Movement keeps binary values native in the streamed pickle envelope. JSON state
-inspection projects binary values as tagged base64 objects, so messages and
-message replies should still use JSON-compatible data unless both sides
-explicitly agree on another representation.
+inspection projects binary values as tagged base64 objects for raw HTTP
+clients; `HostClient` restores those tagged values automatically.
 
 Active paglets run in child Python processes started with the `spawn` method.
 Both the paglet class and the state class must be importable by module path, for
@@ -64,9 +63,100 @@ def run(self):
 `run()` is invoked after creation, arrival, clone arrival, and activation. Do not
 expect call stacks, threads, sockets, or open files to move with the paglet.
 
+## Move Files Naturally
+
+Files do not move just because a Python file handle exists. Register files that
+belong to the paglet instance:
+
+```python
+path = self.work_dir() / "result.db"
+path.write_bytes(result_bytes)
+self.register_file(path, name="result.db", mode="move")
+```
+
+Registered files are copied to the target host before `on_arrival()` or
+`on_clone()` runs. On the target, use the logical name to find the scratch copy:
+
+```python
+def on_arrival(self, event):
+    result_path = self.file_path("result.db")
+```
+
+`mode="copy"` leaves the source in place. `mode="move"` deletes the source only
+after a successful dispatch. Clone always copies and never deletes the source.
+Target copies live under the arriving paglet's scratch/work directory and are
+removed when that paglet is disposed.
+
+## Choose The Right Pattern
+
+For simple request/result paglets, prefer the typed task pattern over writing a
+custom message protocol. `TaskPaglet` owns the low-level `handle_message()`
+routing for `start`, `status`, and `wait`, while `TaskClient` gives callers a
+small typed proxy wrapper:
+
+```python
+from dataclasses import dataclass
+
+from paglets.patterns.tasks import TaskPaglet, TaskState
+
+
+@dataclass(frozen=True, slots=True)
+class AddRequest:
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
+class AddResult:
+    value: int
+
+
+@dataclass
+class AddState(TaskState):
+    pass
+
+
+class AddPaglet(TaskPaglet[AddRequest, AddResult, AddState]):
+    State = AddState
+    Request = AddRequest
+    Result = AddResult
+
+    def run_task(self, request: AddRequest) -> AddResult:
+        return AddResult(value=request.value + 1)
+```
+
+Callers do not need raw `Message("start")` calls:
+
+```python
+from paglets.patterns.tasks import TaskClient
+
+task = TaskClient.for_paglet(proxy, AddPaglet)
+summary = task.start_and_wait(AddRequest(value=41))
+```
+
+For file-moving paglets, choose the smallest helper layer that fits:
+
+- `TaskPaglet` for typed request/result workflows with no raw message protocol.
+- `OperationPaglet` and `OperationClient` for paglets with several named typed
+  operations, such as `start`, `drain`, `summary`, and `cleanup`.
+- `MeshFanoutMixin` for parent paglets that clone children across visible mesh
+  hosts and collect child replies.
+- `CursorDrainMixin` for streaming event drains where clients poll by cursor.
+- `FileMobilityMixin` for readable custom workflows that still share source
+  stat, destination planning, registered-file, result, notification, and atomic
+  write helpers.
+- `SingleFileTransferPaglet` for the fully standard "stat a file, dispatch with
+  it, and place it on arrival" workflow.
+
+The pattern helpers remove repeated protocol and bookkeeping code, but the
+domain action should still be visible in the example paglet. For example,
+`paglets-file-grabber` still shows "prepare file, dry-run or register,
+dispatch, save arrived file"; the helper only names the reusable steps.
+
 ## Handle Messages
 
-Paglets talk through messages delivered to `handle_message`.
+Paglets can still talk directly through messages delivered to `handle_message`.
+Use this lower-level API when you need a custom protocol, mailbox priority, or
+advanced fan-in behavior that does not fit `TaskPaglet`.
 
 ```python
 from paglets.core.messages import Message
@@ -90,6 +180,11 @@ Supported communication patterns:
 - fire-and-forget delivery with `send_oneway(Message(...))`;
 - future-style replies with `send_future(Message(...))`;
 - local broadcast through `context.multicast`.
+
+`bytes` and `bytearray` in message args, message `arg`, and typed service
+dataclasses are converted to tagged JSON automatically and restored on the
+receiver. Keep ordinary messages small; large files should use application
+storage, natural file mobility, or low-level artifact transport.
 
 Normal messages are delivered through the target paglet's mailbox. The mailbox
 selects higher-priority queued messages before lower-priority queued messages
@@ -174,13 +269,14 @@ message workers in the same instance.
 
 Do not make a parent message handler block while waiting for child paglets to
 send result messages back to that same parent. The parent cannot process those
-messages until the current handler returns. Use this pattern instead:
+messages until the current handler returns. For custom protocols, use this
+pattern instead:
 
 1. A `start` or `collect` message stores request state, creates/clones workers,
    and returns quickly.
 2. Workers run in their own paglet processes and send `child_result` messages.
 3. The parent records results, calls `notify_all_state_changed()`, and exposes a
-   `drain` or `summary` message for clients to poll.
+   typed `status`/`wait` path or another explicit polling message.
 
 ## Move Between Hosts
 

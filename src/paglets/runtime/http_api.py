@@ -2,12 +2,15 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
+import shutil
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+from paglets.artifacts import STREAM_CHUNK_BYTES
 from paglets.core.errors import (
     AuthenticationError,
     ForbiddenError,
@@ -21,7 +24,7 @@ from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope, enum_from_wire
 from paglets.persistence.persistency import DeactivationRequest
 from paglets.remote.transfer import TransferTicket
-from paglets.remote.transport import PICKLE_CONTENT_TYPE, json_safe, load_http_pickle_payload
+from paglets.remote.transport import PICKLE_CONTENT_TYPE, json_safe, load_http_pickle_payload, restore_json_safe
 from paglets.runtime.envelope import PagletEnvelope
 from paglets.services.resident import DEFAULT_SERVICE_LEASE_TTL_SECONDS
 
@@ -49,9 +52,14 @@ class RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._handle("POST")
 
+    def do_DELETE(self) -> None:
+        self._handle("DELETE")
+
     def _handle(self, method: str) -> None:
         try:
             self._require_auth()
+            if self._handle_binary_artifact_route(method):
+                return
             payload = self._read_payload() if method == "POST" else {}
             result = self._route(method, self.path, payload)
             self._write_json(200, result)
@@ -151,6 +159,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             since = int((query.get("since") or ["0"])[0])
             limit = int((query.get("limit") or ["100"])[0])
             return {"events": [event.to_wire() for event in host.list_events(since=since, limit=limit)]}
+        if method == "GET" and parts == ["artifacts"]:
+            owner = (query.get("owner_agent_id") or [None])[0]
+            return {"artifacts": [ref.to_wire() for ref in host.artifacts.list(owner_agent_id=owner)]}
+        if method == "GET" and len(parts) == 3 and parts[0] == "artifacts" and parts[2] == "metadata":
+            return {"artifact": host.artifacts.ref(parts[1]).to_wire()}
+        if method == "DELETE" and len(parts) == 2 and parts[0] == "artifacts":
+            host.artifacts.delete(parts[1])
+            return {"ok": True}
         if method == "GET" and parts == ["services"]:
             name = (query.get("name") or [None])[0]
             capability = (query.get("capability") or [None])[0]
@@ -249,6 +265,55 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         raise HostError(f"No route for {method} {path}")
 
+    def _handle_binary_artifact_route(self, method: str) -> bool:
+        host = self.server.host_runtime
+        parsed = urlparse(self.path)
+        parts = [part for part in parsed.path.split("/") if part]
+        query = parse_qs(parsed.query)
+        public_path_parts = _public_path_parts(host.public_url)
+        if public_path_parts and parts[: len(public_path_parts)] == public_path_parts:
+            parts = parts[len(public_path_parts) :]
+
+        if method == "POST" and parts == ["artifacts"]:
+            result = host.artifacts.create_from_http_request(
+                self.headers,
+                self.rfile,
+                owner_agent_id=(query.get("owner_agent_id") or [""])[0],
+                name=(query.get("name") or [""])[0],
+                compression=(query.get("compression") or [""])[0],
+                expires_at=float((query.get("expires_at") or ["0"])[0] or 0.0),
+                expected_sha256=(query.get("sha256") or [None])[0],
+            )
+            self._write_json(200, {"artifact": result.ref.to_wire()})
+            return True
+        if method == "GET" and len(parts) == 2 and parts[0] == "artifacts":
+            self._write_artifact_blob(parts[1])
+            return True
+        if method == "POST" and len(parts) == 4 and parts[:2] == ["relay", "hosts"] and parts[3] == "artifacts":
+            result = host.relay_receive_artifact_upload(parts[2], self.headers, self.rfile, query)
+            self._write_json(200, {"artifact": result.to_wire()})
+            return True
+        if method == "GET" and len(parts) == 5 and parts[:2] == ["relay", "hosts"] and parts[3] == "artifacts":
+            spool = host.relay_export_artifact(parts[2], parts[4])
+            try:
+                self._write_artifact_blob(spool.artifact_id)
+            finally:
+                with contextlib.suppress(Exception):
+                    host.artifacts.delete(spool.artifact_id)
+            return True
+        return False
+
+    def _write_artifact_blob(self, artifact_id: str) -> None:
+        ref = self.server.host_runtime.artifacts.ref(artifact_id)
+        path = self.server.host_runtime.artifacts.blob_path(artifact_id)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(ref.size_bytes))
+        self.send_header("X-Paglets-Artifact-Sha256", ref.sha256)
+        self.end_headers()
+        with path.open("rb") as source:
+            shutil.copyfileobj(source, self.wfile, length=STREAM_CHUNK_BYTES)
+
     def _read_payload(self) -> dict[str, Any]:
         content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip().casefold()
         if content_type == PICKLE_CONTENT_TYPE:
@@ -257,7 +322,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
+        return restore_json_safe(payload)
 
     def _write_json(self, status: int, payload: Any, *, extra_headers: dict[str, str] | None = None) -> None:
         raw = json.dumps(json_safe(payload)).encode("utf-8")

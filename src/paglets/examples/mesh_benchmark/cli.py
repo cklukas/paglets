@@ -10,12 +10,18 @@ import sys
 import time
 from typing import Any
 
-from paglets.core.messages import Message
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
+from .agent import (
+    MESH_BENCHMARK_DRAIN,
+    MESH_BENCHMARK_START,
+    MeshBenchmarkDrainRequest,
+    MeshBenchmarkStartRequest,
+)
 from .analysis import normalize_request, parse_size
 from .models import (
     DEFAULT_CLOCK_PROBES,
@@ -109,12 +115,14 @@ def _run(entry: ServerRef, request: MeshBenchmarkRequest, *, client: HostClient)
         {},
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
+    operations = OperationClient(proxy)
     try:
-        proxy.send(Message("start", {"request": dataclass_to_wire(request)}))
+        operations.call(MESH_BENCHMARK_START, MeshBenchmarkStartRequest(dataclass_to_wire(request)))
         latest: dict[str, Any] = {}
         while True:
-            latest = dict(proxy.send(Message("drain", {"wait_timeout": 0.0})) or {})
-            if latest.get("done"):
+            reply = operations.call(MESH_BENCHMARK_DRAIN, MeshBenchmarkDrainRequest(wait_timeout=0.0))
+            latest = dataclass_to_wire(reply)
+            if reply.done:
                 return latest
             time.sleep(0.25)
     finally:

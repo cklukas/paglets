@@ -3,12 +3,19 @@
 """Packaged mesh compute example paglets."""
 
 from .agent import (
+    PI_CLEANUP,
+    PI_DRAIN,
+    PI_DRAIN_STREAM,
+    PI_START_ASYNC,
     PiBatchWorkerAgent,
     PiBatchWorkerState,
     PiComputeCoordinatorAgent,
     PiComputeState,
+    PiDrainRequest,
+    PiDrainStreamRequest,
     PiPostProcessAgent,
     PiPostProcessState,
+    PiStartRequest,
 )
 from .chudnovsky import chudnovsky_binary_split, pi_decimal, pi_decimal_digits, pi_decimal_digits_from_results
 from .models import (
@@ -22,6 +29,10 @@ from .models import (
 )
 
 __all__ = [
+    "PI_CLEANUP",
+    "PI_DRAIN",
+    "PI_DRAIN_STREAM",
+    "PI_START_ASYNC",
     "PiBatchRequest",
     "PiBatchResult",
     "PiBatchWorkerAgent",
@@ -30,11 +41,14 @@ __all__ = [
     "PiComputeRequest",
     "PiComputeState",
     "PiComputeSummary",
+    "PiDrainRequest",
+    "PiDrainStreamRequest",
     "PiPostProcessAgent",
     "PiPostProcessState",
     "PiPostProcessStreamRequest",
     "PiPostProcessSummary",
     "PiResultDrainRequest",
+    "PiStartRequest",
     "chudnovsky_binary_split",
     "pi_decimal",
     "pi_decimal_digits",

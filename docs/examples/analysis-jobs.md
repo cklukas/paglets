@@ -11,6 +11,11 @@ synthetic pandas/scikit-learn work, stores result frames while the laptop is
 offline, then returns home and appends results to SQLite under a cross-process
 file lock.
 
+This example keeps SQLite result collection application-specific so the
+database write path is visible. For reusable "N jobs plus collector" status and
+failure bookkeeping, use the group helpers described in
+[Detached Compute With A Collector](detached-compute-collector.md).
+
 ## Running It
 
 Start a laptop/home host and one or more Linux-style compute hosts in the same
@@ -59,7 +64,9 @@ flowchart LR
 
 `CampaignSeederPaglet`
 : Runs on the home host. It creates a configurable number of
-  `AnalysisJobPaglet` instances and records their IDs.
+  `AnalysisJobPaglet` instances and records their IDs. Its CLI-facing
+  `start`/`summary` protocol uses typed operations, while `_seed_jobs()` keeps
+  the job creation workflow explicit in the example.
 
 `AnalysisJobPaglet`
 : Derives from `ComputeJobPaglet`. It carries job configuration, resource

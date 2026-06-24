@@ -11,6 +11,7 @@ from dataclasses import is_dataclass
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ClassVar, Concatenate, Generic, ParamSpec, TypeVar
 
+from paglets.artifacts import ArtifactRef, PagletFileRef
 from paglets.core.errors import HostError, NotHandledError
 from paglets.core.events import CloneEvent, CreationEvent, MobilityEvent, PersistencyEvent
 from paglets.core.messages import Message, ReplySet
@@ -315,6 +316,72 @@ class PagletContext:
             raise HostError("persistent_storage requires an attached paglet or explicit agent_id")
         return self._host.persistent_storage_for(owner_id, quota_bytes=quota_bytes)
 
+    def register_file(
+        self,
+        path: Path | str,
+        *,
+        name: str | None = None,
+        mode: str = "copy",
+        agent_id: str | None = None,
+    ) -> PagletFileRef:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("register_file requires an attached paglet or explicit agent_id")
+        return self._host.register_file_for(owner_id, path, name=name, mode=mode)
+
+    def registered_files(self, *, agent_id: str | None = None) -> list[PagletFileRef]:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("registered_files requires an attached paglet or explicit agent_id")
+        return self._host.registered_files_for(owner_id)
+
+    def unregister_file(self, name_or_ref: str | PagletFileRef, *, agent_id: str | None = None) -> None:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("unregister_file requires an attached paglet or explicit agent_id")
+        self._host.unregister_file_for(owner_id, name_or_ref)
+
+    def file_path(self, name_or_ref: str | PagletFileRef, *, agent_id: str | None = None) -> Path:
+        owner_id = agent_id or self._agent_id
+        if owner_id is None:
+            raise HostError("file_path requires an attached paglet or explicit agent_id")
+        return self._host.registered_file_path_for(owner_id, name_or_ref)
+
+    def upload_artifact(
+        self,
+        path: Path | str,
+        *,
+        host_url: str | None = None,
+        owner_agent_id: str | None = None,
+        name: str | None = None,
+        compression: str = "",
+        expires_at: float = 0.0,
+    ) -> ArtifactRef:
+        owner_id = owner_agent_id if owner_agent_id is not None else self._agent_id or ""
+        target = (host_url or self.address).rstrip("/")
+        if target == self.address.rstrip("/") and hasattr(self._host, "artifacts"):
+            return self._host.artifacts.create_from_path(
+                path,
+                owner_agent_id=owner_id,
+                name=name,
+                compression=compression,
+                expires_at=expires_at,
+            ).ref
+        return self._host.client.upload_artifact(
+            target,
+            path,
+            owner_agent_id=owner_id,
+            name=name,
+            compression=compression,
+            expires_at=expires_at,
+        )
+
+    def download_artifact(self, artifact: ArtifactRef, target: Path | str, *, move: bool = False) -> ArtifactRef:
+        return self._host.client.download_artifact(artifact, target, move=move)
+
+    def delete_artifact(self, artifact: ArtifactRef) -> None:
+        self._host.client.delete_artifact(artifact)
+
 
 class Paglet(Generic[StateT]):
     """Base class for mobile Python objects.
@@ -568,6 +635,43 @@ class Paglet(Generic[StateT]):
 
     def persistent_storage(self, *, quota_bytes: int | None = None) -> ManagedStorage:
         return self.context.persistent_storage(quota_bytes=quota_bytes, agent_id=self.agent_id)
+
+    def register_file(self, path: Path | str, *, name: str | None = None, mode: str = "copy") -> PagletFileRef:
+        return self.context.register_file(path, name=name, mode=mode, agent_id=self.agent_id)
+
+    def registered_files(self) -> list[PagletFileRef]:
+        return self.context.registered_files(agent_id=self.agent_id)
+
+    def unregister_file(self, name_or_ref: str | PagletFileRef) -> None:
+        self.context.unregister_file(name_or_ref, agent_id=self.agent_id)
+
+    def file_path(self, name_or_ref: str | PagletFileRef) -> Path:
+        return self.context.file_path(name_or_ref, agent_id=self.agent_id)
+
+    def upload_artifact(
+        self,
+        path: Path | str,
+        *,
+        host_url: str | None = None,
+        owner_agent_id: str | None = None,
+        name: str | None = None,
+        compression: str = "",
+        expires_at: float = 0.0,
+    ) -> ArtifactRef:
+        return self.context.upload_artifact(
+            path,
+            host_url=host_url,
+            owner_agent_id=self.agent_id if owner_agent_id is None else owner_agent_id,
+            name=name,
+            compression=compression,
+            expires_at=expires_at,
+        )
+
+    def download_artifact(self, artifact: ArtifactRef, target: Path | str, *, move: bool = False) -> ArtifactRef:
+        return self.context.download_artifact(artifact, target, move=move)
+
+    def delete_artifact(self, artifact: ArtifactRef) -> None:
+        self.context.delete_artifact(artifact)
 
     @staticmethod
     def not_handled() -> _NotHandled:

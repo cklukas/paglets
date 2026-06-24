@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 import pytest
 
@@ -58,11 +59,26 @@ class WatchReply:
     accepted: bool
 
 
+@dataclass(frozen=True, slots=True)
+class BinaryRequest:
+    payload: bytes
+    marker: bytearray
+
+
+@dataclass(frozen=True, slots=True)
+class BinaryReply:
+    payload: bytes
+    marker: bytearray
+    nested: dict[str, Any]
+
+
 QUOTE = ServiceOperation("quote", QuoteRequest, QuoteReply)
 PING = ServiceOperation("ping", EmptyPayload, EmptyPayload)
 WATCH = ServiceOperation("watch", WatchRequest, WatchReply)
+BINARY = ServiceOperation("binary", BinaryRequest, BinaryReply)
 FLIGHT_TICKETS = ServiceContract("flight-ticket", operations=(QUOTE, PING), version="1")
 FLIGHT_TICKETS_V2 = ServiceContract("flight-ticket", operations=(QUOTE, PING), version="2")
+BINARY_SERVICE = ServiceContract("binary-service", operations=(BINARY,), version="1")
 
 
 @dataclass
@@ -139,6 +155,26 @@ class BrokenTicketAgent(Paglet[TicketState]):
         return FLIGHT_TICKETS.route(
             message,
             {QUOTE: lambda request: "not-a-quote-reply"},
+            default=self.not_handled(),
+        )
+
+
+class BinaryServiceAgent(Paglet[TicketState]):
+    State = TicketState
+
+    def on_creation(self, event):
+        self.advertise_contract(BINARY_SERVICE)
+
+    def handle_message(self, message: Message):
+        return BINARY_SERVICE.route(
+            message,
+            {
+                BINARY: lambda request: BinaryReply(
+                    payload=request.payload,
+                    marker=request.marker,
+                    nested={"payload": request.payload, "marker": request.marker},
+                )
+            },
             default=self.not_handled(),
         )
 
@@ -223,6 +259,29 @@ def test_typed_contract_discovers_and_calls_mesh_service(tmp_path):
     finally:
         beta.stop()
         alpha.stop()
+
+
+def test_typed_contract_json_transport_preserves_binary_request_and_reply(tmp_path):
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    host.start_background()
+    try:
+        host.create(BinaryServiceAgent, TicketState())
+        handle = PagletContext(host).require_contract(BINARY_SERVICE, operation=BINARY)
+
+        reply = handle.call(BINARY, BinaryRequest(payload=b"\x00payload", marker=bytearray(b"\x01marker")))
+    finally:
+        host.stop()
+
+    assert reply.payload == b"\x00payload"
+    assert reply.marker == bytearray(b"\x01marker")
+    assert reply.nested == {"payload": b"\x00payload", "marker": bytearray(b"\x01marker")}
 
 
 def test_legacy_string_services_remain_discoverable_but_not_typed(tmp_path):

@@ -31,6 +31,7 @@ nav:
       - Host CLI: operations/host-cli.md
       - Configuration: operations/configuration.md
       - Local Multi-Host Development: operations/local-multi-host.md
+      - Deployment And Importability: operations/deployment-importability.md
       - Package Releases: operations/package-releases.md
       - Git Auto-Update: git-auto-update.md
   - System Services:
@@ -39,10 +40,13 @@ nav:
       - Mesh Info: system/mesh-info.md
       - User Info: system/user-info.md
       - Compute Slots: system/compute-slots.md
+      - Artifact Transport: system/artifacts.md
   - Examples:
       - Overview: examples/index.md
       - Pi Compute: examples/compute.md
+      - File Grabber: examples/file-grabber.md
       - Search: examples/search.md
+      - Detached Compute With A Collector: examples/detached-compute-collector.md
       - Analysis Jobs: examples/analysis-jobs.md
       - Performance Benchmark: examples/performance.md
       - Mesh Movement Benchmark: examples/mesh-benchmark.md
@@ -51,6 +55,8 @@ nav:
       - Overview: technical/overview.md
       - Core: technical/core.md
       - Runtime: technical/runtime.md
+      - Artifacts: technical/artifacts.md
+      - Patterns: technical/patterns.md
       - Remote: technical/remote.md
       - Persistence: technical/persistence.md
       - Services: technical/services.md

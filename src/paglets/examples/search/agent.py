@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from paglets.core.agent import Paglet, PagletState, state_locked
-from paglets.core.messages import Message
-from paglets.remote.proxy import PagletProxy
+from paglets.core.agent import state_locked
+from paglets.patterns.coordination import CursorDrainMixin, MeshFanoutMixin, MeshFanoutState
+from paglets.patterns.operations import OperationClient, OperationPaglet
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.services.contracts import EmptyPayload, ServiceOperation
 
 from .local_search import run_local_search
 from .models import (
@@ -22,31 +22,98 @@ from .models import (
 
 
 @dataclass
-class MeshSearchState(PagletState):
-    role: str = "parent"
+class MeshSearchState(MeshFanoutState):
     request: dict[str, Any] = field(default_factory=dict)
     timeout: float = DEFAULT_SEARCH_TIMEOUT_SECONDS
-    deadline: float = 0.0
-    parent_host_url: str = ""
-    parent_agent_id: str = ""
-    target_host_name: str = ""
-    target_host_url: str = ""
     requested_targets: list[str] = field(default_factory=list)
-    pending_hosts: list[str] = field(default_factory=list)
-    done_hosts: list[str] = field(default_factory=list)
-    children: dict[str, dict[str, str]] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_cursor: int = 1
     summaries: dict[str, dict[str, Any]] = field(default_factory=dict)
-    errors: dict[str, str] = field(default_factory=dict)
-    cleanup_errors: dict[str, str] = field(default_factory=dict)
     started: bool = False
 
 
-class MeshSearchAgent(Paglet[MeshSearchState]):
+@dataclass(frozen=True, slots=True)
+class SearchStartRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+    timeout: float = DEFAULT_SEARCH_TIMEOUT_SECONDS
+    targets: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchSummaryReply:
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+    cleanup_errors: dict[str, str] = field(default_factory=dict)
+    pending_hosts: list[str] = field(default_factory=list)
+    done_hosts: list[str] = field(default_factory=list)
+    event_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SearchStartReply:
+    targets: list[dict[str, str]] = field(default_factory=list)
+    summary: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchDrainRequest:
+    after_cursor: int = 0
+    wait_timeout: float = DEFAULT_DRAIN_WAIT_SECONDS
+    limit: int = 200
+
+
+@dataclass(frozen=True, slots=True)
+class SearchDrainReply:
+    events: list[dict[str, Any]] = field(default_factory=list)
+    cursor: int = 0
+    done: bool = False
+    summary: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchChildEventsRequest:
+    host_name: str = ""
+    host_url: str = ""
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchChildEventsReply:
+    ok: bool = True
+    cursor: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SearchChildDoneRequest:
+    host_name: str = ""
+    host_url: str = ""
+    summary: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+
+SEARCH_START = ServiceOperation("start", SearchStartRequest, SearchStartReply)
+SEARCH_DRAIN = ServiceOperation("drain", SearchDrainRequest, SearchDrainReply)
+SEARCH_CHILD_EVENTS = ServiceOperation("child_events", SearchChildEventsRequest, SearchChildEventsReply)
+SEARCH_CHILD_DONE = ServiceOperation("child_done", SearchChildDoneRequest, EmptyPayload)
+SEARCH_SUMMARY = ServiceOperation("summary", EmptyPayload, SearchSummaryReply)
+SEARCH_CLEANUP = ServiceOperation("cleanup", EmptyPayload, SearchSummaryReply)
+
+
+class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSearchState]):
     """Clone across the mesh and stream local filesystem search hits."""
 
     State = MeshSearchState
+    Operations = (SEARCH_START, SEARCH_DRAIN, SEARCH_CHILD_EVENTS, SEARCH_CHILD_DONE, SEARCH_SUMMARY, SEARCH_CLEANUP)
+
+    def operation_handlers(self):
+        return {
+            SEARCH_START: self.start,
+            SEARCH_DRAIN: self.drain,
+            SEARCH_CHILD_EVENTS: self.record_child_events,
+            SEARCH_CHILD_DONE: self.record_child_done,
+            SEARCH_SUMMARY: self.summary,
+            SEARCH_CLEANUP: self.cleanup_children,
+        }
 
     def run(self) -> None:
         with self.locked_state() as state:
@@ -59,133 +126,71 @@ class MeshSearchAgent(Paglet[MeshSearchState]):
             )
             thread.start()
 
-    def handle_message(self, message: Message):
-        if message.kind == "start":
-            with self.locked_state() as state:
-                state.request = dict(message.args.get("request") or {})
-                state.timeout = float(message.args.get("timeout", DEFAULT_SEARCH_TIMEOUT_SECONDS))
-                state.requested_targets = [str(item) for item in message.args.get("targets") or []]
-            return self.start()
-        if message.kind == "child_events":
-            return self.record_child_events(message.args)
-        if message.kind == "child_done":
-            return self.record_child_done(message.args)
-        if message.kind == "drain":
-            return self.drain(
-                after_cursor=int(message.args.get("after_cursor", 0)),
-                wait_timeout=float(message.args.get("wait_timeout", DEFAULT_DRAIN_WAIT_SECONDS)),
-                limit=int(message.args.get("limit", 200)),
-            )
-        if message.kind == "summary":
-            return self.summary()
-        if message.kind == "cleanup":
-            return self.cleanup_children()
-        return self.not_handled()
-
-    def start(self) -> dict[str, Any]:
+    def start(self, request: SearchStartRequest) -> SearchStartReply:
+        self.fanout_reset(timeout=request.timeout)
         with self.locked_state() as state:
-            state.role = "parent"
-            state.parent_host_url = self.context.address
-            state.parent_agent_id = self.agent_id
-            state.pending_hosts = []
-            state.done_hosts = []
-            state.children = {}
+            state.request = dict(request.request)
+            state.timeout = float(request.timeout)
+            state.requested_targets = list(request.targets)
             state.events = []
             state.next_cursor = 1
             state.summaries = {}
-            state.errors = {}
-            state.cleanup_errors = {}
             state.started = True
-            state.deadline = time.monotonic() + max(0.0, state.timeout)
             requested_targets = list(state.requested_targets)
         hosts = self._target_hosts(requested_targets)
         for host in hosts:
-            with self.locked_state() as state:
-                state.pending_hosts.append(host.name)
-                state.role = "child"
-                state.target_host_name = host.name
-                state.target_host_url = host.url
+            self.fanout_prepare_clone(host)
             try:
                 child = self.clone_to(host.name)
-                with self.locked_state() as state:
-                    state.children[host.name] = child.to_wire()
+                self.fanout_record_child_proxy(host.name, child)
             except Exception as exc:
-                with self.locked_state() as state:
-                    state.pending_hosts = [name for name in state.pending_hosts if name != host.name]
-                    state.errors[host.name] = str(exc)
+                self.fanout_record_error(host.name, str(exc))
                 self.notify_all_state_changed()
             finally:
-                with self.locked_state() as state:
-                    state.role = "parent"
-                    state.target_host_name = ""
-                    state.target_host_url = ""
+                self.fanout_finish_clone_prepare()
         if not hosts:
             with self.locked_state() as state:
                 state.errors["mesh"] = "no online target hosts found"
             self.notify_all_state_changed()
-        return {
-            "targets": [{"name": host.name, "url": host.url} for host in hosts],
-            "summary": self.summary(),
-        }
+        return SearchStartReply(
+            targets=[{"name": host.name, "url": host.url} for host in hosts],
+            summary=dataclass_to_wire(self.summary()),
+        )
 
-    def drain(self, *, after_cursor: int, wait_timeout: float, limit: int) -> dict[str, Any]:
-        limit = max(1, limit)
+    def drain(self, request: SearchDrainRequest) -> SearchDrainReply:
         self._expire_timed_out_hosts()
 
         def ready(state: MeshSearchState) -> bool:
-            return state.next_cursor > after_cursor + 1 or not state.pending_hosts or bool(state.errors)
+            return state.next_cursor > request.after_cursor + 1 or not state.pending_hosts or bool(state.errors)
 
-        timeout = max(0.0, wait_timeout)
-        with self.locked_state() as state:
-            if state.deadline > 0:
-                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
-        self.wait_state(ready, timeout=timeout)
+        self.fanout_wait_for(ready, wait_timeout=request.wait_timeout)
         self._expire_timed_out_hosts()
 
         with self.locked_state() as state:
-            matching = [event for event in state.events if int(event.get("cursor", 0)) > after_cursor]
-            events = matching[:limit]
-            last_cursor = after_cursor
-            if events:
-                last_cursor = max(int(event.get("cursor", 0)) for event in events)
-            more_events = len(matching) > len(events)
-            done = not state.pending_hosts and not more_events
-            summary = self._summary_from_state(state)
-        return {
-            "events": events,
-            "cursor": last_cursor,
-            "done": done,
-            "summary": summary,
-        }
+            pending = bool(state.pending_hosts)
+        events, cursor, more_events = self.cursor_drain_events(
+            after_cursor=max(0, int(request.after_cursor)),
+            limit=max(1, int(request.limit)),
+        )
+        return SearchDrainReply(
+            events=events,
+            cursor=cursor,
+            done=not pending and not more_events,
+            summary=dataclass_to_wire(self.summary()),
+        )
 
     @state_locked
-    def summary(self) -> dict[str, Any]:
+    def summary(self, request: EmptyPayload | None = None) -> SearchSummaryReply:
+        _ = request
         return self._summary_from_state(self.state)
 
-    def cleanup_children(self) -> dict[str, Any]:
-        with self.locked_state() as state:
-            children = {name: dict(proxy) for name, proxy in state.children.items()}
-        for host_name, proxy_wire in children.items():
-            try:
-                PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
-            except Exception as exc:
-                with self.locked_state() as state:
-                    state.cleanup_errors[host_name] = str(exc)
+    def cleanup_children(self, request: EmptyPayload | None = None) -> SearchSummaryReply:
+        _ = request
+        self.fanout_cleanup_children()
         return self.summary()
 
     def _target_hosts(self, requested_targets: list[str]):
-        hosts = self.context.available_hosts(online_only=True, include_self=True)
-        if not requested_targets:
-            return hosts
-        selected = []
-        for target in requested_targets:
-            ref = self.context.host_status(target)
-            if ref is None or not ref.online:
-                with self.locked_state() as state:
-                    state.errors[target] = "target host is not online or not visible in the mesh"
-                continue
-            selected.append(ref)
-        return selected
+        return self.fanout_select_hosts(requested_targets, include_self=True)
 
     def _run_child(self) -> None:
         with self.locked_state() as state:
@@ -207,7 +212,7 @@ class MeshSearchAgent(Paglet[MeshSearchState]):
                 "events": list(buffer),
             }
             buffer.clear()
-            parent.send(Message("child_events", payload))
+            OperationClient(parent).call(SEARCH_CHILD_EVENTS, SearchChildEventsRequest(**payload))
 
         try:
             request = dataclass_from_wire(SearchRequest, request_wire)
@@ -230,58 +235,47 @@ class MeshSearchAgent(Paglet[MeshSearchState]):
                 "host_name": target_host_name,
                 "host_url": target_host_url,
                 "summary": dataclass_to_wire(summary),
+                "error": "",
             }
         except Exception as exc:
             flush()
             payload = {
                 "host_name": target_host_name,
                 "host_url": target_host_url,
+                "summary": {},
                 "error": str(exc),
             }
         if parent is not None:
-            parent.send(Message("child_done", payload))
+            OperationClient(parent).call(SEARCH_CHILD_DONE, SearchChildDoneRequest(**payload))
+
+    def record_child_events(self, request: SearchChildEventsRequest) -> SearchChildEventsReply:
+        cursor = self.cursor_append_events([dict(event) for event in request.events])
+        return SearchChildEventsReply(ok=True, cursor=cursor)
 
     @state_locked
-    def record_child_events(self, payload: dict[str, Any]) -> dict[str, Any]:
-        for event in payload.get("events") or []:
-            item = dict(event)
-            item["cursor"] = self.state.next_cursor
-            self.state.next_cursor += 1
-            self.state.events.append(item)
-        self.notify_all_state_changed()
-        return {"ok": True, "cursor": self.state.next_cursor - 1}
-
-    @state_locked
-    def record_child_done(self, payload: dict[str, Any]) -> dict[str, Any]:
-        host_name = str(payload.get("host_name") or "")
+    def record_child_done(self, request: SearchChildDoneRequest) -> EmptyPayload:
+        host_name = str(request.host_name or "")
         if host_name:
             self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host_name]
             if host_name not in self.state.done_hosts:
                 self.state.done_hosts.append(host_name)
-        if payload.get("error"):
-            self.state.errors[host_name or "unknown"] = str(payload["error"])
-        elif payload.get("summary"):
-            self.state.summaries[host_name] = dict(payload["summary"])
+        if request.error:
+            self.state.errors[host_name or "unknown"] = request.error
+        elif request.summary:
+            self.state.summaries[host_name] = dict(request.summary)
         self.notify_all_state_changed()
-        return {"ok": True}
+        return EmptyPayload()
 
     def _expire_timed_out_hosts(self) -> None:
-        with self.locked_state() as state:
-            if not state.pending_hosts or state.deadline <= 0 or time.monotonic() < state.deadline:
-                return
-            timed_out = list(state.pending_hosts)
-            for host_name in timed_out:
-                state.errors[host_name] = "timed out waiting for search result"
-            state.pending_hosts = []
-        self.notify_all_state_changed()
+        self.fanout_expire_pending("timed out waiting for search result")
 
     @staticmethod
-    def _summary_from_state(state: MeshSearchState) -> dict[str, Any]:
-        return {
-            "results": dict(state.summaries),
-            "errors": dict(state.errors),
-            "cleanup_errors": dict(state.cleanup_errors),
-            "pending_hosts": list(state.pending_hosts),
-            "done_hosts": list(state.done_hosts),
-            "event_count": len(state.events),
-        }
+    def _summary_from_state(state: MeshSearchState) -> SearchSummaryReply:
+        return SearchSummaryReply(
+            results=dict(state.summaries),
+            errors=dict(state.errors),
+            cleanup_errors=dict(state.cleanup_errors),
+            pending_hosts=list(state.pending_hosts),
+            done_hosts=list(state.done_hosts),
+            event_count=len(state.events),
+        )

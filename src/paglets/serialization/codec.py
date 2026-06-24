@@ -11,7 +11,7 @@ from typing import Any, get_args, get_origin, get_type_hints
 
 from paglets.core.errors import SerializationError
 from paglets.core.wire import WirePayload, WireValue
-from paglets.remote.transport import restore_binary_tag
+from paglets.remote.transport import restore_binary_tag, restore_json_safe
 
 
 def qualified_name(obj: type | object) -> str:
@@ -119,7 +119,7 @@ def _from_wire_value(annotation: Any, value: WireValue) -> Any:
     if value is None:
         return None
     if annotation is Any or annotation is object:
-        return restore_binary_tag(value)
+        return restore_json_safe(value)
     if annotation is PagletProxyRef:
         return PagletProxyRef.from_wire(value)
 
@@ -165,7 +165,7 @@ def _from_wire_value(annotation: Any, value: WireValue) -> Any:
         if annotation in (str, int, float, bool):
             return annotation(value)
 
-    return restore_binary_tag(value)
+    return restore_json_safe(value)
 
 
 def _from_union(args: tuple[Any, ...], value: Any) -> Any:

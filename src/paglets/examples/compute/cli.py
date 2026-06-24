@@ -8,7 +8,7 @@ import json
 import os
 import sys
 
-from paglets.core.messages import Message
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
@@ -18,6 +18,15 @@ from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_to_wire
 
+from .agent import (
+    PI_CLEANUP,
+    PI_DRAIN,
+    PI_DRAIN_STREAM,
+    PI_START_ASYNC,
+    PiDrainRequest,
+    PiDrainStreamRequest,
+    PiStartRequest,
+)
 from .models import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
@@ -107,16 +116,17 @@ def _select_entry_server(*, entry_name: str | None, client: HostClient) -> Serve
 
 def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
     proxy = _create_coordinator(entry, client=client)
+    operations = OperationClient(proxy)
     try:
-        proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
+        operations.call(PI_START_ASYNC, PiStartRequest(dataclass_to_wire(request)))
         summary: dict = {}
         while True:
-            reply = proxy.send(Message("drain", {"after_digits": 0, "wait_timeout": 0.5}))
-            summary = dict(reply.get("summary") or {})
-            if reply.get("done"):
+            reply = operations.call(PI_DRAIN, PiDrainRequest(after_digits=0, wait_timeout=0.5))
+            summary = dict(reply.summary)
+            if reply.done:
                 return summary
     finally:
-        _cleanup_coordinator(proxy)
+        _cleanup_coordinator(proxy, operations=operations)
 
 
 def _run_stream(
@@ -127,38 +137,37 @@ def _run_stream(
     stream_chunk_size: int = DEFAULT_STREAM_CHUNK_DIGITS,
 ) -> dict:
     proxy = _create_coordinator(entry, client=client)
+    operations = OperationClient(proxy)
     summary: dict = {}
     cursor = 0
     printed_digits = 0
     stream_chunk_size = max(0, int(stream_chunk_size))
     try:
-        proxy.send(Message("start_async", {"request": dataclass_to_wire(request)}))
+        operations.call(PI_START_ASYNC, PiStartRequest(dataclass_to_wire(request)))
         _print_stream_header(request)
         while True:
-            reply = proxy.send(
-                Message(
-                    "drain_stream",
-                    {
-                        "after_digits": cursor,
-                        "wait_timeout": 0.5,
-                        "max_digits": stream_chunk_size,
-                    },
-                )
+            reply = operations.call(
+                PI_DRAIN_STREAM,
+                PiDrainStreamRequest(
+                    after_digits=cursor,
+                    wait_timeout=0.5,
+                    max_digits=stream_chunk_size,
+                ),
             )
-            summary = dict(reply.get("summary") or {})
-            new_decimal_digits = str(reply.get("new_decimal_digits") or "")
+            summary = dict(reply.summary)
+            new_decimal_digits = reply.new_decimal_digits
             if new_decimal_digits:
                 _write_stream_digits(new_decimal_digits, stream_chunk_size=stream_chunk_size)
-                cursor = max(cursor, int(reply.get("cursor") or 0))
+                cursor = max(cursor, int(reply.cursor or 0))
                 printed_digits += len(new_decimal_digits)
-            if reply.get("done"):
+            if reply.done:
                 break
         sys.stdout.write("\n")
         _print_status(summary)
         _print_run_diagnostics(summary, printed_digits)
         return summary
     finally:
-        _cleanup_coordinator(proxy)
+        _cleanup_coordinator(proxy, operations=operations)
 
 
 def _create_coordinator(entry: ServerRef, *, client: HostClient) -> PagletProxy:
@@ -172,9 +181,10 @@ def _create_coordinator(entry: ServerRef, *, client: HostClient) -> PagletProxy:
     return PagletProxy.from_wire(proxy_wire, client)
 
 
-def _cleanup_coordinator(proxy: PagletProxy) -> None:
+def _cleanup_coordinator(proxy: PagletProxy, *, operations: OperationClient | None = None) -> None:
+    operations = operations or OperationClient(proxy)
     with contextlib.suppress(Exception):
-        proxy.send(Message("cleanup"))
+        operations.call(PI_CLEANUP)
     with contextlib.suppress(Exception):
         proxy.dispose()
 

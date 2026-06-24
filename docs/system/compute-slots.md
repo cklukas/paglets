@@ -86,6 +86,35 @@ wakes later, only `continue_after_compute_success()` is called again.
 `notify_user()` is non-fatal. It suppresses notification transport failures and
 returns `False` when delivery failed.
 
+## Job Groups And Collectors
+
+For a submitter-plus-collector workflow, use the group helpers instead of
+hand-rolling the same registration and status bookkeeping in every
+application:
+
+```python
+from paglets.system.compute_slots import (
+    CollectingComputeJobPaglet,
+    CollectingComputeJobState,
+    ResultCollectorPaglet,
+    submit_compute_job_group,
+)
+```
+
+`submit_compute_job_group(...)` creates a collector, registers expected job
+keys before workers start, creates the compute jobs, and records creation
+failures back into the collector. `ResultCollectorPaglet` accepts `job_result`
+and `job_failure` reports, exposes `summary` and `drain`, tracks duplicates,
+and can optionally return to the submitter/home host when the group completes.
+
+The group layer is intentionally small. It tracks job completion and result
+reports; it does not add a durable global queue. Use
+`report_compute_artifact(...)` from `run_compute_job()` when a result is a
+file. That helper reports success itself, so do not also call
+`report_compute_success(...)` for the same job. See
+[Artifact Transport](artifacts.md) for natural file mobility and low-level
+artifact APIs.
+
 ## Service Role
 
 Each host runs one eager `ComputeSlotsAgent`:
@@ -169,6 +198,10 @@ A paglet submits a `ComputeSlotRequest` with its own resource estimate:
 - `temp_storage_bytes`, expected scratch storage.
 - `estimated_runtime_seconds`, used for lease TTLs.
 - `requires_gpu` and `gpu_memory_mb`, reserved for GPU scheduling.
+- `required_host_tags`, `excluded_host_tags`, and `preferred_host_tags`, for
+  role-based placement such as Linux-only or GPU-preferred workers.
+- `excluded_host_names` and `excluded_host_urls`, for avoiding the submitter,
+  collector, laptop, or any other known host.
 - `redirect_count`, `last_redirect_at`, and `last_redirect_from_host_url`, used
   for redirect cooldown and ping-pong avoidance.
 
@@ -579,6 +612,14 @@ Check candidate hosts for a resource request:
 
 ```bash
 uv run paglets-compute-slots candidates --cpu-cores 2 --memory 4G --temp-storage 1G
+uv run paglets-compute-slots candidates --require-tag linux --prefer-tag gpu --exclude-host laptop
+```
+
+Inspect compute job groups:
+
+```bash
+uv run paglets-compute-groups
+uv run paglets-compute-groups --group group-abc --json
 ```
 
 For shared or relayed deployments, pass the same `--api-key-env` used by the

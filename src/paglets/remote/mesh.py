@@ -11,7 +11,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -39,6 +39,8 @@ class HostRef:
     last_seen: float
     active_count: int
     inactive_count: int
+    tags: tuple[str, ...] = ()
+    properties: dict[str, str] = field(default_factory=dict)
     error: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
@@ -50,6 +52,8 @@ class HostRef:
             "last_seen": self.last_seen,
             "active_count": self.active_count,
             "inactive_count": self.inactive_count,
+            "tags": list(self.tags),
+            "properties": dict(self.properties),
         }
         if self.error:
             payload["error"] = self.error
@@ -65,6 +69,8 @@ class HostRef:
             last_seen=float(payload.get("last_seen", time.time())),
             active_count=int(payload.get("active_count", 0)),
             inactive_count=int(payload.get("inactive_count", 0)),
+            tags=tuple(_normalize_tags(payload.get("tags", []))),
+            properties=_normalize_properties(payload.get("properties", {})),
             error=str(payload["error"]) if payload.get("error") else None,
         )
 
@@ -76,6 +82,18 @@ def normalize_host_url(url: str) -> str:
     if "://" not in value:
         value = f"http://{value}"
     return value
+
+
+def _normalize_tags(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(sorted({str(item).strip().casefold() for item in value if str(item).strip()}))
+
+
+def _normalize_properties(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key).strip(): str(item) for key, item in value.items() if str(key).strip()}
 
 
 def encode_mesh_beacon(ref: HostRef) -> bytes:
@@ -290,6 +308,8 @@ class MeshRegistry:
             last_seen=ref.last_seen or time.time(),
             active_count=ref.active_count,
             inactive_count=ref.inactive_count,
+            tags=ref.tags,
+            properties=dict(ref.properties),
             error=ref.error,
         )
         with self._lock:
@@ -324,6 +344,8 @@ class MeshRegistry:
                             last_seen=time.time(),
                             active_count=int(health.get("active_count", 0)),
                             inactive_count=int(health.get("inactive_count", 0)),
+                            tags=_normalize_tags(health.get("tags", [])),
+                            properties=_normalize_properties(health.get("properties", {})),
                         ),
                         f"code version {health_version!r} != {self.code_version!r}",
                     )
@@ -336,6 +358,8 @@ class MeshRegistry:
                 last_seen=time.time(),
                 active_count=int(health.get("active_count", 0)),
                 inactive_count=int(health.get("inactive_count", 0)),
+                tags=_normalize_tags(health.get("tags", [])),
+                properties=_normalize_properties(health.get("properties", {})),
             )
             self.register(remote_ref)
             response = self._host.client.post_json(f"{remote_ref.url}/hosts/join", self.refresh_self().to_wire())
@@ -446,6 +470,8 @@ class MeshRegistry:
             last_seen=time.time(),
             active_count=int(health.get("active_count", 0)),
             inactive_count=int(health.get("inactive_count", 0)),
+            tags=_normalize_tags(health.get("tags", [])),
+            properties=_normalize_properties(health.get("properties", {})),
         )
 
     def mark_offline(self, url: str, error: str) -> None:
@@ -463,6 +489,8 @@ class MeshRegistry:
                     last_seen=time.time(),
                     active_count=0,
                     inactive_count=0,
+                    tags=(),
+                    properties={},
                     error=error,
                 )
             else:
@@ -474,6 +502,8 @@ class MeshRegistry:
                     last_seen=existing.last_seen,
                     active_count=existing.active_count,
                     inactive_count=existing.inactive_count,
+                    tags=existing.tags,
+                    properties=dict(existing.properties),
                     error=error,
                 )
             self._hosts[normalized] = existing
@@ -491,6 +521,8 @@ class MeshRegistry:
                 last_seen=ref.last_seen or time.time(),
                 active_count=ref.active_count,
                 inactive_count=ref.inactive_count,
+                tags=ref.tags,
+                properties=dict(ref.properties),
                 error=error,
             )
 
@@ -506,6 +538,8 @@ class MeshRegistry:
             last_seen=time.time(),
             active_count=active_count,
             inactive_count=inactive_count,
+            tags=self._host.tags,
+            properties=self._host.host_properties,
         )
         with self._lock:
             self._hosts[ref.url] = ref
@@ -589,6 +623,8 @@ class MeshRegistry:
                     last_seen=ref.last_seen,
                     active_count=ref.active_count,
                     inactive_count=ref.inactive_count,
+                    tags=ref.tags,
+                    properties=dict(ref.properties),
                     error="stale mesh peer",
                 )
 

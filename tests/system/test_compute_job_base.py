@@ -126,8 +126,17 @@ def test_compute_job_home_host_is_captured_automatically():
     assert paglet.state.home_host_url == "http://laptop:8765"
 
 
-def test_compute_slot_request_uses_state_runtime_estimate():
-    paglet = DemoComputePaglet(DemoComputeState(estimated_runtime_seconds=42.5))
+def test_compute_slot_request_uses_state_runtime_estimate_and_host_policy():
+    paglet = DemoComputePaglet(
+        DemoComputeState(
+            estimated_runtime_seconds=42.5,
+            required_host_tags=("linux",),
+            excluded_host_tags=("laptop",),
+            preferred_host_tags=("gpu",),
+            excluded_host_names=("collector",),
+            excluded_host_urls=("http://home",),
+        )
+    )
     paglet._attach(_FakeContext(name="alpha", address="http://alpha:8765"))  # type: ignore[arg-type]
 
     with paglet.locked_state() as state:
@@ -135,6 +144,11 @@ def test_compute_slot_request_uses_state_runtime_estimate():
 
     assert request.estimated_runtime_seconds == 42.5
     assert request.job_id == paglet.compute_job_id()
+    assert request.required_host_tags == ("linux",)
+    assert request.excluded_host_tags == ("laptop",)
+    assert request.preferred_host_tags == ("gpu",)
+    assert request.excluded_host_names == ("collector",)
+    assert request.excluded_host_urls == ("http://home",)
 
 
 def test_compute_job_success_and_failure_release_lease():

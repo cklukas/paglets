@@ -13,6 +13,7 @@ from typing import Any
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.services.contracts import ServiceOperation
 
 from .analysis import (
     _ordered_hosts,
@@ -47,6 +48,28 @@ class MeshBenchmarkCoordinatorState(PagletState):
     summary: dict[str, Any] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     traveler_proxy: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class MeshBenchmarkStartRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class MeshBenchmarkDrainRequest:
+    wait_timeout: float = 0.5
+
+
+@dataclass(frozen=True, slots=True)
+class MeshBenchmarkRunReply:
+    done: bool = False
+    run_id: str = ""
+    summary: dict[str, Any] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+MESH_BENCHMARK_START = ServiceOperation("start", MeshBenchmarkStartRequest, MeshBenchmarkRunReply)
+MESH_BENCHMARK_DRAIN = ServiceOperation("drain", MeshBenchmarkDrainRequest, MeshBenchmarkRunReply)
 
 
 @dataclass

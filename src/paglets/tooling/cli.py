@@ -26,6 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.connect_to and args.auto_update_from_git:
         parser.error("--auto-update-from-git cannot be used with --connect-to")
+    try:
+        host_properties = _parse_properties(args.property)
+    except ValueError as exc:
+        parser.error(str(exc))
     api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
     if args.api_key_env and not api_key:
         parser.error(f"--api-key-env {args.api_key_env!r} is not set or is empty")
@@ -105,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         mesh_version=args.mesh_version,
         persistence_dir=args.persistence_dir,
         persistent_storage_quota_bytes=args.persistent_storage_quota,
+        artifact_max_bytes=args.artifact_max_size,
+        artifact_storage_quota_bytes=args.artifact_storage_quota,
+        artifact_spool_ttl_seconds=args.artifact_spool_ttl,
         launch_config=launch_config,
         launch_config_sync_result=sync_result,
         auto_update_from_git=args.auto_update_from_git,
@@ -115,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
         relay_offline_after=args.relay_offline_after,
         relay_delivery_timeout=args.relay_delivery_timeout,
         relay_queue_limit=args.relay_queue_limit,
+        tags=args.tag,
+        properties=host_properties,
     )
 
     def shutdown(_signum, _frame):
@@ -232,12 +241,38 @@ def _parser() -> argparse.ArgumentParser:
         "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
+    parser.add_argument("--tag", action="append", default=[], help="Advertise a host tag; repeatable")
+    parser.add_argument(
+        "--property",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Advertise a host property; repeatable",
+    )
     parser.add_argument("--persistence-dir", default=None, help="Directory for this host's durable inactive paglets")
     parser.add_argument(
         "--persistent-storage-quota",
         type=_parse_size_or_none,
         default=DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES,
         help="Persistent storage quota per paglet class, e.g. 10M, or 'none'",
+    )
+    parser.add_argument(
+        "--artifact-max-size",
+        type=_parse_size_or_none,
+        default=1024**3,
+        help="Maximum accepted artifact size, e.g. 1G, or 'none'",
+    )
+    parser.add_argument(
+        "--artifact-storage-quota",
+        type=_parse_size_or_none,
+        default=10 * 1024**3,
+        help="Total host artifact storage quota, e.g. 10G, or 'none'",
+    )
+    parser.add_argument(
+        "--artifact-spool-ttl",
+        type=float,
+        default=24 * 60 * 60,
+        help="Seconds before abandoned artifact temp/spool files are eligible for cleanup",
     )
     parser.add_argument("--launch-config", default=str(DEFAULT_LAUNCH_CONFIG_PATH), help="Launch config TOML path")
     parser.add_argument(
@@ -326,6 +361,17 @@ def _parse_size_or_none(value: str) -> int | None:
     if amount < 0:
         raise argparse.ArgumentTypeError("size must be non-negative")
     return int(amount * multiplier)
+
+
+def _parse_properties(values: list[str]) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for value in values:
+        key, separator, item = value.partition("=")
+        key = key.strip()
+        if not separator or not key:
+            raise ValueError("--property values must use KEY=VALUE")
+        properties[key] = item
+    return properties
 
 
 if __name__ == "__main__":  # pragma: no cover

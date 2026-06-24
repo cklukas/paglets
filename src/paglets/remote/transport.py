@@ -118,6 +118,19 @@ def restore_binary_tag(value: Any) -> Any:
     return value
 
 
+def restore_json_safe(value: Any) -> Any:
+    """Recursively restore values produced by :func:`json_safe`."""
+
+    restored = restore_binary_tag(value)
+    if restored is not value:
+        return restored
+    if isinstance(value, list):
+        return [restore_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: restore_json_safe(item) for key, item in value.items()}
+    return value
+
+
 class ChunkedRequestWriter:
     def __init__(self, connection: http.client.HTTPConnection):
         self._connection = connection

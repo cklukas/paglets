@@ -19,6 +19,7 @@ from paglets.system.compute_slots.agent import (
     ComputeSlotsState,
     _can_ever_satisfy,
     _can_run_now,
+    _candidate_score,
     _elastic_cpu_assignments,
     _redirect_budget,
 )
@@ -100,6 +101,50 @@ def test_compute_slot_rejects_request_larger_than_eligible_cpu_set():
     request = ComputeSlotRequest(cpu_cores=3, memory_bytes=1024, temp_storage_bytes=1024)
 
     assert _can_ever_satisfy(status, request) == "requested CPU cores exceed host eligible CPU count"
+
+
+def test_compute_slot_host_tag_and_exclusion_policies_are_hard_constraints():
+    status = SchedulerHostStatus(
+        host_name="linux-a",
+        host_url="http://linux-a",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        host_tags=("linux", "gpu"),
+    )
+
+    assert _can_ever_satisfy(status, ComputeSlotRequest(required_host_tags=("linux",))) == ""
+    assert (
+        _can_ever_satisfy(status, ComputeSlotRequest(required_host_tags=("windows",)))
+        == "missing required host tags: windows"
+    )
+    assert (
+        _can_ever_satisfy(status, ComputeSlotRequest(excluded_host_tags=("gpu",))) == "excluded host tags present: gpu"
+    )
+    assert _can_ever_satisfy(status, ComputeSlotRequest(excluded_host_names=("linux-a",))) == "host name excluded"
+    assert _can_ever_satisfy(status, ComputeSlotRequest(excluded_host_urls=("http://linux-a",))) == "host URL excluded"
+
+
+def test_compute_slot_preferred_tags_lower_candidate_score_without_requiring_match():
+    plain = SchedulerHostStatus(
+        host_name="linux-a",
+        host_url="http://linux-a",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        free_cpu_cores=8,
+        host_tags=("linux",),
+    )
+    gpu = SchedulerHostStatus(
+        host_name="linux-b",
+        host_url="http://linux-b",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        free_cpu_cores=8,
+        host_tags=("linux", "gpu"),
+    )
+    request = ComputeSlotRequest(preferred_host_tags=("gpu",))
+
+    assert _can_ever_satisfy(plain, request) == ""
+    assert _candidate_score(gpu, request) < _candidate_score(plain, request)
 
 
 def test_compute_slot_grant_reserves_exact_cpu_ids_when_affinity_supported():

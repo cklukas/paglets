@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from paglets.artifacts import PagletFileRef
 from paglets.core.agent import Paglet
 from paglets.core.errors import (
     HostError,
@@ -308,6 +309,34 @@ class _ChildHostFacade:
         self._require_self(agent_id)
         payload = self._call("persistent_storage", {"agent_id": agent_id, "quota_bytes": quota_bytes})
         return _ChildManagedStorage(self, payload["root"], quota_bytes=payload.get("quota_bytes"))
+
+    def register_file_for(
+        self,
+        agent_id: str,
+        path: str | Path,
+        *,
+        name: str | None = None,
+        mode: str = "copy",
+    ) -> PagletFileRef:
+        self._require_self(agent_id)
+        payload = self._call("register_file", {"path": str(path), "name": name, "mode": mode})
+        return PagletFileRef.from_wire(payload["file"])
+
+    def registered_files_for(self, agent_id: str) -> list[PagletFileRef]:
+        self._require_self(agent_id)
+        payload = self._call("registered_files")
+        return [PagletFileRef.from_wire(item) for item in payload.get("files", [])]
+
+    def unregister_file_for(self, agent_id: str, name_or_ref: str | PagletFileRef) -> None:
+        self._require_self(agent_id)
+        name = name_or_ref.name if isinstance(name_or_ref, PagletFileRef) else str(name_or_ref)
+        self._call("unregister_file", {"name": name})
+
+    def registered_file_path_for(self, agent_id: str, name_or_ref: str | PagletFileRef) -> Path:
+        self._require_self(agent_id)
+        name = name_or_ref.name if isinstance(name_or_ref, PagletFileRef) else str(name_or_ref)
+        payload = self._call("registered_file_path", {"name": name})
+        return Path(payload["path"])
 
     def advertise_service(
         self,

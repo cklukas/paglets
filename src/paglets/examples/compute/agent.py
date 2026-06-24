@@ -18,6 +18,7 @@ from paglets.core.errors import InvalidAgentError
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, qualified_name
+from paglets.services.contracts import EmptyPayload, ServiceOperation
 from paglets.system.mesh_info import (
     MESH_INFO,
     SELECT_TARGETS,
@@ -54,6 +55,50 @@ from .models import (
     PiResultDrainRequest,
     _PiComputeProgress,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PiStartRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PiStartReply:
+    started: bool = False
+    summary: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PiDrainRequest:
+    after_digits: int = 0
+    wait_timeout: float = 0.5
+
+
+@dataclass(frozen=True, slots=True)
+class PiDrainReply:
+    summary: dict[str, Any] = field(default_factory=dict)
+    done: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PiDrainStreamRequest:
+    after_digits: int = 0
+    wait_timeout: float = 0.5
+    max_digits: int = DEFAULT_STREAM_CHUNK_DIGITS
+
+
+@dataclass(frozen=True, slots=True)
+class PiDrainStreamReply:
+    new_decimal_digits: str = ""
+    cursor: int = 0
+    summary: dict[str, Any] = field(default_factory=dict)
+    done: bool = False
+
+
+PI_START_ASYNC = ServiceOperation("start_async", PiStartRequest, PiStartReply)
+PI_DRAIN = ServiceOperation("drain", PiDrainRequest, PiDrainReply)
+PI_DRAIN_STREAM = ServiceOperation("drain_stream", PiDrainStreamRequest, PiDrainStreamReply)
+PI_CLEANUP = ServiceOperation("cleanup", EmptyPayload, PiComputeSummary)
 
 
 @dataclass

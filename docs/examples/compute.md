@@ -50,15 +50,22 @@ integer string conversion limits for very large jobs.
 Programmatic use:
 
 ```python
-from paglets.examples.compute import PiComputeCoordinatorAgent, PiComputeRequest
-from paglets.core.messages import Message
+from paglets.examples.compute import (
+    PI_START_ASYNC,
+    PiComputeCoordinatorAgent,
+    PiComputeRequest,
+    PiStartRequest,
+)
+from paglets.patterns.operations import OperationClient
 from paglets.serialization.codec import dataclass_to_wire
 
 coordinator = self.context.create_paglet(PiComputeCoordinatorAgent)
-summary = coordinator.send(
-    Message(
-        "start",
-        {"request": dataclass_to_wire(PiComputeRequest(start=0, digits=16, batch_size=1))},
+client = OperationClient(coordinator)
+reply = client.call(
+    PI_START_ASYNC,
+    PiStartRequest(
+        request=dataclass_to_wire(PiComputeRequest(start=0, digits=16, batch_size=1))
     )
 )
+summary = reply.summary
 ```

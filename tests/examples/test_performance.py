@@ -9,8 +9,13 @@ import time
 from collections import namedtuple
 from pathlib import Path
 
-from paglets.core.messages import Message
-from paglets.examples.performance.agent import PerformanceBenchmarkAgent, PerformanceBenchmarkState
+from paglets.examples.performance.agent import (
+    PERFORMANCE_CHILD_RESULT,
+    PERFORMANCE_SUMMARY,
+    PerformanceBenchmarkAgent,
+    PerformanceBenchmarkState,
+    PerformanceChildResultRequest,
+)
 from paglets.examples.performance.cli import _print_text
 from paglets.examples.performance.cli import main as perf_main
 from paglets.examples.performance.kernels import (
@@ -30,6 +35,7 @@ from paglets.examples.performance.models import (
     DiskTarget,
     HostBenchmarkResult,
 )
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import ServerRef
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
@@ -310,37 +316,34 @@ def test_benchmark_child_failure_records_error_for_one_host(tmp_path):
         alpha.mesh.gossip_once()
         state = PerformanceBenchmarkState(pending_hosts=["alpha", "beta"])
         proxy = alpha.create(PerformanceBenchmarkAgent, state)
-        proxy.send(
-            Message(
-                "child_result",
-                {
-                    "host_name": "alpha",
-                    "host_url": alpha.address,
-                    "result": dataclass_to_wire(
-                        HostBenchmarkResult(
-                            host_name="alpha",
-                            host_url=alpha.address,
-                            platform="test",
-                            python_version="3.x",
-                        )
-                    ),
-                },
-            )
+        operations = OperationClient(proxy)
+        operations.call(
+            PERFORMANCE_CHILD_RESULT,
+            PerformanceChildResultRequest(
+                host_name="alpha",
+                host_url=alpha.address,
+                result=dataclass_to_wire(
+                    HostBenchmarkResult(
+                        host_name="alpha",
+                        host_url=alpha.address,
+                        platform="test",
+                        python_version="3.x",
+                    )
+                ),
+            ),
         )
-        proxy.send(
-            Message(
-                "child_result",
-                {
-                    "host_name": "beta",
-                    "host_url": beta.address,
-                    "error": "forced benchmark failure",
-                },
-            )
+        operations.call(
+            PERFORMANCE_CHILD_RESULT,
+            PerformanceChildResultRequest(
+                host_name="beta",
+                host_url=beta.address,
+                error="forced benchmark failure",
+            ),
         )
-        summary = proxy.send(Message("summary"))
+        summary = operations.call(PERFORMANCE_SUMMARY)
 
-        assert set(summary["results"]) == {"alpha"}
-        assert summary["errors"] == {"beta": "forced benchmark failure"}
+        assert set(summary.results) == {"alpha"}
+        assert summary.errors == {"beta": "forced benchmark failure"}
     finally:
         beta.stop()
         alpha.stop()

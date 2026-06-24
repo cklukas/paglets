@@ -5,9 +5,16 @@ from __future__ import annotations
 import json
 import time
 
-from paglets.core.messages import Message
 from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
+from paglets.examples.search.agent import (
+    SEARCH_CLEANUP,
+    SEARCH_DRAIN,
+    SEARCH_START,
+    SearchDrainRequest,
+    SearchStartRequest,
+)
 from paglets.examples.search.cli import main as search_main
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import ServerRef
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
@@ -136,34 +143,33 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path):
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
         proxy = alpha.create(MeshSearchAgent)
-        proxy.send(
-            Message(
-                "start",
-                {
-                    "request": dataclass_to_wire(
-                        SearchRequest(mode="grep", pattern="needle", paths=[str(tmp_path)], batch_size=1)
-                    ),
-                    "timeout": 3.0,
-                },
-            )
+        operations = OperationClient(proxy)
+        operations.call(
+            SEARCH_START,
+            SearchStartRequest(
+                request=dataclass_to_wire(
+                    SearchRequest(mode="grep", pattern="needle", paths=[str(tmp_path)], batch_size=1)
+                ),
+                timeout=3.0,
+            ),
         )
 
-        first = proxy.send(Message("drain", {"after_cursor": 0, "wait_timeout": 1.0, "limit": 10}))
-        assert first["events"]
+        first = operations.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=0, wait_timeout=1.0, limit=10))
+        assert first.events
 
-        cursor = first["cursor"]
+        cursor = first.cursor
         final = first
         deadline = time.monotonic() + 3.0
-        while not final["done"] and time.monotonic() < deadline:
-            final = proxy.send(Message("drain", {"after_cursor": cursor, "wait_timeout": 1.0, "limit": 10}))
-            cursor = max(cursor, final["cursor"])
+        while not final.done and time.monotonic() < deadline:
+            final = operations.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=cursor, wait_timeout=1.0, limit=10))
+            cursor = max(cursor, final.cursor)
 
-        assert final["done"] is True
-        assert set(final["summary"]["results"]) == {"alpha", "beta"}
+        assert final.done is True
+        assert set(final.summary["results"]) == {"alpha", "beta"}
     finally:
         if proxy is not None:
             try:
-                proxy.send(Message("cleanup"))
+                OperationClient(proxy).call(SEARCH_CLEANUP)
                 proxy.dispose()
             except Exception:
                 pass

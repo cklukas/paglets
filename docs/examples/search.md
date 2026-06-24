@@ -13,8 +13,9 @@ from paglets.examples.search import MeshSearchAgent
 
 It is a pure mobile agent, not a resident service. The CLI creates one parent
 `MeshSearchAgent` on the entry host. The parent clones child agents to target
-hosts, children search local paths, and search events travel back to the parent
-as ordinary paglet messages.
+hosts, children search local paths, and search events travel back to the parent.
+The public parent protocol uses typed operations; `MeshFanoutMixin` handles the
+clone bookkeeping and `CursorDrainMixin` handles event cursors.
 
 The command combines common `ripgrep` content search and `fd` filename search
 features:
@@ -93,9 +94,9 @@ This start/drain shape is important because active paglets process one message
 at a time in their child process. A parent message handler should not block
 waiting for child result messages that must be delivered to that same parent.
 
-The parent handles these messages:
+The parent exposes these typed operations:
 
-| Message | Purpose |
+| Operation | Purpose |
 | --- | --- |
 | `start` | Store the `SearchRequest`, resolve targets, clone children, and return target metadata. |
 | `child_events` | Append streamed hit events from a child and wake waiting drain calls. |
@@ -193,35 +194,38 @@ Most users should use `paglets-search`, but other paglets can create the search
 agent directly and drain streamed events:
 
 ```python
-from paglets.examples.search import MeshSearchAgent, SearchRequest
-from paglets.core.messages import Message
+from paglets.examples.search import (
+    SEARCH_CLEANUP,
+    SEARCH_DRAIN,
+    SEARCH_START,
+    MeshSearchAgent,
+    SearchDrainRequest,
+    SearchRequest,
+    SearchStartRequest,
+)
+from paglets.patterns.operations import OperationClient
 from paglets.serialization.codec import dataclass_to_wire
 
 proxy = self.context.create_paglet(MeshSearchAgent)
-proxy.send(
-    Message(
-        "start",
-        {
-            "request": dataclass_to_wire(
-                SearchRequest(mode="grep", pattern="TODO", paths=["."])
-            ),
-            "timeout": 60.0,
-        },
+client = OperationClient(proxy)
+client.call(
+    SEARCH_START,
+    SearchStartRequest(
+        request=dataclass_to_wire(SearchRequest(mode="grep", pattern="TODO", paths=["."])),
+        timeout=60.0,
     )
 )
 
 cursor = 0
 while True:
-    reply = proxy.send(
-        Message("drain", {"after_cursor": cursor, "wait_timeout": 0.5, "limit": 100})
-    )
-    for event in reply["events"]:
+    reply = client.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=cursor, wait_timeout=0.5, limit=100))
+    for event in reply.events:
         cursor = max(cursor, int(event["cursor"]))
         # Render or forward the event here.
-    if reply["done"]:
+    if reply.done:
         break
 
-summary = reply["summary"]
-proxy.send(Message("cleanup"))
+summary = reply.summary
+client.call(SEARCH_CLEANUP)
 proxy.dispose()
 ```

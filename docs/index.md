@@ -122,12 +122,19 @@ notifications:
 uv run paglets-sysinfo df
 uv run paglets-sysinfo load
 uv run paglets-mesh-info summary
+uv run paglets-artifacts list
 uv run paglets-compute-slots status
+uv run paglets-compute-groups
 uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
+uv run paglets-file-grabber push ./data.bin --remote beta --dest /tmp/data.bin --dry
 uv run paglets-pi-compute --digits 16
 uv run paglets-perf-test
 uv run paglets-mesh-benchmark --payload-size 64K
 ```
+
+`paglets-file-grabber` is the smallest natural file mobility example: the
+source paglet registers one file, dispatches to the destination host, and writes
+the arrived scratch copy to the requested path.
 
 `paglets-perf-test` is a pure mobile-agent example: the entry host creates a
 parent benchmark paglet, clones workers to online same-version mesh hosts, runs
@@ -153,7 +160,8 @@ uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
   behavior.
 - [Example Agents](examples/index.md): detailed explanations of packaged example
   agents, including `server-info`, `mesh-info`, Pi compute,
-  `paglets-perf-test`, and `paglets-mesh-benchmark`.
+  `paglets-file-grabber`, `paglets-perf-test`, and
+  `paglets-mesh-benchmark`.
 - [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,
   synchronize dependencies, broadcast commit hashes, and restart from updated
   code.

@@ -47,8 +47,11 @@ Run a packaged example CLI:
 
 ```bash
 uv run paglets-sysinfo summary
+uv run paglets-artifacts list
 uv run paglets-compute-slots status
+uv run paglets-compute-groups
 uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
+uv run paglets-file-grabber push ./data.bin --remote beta --dest /tmp/data.bin --dry
 uv run paglets-search grep TODO .
 uv run paglets-pi-compute --digits 32
 ```
@@ -58,6 +61,26 @@ The built-in `compute-slots` service admits coarse jobs by explicit
 can best-effort pin granted jobs to allocated CPU IDs. New compute job paglets
 can derive from `ComputeJobPaglet` so scheduling, wakeup, redirects, affinity
 metadata, and lease release stay out of job-specific code.
+
+For detached multi-job workflows, `ResultCollectorPaglet`,
+`CollectingComputeJobPaglet`, and `submit_compute_job_group(...)` provide a
+small job-group plus collector layer. Hosts can advertise placement metadata
+with `paglets-host --tag TAG --property KEY=VALUE`, and compute jobs can
+require, exclude, or prefer host tags.
+
+Files that belong to a paglet instance can be registered with
+`register_file(...)` and then move naturally with dispatch or clone. Larger
+explicit payloads can use `ArtifactRef`, `HostClient.upload_artifact(...)`,
+`PagletProxy.send_artifact(...)`, and the `paglets-artifacts` CLI.
+The `paglets-file-grabber` example demonstrates this natural file mobility for
+one-file push and pull operations between an entry host and one remote host.
+Simple request/result paglets can use `TaskPaglet` and `TaskClient` from
+`paglets.patterns.tasks`. Paglets with several named operations can use
+`OperationPaglet` and `OperationClient`; clone fan-out examples can reuse
+`MeshFanoutMixin` and `CursorDrainMixin` for child bookkeeping and streaming
+drains. File-transfer paglets can subclass `SingleFileTransferPaglet` for the
+default workflow or use `FileMobilityMixin` to keep custom file-transfer code
+readable.
 
 Run a source-tree demo:
 
@@ -110,6 +133,8 @@ Useful entry points:
 - [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets/)
 - [Examples](https://cklukas.github.io/paglets/examples/)
 - [Operations](https://cklukas.github.io/paglets/operations/)
+- [Detached Compute With A Collector](https://cklukas.github.io/paglets/examples/detached-compute-collector/)
+- [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts/)
 - [Technical Reference](https://cklukas.github.io/paglets/technical/overview/)
 - [Status And Limitations](https://cklukas.github.io/paglets/project/status/)
 
@@ -124,8 +149,10 @@ uv run --extra docs mkdocs serve
 
 ```text
 src/paglets/core/            paglet model, messages, lifecycle events
+src/paglets/artifacts.py     artifact references and host artifact storage
 src/paglets/runtime/         host facade, child processes, HTTP, relay, storage runtime
 src/paglets/remote/          clients, proxies, transfer tickets, mesh, admin API
+src/paglets/patterns/        typed task, operation, coordination, notification, and file mobility helpers
 src/paglets/persistence/     inactive records and managed storage
 src/paglets/services/        service contracts and resident services
 src/paglets/system/          built-in resident service agents

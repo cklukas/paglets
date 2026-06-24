@@ -53,6 +53,22 @@ class SelfDispatchAgent(Paglet[TravelState]):
         return self.not_handled()
 
 
+class BinaryMessageAgent(Paglet[BinaryTravelState]):
+    State = BinaryTravelState
+
+    def handle_message(self, message: Message):
+        if message.kind == "echo-binary":
+            payload = message.args["payload"]
+            self.state.payload = payload
+            self.state.marker = message.arg
+            return {
+                "payload": payload,
+                "arg": message.arg,
+                "nested": {"payload": payload},
+            }
+        return self.not_handled()
+
+
 class RecordingClient(HostClient):
     def __init__(self):
         super().__init__()
@@ -153,6 +169,32 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
     assert active_state["state"]["last_message"] == "hello"
     assert inactive_state["active"] is False
     assert inactive_state["state"]["last_message"] == "hello"
+
+
+def test_json_message_transport_preserves_binary_args_arg_and_replies(tmp_path: Path):
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    host.start_background()
+    try:
+        proxy = host.create(BinaryMessageAgent, BinaryTravelState())
+
+        reply = proxy.send(
+            Message(
+                "echo-binary",
+                {"payload": b"\x00payload"},
+                arg=bytearray(b"\x01argument"),
+            )
+        )
+        state = host.get_state(proxy.agent_id, BinaryTravelState)
+    finally:
+        host.stop()
+
+    assert reply == {
+        "payload": b"\x00payload",
+        "arg": bytearray(b"\x01argument"),
+        "nested": {"payload": b"\x00payload"},
+    }
+    assert state.payload == b"\x00payload"
+    assert state.marker == bytearray(b"\x01argument")
 
 
 def test_public_url_path_prefix_and_api_key_are_supported(tmp_path: Path):

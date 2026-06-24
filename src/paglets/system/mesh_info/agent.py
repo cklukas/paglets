@@ -46,6 +46,8 @@ class MeshHostSnapshot:
     work_percent_used: float = 0.0
     active_count: int = 0
     inactive_count: int = 0
+    host_tags: tuple[str, ...] = ()
+    host_properties: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -367,6 +369,8 @@ class MeshInfoAgent(Paglet[MeshInfoState]):
             work_percent_used=float(volume.percent_used if volume is not None else 0.0),
             active_count=int(health.get("active_count", 0)),
             inactive_count=int(health.get("inactive_count", 0)),
+            host_tags=tuple(str(item) for item in health.get("tags", [])),
+            host_properties={str(key): str(value) for key, value in dict(health.get("properties") or {}).items()},
             errors=errors,
         )
         with self.locked_state() as state:

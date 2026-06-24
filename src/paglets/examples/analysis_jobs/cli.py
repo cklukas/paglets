@@ -8,13 +8,15 @@ import os
 import sys
 import time
 
-from paglets.core.messages import Message
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import PagletsAdminClient, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_to_wire
 
 from .agent import (
+    ANALYSIS_CAMPAIGN_START,
+    ANALYSIS_CAMPAIGN_SUMMARY,
     DEFAULT_CPU_CORES,
     DEFAULT_DB_LOCK_TIMEOUT_SECONDS,
     DEFAULT_ESTIMATOR_TREES,
@@ -25,6 +27,7 @@ from .agent import (
     DEFAULT_TASK_COUNT,
     DEFAULT_TEMP_STORAGE_BYTES,
     AnalysisCampaignRequest,
+    AnalysisCampaignStartRequest,
     default_result_db,
 )
 
@@ -58,15 +61,20 @@ def main(argv: list[str] | None = None) -> int:
             {},
         )
         proxy = PagletProxy.from_wire(proxy_wire, client)
-        summary = proxy.send(Message("start", {"request": dataclass_to_wire(request)}), timeout=args.timeout)
+        operations = OperationClient(proxy)
+        summary = operations.call(
+            ANALYSIS_CAMPAIGN_START,
+            AnalysisCampaignStartRequest(dataclass_to_wire(request)),
+            timeout=args.timeout,
+        )
         if args.wait:
             deadline = time.monotonic() + max(0.0, args.wait)
             while time.monotonic() < deadline:
-                summary = proxy.send(Message("summary"), timeout=args.timeout)
-                if summary.get("done"):
+                summary = operations.call(ANALYSIS_CAMPAIGN_SUMMARY, timeout=args.timeout)
+                if summary.done:
                     break
                 time.sleep(0.5)
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        print(json.dumps(dataclass_to_wire(summary), indent=2, sort_keys=True))
         return 0
     except Exception as exc:
         print(f"paglets-analysis-jobs: {exc}", file=sys.stderr)

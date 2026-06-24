@@ -80,7 +80,7 @@ class _IgnoreMatcher:
             except OSError:
                 continue
         if lines:
-            self._specs.append((directory, pathspec.PathSpec.from_lines("gitwildmatch", lines)))
+            self._specs.append((directory, pathspec.PathSpec.from_lines("gitignore", lines)))
 
     def ignored(self, path: Path, *, is_dir: bool) -> bool:
         if self.request.no_ignore:

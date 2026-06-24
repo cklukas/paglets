@@ -5,8 +5,12 @@ patterns without mixing application code into the built-in service namespace:
 
 - `paglets.examples.analysis_jobs`: synthetic dataframe jobs that use
   built-in compute-slot scheduling and return results to a home SQLite DB.
+- Detached compute collector guide: reusable job-group and collector helpers
+  for laptop-submit, worker-compute, collector-status workflows.
 - `paglets.examples.compute`: a coordinator/worker decimal Pi compute example
   plus a mesh-aware CLI.
+- `paglets.examples.file_grabber`: a small one-file push/pull example that
+  registers a file, dispatches with it, and writes it on the destination host.
 - `paglets.examples.performance`: a pure mobile benchmark agent plus a
   mesh-wide benchmark CLI.
 - `paglets.examples.mesh_benchmark`: a directional mesh movement benchmark
@@ -70,8 +74,11 @@ file to maintain.
 ```bash
 uv run paglets-sysinfo [--entry alpha] df
 uv run paglets-mesh-info [--entry alpha] summary
+uv run paglets-artifacts [--entry alpha] list
 uv run paglets-compute-slots [--entry alpha] status
+uv run paglets-compute-groups [--entry alpha]
 uv run paglets-analysis-jobs [--entry alpha] --tasks 20
+uv run paglets-file-grabber [--entry alpha] push ./data.bin --remote beta --dest /tmp/data.bin --dry
 uv run paglets-pi-compute [--entry alpha] --digits 16
 uv run paglets-perf-test [--entry alpha]
 uv run paglets-search [--entry alpha] grep TODO .
@@ -82,8 +89,9 @@ networks, start hosts with `--api-key-env` and use the relay setup from the main
 guide so the HTTP API requires bearer authentication.
 
 All packaged example CLIs that contact an entry host accept `--api-key-env`,
-including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-compute-slots`,
-`paglets-analysis-jobs`, `paglets-pi-compute`, `paglets-perf-test`,
+including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-artifacts`,
+`paglets-compute-slots`, `paglets-compute-groups`, `paglets-analysis-jobs`,
+`paglets-file-grabber`, `paglets-pi-compute`, `paglets-perf-test`,
 `paglets-mesh-benchmark`, and `paglets-search`. The paglet classes themselves
 do not need relay-specific branches; use normal context, proxy, service,
 creation, clone, and dispatch APIs and the host transport forwards relayed URLs
@@ -91,7 +99,9 @@ transparently.
 
 ## Example Pages
 
+- [Detached Compute With A Collector](detached-compute-collector.md)
 - [Analysis Jobs](analysis-jobs.md)
+- [File Grabber](file-grabber.md)
 - [Pi Compute](compute.md)
 - [Performance Benchmark](performance.md)
 - [Mesh Movement Benchmark](mesh-benchmark.md)

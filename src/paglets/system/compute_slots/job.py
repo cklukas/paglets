@@ -49,6 +49,11 @@ class ComputeJobState(PagletState):
     allow_zero_memory_bytes: bool = False
     allow_zero_runtime_seconds: bool = False
     allow_home_compute: bool = False
+    required_host_tags: tuple[str, ...] = ()
+    excluded_host_tags: tuple[str, ...] = ()
+    preferred_host_tags: tuple[str, ...] = ()
+    excluded_host_names: tuple[str, ...] = ()
+    excluded_host_urls: tuple[str, ...] = ()
     candidate_limit: int = 8
     scheduler_timeout_seconds: float = 5.0
     release_timeout_seconds: float = 2.0
@@ -327,6 +332,11 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
             memory_bytes=state.memory_bytes,
             temp_storage_bytes=state.temp_storage_bytes,
             estimated_runtime_seconds=estimated_runtime_seconds,
+            required_host_tags=tuple(state.required_host_tags),
+            excluded_host_tags=tuple(state.excluded_host_tags),
+            preferred_host_tags=tuple(state.preferred_host_tags),
+            excluded_host_names=tuple(state.excluded_host_names),
+            excluded_host_urls=tuple(state.excluded_host_urls),
             submitted_at=time.time(),
             redirect_count=state.redirect_count,
             last_redirect_at=state.last_redirect_at,

@@ -9,10 +9,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from paglets.core.agent import Paglet, PagletState
+from paglets.core.agent import PagletState
 from paglets.core.messages import Message
+from paglets.patterns.operations import OperationPaglet
 from paglets.persistence.persistency import DeactivationPolicy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.services.contracts import EmptyPayload, ServiceOperation
 from paglets.system.compute_slots import (
     COMPUTE_STATUS_RUNNING,
     ComputeJobPaglet,
@@ -64,6 +66,23 @@ class CampaignSeederState(PagletState):
     done: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisCampaignStartRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisCampaignSummary:
+    request: dict[str, Any] = field(default_factory=dict)
+    created_jobs: list[dict[str, str]] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+    done: bool = False
+
+
+ANALYSIS_CAMPAIGN_START = ServiceOperation("start", AnalysisCampaignStartRequest, AnalysisCampaignSummary)
+ANALYSIS_CAMPAIGN_SUMMARY = ServiceOperation("summary", EmptyPayload, AnalysisCampaignSummary)
+
+
 # --8<-- [start:analysis-job-state]
 @dataclass
 class AnalysisJobState(ComputeJobState):
@@ -92,43 +111,44 @@ class AnalysisJobState(ComputeJobState):
 # --8<-- [end:analysis-job-state]
 
 
-class CampaignSeederPaglet(Paglet[CampaignSeederState]):
+class CampaignSeederPaglet(OperationPaglet[CampaignSeederState]):
     """Create a batch of synthetic analysis job paglets on the home host."""
 
     State = CampaignSeederState
+    Operations = (ANALYSIS_CAMPAIGN_START, ANALYSIS_CAMPAIGN_SUMMARY)
 
     def __init__(self, state: CampaignSeederState | None = None, *, agent_id: str | None = None):
         super().__init__(state=state, agent_id=agent_id)
         self._thread: threading.Thread | None = None
 
-    def handle_message(self, message: Message):
-        if message.kind == "start":
-            request = dataclass_from_wire(AnalysisCampaignRequest, dict(message.args.get("request") or message.args))
-            return self.start(request)
-        if message.kind == "summary":
-            return self.summary()
-        return self.not_handled()
+    def operation_handlers(self):
+        return {
+            ANALYSIS_CAMPAIGN_START: self.start,
+            ANALYSIS_CAMPAIGN_SUMMARY: self.summary,
+        }
 
-    def start(self, request: AnalysisCampaignRequest) -> dict[str, Any]:
+    def start(self, request: AnalysisCampaignStartRequest) -> AnalysisCampaignSummary:
+        campaign = dataclass_from_wire(AnalysisCampaignRequest, dict(request.request))
         with self.locked():
             if self._thread is not None and self._thread.is_alive():
                 return self.summary()
-            self.state.request = dataclass_to_wire(request)
+            self.state.request = dataclass_to_wire(campaign)
             self.state.created_jobs = []
             self.state.errors = {}
             self.state.done = False
-            self._thread = threading.Thread(target=self._seed_jobs, args=(request,), daemon=True)
+            self._thread = threading.Thread(target=self._seed_jobs, args=(campaign,), daemon=True)
             self._thread.start()
         return self.summary()
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, request: EmptyPayload | None = None) -> AnalysisCampaignSummary:
+        _ = request
         with self.locked_state() as state:
-            return {
-                "request": dict(state.request),
-                "created_jobs": list(state.created_jobs),
-                "errors": dict(state.errors),
-                "done": bool(state.done),
-            }
+            return AnalysisCampaignSummary(
+                request=dict(state.request),
+                created_jobs=list(state.created_jobs),
+                errors=dict(state.errors),
+                done=bool(state.done),
+            )
 
     # --8<-- [start:seed-jobs]
     def _seed_jobs(self, request: AnalysisCampaignRequest) -> None:

@@ -50,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
                 temp_storage_bytes=max(0, args.temp_storage),
                 requires_gpu=bool(args.gpu),
                 gpu_memory_mb=max(0, args.gpu_memory),
+                required_host_tags=tuple(args.require_tag),
+                excluded_host_tags=tuple(args.exclude_tag),
+                preferred_host_tags=tuple(args.prefer_tag),
+                excluded_host_names=_excluded_host_names(args.exclude_host),
+                excluded_host_urls=_excluded_host_urls(args.exclude_host),
             ),
             limit=max(0, args.limit),
         )
@@ -84,6 +89,10 @@ def _parser() -> argparse.ArgumentParser:
     candidates.add_argument("--temp-storage", type=_parse_size, default=0, help="Requested temp storage")
     candidates.add_argument("--gpu", action="store_true", help="Require GPU support")
     candidates.add_argument("--gpu-memory", type=int, default=0, help="Requested GPU memory in MB")
+    candidates.add_argument("--require-tag", action="append", default=[], help="Require a host tag; repeatable")
+    candidates.add_argument("--exclude-tag", action="append", default=[], help="Reject hosts with this tag; repeatable")
+    candidates.add_argument("--prefer-tag", action="append", default=[], help="Prefer hosts with this tag; repeatable")
+    candidates.add_argument("--exclude-host", action="append", default=[], help="Reject a host name or URL; repeatable")
     return parser
 
 
@@ -189,6 +198,14 @@ def _parse_size(value: str) -> int:
     if amount < 0:
         raise argparse.ArgumentTypeError("size must be non-negative")
     return int(amount * multiplier)
+
+
+def _excluded_host_names(values: list[str]) -> tuple[str, ...]:
+    return tuple(value for value in values if "://" not in value)
+
+
+def _excluded_host_urls(values: list[str]) -> tuple[str, ...]:
+    return tuple(value for value in values if "://" in value)
 
 
 def _bytes(value: int) -> str:

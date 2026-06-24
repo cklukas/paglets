@@ -15,6 +15,8 @@ children to online same-version mesh hosts. Each child runs benchmarks locally
 and sends one result back to the parent. The CLI polls the parent with `drain`
 until all hosts have replied. Parent result bookkeeping uses the paglet state
 lock, but the actual benchmark work and remote calls happen outside that lock.
+The public parent protocol uses typed operations, while `MeshFanoutMixin`
+handles the repeated parent/child clone bookkeeping.
 
 ### Benchmarks
 
@@ -134,20 +136,24 @@ machine while still allowing different physical hosts to work in parallel.
 The request and reply dataclasses are importable:
 
 ```python
-from paglets.examples.performance import BenchmarkRequest, PerformanceBenchmarkAgent
-from paglets.core.messages import Message
+from paglets.examples.performance import (
+    PERFORMANCE_COLLECT,
+    BenchmarkRequest,
+    PerformanceBenchmarkAgent,
+    PerformanceCollectRequest,
+)
+from paglets.patterns.operations import OperationClient
 from paglets.serialization.codec import dataclass_to_wire
 
 proxy = self.context.create_paglet(PerformanceBenchmarkAgent)
-summary = proxy.send(
-    Message(
-        "collect",
-        {
-            "request": dataclass_to_wire(
-                BenchmarkRequest(duration_seconds=0.5, disk_size_bytes=64 * 1024 * 1024)
-            ),
-            "timeout": 120.0,
-        },
+client = OperationClient(proxy)
+summary = client.call(
+    PERFORMANCE_COLLECT,
+    PerformanceCollectRequest(
+        request=dataclass_to_wire(
+            BenchmarkRequest(duration_seconds=0.5, disk_size_bytes=64 * 1024 * 1024)
+        ),
+        timeout=120.0,
     )
 )
 ```

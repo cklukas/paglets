@@ -4,39 +4,86 @@ from __future__ import annotations
 
 import contextlib
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from paglets.core.agent import Paglet, PagletState, state_locked
-from paglets.core.messages import Message
+from paglets.core.agent import state_locked
+from paglets.patterns.coordination import MeshFanoutMixin, MeshFanoutState
+from paglets.patterns.operations import OperationClient, OperationPaglet
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.services.contracts import EmptyPayload, ServiceOperation
 
 from .kernels import run_host_benchmarks
 from .models import BenchmarkRequest
 
 
 @dataclass
-class PerformanceBenchmarkState(PagletState):
-    role: str = "parent"
+class PerformanceBenchmarkState(MeshFanoutState):
     request: dict[str, Any] = field(default_factory=dict)
     timeout: float = 120.0
-    parent_host_url: str = ""
-    parent_agent_id: str = ""
-    target_host_name: str = ""
-    target_host_url: str = ""
-    deadline: float = 0.0
-    pending_hosts: list[str] = field(default_factory=list)
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceCollectRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+    timeout: float = 120.0
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceDrainRequest:
+    wait_timeout: float = 0.5
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceSummaryReply:
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     cleanup_errors: dict[str, str] = field(default_factory=dict)
-    child_proxies: dict[str, dict[str, str]] = field(default_factory=dict)
+    pending_hosts: list[str] = field(default_factory=list)
 
 
-class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
+@dataclass(frozen=True, slots=True)
+class PerformanceDrainReply:
+    done: bool = False
+    summary: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceChildResultRequest:
+    host_name: str = ""
+    host_url: str = ""
+    result: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+
+
+PERFORMANCE_COLLECT = ServiceOperation("collect", PerformanceCollectRequest, PerformanceSummaryReply)
+PERFORMANCE_DRAIN = ServiceOperation("drain", PerformanceDrainRequest, PerformanceDrainReply)
+PERFORMANCE_CHILD_RESULT = ServiceOperation("child_result", PerformanceChildResultRequest, EmptyPayload)
+PERFORMANCE_SUMMARY = ServiceOperation("summary", EmptyPayload, PerformanceSummaryReply)
+PERFORMANCE_CLEANUP = ServiceOperation("cleanup", EmptyPayload, PerformanceSummaryReply)
+
+
+class PerformanceBenchmarkAgent(MeshFanoutMixin, OperationPaglet[PerformanceBenchmarkState]):
     """Clone across the mesh and run local host performance benchmarks."""
 
     State = PerformanceBenchmarkState
+    Operations = (
+        PERFORMANCE_COLLECT,
+        PERFORMANCE_DRAIN,
+        PERFORMANCE_CHILD_RESULT,
+        PERFORMANCE_SUMMARY,
+        PERFORMANCE_CLEANUP,
+    )
+
+    def operation_handlers(self):
+        return {
+            PERFORMANCE_COLLECT: self.collect,
+            PERFORMANCE_DRAIN: self.drain,
+            PERFORMANCE_CHILD_RESULT: self.record_child_result,
+            PERFORMANCE_SUMMARY: self.summary,
+            PERFORMANCE_CLEANUP: self.cleanup_children,
+        }
 
     def run(self) -> None:
         with self.locked_state() as state:
@@ -49,73 +96,36 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
             )
             thread.start()
 
-    def handle_message(self, message: Message):
-        if message.kind == "collect":
-            with self.locked_state() as state:
-                state.request = dict(message.args.get("request") or {})
-                state.timeout = float(message.args.get("timeout", 120.0))
-            return self.collect()
-        if message.kind == "drain":
-            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
-        if message.kind == "child_result":
-            return self.record_child_result(message.args)
-        if message.kind == "summary":
-            self._expire_timed_out_hosts()
-            return self.summary()
-        if message.kind == "cleanup":
-            return self.cleanup_children()
-        return self.not_handled()
-
-    def collect(self) -> dict[str, Any]:
+    def collect(self, request: PerformanceCollectRequest) -> PerformanceSummaryReply:
+        self.fanout_reset(timeout=request.timeout)
         with self.locked_state() as state:
-            state.role = "parent"
-            state.parent_host_url = self.context.address
-            state.parent_agent_id = self.agent_id
-            state.pending_hosts = []
+            state.request = dict(request.request)
+            state.timeout = float(request.timeout)
             state.results = {}
-            state.errors = {}
-            state.cleanup_errors = {}
-            state.child_proxies = {}
-            timeout = state.timeout
-            state.deadline = time.monotonic() + max(0.0, timeout)
-        hosts = self.context.available_hosts(online_only=True, include_self=True)
+        hosts = self.fanout_available_hosts(include_self=True)
 
         for host in hosts:
-            with self.locked_state() as state:
-                state.pending_hosts.append(host.name)
-                state.role = "child"
-                state.target_host_name = host.name
-                state.target_host_url = host.url
+            self.fanout_prepare_clone(host)
             try:
                 child = self.clone_to(host.name)
-                with self.locked_state() as state:
-                    state.child_proxies[host.name] = child.to_wire()
+                self.fanout_record_child_proxy(host.name, child)
             except Exception as exc:
-                with self.locked_state() as state:
-                    state.pending_hosts = [name for name in state.pending_hosts if name != host.name]
-                    state.errors[host.name] = str(exc)
+                self.fanout_record_error(host.name, str(exc))
             finally:
-                with self.locked_state() as state:
-                    state.role = "parent"
-                    state.target_host_name = ""
-                    state.target_host_url = ""
+                self.fanout_finish_clone_prepare()
 
         return self.summary()
 
-    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
+    def drain(self, request: PerformanceDrainRequest) -> PerformanceDrainReply:
         self._expire_timed_out_hosts()
 
         def ready(state: PerformanceBenchmarkState) -> bool:
             return not state.pending_hosts
 
-        timeout = max(0.0, wait_timeout)
-        with self.locked_state() as state:
-            if state.deadline > 0:
-                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
-        self.wait_state(ready, timeout=timeout)
+        self.fanout_wait_for(ready, wait_timeout=request.wait_timeout)
         self._expire_timed_out_hosts()
         summary = self.summary()
-        return {"done": not summary["pending_hosts"], "summary": summary}
+        return PerformanceDrainReply(done=not summary.pending_hosts, summary=dataclass_to_wire(summary))
 
     def _run_child(self) -> None:
         with self.locked_state() as state:
@@ -135,62 +145,54 @@ class PerformanceBenchmarkAgent(Paglet[PerformanceBenchmarkState]):
                 "host_name": target_host_name or self.context.name,
                 "host_url": target_host_url or self.context.address,
                 "result": dataclass_to_wire(result),
+                "error": "",
             }
         except Exception as exc:
             payload = {
                 "host_name": target_host_name or self.context.name,
                 "host_url": target_host_url or self.context.address,
+                "result": {},
                 "error": str(exc),
             }
 
         parent = self.context.get_proxy(parent_agent_id, parent_host_url)
         try:
             if parent is not None:
-                parent.send(Message("child_result", payload))
+                OperationClient(parent).call(PERFORMANCE_CHILD_RESULT, PerformanceChildResultRequest(**payload))
         finally:
             with contextlib.suppress(Exception):
                 self.context.host.dispose(self.agent_id)
 
-    @state_locked
-    def record_child_result(self, payload: dict[str, Any]) -> dict[str, Any]:
-        host_name = str(payload["host_name"])
-        self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host_name]
-        if payload.get("error"):
-            self.state.errors[host_name] = str(payload["error"])
-        else:
-            self.state.results[host_name] = {
-                "host_url": str(payload.get("host_url") or ""),
-                "result": dict(payload.get("result") or {}),
-            }
-        return {"ok": True}
-
-    @state_locked
-    def summary(self) -> dict[str, Any]:
-        return {
-            "results": dict(self.state.results),
-            "errors": dict(self.state.errors),
-            "cleanup_errors": dict(self.state.cleanup_errors),
-            "pending_hosts": list(self.state.pending_hosts),
-        }
-
-    def cleanup_children(self) -> dict[str, Any]:
+    def record_child_result(self, request: PerformanceChildResultRequest) -> EmptyPayload:
+        host_name = str(request.host_name)
         with self.locked_state() as state:
-            children = {host_name: dict(proxy) for host_name, proxy in state.child_proxies.items()}
-        for host_name, proxy_wire in children.items():
-            try:
-                from paglets.remote.proxy import PagletProxy
+            state.pending_hosts = [name for name in state.pending_hosts if name != host_name]
+            if host_name and host_name not in state.done_hosts:
+                state.done_hosts.append(host_name)
+            if request.error:
+                state.errors[host_name] = request.error
+            else:
+                state.results[host_name] = {
+                    "host_url": request.host_url,
+                    "result": dict(request.result),
+                }
+        self.notify_all_state_changed()
+        return EmptyPayload()
 
-                PagletProxy.from_wire(proxy_wire, self.context.host.client).dispose()
-            except Exception as exc:
-                with self.locked_state() as state:
-                    state.cleanup_errors[host_name] = str(exc)
+    @state_locked
+    def summary(self, request: EmptyPayload | None = None) -> PerformanceSummaryReply:
+        _ = request
+        return PerformanceSummaryReply(
+            results=dict(self.state.results),
+            errors=dict(self.state.errors),
+            cleanup_errors=dict(self.state.cleanup_errors),
+            pending_hosts=list(self.state.pending_hosts),
+        )
+
+    def cleanup_children(self, request: EmptyPayload | None = None) -> PerformanceSummaryReply:
+        _ = request
+        self.fanout_cleanup_children()
         return self.summary()
 
     def _expire_timed_out_hosts(self) -> None:
-        with self.locked_state() as state:
-            if not state.pending_hosts or state.deadline <= 0 or time.monotonic() < state.deadline:
-                return
-            for host_name in list(state.pending_hosts):
-                state.errors[host_name] = "timed out waiting for benchmark result"
-            state.pending_hosts = []
-        self.notify_all_state_changed()
+        self.fanout_expire_pending("timed out waiting for benchmark result")

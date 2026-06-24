@@ -9,7 +9,7 @@ import os
 import sys
 from typing import Any
 
-from paglets.core.messages import Message
+from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
@@ -19,6 +19,13 @@ from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
+from .agent import (
+    SEARCH_CLEANUP,
+    SEARCH_DRAIN,
+    SEARCH_START,
+    SearchDrainRequest,
+    SearchStartRequest,
+)
 from .models import (
     DEFAULT_DRAIN_WAIT_SECONDS,
     DEFAULT_SEARCH_TIMEOUT_SECONDS,
@@ -227,32 +234,29 @@ def _run_search(
         {},
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
+    operations = OperationClient(proxy)
     events: list[SearchEvent] = []
     try:
-        proxy.send(
-            Message(
-                "start",
-                {
-                    "request": dataclass_to_wire(request),
-                    "targets": list(args.host),
-                    "timeout": max(0.0, float(args.timeout)),
-                },
-            )
+        operations.call(
+            SEARCH_START,
+            SearchStartRequest(
+                request=dataclass_to_wire(request),
+                targets=list(args.host),
+                timeout=max(0.0, float(args.timeout)),
+            ),
         )
         cursor = 0
         use_color = _use_color(args)
         while True:
-            reply = proxy.send(
-                Message(
-                    "drain",
-                    {
-                        "after_cursor": cursor,
-                        "wait_timeout": max(0.0, float(args.poll_interval)),
-                        "limit": max(1, int(args.drain_limit)),
-                    },
-                )
+            reply = operations.call(
+                SEARCH_DRAIN,
+                SearchDrainRequest(
+                    after_cursor=cursor,
+                    wait_timeout=max(0.0, float(args.poll_interval)),
+                    limit=max(1, int(args.drain_limit)),
+                ),
             )
-            for event_wire in reply.get("events") or []:
+            for event_wire in reply.events:
                 event = dataclass_from_wire(SearchEvent, event_wire)
                 events.append(event)
                 cursor = max(cursor, event.cursor)
@@ -260,11 +264,11 @@ def _run_search(
                     print(json.dumps(dataclass_to_wire(event), sort_keys=True))
                 elif not args.json and not args.no_stream:
                     _print_event(event, use_color=use_color)
-            if reply.get("done"):
-                return dict(reply.get("summary") or {}), events
+            if reply.done:
+                return dict(reply.summary), events
     finally:
         with contextlib.suppress(Exception):
-            proxy.send(Message("cleanup"))
+            operations.call(SEARCH_CLEANUP)
         with contextlib.suppress(Exception):
             proxy.dispose()
 

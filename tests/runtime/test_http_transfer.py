@@ -293,8 +293,8 @@ def test_binary_state_json_projection_and_dataclass_restore(tmp_path: Path):
     finally:
         host.stop()
 
-    assert state_payload["state"]["payload"] == {"__paglets_binary__": "bytes", "base64": "AHBheWxvYWQ="}
-    assert state_payload["state"]["marker"] == {"__paglets_binary__": "bytearray", "base64": "AW1hcmtlcg=="}
+    assert state_payload["state"]["payload"] == b"\x00payload"
+    assert state_payload["state"]["marker"] == bytearray(b"\x01marker")
     assert restored.payload == b"\x00payload"
     assert restored.marker == bytearray(b"\x01marker")
 

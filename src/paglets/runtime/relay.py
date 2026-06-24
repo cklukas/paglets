@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
 import queue
 import threading
 import time
@@ -12,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from paglets.artifacts import ArtifactRef
 from paglets.core.errors import (
     AuthenticationError,
     ForbiddenError,
@@ -137,6 +139,12 @@ class RelayMixin:
             last_seen=node.last_seen,
             active_count=int(node.health.get("active_count", 0)),
             inactive_count=int(node.health.get("inactive_count", 0)),
+            tags=tuple(str(item).strip().casefold() for item in node.health.get("tags", []) if str(item).strip()),
+            properties={
+                str(key).strip(): str(value)
+                for key, value in dict(node.health.get("properties") or {}).items()
+                if str(key).strip()
+            },
             error=node.last_error,
         )
 
@@ -293,6 +301,49 @@ class RelayMixin:
             timeout=self.relay_delivery_timeout if timeout is None else timeout,
         )
         return response.get("result")
+
+    def relay_receive_artifact_upload(
+        self,
+        target: str,
+        headers: Any,
+        source: Any,
+        query: dict[str, list[str]],
+    ) -> ArtifactRef:
+        expires_at = time.time() + self.artifact_spool_ttl_seconds
+        spool = self.artifacts.create_from_http_request(
+            headers,
+            source,
+            owner_agent_id="",
+            name=(query.get("name") or [""])[0],
+            compression=(query.get("compression") or [""])[0],
+            expires_at=expires_at,
+            expected_sha256=(query.get("sha256") or [None])[0],
+        )
+        try:
+            response = self._relay_submit(
+                unquote(target),
+                "artifact-import",
+                {
+                    "source_artifact": spool.ref.to_wire(),
+                    "owner_agent_id": (query.get("owner_agent_id") or [""])[0],
+                    "name": (query.get("name") or [""])[0],
+                    "compression": (query.get("compression") or [""])[0],
+                    "expires_at": float((query.get("expires_at") or ["0"])[0] or 0.0),
+                },
+                timeout=self.relay_delivery_timeout,
+            )
+            return ArtifactRef.from_wire(response["artifact"])
+        finally:
+            self.artifacts.delete(spool.ref.artifact_id)
+
+    def relay_export_artifact(self, target: str, artifact_id: str) -> ArtifactRef:
+        response = self._relay_submit(
+            unquote(target),
+            "artifact-export",
+            {"artifact_id": artifact_id},
+            timeout=self.relay_delivery_timeout,
+        )
+        return ArtifactRef.from_wire(response["artifact"])
 
     def _relay_submit(self, target: str, kind: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         with self._lock:
@@ -462,11 +513,52 @@ class RelayMixin:
                     no_delay=bool(payload.get("no_delay", False)),
                 )
                 ack = {"ok": True, "result": result}
+            elif kind == "artifact-import":
+                ref = self._relay_import_artifact(dict(payload))
+                ack = {"ok": True, "artifact": ref.to_wire()}
+            elif kind == "artifact-export":
+                ref = self._relay_upload_artifact_export(str(payload["artifact_id"]))
+                ack = {"ok": True, "artifact": ref.to_wire()}
             else:
                 raise HostError(f"Unknown relay delivery kind {kind!r}")
         except Exception as exc:
             ack = {"ok": False, "error_type": exc.__class__.__name__, "error": str(exc)}
         self.client.post_json(f"{self.connect_to.rstrip('/')}/relay/ack/{delivery_id}", ack, timeout=5.0)
+
+    def _relay_import_artifact(self, payload: dict[str, Any]) -> ArtifactRef:
+        source = ArtifactRef.from_wire(payload["source_artifact"])
+        temp_path = self._artifact_root / "tmp" / f"{uuid.uuid4().hex}.part"
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.client.download_artifact(source, temp_path, timeout=self.relay_delivery_timeout)
+            result = self.artifacts.create_from_path(
+                temp_path,
+                owner_agent_id=str(payload.get("owner_agent_id") or ""),
+                name=str(payload.get("name") or source.name),
+                compression=str(payload.get("compression") or source.compression),
+                expires_at=float(payload.get("expires_at") or 0.0),
+                expected_sha256=source.sha256,
+            )
+            return result.ref
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                temp_path.unlink()
+
+    def _relay_upload_artifact_export(self, artifact_id: str) -> ArtifactRef:
+        if not self.connect_to:
+            raise HostError("artifact export through relay requires connect_to")
+        ref = self.artifacts.ref(artifact_id)
+        path = self.artifacts.blob_path(artifact_id)
+        return self.client.upload_artifact(
+            self.connect_to,
+            path,
+            owner_agent_id="",
+            name=ref.name,
+            compression=ref.compression,
+            expires_at=time.time() + self.artifact_spool_ttl_seconds,
+            expected_sha256=ref.sha256,
+            timeout=self.relay_delivery_timeout,
+        )
 
     def _relay_local_api(self, method: str, path: str, payload: dict[str, Any]) -> Any:
         parsed = urlparse(path)
@@ -483,6 +575,14 @@ class RelayMixin:
             since = int((query.get("since") or ["0"])[0])
             limit = int((query.get("limit") or ["100"])[0])
             return {"events": [event.to_wire() for event in self.list_events(since=since, limit=limit)]}
+        if method == "GET" and parts == ["artifacts"]:
+            owner = (query.get("owner_agent_id") or [None])[0]
+            return {"artifacts": [ref.to_wire() for ref in self.artifacts.list(owner_agent_id=owner)]}
+        if method == "GET" and len(parts) == 3 and parts[0] == "artifacts" and parts[2] == "metadata":
+            return {"artifact": self.artifacts.ref(parts[1]).to_wire()}
+        if method == "DELETE" and len(parts) == 2 and parts[0] == "artifacts":
+            self.artifacts.delete(parts[1])
+            return {"ok": True}
         if method == "GET" and parts == ["services"]:
             name = (query.get("name") or [None])[0]
             capability = (query.get("capability") or [None])[0]

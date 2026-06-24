@@ -18,7 +18,7 @@ membership, and admin tooling.
 
 `paglets.remote.client`
 : Implements `HostClient`, request helpers, error decoding, and binary movement
-  upload support.
+  upload support, including streamed artifact upload/download helpers.
 
 `paglets.remote.proxy` and `paglets.remote.references`
 : Provide the controlled handle and serializable reference form used to inspect,
@@ -46,6 +46,10 @@ Control-plane operations stay JSON-oriented. Movement payloads are streamed
 pickle data because paglet state can contain binary values and large nested
 dataclass structures.
 
+Large files should travel as artifacts rather than message bytes. Registered
+paglet files use artifact upload internally before the movement envelope is
+accepted on the target host, so the scratch copy is present before activation.
+
 Mesh peers must agree on mesh version and compatible code version before they
 are used as movement targets. Relay/connect mode avoids inbound ports on
 clients by long-polling a hub host.
@@ -72,4 +76,3 @@ clients by long-polling a hub host.
 - [Configuration](configuration.md) covers launch configuration for resident
   services and startup agents.
 - [Tooling](tooling.md) covers CLI and git auto-update.
-

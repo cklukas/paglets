@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import paglets.tooling.git_update as git_update
+from paglets.artifacts import (
+    DEFAULT_ARTIFACT_MAX_BYTES,
+    DEFAULT_ARTIFACT_SPOOL_TTL_SECONDS,
+    DEFAULT_ARTIFACT_STORAGE_QUOTA_BYTES,
+    ArtifactStore,
+    PagletFileRef,
+    paglet_file_ref_from_path,
+)
 from paglets.config.startup import (
     LaunchConfig,
     LaunchConfigSyncResult,
@@ -69,6 +77,10 @@ HOST_CAPABILITIES = [
     "services:mesh",
     "transfer:tickets",
     "admin:git-update",
+    "artifacts:upload",
+    "artifacts:download",
+    "artifacts:list",
+    "artifacts:delete",
 ]
 
 SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS = 0.5
@@ -111,6 +123,9 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         mesh_offline_after: float = 10.0,
         persistence_dir: str | Path | None = None,
         persistent_storage_quota_bytes: int | None = DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES,
+        artifact_max_bytes: int | None = DEFAULT_ARTIFACT_MAX_BYTES,
+        artifact_storage_quota_bytes: int | None = DEFAULT_ARTIFACT_STORAGE_QUOTA_BYTES,
+        artifact_spool_ttl_seconds: float = DEFAULT_ARTIFACT_SPOOL_TTL_SECONDS,
         launch_config: LaunchConfig | None = None,
         launch_config_sync_result: LaunchConfigSyncResult | None = None,
         auto_update_from_git: bool = False,
@@ -123,8 +138,12 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         relay_offline_after: float = RELAY_OFFLINE_AFTER_SECONDS,
         relay_delivery_timeout: float | None = None,
         relay_queue_limit: int = RELAY_QUEUE_LIMIT,
+        tags: Sequence[str] | None = None,
+        properties: dict[str, str] | None = None,
     ):
         self.name = name
+        self.tags = _normalize_host_tags(tags or ())
+        self.host_properties = _normalize_host_properties(properties or {})
         self.api_key = api_key
         self.public_url = public_url.strip().rstrip("/") if public_url else None
         self.connect_to = connect_to.strip().rstrip("/") if connect_to else None
@@ -155,7 +174,21 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self._inactive_dir = self.persistence_dir / "inactive"
         self._work_root = self.persistence_dir / "work"
         self._storage_root = self.persistence_dir / "storage"
+        self._artifact_root = self.persistence_dir / "artifacts"
         self.persistent_storage_quota_bytes = persistent_storage_quota_bytes
+        self.artifact_max_bytes = 0 if artifact_max_bytes is None else max(0, int(artifact_max_bytes))
+        self.artifact_storage_quota_bytes = (
+            None if artifact_storage_quota_bytes is None else max(0, int(artifact_storage_quota_bytes))
+        )
+        self.artifact_spool_ttl_seconds = max(1.0, float(artifact_spool_ttl_seconds))
+        self.artifacts = ArtifactStore(
+            self._artifact_root,
+            host_url=self.address,
+            max_artifact_bytes=self.artifact_max_bytes,
+            quota_bytes=self.artifact_storage_quota_bytes,
+            spool_ttl_seconds=self.artifact_spool_ttl_seconds,
+        )
+        self._registered_files: dict[str, dict[str, PagletFileRef]] = {}
         self._inactive: dict[str, InactiveRecord] = {}
         self._services = ServiceRegistry()
         self._resident_services: dict[str, _ManagedResidentService] = {}
@@ -171,6 +204,8 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self._threads: list[threading.Thread] = []
         self._activation_stop = threading.Event()
         self._activation_thread: threading.Thread | None = None
+        self._artifact_cleanup_stop = threading.Event()
+        self._artifact_cleanup_thread: threading.Thread | None = None
         self._relay_stop = threading.Event()
         self._relay_client_thread: threading.Thread | None = None
         self._relay_nodes: dict[str, _RelayNode] = {}
@@ -225,6 +260,7 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self._start_activation_scheduler()
         self.mesh.start()
         self._start_bind_watcher()
+        self._start_artifact_cleanup()
         self._emit("context-start")
 
     def serve_forever(self) -> None:
@@ -257,6 +293,7 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
                 threads = [self._thread]
         self._stop_relay_client()
         self._stop_activation_scheduler()
+        self._stop_artifact_cleanup()
         if deactivate_active:
             self._deactivate_active_for_shutdown()
         self._terminate_active_children()
@@ -272,6 +309,8 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             if self._relay_client_thread is not None:
                 return
             self._clear_work_root()
+            self.artifacts.set_host_url(self.address)
+            self.artifacts.cleanup_temporary()
         self._activation_stop.clear()
         self._emit_launch_config_sync_result()
         self._activate_startup_records()
@@ -280,6 +319,7 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self._start_activation_scheduler()
         self.mesh.refresh_self()
         self._start_relay_client()
+        self._start_artifact_cleanup()
         self._emit("context-start")
 
     def _open_http_servers(self, bind_hosts: list[str], port: int) -> list[_PagletHTTPServer]:
@@ -303,6 +343,8 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self.address = self.public_url or f"http://{self.public_host}:{actual_port}"
         self._servers = servers
         self._server = servers[0]
+        self.artifacts.set_host_url(self.address)
+        self.artifacts.cleanup_temporary()
         self._threads = [
             threading.Thread(target=server.serve_forever, name=f"paglets-{self.name}-{index}", daemon=True)
             for index, server in enumerate(servers)
@@ -350,6 +392,30 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         self._bind_watch_thread = None
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=2)
+
+    def _start_artifact_cleanup(self) -> None:
+        if self._artifact_cleanup_thread is not None and self._artifact_cleanup_thread.is_alive():
+            return
+        self._artifact_cleanup_stop.clear()
+        self._artifact_cleanup_thread = threading.Thread(
+            target=self._artifact_cleanup_loop,
+            name=f"paglets-artifacts-cleanup-{self.name}",
+            daemon=True,
+        )
+        self._artifact_cleanup_thread.start()
+
+    def _stop_artifact_cleanup(self) -> None:
+        self._artifact_cleanup_stop.set()
+        thread = self._artifact_cleanup_thread
+        self._artifact_cleanup_thread = None
+        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=2)
+
+    def _artifact_cleanup_loop(self) -> None:
+        interval = max(1.0, min(float(self.artifact_spool_ttl_seconds), 300.0))
+        while not self._artifact_cleanup_stop.wait(interval):
+            with contextlib.suppress(Exception):
+                self.artifacts.cleanup_temporary()
 
     def _bind_watch_loop(self) -> None:
         while not self._bind_watch_stop.wait(self._bind_watch_interval):
@@ -470,6 +536,48 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             quota_bytes=quota,
         )
 
+    def register_file_for(
+        self,
+        agent_id: str,
+        path: str | Path,
+        *,
+        name: str | None = None,
+        mode: str = "copy",
+    ) -> PagletFileRef:
+        self._require_agent(agent_id)
+        ref = paglet_file_ref_from_path(
+            path,
+            name=name,
+            mode=mode,
+            host_name=self.name,
+            host_url=self.address,
+        )
+        with self._lock:
+            files = self._registered_files.setdefault(agent_id, {})
+            files[ref.name] = ref
+        return ref
+
+    def registered_files_for(self, agent_id: str) -> list[PagletFileRef]:
+        with self._lock:
+            return [PagletFileRef.from_wire(ref.to_wire()) for ref in self._registered_files.get(agent_id, {}).values()]
+
+    def unregister_file_for(self, agent_id: str, name_or_ref: str | PagletFileRef) -> None:
+        name = name_or_ref.name if isinstance(name_or_ref, PagletFileRef) else str(name_or_ref)
+        with self._lock:
+            files = self._registered_files.get(agent_id)
+            if files is not None:
+                files.pop(name, None)
+                if not files:
+                    self._registered_files.pop(agent_id, None)
+
+    def registered_file_path_for(self, agent_id: str, name_or_ref: str | PagletFileRef) -> Path:
+        name = name_or_ref.name if isinstance(name_or_ref, PagletFileRef) else str(name_or_ref)
+        with self._lock:
+            ref = self._registered_files.get(agent_id, {}).get(name)
+        if ref is None:
+            raise HostError(f"No registered file {name!r} for paglet {agent_id!r}")
+        return Path(ref.current_path)
+
     def list_agents(self, *, active: bool = True, inactive: bool = False) -> list[dict[str, Any]]:
         with self._lock:
             agents = [self._summary(agent) for agent in self._agents.values()] if active else []
@@ -493,6 +601,8 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             "inactive_count": inactive_count,
             "code_version": self.mesh.code_version,
             "capabilities": capabilities,
+            "tags": list(self.tags),
+            "properties": dict(self.host_properties),
         }
         if self._relay_nodes:
             payload["relay_nodes"] = self.relay_diagnostics()["nodes"]
@@ -1118,6 +1228,14 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
     @staticmethod
     def _safe_host_name(name: str) -> str:
         return "".join(char if char.isalnum() or char in "._-" else "_" for char in name) or "host"
+
+
+def _normalize_host_tags(tags: Sequence[str]) -> tuple[str, ...]:
+    return tuple(sorted({str(tag).strip().casefold() for tag in tags if str(tag).strip()}))
+
+
+def _normalize_host_properties(properties: dict[str, str]) -> dict[str, str]:
+    return {str(key).strip(): str(value) for key, value in properties.items() if str(key).strip()}
 
 
 class _RemoteResourceRegistry:

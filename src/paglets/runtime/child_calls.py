@@ -161,6 +161,21 @@ class _ChildCallMixin:
         if op == "persistent_storage":
             storage = self.persistent_storage_for(agent_id, quota_bytes=payload.get("quota_bytes"))
             return {"root": str(storage.root), "quota_bytes": storage.quota_bytes}
+        if op == "register_file":
+            ref = self.register_file_for(
+                agent_id,
+                str(payload["path"]),
+                name=payload.get("name"),
+                mode=str(payload.get("mode") or "copy"),
+            )
+            return {"file": ref.to_wire()}
+        if op == "registered_files":
+            return {"files": [ref.to_wire() for ref in self.registered_files_for(agent_id)]}
+        if op == "unregister_file":
+            self.unregister_file_for(agent_id, str(payload["name"]))
+            return {"ok": True}
+        if op == "registered_file_path":
+            return {"path": str(self.registered_file_path_for(agent_id, str(payload["name"])))}
         if op.startswith("storage_"):
             return self._handle_child_storage_call(agent_id, op, payload)
         raise HostError(f"Unknown child host call {op!r}")
@@ -176,12 +191,25 @@ class _ChildCallMixin:
         record.resource_status = dict(payload.get("resources") or {})
         ticket = TransferTicket.from_wire(payload["ticket"])
         target_info = dict(payload["target_info"])
-        self._cleanup_agent_work_dir(agent_id)
         envelope = self._make_envelope(record, EnvelopeKind.DISPATCH, target_info, ticket=ticket)
+        staged = self._stage_registered_files(
+            agent_id,
+            target_info,
+            target_agent_id=agent_id,
+            kind=EnvelopeKind.DISPATCH,
+        )
+        if staged:
+            envelope.metadata["registered_files"] = staged
         if not _is_relay_transport_url(str(target_info["address"])):
             self._remove_active_agent(agent_id, record, terminate=False)
             record.set_terminal_proxy_wire({"host_url": target_info["address"], "agent_id": agent_id})
-            response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+            try:
+                response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+            except Exception:
+                self._cleanup_staged_registered_artifacts(staged)
+                raise
+            self._finalize_registered_file_departure(agent_id, staged, delete_moves=True)
+            self._cleanup_agent_work_dir(agent_id)
             self._emit("dispatch", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
             return {"proxy": response["proxy"]}
         record.departing = True
@@ -189,7 +217,10 @@ class _ChildCallMixin:
             response = self._post_envelope_with_ticket(ticket, target_info, envelope)
         except Exception:
             record.departing = False
+            self._cleanup_staged_registered_artifacts(staged)
             raise
+        self._finalize_registered_file_departure(agent_id, staged, delete_moves=True)
+        self._cleanup_agent_work_dir(agent_id)
         self._remove_active_agent(agent_id, record, terminate=False)
         record.set_terminal_proxy_wire(response["proxy"])
         self._emit("dispatch", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
@@ -209,7 +240,14 @@ class _ChildCallMixin:
             clone_of=agent_id,
             ticket=ticket,
         )
-        response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        staged = self._stage_registered_files(agent_id, target_info, target_agent_id=clone_id, kind=EnvelopeKind.CLONE)
+        if staged:
+            envelope.metadata["registered_files"] = staged
+        try:
+            response = self._post_envelope_with_ticket(ticket, target_info, envelope)
+        except Exception:
+            self._cleanup_staged_registered_artifacts(staged)
+            raise
         self._emit(
             "clone",
             agent_id=agent_id,
@@ -239,6 +277,8 @@ class _ChildCallMixin:
         record.state = dict(payload.get("state") or record.state)
         record.resource_status = dict(payload.get("resources") or {})
         self._cleanup_agent_work_dir(agent_id)
+        with self._lock:
+            self._registered_files.pop(agent_id, None)
         self._remove_active_agent(agent_id, record, terminate=False)
         self._emit("dispose", agent_id=agent_id, class_name=record.agent_class_name, data={"active": True})
         return {"ok": True}

@@ -59,6 +59,11 @@ class ComputeSlotRequest:
     estimated_runtime_seconds: float = 0.0
     requires_gpu: bool = False
     gpu_memory_mb: int = 0
+    required_host_tags: tuple[str, ...] = ()
+    excluded_host_tags: tuple[str, ...] = ()
+    preferred_host_tags: tuple[str, ...] = ()
+    excluded_host_names: tuple[str, ...] = ()
+    excluded_host_urls: tuple[str, ...] = ()
     submitted_at: float = 0.0
     redirect_count: int = 0
     last_redirect_at: float = 0.0
@@ -94,6 +99,8 @@ class SchedulerHostStatus:
     work_free_bytes: int = 0
     queue_length: int = 0
     active_leases: int = 0
+    host_tags: tuple[str, ...] = ()
+    host_properties: dict[str, str] = field(default_factory=dict)
     reserved_cpu_cores: int = 0
     reserved_memory_bytes: int = 0
     reserved_temp_storage_bytes: int = 0
@@ -324,7 +331,9 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             if health:
                 rejected[key] = health
                 continue
-            candidates.append(CandidateHost(status=status, score=_candidate_score(status), reasons=["suitable"]))
+            candidates.append(
+                CandidateHost(status=status, score=_candidate_score(status, request.slot), reasons=["suitable"])
+            )
         candidates.sort(key=lambda item: (item.score, item.status.host_name, item.status.host_url))
         limit = max(0, int(request.limit))
         if limit:
@@ -701,6 +710,10 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         volume = disk.volumes[0] if disk is not None and disk.volumes else None
         if disk is not None:
             errors.extend(f"{path}: {error}" for path, error in disk.errors.items())
+        try:
+            health = self.context.host.health()
+        except Exception:
+            health = {}
         cpu_count = int(summary.cpu_count_logical if summary is not None else 0)
         load_average = list(load.load_average if load is not None else [])
         load_value = load_average[0] if load_average else 0.0
@@ -738,6 +751,8 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             work_free_bytes=work_free,
             queue_length=queue_length,
             active_leases=active_leases,
+            host_tags=tuple(str(item) for item in health.get("tags", [])),
+            host_properties={str(key): str(value) for key, value in dict(health.get("properties") or {}).items()},
             reserved_cpu_cores=reserved["cpu"],
             reserved_memory_bytes=reserved["memory"],
             reserved_temp_storage_bytes=reserved["storage"],
@@ -1013,6 +1028,15 @@ def _normalize_request(request: ComputeSlotRequest, *, default_host_url: str) ->
         estimated_runtime_seconds=max(0.0, float(request.estimated_runtime_seconds)),
         requires_gpu=bool(request.requires_gpu),
         gpu_memory_mb=max(0, int(request.gpu_memory_mb)),
+        required_host_tags=_normalize_tag_tuple(request.required_host_tags),
+        excluded_host_tags=_normalize_tag_tuple(request.excluded_host_tags),
+        preferred_host_tags=_normalize_tag_tuple(request.preferred_host_tags),
+        excluded_host_names=tuple(
+            sorted({str(name).strip().casefold() for name in request.excluded_host_names if str(name).strip()})
+        ),
+        excluded_host_urls=tuple(
+            sorted({str(url).strip().rstrip("/") for url in request.excluded_host_urls if str(url).strip()})
+        ),
         submitted_at=submitted_at,
         redirect_count=max(0, int(request.redirect_count)),
         last_redirect_at=max(0.0, float(request.last_redirect_at)),
@@ -1025,6 +1049,9 @@ def _can_ever_satisfy(status: SchedulerHostStatus, request: ComputeSlotRequest) 
         return "CPU jobs unsupported"
     if request.requires_gpu and not status.supports_gpu_jobs:
         return "GPU jobs unsupported"
+    host_rejection = _host_policy_rejection(status, request)
+    if host_rejection:
+        return host_rejection
     eligible_cpu_count = len(_eligible_cpu_ids(status))
     if eligible_cpu_count > 0 and request.cpu_cores > eligible_cpu_count:
         return "requested CPU cores exceed host eligible CPU count"
@@ -1092,7 +1119,7 @@ def _best_projected_redirect_target(
         key=lambda status: (
             status.queue_length,
             -status.free_cpu_cores,
-            _candidate_score(status),
+            _candidate_score(status, request),
             status.host_name,
             status.host_url,
         )
@@ -1120,6 +1147,8 @@ def _reserve_projected_capacity(status: SchedulerHostStatus, request: ComputeSlo
         work_free_bytes=status.work_free_bytes,
         queue_length=status.queue_length,
         active_leases=status.active_leases + 1,
+        host_tags=status.host_tags,
+        host_properties=dict(status.host_properties),
         reserved_cpu_cores=status.reserved_cpu_cores + max(1, int(request.cpu_cores)),
         reserved_memory_bytes=status.reserved_memory_bytes + max(0, int(request.memory_bytes)),
         reserved_temp_storage_bytes=status.reserved_temp_storage_bytes + max(0, int(request.temp_storage_bytes)),
@@ -1215,7 +1244,7 @@ def _local_cpu_affinity_capability(cpu_count: int) -> tuple[bool, list[int]]:
     return False, fallback
 
 
-def _candidate_score(status: SchedulerHostStatus) -> float:
+def _candidate_score(status: SchedulerHostStatus, request: ComputeSlotRequest | None = None) -> float:
     cpu_pressure = max(0.0, status.load_per_cpu) + max(0.0, status.cpu_percent / 100.0)
     memory_pressure = 1.0
     if status.memory_total_bytes:
@@ -1223,4 +1252,34 @@ def _candidate_score(status: SchedulerHostStatus) -> float:
     storage_pressure = 1.0
     if status.work_total_bytes:
         storage_pressure = 1.0 - (status.free_temp_storage_bytes / status.work_total_bytes)
-    return round(cpu_pressure + memory_pressure + storage_pressure + status.queue_length * 0.1, 6)
+    preferred_bonus = 0.0
+    if request is not None and request.preferred_host_tags:
+        matches = len(set(request.preferred_host_tags) & _status_tag_set(status))
+        preferred_bonus = min(0.75, matches * 0.25)
+    return round(
+        max(0.0, cpu_pressure + memory_pressure + storage_pressure + status.queue_length * 0.1 - preferred_bonus), 6
+    )
+
+
+def _host_policy_rejection(status: SchedulerHostStatus, request: ComputeSlotRequest) -> str:
+    status_tags = _status_tag_set(status)
+    required = set(request.required_host_tags)
+    missing = sorted(required - status_tags)
+    if missing:
+        return "missing required host tags: " + ", ".join(missing)
+    excluded_tags = sorted(set(request.excluded_host_tags) & status_tags)
+    if excluded_tags:
+        return "excluded host tags present: " + ", ".join(excluded_tags)
+    if status.host_name.strip().casefold() in {name.strip().casefold() for name in request.excluded_host_names}:
+        return "host name excluded"
+    if status.host_url.rstrip("/") in {url.rstrip("/") for url in request.excluded_host_urls}:
+        return "host URL excluded"
+    return ""
+
+
+def _status_tag_set(status: SchedulerHostStatus) -> set[str]:
+    return {str(tag).strip().casefold() for tag in status.host_tags if str(tag).strip()}
+
+
+def _normalize_tag_tuple(tags: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted({str(tag).strip().casefold() for tag in tags if str(tag).strip()}))
