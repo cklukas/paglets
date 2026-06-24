@@ -14,7 +14,7 @@ from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from paglets.services.contracts import ServiceContract, ServiceOperation
 from paglets.services.resident import ResidentServiceSpec
 
-from ..system_info import GET_DISK, GET_LOAD, GET_SUMMARY, SERVER_INFO, DiskRequest, LoadRequest
+from ..server_info import GET_DISK, GET_LOAD, GET_SUMMARY, SERVER_INFO, DiskRequest, LoadRequest
 
 DEFAULT_SAMPLE_INTERVAL_SECONDS = 5.0
 DEFAULT_GOSSIP_INTERVAL_SECONDS = 2.0

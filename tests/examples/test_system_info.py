@@ -9,7 +9,9 @@ import psutil
 from paglets.config.startup import load_launch_config, sync_launch_config
 from paglets.core.agent import PagletContext
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.system_info import (
+from paglets.remote.admin import ServerRef
+from paglets.runtime.host import Host
+from paglets.system.server_info import (
     GET_DISK,
     GET_LOAD,
     LIST_PROCESSES,
@@ -18,9 +20,7 @@ from paglets.examples.system_info import (
     LoadRequest,
     ProcessListRequest,
 )
-from paglets.examples.system_info.cli import main as sysinfo_main
-from paglets.remote.admin import ServerRef
-from paglets.runtime.host import Host
+from paglets.system.server_info.cli import main as sysinfo_main
 from tests.support import free_port
 
 
@@ -93,7 +93,7 @@ def test_paglets_sysinfo_df_uses_dynamic_entry_and_collects_mesh(tmp_path, capsy
         beta.mesh.gossip_once()
         alpha.mesh.gossip_once()
         monkeypatch.setattr(
-            "paglets.examples.system_info.cli._select_entry_server",
+            "paglets.system.server_info.cli._select_entry_server",
             lambda *, entry_name, client: ServerRef("alpha", alpha.address),
         )
 

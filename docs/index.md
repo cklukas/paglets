@@ -1,6 +1,6 @@
-<img src="repository-open-graph-1280x640.png" alt="paglets social preview" width="640" align="right">
+<img src="repository-open-graph-1280x640.png" alt="paglets social preview" width="640">
 
-# paglets
+# paglets - mobile python agents
 
 `paglets` is a compact Python runtime inspired by Java Aglets. A paglet is a
 mobile object with explicit dataclass state, lifecycle hooks, message handling,
@@ -114,14 +114,16 @@ relay delivery fails. Hubs expose `GET /paglets/relay/diagnostics` and support
 for corporate network tuning.
 
 On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
-demo config. The default launch config declares lazy `server-info` and eager
-`mesh-info`, so hosts continuously exchange resource snapshots while still
-using `server-info` as the local system information provider:
+config. The default launch config declares built-in resident services for host
+inspection, mesh resource snapshots, compute-slot scheduling, and user
+notifications:
 
 ```bash
 uv run paglets-sysinfo df
 uv run paglets-sysinfo load
 uv run paglets-mesh-info summary
+uv run paglets-compute-slots status
+uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
 uv run paglets-pi-compute --digits 16
 uv run paglets-perf-test
 uv run paglets-mesh-benchmark --payload-size 64K

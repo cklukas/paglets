@@ -111,6 +111,9 @@ class _ChildHostFacade:
         payload = self._call("get_proxies", {"state": state})
         return [PagletProxy.from_wire(item, self.client) for item in payload.get("proxies", [])]
 
+    def set_process_cpu_affinity(self, agent_id: str, cpu_core_ids: list[int]) -> dict[str, Any]:
+        return dict(self._call("set_process_cpu_affinity", {"agent_id": agent_id, "cpu_core_ids": cpu_core_ids}))
+
     def get_property(self, key: str, default: Any = None) -> Any:
         return self._call("get_property", {"key": key, "default": default}).get("value")
 

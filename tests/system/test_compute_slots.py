@@ -1,0 +1,497 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+from __future__ import annotations
+
+import time
+from types import SimpleNamespace
+
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.system.compute_slots import (
+    ComputeJobRuntimeInfo,
+    ComputeSlotRequest,
+    CpuAffinityResult,
+    SchedulerHostStatus,
+    SchedulerStatusRequest,
+    SlotLease,
+)
+from paglets.system.compute_slots.agent import (
+    ComputeSlotsAgent,
+    ComputeSlotsState,
+    _can_ever_satisfy,
+    _can_run_now,
+    _elastic_cpu_assignments,
+    _redirect_budget,
+)
+
+
+def affinity_result(cpu_core_ids: list[int], *, enforced: bool) -> CpuAffinityResult:
+    return CpuAffinityResult(
+        requested_cpu_ids=list(cpu_core_ids),
+        supported=True,
+        enforced=enforced,
+        error="" if enforced else "not enforced",
+    )
+
+
+def test_compute_slot_rejects_gpu_required_hosts_when_gpu_unsupported():
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        supports_gpu_jobs=False,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+    )
+    request = ComputeSlotRequest(requires_gpu=True, gpu_memory_mb=4096)
+
+    assert _can_ever_satisfy(status, request) == "GPU jobs unsupported"
+
+
+def test_compute_slot_distinguishes_eventual_fit_from_current_capacity():
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        memory_available_bytes=8 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        work_free_bytes=50 * 1024**3,
+        free_cpu_cores=0,
+        free_memory_bytes=8 * 1024**3,
+        free_temp_storage_bytes=50 * 1024**3,
+    )
+    request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)
+
+    assert _can_ever_satisfy(status, request) == ""
+    assert _can_run_now(status, request) is False
+
+
+def test_compute_slot_can_run_when_reserved_free_resources_fit():
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        memory_available_bytes=8 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        work_free_bytes=50 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=8 * 1024**3,
+        free_temp_storage_bytes=50 * 1024**3,
+    )
+    request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)
+
+    assert _can_run_now(status, request) is True
+
+
+def test_compute_slot_rejects_request_larger_than_eligible_cpu_set():
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        eligible_cpu_ids=[0, 1],
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+    )
+    request = ComputeSlotRequest(cpu_cores=3, memory_bytes=1024, temp_storage_bytes=1024)
+
+    assert _can_ever_satisfy(status, request) == "requested CPU cores exceed host eligible CPU count"
+
+
+def test_compute_slot_grant_reserves_exact_cpu_ids_when_affinity_supported():
+    request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=2)
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        cpu_affinity_supported=True,
+        eligible_cpu_ids=[0, 1, 2, 3],
+        memory_total_bytes=16 * 1024**3,
+        work_dir_base="/tmp/paglets",
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState())
+    applied: list[tuple[str, list[int]]] = []
+    agent._set_agent_cpu_affinity = (  # type: ignore[method-assign]
+        lambda agent_id, cpu_ids: (
+            applied.append((agent_id, list(cpu_ids))) or affinity_result(list(cpu_ids), enforced=True)
+        )
+    )
+
+    reply = agent._grant_now(request, status, send_message=False)
+
+    assert reply.cpu_core_ids == [0, 1]
+    assert reply.cpu_affinity_supported is True
+    assert reply.cpu_affinity_enforced is True
+    assert applied == [("agent-0", [0, 1])]
+    with agent.locked_state() as state:
+        [lease_wire] = list(state.leases.values())
+    lease = dataclass_from_wire(SlotLease, lease_wire)
+    assert lease.cpu_core_ids == [0, 1]
+    assert lease.reserved_cpu_core_ids == [0, 1]
+
+
+def test_compute_slot_grant_skips_cpu_ids_already_reserved_by_leases():
+    first_request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=2)
+    first_lease = SlotLease(
+        lease_id="lease-0",
+        request=first_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+        cpu_core_ids=[0, 1],
+        cpu_affinity_supported=True,
+    )
+    request = ComputeSlotRequest(request_id="request-1", agent_id="agent-1", cpu_cores=1)
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        cpu_affinity_supported=True,
+        eligible_cpu_ids=[0, 1, 2, 3],
+        memory_total_bytes=16 * 1024**3,
+        work_dir_base="/tmp/paglets",
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=2,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={first_lease.lease_id: dataclass_to_wire(first_lease)}))
+    agent._set_agent_cpu_affinity = lambda agent_id, cpu_ids: affinity_result(list(cpu_ids), enforced=True)  # type: ignore[method-assign]
+
+    reply = agent._grant_now(request, status, send_message=False)
+
+    assert reply.cpu_core_ids == [2]
+
+
+def test_compute_slot_elastic_affinity_spreads_spare_cpus_evenly():
+    now = time.time()
+    first = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=2),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=now,
+        expires_at=now + 60.0,
+        cpu_core_ids=[0, 1],
+        reserved_cpu_core_ids=[0, 1],
+        cpu_affinity_supported=True,
+    )
+    second = SlotLease(
+        lease_id="lease-1",
+        request=ComputeSlotRequest(request_id="request-1", agent_id="agent-1", cpu_cores=2),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=now,
+        expires_at=now + 60.0,
+        cpu_core_ids=[2, 3],
+        reserved_cpu_core_ids=[2, 3],
+        cpu_affinity_supported=True,
+    )
+
+    assignments = _elastic_cpu_assignments(list(range(10)), [first, second])
+
+    assert len(assignments["lease-0"]) == 5
+    assert len(assignments["lease-1"]) == 5
+    assert sorted(assignments["lease-0"] + assignments["lease-1"]) == list(range(10))
+
+
+def test_compute_slot_cleanup_removes_lease_for_missing_active_agent():
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="missing", cpu_cores=1),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+        cpu_core_ids=[0],
+        reserved_cpu_core_ids=[0],
+        cpu_affinity_supported=True,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._is_agent_active = lambda agent_id: False  # type: ignore[method-assign]
+
+    agent._cleanup_inactive_leases()
+
+    with agent.locked_state() as state:
+        assert state.leases == {}
+
+
+def test_compute_slot_scheduler_status_can_include_active_job_metrics_without_queue():
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0", cpu_cores=1),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+    )
+    local = SchedulerHostStatus(host_name="alpha", host_url="http://alpha", observed_at=time.time())
+    runtime = ComputeJobRuntimeInfo(
+        lease_id="lease-0",
+        request_id="request-0",
+        job_id="job-0",
+        agent_id="agent-0",
+        declared_cpu_cores=1,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._local_status = lambda: local  # type: ignore[method-assign]
+    agent._runtime_info_for_leases = lambda leases: [runtime]  # type: ignore[method-assign]
+
+    reply = agent.scheduler_status(SchedulerStatusRequest(include_jobs=True, include_queue=False))
+
+    assert reply.active_jobs == [runtime]
+    assert reply.queued_requests == []
+    assert reply.leases == []
+
+
+def test_compute_slot_redirect_target_prefers_suitable_empty_peer_queue():
+    now = time.time()
+    request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)
+    unsuitable = SchedulerHostStatus(
+        host_name="tiny",
+        host_url="http://tiny",
+        observed_at=now,
+        cpu_count_logical=1,
+        memory_total_bytes=1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=1,
+        free_memory_bytes=1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+        queue_length=0,
+    )
+    backlogged = SchedulerHostStatus(
+        host_name="backlog",
+        host_url="http://backlog",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=8 * 1024**3,
+        free_temp_storage_bytes=50 * 1024**3,
+        queue_length=5,
+    )
+    empty = SchedulerHostStatus(
+        host_name="empty",
+        host_url="http://empty",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=8 * 1024**3,
+        free_temp_storage_bytes=50 * 1024**3,
+        queue_length=0,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            peer_statuses={
+                unsuitable.host_url: dataclass_to_wire(unsuitable),
+                backlogged.host_url: dataclass_to_wire(backlogged),
+                empty.host_url: dataclass_to_wire(empty),
+            }
+        )
+    )
+
+    target = agent._redirect_target(request)
+
+    assert target is not None
+    assert target.host_url == "http://empty"
+
+
+def test_compute_slot_redirect_budget_keeps_anchor_except_single_waiter():
+    assert _redirect_budget(queue_length=0, max_fraction=0.5, max_per_tick=4) == 0
+    assert _redirect_budget(queue_length=1, max_fraction=0.5, max_per_tick=4) == 1
+    assert _redirect_budget(queue_length=2, max_fraction=0.5, max_per_tick=4) == 1
+    assert _redirect_budget(queue_length=5, max_fraction=0.5, max_per_tick=4) == 3
+    assert _redirect_budget(queue_length=20, max_fraction=0.5, max_per_tick=4) == 4
+
+
+def test_compute_slot_redirects_multiple_jobs_to_projected_peer_capacity():
+    now = time.time()
+    requests = [
+        ComputeSlotRequest(
+            request_id=f"request-{index}",
+            agent_id=f"agent-{index}",
+            cpu_cores=1,
+            memory_bytes=1024,
+            temp_storage_bytes=1024,
+        )
+        for index in range(5)
+    ]
+    peer = SchedulerHostStatus(
+        host_name="empty",
+        host_url="http://empty",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=3,
+        free_memory_bytes=3 * 1024,
+        free_temp_storage_bytes=3 * 1024,
+        queue_length=0,
+    )
+    local = SchedulerHostStatus(
+        host_name="backlog",
+        host_url="http://backlog",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=0,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+        queue_length=len(requests),
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(request) for request in requests],
+            peer_statuses={peer.host_url: dataclass_to_wire(peer)},
+        )
+    )
+    agent._context = SimpleNamespace(address=local.host_url)  # type: ignore[assignment]
+    sent: list[str] = []
+    agent._local_status = lambda: local  # type: ignore[method-assign]
+    agent._send_redirect = lambda request, reply: sent.append(request.request_id) or True  # type: ignore[method-assign]
+
+    agent._redirect_queued_requests()
+
+    assert sent == ["request-0", "request-1", "request-2"]
+    with agent.locked_state() as state:
+        remaining = [dataclass_to_wire(request) for request in requests[3:]]
+        assert state.queued_requests == remaining
+
+
+def test_compute_slot_redirect_cooldown_prevents_immediate_ping_pong():
+    now = time.time()
+    request = ComputeSlotRequest(
+        request_id="request-0",
+        agent_id="agent-0",
+        cpu_cores=1,
+        memory_bytes=1024,
+        temp_storage_bytes=1024,
+        last_redirect_at=now,
+        last_redirect_from_host_url="http://empty",
+    )
+    peer = SchedulerHostStatus(
+        host_name="empty",
+        host_url="http://empty",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=4 * 1024,
+        free_temp_storage_bytes=4 * 1024,
+        queue_length=0,
+    )
+    local = SchedulerHostStatus(
+        host_name="backlog",
+        host_url="http://backlog",
+        observed_at=now,
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=0,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+        queue_length=1,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(request)],
+            peer_statuses={peer.host_url: dataclass_to_wire(peer)},
+        )
+    )
+    agent._context = SimpleNamespace(address=local.host_url)  # type: ignore[assignment]
+    sent: list[str] = []
+    agent._local_status = lambda: local  # type: ignore[method-assign]
+    agent._send_redirect = lambda request, reply: sent.append(request.request_id) or True  # type: ignore[method-assign]
+
+    agent._redirect_queued_requests()
+
+    assert sent == []
+    with agent.locked_state() as state:
+        assert state.queued_requests == [dataclass_to_wire(request)]
+
+
+def test_compute_slot_keeps_queued_request_when_grant_delivery_fails():
+    request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=1)
+    local = SchedulerHostStatus(
+        host_name="backlog",
+        host_url="http://backlog",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(request)],
+            last_grant_at=123.0,
+        )
+    )
+    agent._context = SimpleNamespace(address=local.host_url)  # type: ignore[assignment]
+    agent._local_status = lambda: local  # type: ignore[method-assign]
+    agent._send_grant = lambda request, reply: False  # type: ignore[method-assign]
+
+    agent._grant_queued_requests()
+
+    with agent.locked_state() as state:
+        assert state.queued_requests == [dataclass_to_wire(request)]
+        assert state.leases == {}
+        assert state.last_grant_at == 123.0
+
+
+def test_compute_slot_respects_configurable_grants_per_tick():
+    requests = [
+        ComputeSlotRequest(request_id=f"request-{index}", agent_id=f"agent-{index}", cpu_cores=1) for index in range(4)
+    ]
+    local = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        memory_total_bytes=16 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        free_cpu_cores=8,
+        free_memory_bytes=16 * 1024**3,
+        free_temp_storage_bytes=100 * 1024**3,
+        load_per_cpu=0.1,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(request) for request in requests],
+            grant_interval=0.0,
+            max_grants_per_tick=2,
+        )
+    )
+    agent._context = SimpleNamespace(address=local.host_url)  # type: ignore[assignment]
+    agent._local_status = lambda: local  # type: ignore[method-assign]
+    sent: list[str] = []
+    agent._send_grant = lambda request, reply: sent.append(request.request_id) or True  # type: ignore[method-assign]
+
+    agent._grant_queued_requests()
+
+    assert sent == ["request-0", "request-1"]
+    with agent.locked_state() as state:
+        assert state.queued_requests == [dataclass_to_wire(request) for request in requests[2:]]

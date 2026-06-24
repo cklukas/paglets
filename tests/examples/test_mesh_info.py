@@ -9,7 +9,8 @@ from types import SimpleNamespace
 from paglets.config.startup import load_launch_config, sync_launch_config
 from paglets.core.agent import PagletContext
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.mesh_info import (
+from paglets.runtime.host import Host
+from paglets.system.mesh_info import (
     GET_LANDSCAPE,
     GET_SNAPSHOT,
     MESH_INFO,
@@ -22,8 +23,7 @@ from paglets.examples.mesh_info import (
     SnapshotRequest,
     TargetSelectionRequest,
 )
-from paglets.examples.mesh_info.agent import _target_rejection
-from paglets.runtime.host import Host
+from paglets.system.mesh_info.agent import _target_rejection
 from tests.support import free_port
 
 

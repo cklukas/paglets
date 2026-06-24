@@ -25,9 +25,9 @@ from paglets.examples.compute.agent import (
     _is_missing_worker_error,
     _normalize_request,
 )
-from paglets.examples.mesh_info import MeshHostSnapshot, TargetCandidate
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_to_wire
+from paglets.system.mesh_info import MeshHostSnapshot, TargetCandidate
 from tests.support import free_port
 
 

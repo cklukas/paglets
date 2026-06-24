@@ -17,7 +17,7 @@ from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequ
 from paglets.remote.transfer import TransferTicket
 from paglets.runtime.process_runtime import ChildProcessController
 from paglets.runtime.relay import _is_relay_transport_url
-from paglets.serialization.codec import dataclass_from_wire, resolve_qualified_name
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, resolve_qualified_name
 from paglets.services.contracts import ServiceRecord
 from paglets.services.resident import DEFAULT_SERVICE_LEASE_TTL_SECONDS
 
@@ -49,6 +49,15 @@ class _ChildCallMixin:
         if op == "get_proxies":
             proxies = self.get_proxies(int(payload.get("state", ACTIVE)))
             return {"proxies": [proxy.to_wire() for proxy in proxies]}
+        if op == "set_process_cpu_affinity":
+            record = self._require_agent(str(payload["agent_id"]))
+            pid = int(record.pid or 0)
+            if pid <= 0:
+                raise HostError(f"Paglet {record.agent_id!r} has no running child process")
+            cpu_core_ids = [int(cpu_id) for cpu_id in payload.get("cpu_core_ids") or []]
+            from paglets.system.compute_slots.affinity import apply_process_cpu_affinity
+
+            return {"affinity": dataclass_to_wire(apply_process_cpu_affinity(pid, cpu_core_ids))}
         if op == "get_property":
             return {"value": self.get_property(str(payload["key"]), payload.get("default"))}
         if op == "set_property":

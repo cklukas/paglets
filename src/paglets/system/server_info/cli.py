@@ -104,8 +104,8 @@ def _collect(
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
-        "paglets.examples.system_info.agent:SystemInfoCollectorAgent",
-        "paglets.examples.system_info.agent:SystemInfoCollectorState",
+        "paglets.system.server_info.agent:SystemInfoCollectorAgent",
+        "paglets.system.server_info.agent:SystemInfoCollectorState",
         {},
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)

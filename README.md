@@ -47,9 +47,17 @@ Run a packaged example CLI:
 
 ```bash
 uv run paglets-sysinfo summary
+uv run paglets-compute-slots status
+uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
 uv run paglets-search grep TODO .
 uv run paglets-pi-compute --digits 32
 ```
+
+The built-in `compute-slots` service admits coarse jobs by explicit
+`cpu_cores`, expected RAM, and temp-storage estimates; on Linux and Windows it
+can best-effort pin granted jobs to allocated CPU IDs. New compute job paglets
+can derive from `ComputeJobPaglet` so scheduling, wakeup, redirects, affinity
+metadata, and lease release stay out of job-specific code.
 
 Run a source-tree demo:
 
@@ -120,6 +128,7 @@ src/paglets/runtime/         host facade, child processes, HTTP, relay, storage 
 src/paglets/remote/          clients, proxies, transfer tickets, mesh, admin API
 src/paglets/persistence/     inactive records and managed storage
 src/paglets/services/        service contracts and resident services
+src/paglets/system/          built-in resident service agents
 src/paglets/serialization/   dataclass wire conversion and import resolution
 src/paglets/config/          launch config and bundled defaults
 src/paglets/tooling/         CLI, discovery, git auto-update

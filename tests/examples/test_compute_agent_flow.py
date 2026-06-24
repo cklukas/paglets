@@ -18,9 +18,9 @@ from paglets.examples.compute import (
     PiResultDrainRequest,
     chudnovsky_binary_split,
 )
-from paglets.examples.mesh_info import MeshHostSnapshot
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_to_wire
+from paglets.system.mesh_info import MeshHostSnapshot
 from tests.support import free_port
 
 

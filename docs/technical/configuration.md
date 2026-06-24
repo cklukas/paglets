@@ -5,7 +5,7 @@
 ## Responsibilities
 
 - Parse `~/.paglets/launch.toml`.
-- Sync the bundled demo launch configuration on first start or when requested.
+- Sync the bundled launch configuration on first start or when requested.
 - Resolve startup agent classes, initial state, singleton settings, and IDs.
 - Resolve resident service declarations and lifecycle settings.
 
@@ -16,7 +16,7 @@
   startup/resident-service resolution helpers.
 
 `paglets.config.defaults`
-: Contains package data for the bundled `launch.toml` demo configuration.
+: Contains package data for the bundled `launch.toml` configuration.
 
 ## Implementation Notes
 
@@ -35,4 +35,3 @@ interactive confirmation, forced sync, or disabling launch-config sync.
 
 - [Services](services.md) covers resident service contracts and leases.
 - [Tooling](tooling.md) covers the host CLI that loads launch configuration.
-

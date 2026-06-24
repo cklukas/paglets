@@ -1,12 +1,10 @@
 # Example Agents
 
-`paglets` ships six packaged example agents that demonstrate different runtime
-patterns without mixing application code into the root runtime namespace:
+`paglets` ships packaged example agents that demonstrate different runtime
+patterns without mixing application code into the built-in service namespace:
 
-- `paglets.examples.system_info`: a resident typed service agent plus a
-  mesh-wide collector CLI.
-- `paglets.examples.mesh_info`: an eager resident mesh resource landscape
-  service plus a summary/target-selection CLI.
+- `paglets.examples.analysis_jobs`: synthetic dataframe jobs that use
+  built-in compute-slot scheduling and return results to a home SQLite DB.
 - `paglets.examples.compute`: a coordinator/worker decimal Pi compute example
   plus a mesh-aware CLI.
 - `paglets.examples.performance`: a pure mobile benchmark agent plus a
@@ -17,8 +15,9 @@ patterns without mixing application code into the root runtime namespace:
   streaming mesh search CLI.
 
 Runtime infrastructure lives in topic packages such as `paglets.core`,
-`paglets.runtime`, `paglets.remote`, and `paglets.services`. Example agents live
-under `paglets.examples.*` so their imports make that boundary explicit.
+`paglets.runtime`, `paglets.remote`, and `paglets.services`. Built-in resident
+services live under `paglets.system.*`. Example agents live under
+`paglets.examples.*` so their imports make that boundary explicit.
 
 The larger examples are split the same way internally: request/result
 dataclasses live in `models.py`, pure computation or analysis helpers live in
@@ -52,34 +51,14 @@ first one is published to the mesh. The auto form keeps watching for LAN
 address changes and rebinds/publishes the new address after DHCP or network
 reconnect changes it.
 
-On first start, `paglets-host` copies the bundled demo launch config to
-`~/.paglets/launch.toml`. The bundled config declares lazy `server-info` and
-eager `mesh-info` services:
+On first start, `paglets-host` copies the bundled launch config to
+`~/.paglets/launch.toml`. The bundled config declares built-in resident
+services:
+
+<div class="paglets-code-source">Source: <a href="https://github.com/cklukas/paglets/blob/main/src/paglets/config/defaults/launch.toml">src/paglets/config/defaults/launch.toml</a></div>
 
 ```toml
-[launch]
-demo_config_id = "paglets-default-launch"
-demo_config_version = "4"
-
-[[resident_services]]
-class = "paglets.examples.system_info.agent:ServerInfoAgent"
-enabled = true
-agent_id = "service.server-info"
-singleton = true
-lifecycle = "lazy"
-scope = "mesh"
-idle_timeout = 30.0
-state = { service_scope = "mesh" }
-
-[[resident_services]]
-class = "paglets.examples.mesh_info.agent:MeshInfoAgent"
-enabled = true
-agent_id = "service.mesh-info"
-singleton = true
-lifecycle = "eager"
-scope = "mesh"
-idle_timeout = 0.0
-state = { service_scope = "mesh" }
+--8<-- "src/paglets/config/defaults/launch.toml"
 ```
 
 The command-line examples dynamically discover a reachable entry host from
@@ -91,6 +70,8 @@ file to maintain.
 ```bash
 uv run paglets-sysinfo [--entry alpha] df
 uv run paglets-mesh-info [--entry alpha] summary
+uv run paglets-compute-slots [--entry alpha] status
+uv run paglets-analysis-jobs [--entry alpha] --tasks 20
 uv run paglets-pi-compute [--entry alpha] --digits 16
 uv run paglets-perf-test [--entry alpha]
 uv run paglets-search [--entry alpha] grep TODO .
@@ -101,19 +82,20 @@ networks, start hosts with `--api-key-env` and use the relay setup from the main
 guide so the HTTP API requires bearer authentication.
 
 All packaged example CLIs that contact an entry host accept `--api-key-env`,
-including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-pi-compute`,
-`paglets-perf-test`, `paglets-mesh-benchmark`, and `paglets-search`. The paglet
-classes themselves do not need relay-specific branches; use normal context,
-proxy, service, creation, clone, and dispatch APIs and the host transport
-forwards relayed URLs transparently.
+including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-compute-slots`,
+`paglets-analysis-jobs`, `paglets-pi-compute`, `paglets-perf-test`,
+`paglets-mesh-benchmark`, and `paglets-search`. The paglet classes themselves
+do not need relay-specific branches; use normal context, proxy, service,
+creation, clone, and dispatch APIs and the host transport forwards relayed URLs
+transparently.
 
 ## Example Pages
 
-- [Server Info](system-info.md)
-- [Mesh Info](mesh-info.md)
+- [Analysis Jobs](analysis-jobs.md)
 - [Pi Compute](compute.md)
 - [Performance Benchmark](performance.md)
 - [Mesh Movement Benchmark](mesh-benchmark.md)
 - [Mesh Search](search.md)
 - [Source-Tree Demos](source-tree-demos.md)
 
+Built-in service pages live under [System Services](../system/index.md).

@@ -18,14 +18,14 @@ from paglets.core.errors import InvalidAgentError
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, qualified_name
-
-from ..mesh_info import (
+from paglets.system.mesh_info import (
     MESH_INFO,
     SELECT_TARGETS,
     MeshHostSnapshot,
     TargetCandidate,
     TargetSelectionRequest,
 )
+
 from .chudnovsky import (
     _available_decimal_digits,
     _combine_parts,

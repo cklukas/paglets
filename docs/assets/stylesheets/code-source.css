@@ -1,0 +1,25 @@
+/*
+ * Copyright (c) 2026 by C. Klukas.
+ * Licensed under the MIT License. See LICENSE for details.
+ */
+
+.paglets-code-source {
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-bottom: 0;
+  border-radius: 0.1rem 0.1rem 0 0;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.62rem;
+  line-height: 1.45;
+  margin: 1em 0 -1em;
+  padding: 0.28rem 0.6rem;
+}
+
+.paglets-code-source + .highlight,
+.paglets-code-source + div.highlight {
+  margin-top: 0;
+}
+
+.paglets-code-source a {
+  font-weight: 600;
+}

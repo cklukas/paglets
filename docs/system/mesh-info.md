@@ -8,7 +8,7 @@ batches with peer `mesh-info` services.
 The core contract is:
 
 ```python
-from paglets.examples.mesh_info import MESH_INFO, GET_LANDSCAPE, SELECT_TARGETS
+from paglets.system.mesh_info import MESH_INFO, GET_LANDSCAPE, SELECT_TARGETS
 ```
 
 Useful CLI commands:
@@ -29,7 +29,7 @@ Programmatic target selection:
 
 ```python
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
+from paglets.system.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
 
 mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
 targets = mesh_info.call(

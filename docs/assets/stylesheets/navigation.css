@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2026 by C. Klukas.
+ * Licensed under the MIT License. See LICENSE for details.
+ */
+
+/*
+ * Material hides top navigation tabs at narrower widths. With a tabbed
+ * documentation structure, that leaves only the current section in the sidebar.
+ * Keep the section tabs available and wrap them onto additional rows instead.
+ */
+@media screen and (max-width: 76.234375em) {
+  .md-tabs {
+    display: block;
+    overflow: visible;
+  }
+
+  .md-tabs__list {
+    flex-wrap: wrap;
+    height: auto;
+    padding-bottom: 0.2rem;
+    padding-top: 0.2rem;
+  }
+
+  .md-tabs__item {
+    flex: 0 0 auto;
+    height: 1.75rem;
+  }
+
+  .md-tabs__link {
+    margin-top: 0.45rem;
+  }
+}
+
+@media screen and (max-width: 44.984375em) {
+  .md-tabs__link {
+    font-size: 0.65rem;
+    margin-top: 0.4rem;
+  }
+}
+
+.paglets-section-pages {
+  display: none;
+}
+
+@media screen and (max-width: 76.234375em) {
+  .paglets-section-pages {
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    display: block;
+    margin: 0 0 0.8rem;
+    padding: 0.65rem 0 0.65rem 1rem;
+  }
+
+  .paglets-section-pages__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.85rem;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .paglets-section-pages__link {
+    color: var(--md-default-fg-color);
+    display: inline-block;
+    font-size: 0.7rem;
+    line-height: 1.45;
+  }
+
+  .paglets-section-pages__link--active {
+    color: var(--md-accent-fg-color);
+    font-weight: 700;
+  }
+}

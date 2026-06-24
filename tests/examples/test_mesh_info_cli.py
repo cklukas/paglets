@@ -2,8 +2,8 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from paglets.examples.mesh_info import LandscapeReply, MeshHostSnapshot, TargetCandidate, TargetSelectionReply
-from paglets.examples.mesh_info.cli import _print_summary, _print_targets
+from paglets.system.mesh_info import LandscapeReply, MeshHostSnapshot, TargetCandidate, TargetSelectionReply
+from paglets.system.mesh_info.cli import _print_summary, _print_targets
 
 
 def test_mesh_info_summary_prints_active_and_inactive_counts(capsys):

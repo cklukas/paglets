@@ -29,7 +29,7 @@ Send a paglet to each server and let it inspect local-only state:
 - installed software versions.
 
 The paglet returns summarized findings instead of streaming raw machine data
-back to a central client. The packaged example `server-info` service and
+back to a central client. The built-in `server-info` service and
 `paglets-sysinfo` CLI provide this as a concrete demo:
 
 ```bash

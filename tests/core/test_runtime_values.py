@@ -15,12 +15,12 @@ from paglets.core.runtime_values import (
     ResidentLifecycle,
     ServiceScope,
 )
-from paglets.examples.system_info import SERVER_INFO
 from paglets.remote.references import PagletProxyRef
 from paglets.remote.transfer import TransferTicket
 from paglets.runtime.envelope import PagletEnvelope
 from paglets.services.contracts import ServiceRecord
 from paglets.services.resident import ResidentServiceSpec
+from paglets.system.server_info import SERVER_INFO
 
 
 def test_python_runtime_value_fields_reject_raw_strings(tmp_path: Path):
@@ -115,7 +115,7 @@ demo_config_id = "test"
 demo_config_version = "1"
 
 [[resident_services]]
-class = "paglets.examples.system_info.agent:ServerInfoAgent"
+class = "paglets.system.server_info.agent:ServerInfoAgent"
 lifecycle = "eager"
 scope = "mesh"
 """.strip()
@@ -138,7 +138,7 @@ demo_config_id = "test"
 demo_config_version = "1"
 
 [[resident_services]]
-class = "paglets.examples.system_info.agent:ServerInfoAgent"
+class = "paglets.system.server_info.agent:ServerInfoAgent"
 lifecycle = "sleeping"
 scope = "mesh"
 """.strip()

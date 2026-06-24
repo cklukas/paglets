@@ -13,10 +13,10 @@ from paglets.examples.compute import (
 )
 from paglets.examples.compute.cli import _parser as pi_parser
 from paglets.examples.compute.cli import main as pi_main
-from paglets.examples.mesh_info import MeshHostSnapshot
 from paglets.remote.admin import ServerRef
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_to_wire
+from paglets.system.mesh_info import MeshHostSnapshot
 from tests.support import free_port
 
 

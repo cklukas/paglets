@@ -276,14 +276,14 @@ message fails immediately instead.
 
 ## Talk To Resident Services
 
-Prefer typed service contracts for resident services. The packaged example
+Prefer typed service contracts for resident services. The built-in
 `server-info` service is a ready-made example: each host declares it from launch
 config, callers can discover the `SERVER_INFO` contract immediately, and the
 provider agent starts lazily on first use:
 
 ```python
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
+from paglets.system.server_info import GET_DISK, SERVER_INFO, DiskRequest
 
 
 service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
@@ -391,12 +391,12 @@ the `Host(..., persistent_storage_quota_bytes=...)` constructor argument.
 
 ## Query Mesh Placement
 
-The packaged `mesh-info` resident service keeps fresh host resource snapshots,
+The built-in `mesh-info` resident service keeps fresh host resource snapshots,
 including active/inactive paglet counts, and ranks eligible compute targets:
 
 ```python
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
+from paglets.system.mesh_info import MESH_INFO, SELECT_TARGETS, TargetSelectionRequest
 
 mesh_info = self.require_contract(MESH_INFO, operation=SELECT_TARGETS, scope=ServiceScope.LOCAL)
 targets = mesh_info.call(SELECT_TARGETS, TargetSelectionRequest(limit=2, max_load_per_cpu=1.0))

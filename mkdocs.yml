@@ -7,25 +7,25 @@ repo_name: cklukas/paglets
 theme:
   name: material
   features:
-    - navigation.sections
-    - navigation.expand
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.top
     - content.code.copy
+
+extra_css:
+  - assets/stylesheets/navigation.css
+  - assets/stylesheets/diagram-zoom.css
+  - assets/stylesheets/code-source.css
+
+extra_javascript:
+  - assets/javascripts/section-nav.js
+  - assets/javascripts/diagram-zoom.js
 
 nav:
   - Getting Started:
       - Overview: index.md
       - Implementing Paglets: implementing-paglets.md
       - Usage Ideas: usage-ideas.md
-  - Examples:
-      - Overview: examples/index.md
-      - Server Info: examples/system-info.md
-      - Mesh Info: examples/mesh-info.md
-      - Pi Compute: examples/compute.md
-      - Search: examples/search.md
-      - Performance Benchmark: examples/performance.md
-      - Mesh Movement Benchmark: examples/mesh-benchmark.md
-      - Source-Tree Demos: examples/source-tree-demos.md
   - Operations:
       - Overview: operations/index.md
       - Host CLI: operations/host-cli.md
@@ -33,6 +33,20 @@ nav:
       - Local Multi-Host Development: operations/local-multi-host.md
       - Package Releases: operations/package-releases.md
       - Git Auto-Update: git-auto-update.md
+  - System Services:
+      - Overview: system/index.md
+      - Server Info: system/server-info.md
+      - Mesh Info: system/mesh-info.md
+      - User Info: system/user-info.md
+      - Compute Slots: system/compute-slots.md
+  - Examples:
+      - Overview: examples/index.md
+      - Pi Compute: examples/compute.md
+      - Search: examples/search.md
+      - Analysis Jobs: examples/analysis-jobs.md
+      - Performance Benchmark: examples/performance.md
+      - Mesh Movement Benchmark: examples/mesh-benchmark.md
+      - Source-Tree Demos: examples/source-tree-demos.md
   - Technical Reference:
       - Overview: technical/overview.md
       - Core: technical/core.md
@@ -70,6 +84,10 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: .
+      check_paths: true
+      dedent_subsections: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid

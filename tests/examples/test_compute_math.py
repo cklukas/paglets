@@ -19,9 +19,9 @@ from paglets.examples.compute import (
     pi_decimal_digits_from_results,
 )
 from paglets.examples.compute.chudnovsky import _decode_bigint, _encode_bigint, _int_to_decimal_string
-from paglets.examples.mesh_info import MeshHostSnapshot
 from paglets.runtime.host import Host
 from paglets.serialization.codec import dataclass_to_wire
+from paglets.system.mesh_info import MeshHostSnapshot
 from tests.support import free_port
 
 

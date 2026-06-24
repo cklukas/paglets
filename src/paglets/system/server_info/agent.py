@@ -156,6 +156,7 @@ class ServerInfoAgent(Paglet[ServerInfoState]):
     def on_creation(self, event):
         self.advertise_contract(SERVER_INFO, scope=self.state.service_scope)
 
+    # --8<-- [start:server-info-routing]
     def handle_message(self, message: Message):
         return SERVER_INFO.route(
             message,
@@ -167,6 +168,8 @@ class ServerInfoAgent(Paglet[ServerInfoState]):
             },
             default=self.not_handled(),
         )
+
+    # --8<-- [end:server-info-routing]
 
     def get_load(self, request: LoadRequest) -> LoadReply:
         virtual = psutil.virtual_memory()

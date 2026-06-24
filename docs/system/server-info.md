@@ -1,6 +1,7 @@
 # Server Info
 
-`server-info` demonstrates the resident-service pattern:
+`server-info` is a built-in resident service for host inspection. It also
+demonstrates the resident-service pattern:
 
 1. A host declares `ServerInfoAgent` from launch config.
 2. The host advertises a typed service contract named `server-info` before the
@@ -15,12 +16,12 @@
 7. After the idle timeout, the provider deactivates while the service remains
    discoverable for later calls.
 
-### Contract And Operations
+## Contract And Operations
 
-Import the example contract explicitly from the example package:
+Import the contract explicitly from the system package:
 
 ```python
-from paglets.examples.system_info import (
+from paglets.system.server_info import (
     GET_DISK,
     GET_LOAD,
     GET_SUMMARY,
@@ -43,30 +44,23 @@ The contract has four operations:
 
 Provider-side routing is in `ServerInfoAgent.handle_message`:
 
+<div class="paglets-code-source">Source: <a href="https://github.com/cklukas/paglets/blob/main/src/paglets/system/server_info/agent.py">ServerInfoAgent.handle_message in agent.py</a></div>
+
 ```python
-return SERVER_INFO.route(
-    message,
-    {
-        GET_LOAD: self.get_load,
-        GET_DISK: self.get_disk,
-        LIST_PROCESSES: self.list_processes,
-        GET_SUMMARY: self.get_summary,
-    },
-    default=self.not_handled(),
-)
+--8<-- "src/paglets/system/server_info/agent.py:server-info-routing"
 ```
 
 Consumer code can call the typed service directly:
 
 ```python
 from paglets.core.runtime_values import ServiceScope
-from paglets.examples.system_info import GET_DISK, SERVER_INFO, DiskRequest
+from paglets.system.server_info import GET_DISK, SERVER_INFO, DiskRequest
 
 service = self.require_contract(SERVER_INFO, operation=GET_DISK, scope=ServiceScope.MESH)
 reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 ```
 
-### CLI Commands
+## CLI Commands
 
 `paglets-sysinfo` provides familiar host-inspection commands across the mesh:
 
@@ -83,7 +77,7 @@ The CLI discovers a reachable entry host automatically. Use optional
 `--entry HOSTNAME` to choose one discovered entry host by name, then the
 collector paglet discovers online same-version mesh hosts.
 
-### Collector Flow
+## Collector Flow
 
 The collector is `SystemInfoCollectorAgent`. It is not a resident service:
 
@@ -101,7 +95,7 @@ to each host. The parent protects `pending_hosts`, `results`, and `errors` with
 short `locked_state()` and `@state_locked` sections because child replies can
 arrive while the parent is still waiting.
 
-### GPU And Process Notes
+## GPU And Process Notes
 
 GPU information is best effort. The agent runs `nvidia-smi` if available; when
 the command is missing or fails, the reply records the reason instead of failing

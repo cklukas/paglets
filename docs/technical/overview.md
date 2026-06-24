@@ -26,6 +26,10 @@ the behavior you need; the root `paglets` package and topic package
 : Service contracts, service registry records, and resident service lease
   metadata.
 
+`paglets.system`
+: Built-in resident services such as host system information, mesh resource
+  landscape, compute-slot scheduling, and user notifications.
+
 `paglets.serialization`
 : Dataclass wire conversion and qualified-name import resolution.
 

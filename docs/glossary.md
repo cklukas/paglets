@@ -51,8 +51,8 @@ Itinerary
 
 LaunchConfig
 : The `~/.paglets/launch.toml` startup configuration read by `paglets-host`.
-  The bundled demo config declares lazy `server-info` and eager `mesh-info`
-  resident services by default.
+  The bundled config declares built-in resident services such as `server-info`,
+  `mesh-info`, `compute-slots`, and `user-info`.
 
 Message
 : A JSON-compatible command delivered to a paglet's `handle_message` method.
@@ -72,7 +72,7 @@ Mesh
   multicast beacons.
 
 MeshInfoAgent
-: The packaged eager resident service agent advertised as `mesh-info`. It
+: The built-in eager resident service agent advertised as `mesh-info`. It
   samples local system data through `server-info`, syncs snapshots with peers,
   and ranks eligible compute targets.
 
@@ -134,7 +134,7 @@ ServiceRecord
   scope, and a `PagletProxyRef` for the providing paglet.
 
 ServerInfoAgent
-: The packaged example resident service agent advertised as `server-info`. It
+: The built-in resident service agent advertised as `server-info`. It
   starts lazily on first use and reports load, memory, disk usage, process
   matches, and host summary data.
 

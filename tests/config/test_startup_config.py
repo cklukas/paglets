@@ -11,9 +11,9 @@ from paglets.config.startup import load_launch_config, sync_launch_config
 from paglets.core.agent import Paglet, PagletContext, PagletState
 from paglets.core.messages import Message
 from paglets.core.runtime_values import LaunchConfigSyncAction, ResidentLifecycle, ServiceScope
-from paglets.examples.mesh_info import GET_SNAPSHOT, MESH_INFO
-from paglets.examples.system_info import GET_SUMMARY, SERVER_INFO
 from paglets.runtime.host import Host
+from paglets.system.mesh_info import GET_SNAPSHOT, MESH_INFO
+from paglets.system.server_info import GET_SUMMARY, SERVER_INFO
 from tests.support import free_port
 
 
@@ -42,13 +42,17 @@ def test_launch_config_sync_copies_bundled_config_on_first_start(tmp_path):
     assert result.action is LaunchConfigSyncAction.COPIED
     assert path.exists()
     assert config.demo_config_id == "paglets-default-launch"
-    assert config.demo_config_version == "4"
+    assert config.demo_config_version == "5"
     assert len(config.startup_agents) == 0
-    assert len(config.resident_services) == 2
-    assert config.resident_services[0].class_name == "paglets.examples.system_info.agent:ServerInfoAgent"
+    assert len(config.resident_services) == 4
+    assert config.resident_services[0].class_name == "paglets.system.server_info.agent:ServerInfoAgent"
     assert config.resident_services[0].lifecycle is ResidentLifecycle.LAZY
-    assert config.resident_services[1].class_name == "paglets.examples.mesh_info.agent:MeshInfoAgent"
+    assert config.resident_services[1].class_name == "paglets.system.mesh_info.agent:MeshInfoAgent"
     assert config.resident_services[1].lifecycle is ResidentLifecycle.EAGER
+    assert config.resident_services[2].class_name == "paglets.system.compute_slots.agent:ComputeSlotsAgent"
+    assert config.resident_services[2].lifecycle is ResidentLifecycle.EAGER
+    assert config.resident_services[3].class_name == "paglets.system.user_info.agent:UserInfoAgent"
+    assert config.resident_services[3].lifecycle is ResidentLifecycle.LAZY
 
 
 def test_launch_config_sync_updates_with_backup_when_accepted(tmp_path):
@@ -72,7 +76,7 @@ use = "old-service"
     assert result.backup_path is not None
     assert result.backup_path.exists()
     assert "old-service" in result.backup_path.read_text(encoding="utf-8")
-    assert load_launch_config(path).demo_config_version == "4"
+    assert load_launch_config(path).demo_config_version == "5"
 
 
 def test_launch_config_sync_warns_without_replacing_noninteractive(tmp_path, capsys):
@@ -345,7 +349,7 @@ demo_config_id = "test"
 demo_config_version = "1"
 
 [[resident_services]]
-class = "paglets.examples.system_info.agent:ServerInfoAgent"
+class = "paglets.system.server_info.agent:ServerInfoAgent"
 enabled = true
 agent_id = "service.server-info"
 singleton = true

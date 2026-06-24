@@ -1,0 +1,155 @@
+/*
+ * Copyright (c) 2026 by C. Klukas.
+ * Licensed under the MIT License. See LICENSE for details.
+ */
+
+.paglets-mermaid-frame {
+  position: relative;
+}
+
+.paglets-mermaid-frame > .mermaid,
+.paglets-mermaid-frame > pre.mermaid {
+  margin: 0;
+}
+
+.paglets-diagram-expand {
+  align-items: center;
+  background: var(--md-default-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.2rem;
+  box-shadow: var(--md-shadow-z1);
+  color: var(--md-default-fg-color);
+  cursor: pointer;
+  display: inline-flex;
+  height: 1.8rem;
+  justify-content: center;
+  opacity: 0.78;
+  padding: 0;
+  position: absolute;
+  right: 0.45rem;
+  top: 0.45rem;
+  transition:
+    background-color 125ms ease,
+    opacity 125ms ease;
+  width: 1.8rem;
+  z-index: 2;
+}
+
+.paglets-diagram-expand:hover,
+.paglets-diagram-expand:focus-visible {
+  opacity: 1;
+}
+
+.paglets-diagram-expand svg {
+  height: 1rem;
+  width: 1rem;
+}
+
+.paglets-diagram-overlay {
+  align-items: center;
+  background: rgb(0 0 0 / 78%);
+  bottom: 0;
+  display: none;
+  justify-content: center;
+  left: 0;
+  padding: 2rem;
+  position: fixed;
+  right: 0;
+  top: 0;
+  z-index: 10000;
+}
+
+.paglets-diagram-overlay[aria-hidden="false"] {
+  display: flex;
+}
+
+.paglets-diagram-overlay__panel {
+  background: var(--md-default-bg-color);
+  border-radius: 0.25rem;
+  box-shadow: var(--md-shadow-z3);
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+  max-width: 96vw;
+  overflow: hidden;
+}
+
+.paglets-diagram-overlay__bar {
+  align-items: center;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  min-height: 2.4rem;
+  padding: 0.25rem 0.45rem;
+}
+
+.paglets-diagram-close {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--md-default-fg-color);
+  cursor: pointer;
+  display: inline-flex;
+  height: 1.8rem;
+  justify-content: center;
+  padding: 0;
+  width: 1.8rem;
+}
+
+.paglets-diagram-close svg {
+  height: 1.15rem;
+  width: 1.15rem;
+}
+
+.paglets-diagram-overlay__content {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.paglets-diagram-overlay__content .mermaid,
+.paglets-diagram-overlay__content .paglets-mermaid-frame,
+.paglets-diagram-overlay__content pre.mermaid {
+  height: 100%;
+  margin: 0;
+  max-height: 100%;
+  max-width: 100%;
+  width: 100%;
+}
+
+.paglets-diagram-overlay__content .paglets-mermaid-frame {
+  align-items: center;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  overflow: auto;
+  width: 100%;
+}
+
+.paglets-diagram-overlay__content .paglets-mermaid-frame > .mermaid,
+.paglets-diagram-overlay__content .paglets-mermaid-frame > pre.mermaid {
+  flex: 1 1 auto;
+  height: 100%;
+  width: 100%;
+}
+
+.paglets-diagram-overlay__content .paglets-diagram-expand {
+  display: none;
+}
+
+.paglets-diagram-overlay__content svg {
+  display: block;
+  height: 100%;
+  max-height: calc(92vh - 4.8rem);
+  max-width: calc(96vw - 2rem);
+  width: 100%;
+}
+
+.paglets-diagram-overlay__content pre {
+  white-space: pre;
+}
