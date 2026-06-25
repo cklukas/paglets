@@ -18,6 +18,7 @@ from paglets.remote.transport import json_safe
 
 SHUTDOWN_DEACTIVATE_TIMEOUT_SECONDS = 0.5
 MESH_SERVICE_LOOKUP_TIMEOUT_SECONDS = 1.0
+COMPUTE_STATUS_WAITING_FOR_SLOT = "WAITING_FOR_SLOT"
 
 
 class _InactiveRecordsMixin:
@@ -30,6 +31,8 @@ class _InactiveRecordsMixin:
                 record = InactiveRecord.from_wire(json.loads(path.read_text(encoding="utf-8")))
             except Exception:
                 continue
+            if _repair_inactive_compute_job_policy(record):
+                self._write_inactive_record(record)
             records[record.agent_id] = record
         with self._lock:
             self._inactive.update(records)
@@ -178,3 +181,17 @@ class _InactiveRecordsMixin:
             return
         record.queued_messages.extend(messages)
         self._write_inactive_record(record)
+
+
+def _repair_inactive_compute_job_policy(record: InactiveRecord) -> bool:
+    state = record.envelope.state
+    if record.policy.activate_on_startup:
+        return False
+    if not record.policy.activate_on_message:
+        return False
+    if state.get("compute_status") != COMPUTE_STATUS_WAITING_FOR_SLOT:
+        return False
+    record.policy.activate_on_startup = True
+    if record.request.policy is not None:
+        record.request.policy.activate_on_startup = True
+    return True

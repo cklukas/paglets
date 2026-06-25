@@ -11,8 +11,12 @@ import pytest
 from paglets.core.agent import Paglet, PagletState
 from paglets.core.errors import PagletInactiveError
 from paglets.core.messages import DEACTIVATE, Message
+from paglets.core.runtime_values import EnvelopeKind
 from paglets.persistence.persistency import DeactivationPolicy
+from paglets.persistence.persistency import DeactivationRequest, InactiveRecord
+from paglets.runtime.envelope import PagletEnvelope
 from paglets.runtime.host import Host
+from paglets.runtime.inactive_records import _repair_inactive_compute_job_policy
 from tests.support import free_port
 
 
@@ -114,6 +118,29 @@ def test_shutdown_deactivation_activates_on_next_startup(tmp_path: Path):
         assert state.events[-2:] == ["activated:activate", "run:alpha"]
     finally:
         restarted.stop()
+
+
+def test_inactive_waiting_compute_job_policy_is_repaired_for_startup():
+    request_policy = DeactivationPolicy(activate_on_startup=False)
+    record = InactiveRecord(
+        envelope=PagletEnvelope(
+            kind=EnvelopeKind.ACTIVATION,
+            agent_id="job-agent",
+            agent_class_name="example:ComputeJob",
+            state_class_name="example:ComputeState",
+            state={"compute_status": "WAITING_FOR_SLOT", "slot_request_id": "request-0"},
+            source_host_name="alpha",
+            source_host_address="http://alpha:8765",
+            target_host_name="alpha",
+            target_host_address="http://alpha:8765",
+        ),
+        policy=DeactivationPolicy(activate_on_startup=False),
+        request=DeactivationRequest(policy=request_policy),
+    )
+
+    assert _repair_inactive_compute_job_policy(record) is True
+    assert record.policy.activate_on_startup is True
+    assert request_policy.activate_on_startup is True
 
 
 def test_scheduled_activation_restores_due_inactive_paglet(tmp_path: Path):
