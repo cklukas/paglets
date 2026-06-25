@@ -347,9 +347,9 @@ class PagletsAdminClient:
         return agents
 
     def list_agents(self, server: ServerRef) -> list[AgentRecord]:
-        payload = self.client.get_json(f"{server.url}/agents?state=all")
+        payloads = self.list_agent_payloads(server)
         records: list[AgentRecord] = []
-        for item in payload.get("agents", []):
+        for item in payloads:
             records.append(
                 AgentRecord(
                     server_name=server.name,
@@ -361,6 +361,21 @@ class PagletsAdminClient:
                 )
             )
         return records
+
+    def list_agent_payloads(self, server: ServerRef, *, include_state: bool = False) -> list[dict[str, Any]]:
+        query = "state=all"
+        if include_state:
+            query += "&include_state=true"
+        payload = self.client.get_json(f"{server.url}/agents?{query}")
+        agents: list[dict[str, Any]] = []
+        for item in payload.get("agents", []):
+            if not isinstance(item, dict):
+                continue
+            enriched = dict(item)
+            enriched["server_name"] = server.name
+            enriched["host_url"] = str(item.get("address") or server.url)
+            agents.append(enriched)
+        return agents
 
     def list_hosts(self, server: ServerRef) -> list[HostRef]:
         payload = self.client.get_json(f"{server.url}/hosts")

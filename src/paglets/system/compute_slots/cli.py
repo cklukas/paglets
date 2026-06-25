@@ -8,7 +8,7 @@ import sys
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.core.runtime_values import ServiceScope
-from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
+from paglets.remote.admin import AgentRecord, PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.services.contracts import ServiceHandle, ServiceRecord
 
@@ -183,10 +183,7 @@ def _run_cancel(args: argparse.Namespace, entry: ServerRef, client: HostClient) 
 def _run_jobs(args: argparse.Namespace, entry: ServerRef, client: HostClient) -> int:
     admin = PagletsAdminClient([entry], client=client)
     if args.jobs_command == "list":
-        include_active = bool(args.active)
-        include_inactive = bool(args.inactive)
-        if not include_active and not include_inactive:
-            include_inactive = True
+        include_active, include_inactive = _jobs_list_inclusion(args)
         jobs = _load_compute_jobs(
             admin,
             entry,
@@ -249,6 +246,14 @@ def _run_jobs(args: argparse.Namespace, entry: ServerRef, client: HostClient) ->
     return 1 if errors else 0
 
 
+def _jobs_list_inclusion(args: argparse.Namespace) -> tuple[bool, bool]:
+    include_active = bool(args.active)
+    include_inactive = bool(args.inactive)
+    if not include_active and not include_inactive:
+        return True, True
+    return include_active, include_inactive
+
+
 def _handle(entry: ServerRef, client: HostClient, capability: str) -> ServiceHandle:
     payload = client.get_json(
         f"{entry.url.rstrip('/')}/services?name={COMPUTE_SLOTS.name}"
@@ -272,20 +277,25 @@ def _load_compute_jobs(
     class_names: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     jobs: list[dict[str, object]] = []
-    for agent in admin.list_agents(entry):
-        if agent.active and not include_active:
+    for item in admin.list_agent_payloads(entry, include_state=True):
+        agent_active = bool(item.get("active"))
+        if agent_active and not include_active:
             continue
-        if not agent.active and not include_inactive:
+        if not agent_active and not include_inactive:
             continue
-        if agent_ids and agent.agent_id not in agent_ids:
+        agent_id = str(item.get("agent_id") or "")
+        if agent_ids and agent_id not in agent_ids:
             continue
-        if class_names and not _matches_class_name(agent.class_name, class_names):
+        class_name = str(item.get("class_name") or "")
+        if class_names and not _matches_class_name(class_name, class_names):
             continue
-        try:
-            payload = admin.get_agent_state(agent)
-        except Exception:
-            continue
-        state = payload.get("state") if isinstance(payload, dict) else None
+        state = item.get("state")
+        if state is None:
+            try:
+                payload = admin.get_agent_state(_agent_record_from_payload(entry, item))
+            except Exception:
+                continue
+            state = payload.get("state") if isinstance(payload, dict) else None
         if not isinstance(state, dict) or "compute_status" not in state:
             continue
         job_id = str(state.get("job_id") or state.get("slot_request_id") or "")
@@ -297,23 +307,34 @@ def _load_compute_jobs(
             continue
         jobs.append(
             {
-                "agent_id": agent.agent_id,
-                "active": agent.active,
-                "class_name": agent.class_name,
-                "state_class_name": agent.state_class_name,
-                "host": agent.server_name,
-                "host_url": agent.host_url,
+                "agent_id": agent_id,
+                "active": agent_active,
+                "class_name": class_name,
+                "state_class_name": str(item.get("state_class_name") or ""),
+                "host": str(item.get("server_name") or entry.name),
+                "host_url": str(item.get("host_url") or item.get("address") or entry.url),
                 "job_id": job_id,
                 "compute_status": compute_status,
                 "status": job_status,
                 "request_id": str(state.get("slot_request_id") or ""),
                 "lease_id": str(state.get("slot_lease_id") or ""),
-                "deactivated_at": payload.get("deactivated_at"),
-                "_agent": agent,
+                "deactivated_at": item.get("deactivated_at"),
+                "_agent": _agent_record_from_payload(entry, item),
             }
         )
     jobs.sort(key=lambda item: (str(item["host"]), str(item["job_id"]), str(item["agent_id"])))
     return jobs
+
+
+def _agent_record_from_payload(entry: ServerRef, item: dict[str, object]) -> AgentRecord:
+    return AgentRecord(
+        server_name=str(item.get("server_name") or entry.name),
+        host_url=str(item.get("host_url") or item.get("address") or entry.url),
+        agent_id=str(item.get("agent_id") or ""),
+        class_name=str(item.get("class_name") or ""),
+        state_class_name=str(item.get("state_class_name") or ""),
+        active=bool(item.get("active")),
+    )
 
 
 def _public_jobs(jobs: list[dict[str, object]]) -> list[dict[str, object]]:

@@ -578,12 +578,22 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             raise HostError(f"No registered file {name!r} for paglet {agent_id!r}")
         return Path(ref.current_path)
 
-    def list_agents(self, *, active: bool = True, inactive: bool = False) -> list[dict[str, Any]]:
+    def list_agents(
+        self,
+        *,
+        active: bool = True,
+        inactive: bool = False,
+        include_state: bool = False,
+    ) -> list[dict[str, Any]]:
         with self._lock:
-            agents = [self._summary(agent) for agent in self._agents.values()] if active else []
+            active_records = list(self._agents.values()) if active else []
+            inactive_records = list(self._inactive.values()) if inactive else []
+            agents = [self._summary(agent) for agent in active_records]
             if inactive:
-                agents.extend(self._inactive_summary(record) for record in self._inactive.values())
+                agents.extend(self._inactive_summary(record) for record in inactive_records)
+        if not include_state:
             return agents
+        return [self._summary_with_state(item) for item in agents]
 
     def health(self) -> dict[str, Any]:
         with self._lock:
@@ -1087,6 +1097,17 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             "active": False,
             "deactivated_at": record.deactivated_at,
         }
+
+    def _summary_with_state(self, summary: dict[str, Any]) -> dict[str, Any]:
+        try:
+            state_payload = self._state_payload(str(summary["agent_id"]))
+        except Exception as exc:
+            enriched = dict(summary)
+            enriched["state_error"] = str(exc)
+            return enriched
+        enriched = dict(summary)
+        enriched.update(state_payload)
+        return enriched
 
     def _state_payload(self, agent_id: str) -> dict[str, Any]:
         with self._lock:

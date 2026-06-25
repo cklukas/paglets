@@ -7,6 +7,7 @@ import time
 import pytest
 
 from paglets.remote.admin import AgentRecord
+from paglets.remote.admin import ServerRef
 from paglets.remote.client import HostClient
 from paglets.system.compute_slots import (
     CancelSlotRequestsRequest,
@@ -15,7 +16,8 @@ from paglets.system.compute_slots import (
     SchedulerStatusReply,
     SlotLease,
 )
-from paglets.system.compute_slots.cli import _cancel_preview_payload, _parser, _print_jobs, _print_status, _public_jobs
+from paglets.system.compute_slots.cli import _cancel_preview_payload, _load_compute_jobs, _parser, _print_jobs, _print_status, _public_jobs
+from paglets.system.compute_slots.cli import _jobs_list_inclusion
 
 
 def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
@@ -137,11 +139,53 @@ def test_compute_slots_public_jobs_omits_internal_agent_record():
     assert public == {"agent_id": "agent-0"}
 
 
+def test_compute_slots_load_jobs_uses_bulk_state_payloads():
+    class FakeAdmin:
+        def list_agent_payloads(self, entry, *, include_state=False):
+            assert include_state is True
+            return [
+                {
+                    "agent_id": "agent-0",
+                    "class_name": "paglets.examples:ExampleComputeJob",
+                    "state_class_name": "paglets.examples:ExampleComputeState",
+                    "active": True,
+                    "server_name": "alpha",
+                    "host_url": "http://alpha",
+                    "state": {
+                        "compute_status": "RUNNING",
+                        "status": "PROCESSING",
+                        "job_id": "job-0",
+                        "slot_request_id": "request-0",
+                    },
+                }
+            ]
+
+        def get_agent_state(self, agent):
+            raise AssertionError("bulk state payload should avoid per-agent state fetches")
+
+    jobs = _load_compute_jobs(
+        FakeAdmin(),
+        ServerRef("alpha", "http://alpha"),
+        include_active=True,
+        include_inactive=True,
+    )
+
+    assert jobs[0]["agent_id"] == "agent-0"
+    assert jobs[0]["compute_status"] == "RUNNING"
+
+
 def test_compute_slots_json_flag_is_accepted_before_or_after_subcommands():
     assert _parser().parse_args(["--json", "status"]).json is True
     assert _parser().parse_args(["status", "--json"]).json is True
     assert _parser().parse_args(["jobs", "list", "--json"]).json is True
     assert _parser().parse_args(["jobs", "clear", "--json"]).json is True
+
+
+def test_compute_slots_jobs_list_defaults_to_active_and_inactive():
+    assert _jobs_list_inclusion(_parser().parse_args(["jobs", "list"])) == (True, True)
+    assert _jobs_list_inclusion(_parser().parse_args(["jobs", "list", "--active"])) == (True, False)
+    assert _jobs_list_inclusion(_parser().parse_args(["jobs", "list", "--inactive"])) == (False, True)
+    assert _jobs_list_inclusion(_parser().parse_args(["jobs", "list", "--active", "--inactive"])) == (True, True)
 
 
 def test_compute_slots_entry_url_is_used_directly(monkeypatch):

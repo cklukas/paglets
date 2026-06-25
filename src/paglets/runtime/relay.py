@@ -603,11 +603,12 @@ class RelayMixin:
             return self.release_resident_service_lease(parts[2])
         if method == "GET" and parts == ["agents"]:
             state = (query.get("state") or ["active"])[0]
+            include_state = (query.get("include_state") or [""])[0].lower() in {"1", "true", "yes"}
             if state == "all":
-                return {"agents": self.list_agents(active=True, inactive=True)}
+                return {"agents": self.list_agents(active=True, inactive=True, include_state=include_state)}
             if state == "inactive":
-                return {"agents": self.list_agents(active=False, inactive=True)}
-            return {"agents": self.list_agents(active=True, inactive=False)}
+                return {"agents": self.list_agents(active=False, inactive=True, include_state=include_state)}
+            return {"agents": self.list_agents(active=True, inactive=False, include_state=include_state)}
         if method == "POST" and parts == ["agents"]:
             if "envelope" in payload:
                 proxy = self._receive_envelope(PagletEnvelope.from_wire(payload["envelope"]))
