@@ -7,11 +7,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from paglets.core.messages import Message
+from paglets.persistence.persistency import DeactivationRequest
 from paglets.serialization.codec import dataclass_to_wire
 from paglets.system.compute_slots import (
     COMPUTE_STATUS_COMPLETED,
     COMPUTE_STATUS_FAILED_FINAL,
+    COMPUTE_STATUS_NEW,
     COMPUTE_STATUS_PLACING,
+    COMPUTE_STATUS_RUNNING,
     COMPUTE_STATUS_WAITING_FOR_SLOT,
     CandidateHost,
     CandidateHostsReply,
@@ -220,6 +223,116 @@ def test_compute_job_scheduler_and_release_timeouts_are_configurable():
     assert calls[0] == (REQUEST_SLOT, 12.5)
     assert calls[1][1] == 3.5
     assert paglet.state.compute_status == COMPUTE_STATUS_WAITING_FOR_SLOT
+
+
+def test_compute_job_sleep_deactivation_is_startup_recoverable():
+    paglet = DemoComputePaglet(DemoComputeState())
+    policies: list[Any] = []
+
+    class Handle:
+        def call(self, operation, payload, *, timeout=None, **kwargs):
+            return SlotDecisionReply(decision="sleep", request_id=payload.request_id)
+
+    paglet.require_contract = lambda *args, **kwargs: Handle()  # type: ignore[method-assign]
+    paglet.deactivate = lambda *args, **kwargs: policies.append(kwargs["policy"])  # type: ignore[method-assign]
+
+    assert paglet._request_local_compute_slot(ComputeSlotRequest(request_id="request-0")) is False
+
+    [policy] = policies
+    assert policy.activate_on_message is True
+    assert policy.activate_on_startup is True
+    assert policy.queue_messages_when_inactive is True
+
+
+def test_waiting_compute_job_requeues_slot_request_after_startup_activation():
+    paglet = DemoComputePaglet(
+        DemoComputeState(
+            allow_home_compute=True,
+            compute_status=COMPUTE_STATUS_WAITING_FOR_SLOT,
+            home_host_name="alpha",
+            home_host_url="http://alpha:8765",
+            slot_request_id="request-existing",
+        )
+    )
+    paglet._attach(_FakeContext(name="alpha", address="http://alpha:8765"))  # type: ignore[arg-type]
+    requests: list[ComputeSlotRequest] = []
+    policies: list[Any] = []
+
+    class Handle:
+        def call(self, operation, payload, *, timeout=None, **kwargs):
+            requests.append(payload)
+            return SlotDecisionReply(decision="sleep", request_id=payload.request_id)
+
+    paglet.require_contract = lambda *args, **kwargs: Handle()  # type: ignore[method-assign]
+    paglet.deactivate = lambda *args, **kwargs: policies.append(kwargs["policy"])  # type: ignore[method-assign]
+
+    paglet.advance_compute_job()
+
+    [request] = requests
+    assert request.request_id == "request-existing"
+    assert request.agent_id == paglet.agent_id
+    assert paglet.state.compute_status == COMPUTE_STATUS_WAITING_FOR_SLOT
+    assert len(policies) == 1
+
+
+def test_running_compute_job_shutdown_restarts_from_submitted_state():
+    paglet = DemoComputePaglet(DemoComputeState(allow_home_compute=True))
+    with paglet.locked_state() as state:
+        state.compute_status = COMPUTE_STATUS_RUNNING
+        state.compute_error = "old error"
+        state.slot_request_id = "request-running"
+        state.slot_lease_id = "lease-running"
+        state.cpu_core_ids = [0, 1]
+        state.events.append("running")
+
+    policy = paglet.deactivation_policy(DeactivationRequest(reason="shutdown", source="host"))
+    paglet.on_deactivating(None)
+
+    assert policy.activate_on_startup is True
+    assert policy.activate_on_message is True
+    assert policy.queue_messages_when_inactive is True
+    assert paglet.state.compute_status == COMPUTE_STATUS_NEW
+    assert paglet.state.compute_error == ""
+    assert paglet.state.slot_request_id == ""
+    assert paglet.state.slot_lease_id == ""
+    assert paglet.state.cpu_core_ids == []
+    assert paglet.state.events == []
+
+
+def test_running_compute_job_restart_policy_can_be_disabled():
+    paglet = DemoComputePaglet(DemoComputeState(restart_running_on_host_startup=False))
+    with paglet.locked_state() as state:
+        state.compute_status = COMPUTE_STATUS_RUNNING
+        state.slot_lease_id = "lease-running"
+        state.events.append("running")
+
+    policy = paglet.deactivation_policy(DeactivationRequest(reason="shutdown", source="host"))
+    paglet.on_deactivating(None)
+
+    assert policy.activate_on_startup is False
+    assert paglet.state.compute_status == COMPUTE_STATUS_RUNNING
+    assert paglet.state.slot_lease_id == "lease-running"
+    assert paglet.state.events == ["running"]
+
+
+def test_running_compute_job_without_initial_snapshot_restarts_fresh_on_activation():
+    paglet = DemoComputePaglet(
+        DemoComputeState(
+            compute_status=COMPUTE_STATUS_RUNNING,
+            slot_request_id="request-running",
+            slot_lease_id="lease-running",
+            events=["running"],
+        )
+    )
+
+    paglet.on_activation(None)
+
+    assert paglet.state.compute_status == COMPUTE_STATUS_NEW
+    assert paglet.state.compute_error == ""
+    assert paglet.state.slot_request_id == ""
+    assert paglet.state.slot_lease_id == ""
+    assert paglet.state.cpu_core_ids == []
+    assert paglet.state.events == ["running"]
 
 
 def test_compute_job_validation_rejects_invalid_estimates_before_scheduler_contact():

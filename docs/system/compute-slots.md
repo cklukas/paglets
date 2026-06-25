@@ -69,14 +69,14 @@ Use application fields, such as `dataset_name`, `sample_id`, `job_id`, or
 internal diagnostic label from the runtime `agent_id`; normal job code does not
 set or use that label.
 
-| Field or hook | Owner | Purpose |
-| --- | --- | --- |
-| `compute_status`, `compute_error` | Base class | Scheduler and slot lifecycle. |
-| `slot_request_id`, `slot_lease_id`, redirects, affinity metadata | Base class | Internal scheduler protocol state. |
-| `status`, `result_path`, domain IDs | Application | Result lifecycle and business state. |
-| `run_compute_job()` | Application | The actual work after a slot grant. |
-| `continue_after_compute_success()` | Application | Result return/commit logic, including later wakeups. |
-| `after_compute_failure(message)` | Application | Optional notification or cleanup. |
+| Field or hook                                                    | Owner       | Purpose                                              |
+| ---------------------------------------------------------------- | ----------- | ---------------------------------------------------- |
+| `compute_status`, `compute_error`                                | Base class  | Scheduler and slot lifecycle.                        |
+| `slot_request_id`, `slot_lease_id`, redirects, affinity metadata | Base class  | Internal scheduler protocol state.                   |
+| `status`, `result_path`, domain IDs                              | Application | Result lifecycle and business state.                 |
+| `run_compute_job()`                                              | Application | The actual work after a slot grant.                  |
+| `continue_after_compute_success()`                               | Application | Result return/commit logic, including later wakeups. |
+| `after_compute_failure(message)`                                 | Application | Optional notification or cleanup.                    |
 
 `after_compute_success()` is a one-shot hook called immediately after
 `run_compute_job()` returns and the lease is released. Its default implementation
@@ -228,16 +228,16 @@ The scheduler uses common coarse-grained scheduling concepts:
 
 The defaults are conservative:
 
-| Setting | Default | Meaning |
-| --- | ---: | --- |
-| `grant_interval` | `15.0` seconds | Normal wait between local grants. |
-| `max_grants_per_tick` | `4` | Hard cap for grants sent during one scheduler pass. |
-| `burst_load_per_cpu` | `0.5` | Maximum load per CPU for burst grants after the first grant. |
-| `burst_resource_headroom_factor` | `2.0` | Free CPU/RAM/temp-storage multiplier required for burst grants. |
-| `max_redirects_per_tick` | `4` | Hard cap for peer spillover in one scheduler pass. |
-| `max_redirect_fraction` | `0.5` | Redirect at most half of the local queue. |
-| `redirect_cooldown_seconds` | `60.0` | Minimum time before a request can be redirected again. |
-| `placement_sample_size` | `3` | Initial placement chooses deterministically among the best ranked candidates. |
+| Setting                          |        Default | Meaning                                                                       |
+| -------------------------------- | -------------: | ----------------------------------------------------------------------------- |
+| `grant_interval`                 | `15.0` seconds | Normal wait between local grants.                                             |
+| `max_grants_per_tick`            |            `4` | Hard cap for grants sent during one scheduler pass.                           |
+| `burst_load_per_cpu`             |          `0.5` | Maximum load per CPU for burst grants after the first grant.                  |
+| `burst_resource_headroom_factor` |          `2.0` | Free CPU/RAM/temp-storage multiplier required for burst grants.               |
+| `max_redirects_per_tick`         |            `4` | Hard cap for peer spillover in one scheduler pass.                            |
+| `max_redirect_fraction`          |          `0.5` | Redirect at most half of the local queue.                                     |
+| `redirect_cooldown_seconds`      |         `60.0` | Minimum time before a request can be redirected again.                        |
+| `placement_sample_size`          |            `3` | Initial placement chooses deterministically among the best ranked candidates. |
 
 ### CPU Cores, Affinity, And Memory
 
@@ -406,12 +406,12 @@ again, but the error is treated as transient health, not as durable capability.
 After arriving on a candidate host, the paglet calls `request_slot` on the local
 scheduler. The reply has one of four decisions:
 
-| Decision | Meaning | Expected paglet behavior |
-| --- | --- | --- |
-| `run_now` | A lease was created immediately. | Start compute. `ComputeJobPaglet` releases automatically; raw protocol users must call `release_slot`. |
-| `sleep` | The request is queued locally. | Deactivate with `activate_on_message=True`. |
-| `redirect` | Another scheduler is a better bounded-spillover target. | Dispatch to the target host and request again. |
-| `rejected` | No valid local/peer path exists. | Fail or return home and notify the user. |
+| Decision   | Meaning                                                 | Expected paglet behavior                                                                               |
+| ---------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `run_now`  | A lease was created immediately.                        | Start compute. `ComputeJobPaglet` releases automatically; raw protocol users must call `release_slot`. |
+| `sleep`    | The request is queued locally.                          | Deactivate with `activate_on_message=True`.                                                            |
+| `redirect` | Another scheduler is a better bounded-spillover target. | Dispatch to the target host and request again.                                                         |
+| `rejected` | No valid local/peer path exists.                        | Fail or return home and notify the user.                                                               |
 
 Queued paglets are woken by normal messages. The scheduler does not directly
 dispatch inactive paglets because the runtime requires paglets to be active for
@@ -429,7 +429,18 @@ back and the request remains queued for a later pass.
 
 The scheduler queue is in-memory. It is intentionally not durable in v1. If a
 host restarts, queued requests and leases are lost, and job-specific recovery is
-outside this first implementation.
+handled by `ComputeJobPaglet`: jobs that were deactivated in `WAITING_FOR_SLOT`
+activate on host startup and submit their slot request again. Raw `request_slot`
+users must provide their own restart recovery if they choose to deactivate while
+waiting.
+
+By default, `ComputeJobPaglet` also treats a host shutdown during `RUNNING` as a
+restartable compute attempt. The job stores its submitted compute state when it
+is created. During graceful host shutdown, a running job is deactivated with
+`activate_on_startup=True` and its persisted state is reset to that submitted
+state, so after startup it requests a fresh slot before rerunning compute. Set
+`restart_running_on_host_startup=False` on the job state to opt out and keep the
+normal inactive lifecycle chosen by the deactivation request.
 
 Queue processing is local-first and then oldest-fit:
 
@@ -450,10 +461,13 @@ capacity when a large older job cannot currently fit.
 Leases are local reservations. `ComputeJobPaglet` calls `release_slot`
 automatically after `run_compute_job()` finishes or fails. Raw `request_slot`
 users must call `release_slot` themselves. The scheduler also checks whether the
-leased paglet is still active on the local host; if its child process has exited
-or the paglet is otherwise no longer active, the lease is removed and the
-reserved CPU/RAM/storage capacity becomes available again. Lease TTLs remain a
-safety net for stale records.
+leased paglet still has an active local host record; if its child process has
+exited or the paglet is otherwise definitely no longer active, the lease is
+removed and the reserved CPU/RAM/storage capacity becomes available again.
+Lease TTLs are a stale-record safety net, not permission to release resources
+for an active job. If a lease expires while the local job record is still active,
+the scheduler keeps the reservation and extends the lease instead of admitting
+new jobs into the same resource budget.
 
 ## Startup Throttling
 
@@ -506,17 +520,17 @@ Paglet scheduling keeps the unit of work as a mobile object:
 This makes paglets a better fit when the application benefits from explicit
 mobile state and application-specific result handling:
 
-| Aspect | `compute-slots` paglets | Classic cluster submission |
-| --- | --- | --- |
-| Work unit | Mobile paglet with dataclass state and methods. | Submitted job script or job spec. |
-| Scheduler role | Local resident admission, leases, queueing, peer spillover. | Usually central queue, allocation, launch, accounting. |
-| Movement | Paglet dispatches itself between hosts. | Scheduler starts a process on an allocated node. |
-| Result handling | Application-specific; paglet can return home, wait, notify, or store locally. | Usually stdout/stderr, files, artifacts, or workflow-managed outputs. |
-| Home host offline | Natural fit if paglet stores results remotely and returns later. | Usually handled by shared storage, submit host spool, or scheduler accounting. |
+| Aspect              | `compute-slots` paglets                                                                                                    | Classic cluster submission                                                                                       |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Work unit           | Mobile paglet with dataclass state and methods.                                                                            | Submitted job script or job spec.                                                                                |
+| Scheduler role      | Local resident admission, leases, queueing, peer spillover.                                                                | Usually central queue, allocation, launch, accounting.                                                           |
+| Movement            | Paglet dispatches itself between hosts.                                                                                    | Scheduler starts a process on an allocated node.                                                                 |
+| Result handling     | Application-specific; paglet can return home, wait, notify, or store locally.                                              | Usually stdout/stderr, files, artifacts, or workflow-managed outputs.                                            |
+| Home host offline   | Natural fit if paglet stores results remotely and returns later.                                                           | Usually handled by shared storage, submit host spool, or scheduler accounting.                                   |
 | Adding servers live | New paglet hosts can join the mesh and advertise `compute-slots`; existing schedulers learn them through peer status sync. | New worker nodes can be added live when the cluster manager, node daemon, queues, and node state are configured. |
-| Operational scope | Lightweight mesh of paglet hosts. | Dedicated cluster services, worker daemons, queues, policies. |
-| Fairness/accounting | Minimal in v1; cooperative estimates and local policy. | Mature priority, quotas, reservations, preemption, accounting. |
-| Failure recovery | Mostly application-specific in v1. | Mature retry/requeue and node-failure handling, depending on system. |
+| Operational scope   | Lightweight mesh of paglet hosts.                                                                                          | Dedicated cluster services, worker daemons, queues, policies.                                                    |
+| Fairness/accounting | Minimal in v1; cooperative estimates and local policy.                                                                     | Mature priority, quotas, reservations, preemption, accounting.                                                   |
+| Failure recovery    | Mostly application-specific in v1.                                                                                         | Mature retry/requeue and node-failure handling, depending on system.                                             |
 
 The difference is not that PBS-style jobs cannot communicate or create more
 processes. A batch job can open network connections, launch child processes, use

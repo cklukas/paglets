@@ -6,14 +6,14 @@ import random
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Generic, TypeVar, final
 
 from paglets.core.agent import Paglet, PagletState
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope
-from paglets.persistence.persistency import DeactivationPolicy
-from paglets.serialization.codec import dataclass_from_wire
+from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest
+from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
 from .agent import (
     CANDIDATE_HOSTS,
@@ -67,6 +67,8 @@ class ComputeJobState(PagletState):
     cpu_affinity_supported: bool = False
     cpu_affinity_enforced: bool = False
     cpu_affinity_error: str = ""
+    restart_running_on_host_startup: bool = True
+    restart_initial_state: dict[str, Any] = field(default_factory=dict)
 
 
 StateT = TypeVar("StateT", bound=ComputeJobState)
@@ -78,6 +80,7 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
     def __init__(self, state: StateT | None = None, *, agent_id: str | None = None):
         super().__init__(state=state, agent_id=agent_id)
         self._compute_thread: threading.Thread | None = None
+        self._ensure_restart_initial_state()
 
     def run(self) -> None:
         self.start_compute_worker()
@@ -129,10 +132,16 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
         except Exception as exc:
             self._fail_compute_job(str(exc))
 
+    def on_activation(self, event) -> None:
+        _ = event
+        with self.locked_state() as state:
+            if state.compute_status == COMPUTE_STATUS_RUNNING and state.restart_running_on_host_startup:
+                self._restore_restart_initial_state_locked(state)
+
     def advance_compute_job(self) -> None:
         with self.locked_state() as state:
             status = state.compute_status
-        if status in {COMPUTE_STATUS_NEW, COMPUTE_STATUS_PLACING}:
+        if status in {COMPUTE_STATUS_NEW, COMPUTE_STATUS_PLACING, COMPUTE_STATUS_WAITING_FOR_SLOT}:
             if self._place_or_request_compute_slot():
                 self._run_granted_compute_job()
         elif status == COMPUTE_STATUS_RUNNING:
@@ -223,7 +232,13 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
         if reply.decision == "sleep":
             with self.locked_state() as state:
                 state.compute_status = COMPUTE_STATUS_WAITING_FOR_SLOT
-            self.deactivate(policy=DeactivationPolicy(activate_on_message=True, queue_messages_when_inactive=True))
+            self.deactivate(
+                policy=DeactivationPolicy(
+                    activate_on_message=True,
+                    activate_on_startup=True,
+                    queue_messages_when_inactive=True,
+                )
+            )
             return False
         self._on_compute_slot_rejected(reply)
         return False
@@ -368,6 +383,24 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
             state.compute_error = message
         self.after_compute_failure(message)
 
+    def deactivation_policy(self, request: DeactivationRequest) -> DeactivationPolicy:
+        with self.locked_state() as state:
+            if request.reason == "shutdown" and state.compute_status == COMPUTE_STATUS_RUNNING:
+                if not state.restart_running_on_host_startup:
+                    return request.policy or DeactivationPolicy()
+                return DeactivationPolicy(
+                    activate_on_message=True,
+                    activate_on_startup=True,
+                    queue_messages_when_inactive=True,
+                )
+        return super().deactivation_policy(request)
+
+    def on_deactivating(self, event) -> None:
+        _ = event
+        with self.locked_state() as state:
+            if state.compute_status == COMPUTE_STATUS_RUNNING and state.restart_running_on_host_startup:
+                self._restore_restart_initial_state_locked(state)
+
     def _ensure_compute_home_locked(self, state: ComputeJobState) -> None:
         current_url = self.context.address.rstrip("/")
         if not state.home_host_name and not state.home_host_url:
@@ -379,6 +412,32 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
                 state.home_host_name = self.context.name
             if not state.home_host_url:
                 state.home_host_url = current_url
+
+    def _ensure_restart_initial_state(self) -> None:
+        with self.locked_state() as state:
+            if state.restart_initial_state:
+                return
+            if state.compute_status != COMPUTE_STATUS_NEW:
+                return
+            state.restart_initial_state = dataclass_to_wire(replace(state, restart_initial_state={}))
+
+    def _restore_restart_initial_state_locked(self, state: StateT) -> None:
+        if not state.restart_initial_state:
+            state.compute_status = COMPUTE_STATUS_NEW
+            state.compute_error = ""
+            state.slot_lease_id = ""
+            state.slot_request_id = ""
+            state.cpu_core_ids = []
+            state.cpu_affinity_supported = False
+            state.cpu_affinity_enforced = False
+            state.cpu_affinity_error = ""
+            return
+        restored = dataclass_from_wire(type(state), state.restart_initial_state)
+        current_initial = dict(state.restart_initial_state)
+        for item in fields(state):
+            setattr(state, item.name, getattr(restored, item.name))
+        state.restart_initial_state = current_initial
+        state.restart_running_on_host_startup = restored.restart_running_on_host_startup
 
     @staticmethod
     def _record_compute_slot_grant_locked(state: ComputeJobState, reply: SlotDecisionReply) -> None:

@@ -15,6 +15,7 @@ from paglets.system.compute_slots import (
     SlotLease,
 )
 from paglets.system.compute_slots.agent import (
+    COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY,
     ComputeSlotsAgent,
     ComputeSlotsState,
     _can_ever_satisfy,
@@ -86,6 +87,46 @@ def test_compute_slot_can_run_when_reserved_free_resources_fit():
     request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)
 
     assert _can_run_now(status, request) is True
+
+
+def test_compute_slot_direct_requests_respect_reserved_capacity():
+    agent = ComputeSlotsAgent(ComputeSlotsState())
+    agent._context = SimpleNamespace(address="http://alpha")  # type: ignore[assignment]
+
+    def local_status():
+        reserved = agent._reserved_resources()
+        return SchedulerHostStatus(
+            host_name="alpha",
+            host_url="http://alpha",
+            observed_at=time.time(),
+            cpu_count_logical=8,
+            memory_total_bytes=16 * 1024**3,
+            memory_available_bytes=16 * 1024**3,
+            work_total_bytes=100 * 1024**3,
+            work_free_bytes=100 * 1024**3,
+            free_cpu_cores=max(0, 8 - reserved["cpu"]),
+            free_memory_bytes=max(0, 16 * 1024**3 - reserved["memory"]),
+            free_temp_storage_bytes=max(0, 100 * 1024**3 - reserved["storage"]),
+        )
+
+    agent._local_status = local_status  # type: ignore[method-assign]
+    requests = [
+        ComputeSlotRequest(
+            request_id=f"request-{index}",
+            agent_id=f"agent-{index}",
+            cpu_cores=2,
+            memory_bytes=2 * 1024**3,
+            temp_storage_bytes=10 * 1024**3,
+        )
+        for index in range(5)
+    ]
+
+    replies = [agent.request_slot(request) for request in requests]
+
+    assert [reply.decision for reply in replies] == ["run_now", "run_now", "run_now", "sleep", "sleep"]
+    with agent.locked_state() as state:
+        assert len(state.leases) == 3
+        assert len(state.queued_requests) == 2
 
 
 def test_compute_slot_rejects_request_larger_than_eligible_cpu_set():
@@ -274,6 +315,62 @@ def test_compute_slot_cleanup_removes_lease_for_missing_active_agent():
 
     with agent.locked_state() as state:
         assert state.leases == {}
+
+
+def test_compute_slot_expiry_retains_reservation_for_active_agent():
+    now = time.time()
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=2),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=now - 120.0,
+        expires_at=now - 60.0,
+        cpu_core_ids=[0, 1],
+        reserved_cpu_core_ids=[0, 1],
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._is_agent_active = lambda agent_id: True  # type: ignore[method-assign]
+
+    agent._expire_leases()
+
+    with agent.locked_state() as state:
+        [lease_wire] = list(state.leases.values())
+        retained = dataclass_from_wire(SlotLease, lease_wire)
+        assert retained.expires_at > now
+        assert COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY in state.errors
+
+
+def test_compute_slot_expiry_removes_reservation_for_definitely_inactive_agent():
+    now = time.time()
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", cpu_cores=2),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=now - 120.0,
+        expires_at=now - 60.0,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._is_agent_active = lambda agent_id: False  # type: ignore[method-assign]
+
+    agent._expire_leases()
+
+    with agent.locked_state() as state:
+        assert state.leases == {}
+
+
+def test_compute_slot_active_check_is_conservative_on_control_error():
+    agent = ComputeSlotsAgent(ComputeSlotsState())
+
+    def raise_control_error(agent_id, host_url):
+        raise RuntimeError("control channel busy")
+
+    agent._context = SimpleNamespace(address="http://alpha", get_proxy=raise_control_error)  # type: ignore[assignment]
+
+    assert agent._is_agent_active("agent-0") is True
 
 
 def test_compute_slot_scheduler_status_can_include_active_job_metrics_without_queue():

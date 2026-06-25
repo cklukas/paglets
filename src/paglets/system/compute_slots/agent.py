@@ -38,7 +38,9 @@ DEFAULT_REDIRECT_COOLDOWN_SECONDS = 60.0
 DEFAULT_BURST_LOAD_PER_CPU_LIMIT = 0.5
 DEFAULT_BURST_RESOURCE_HEADROOM_FACTOR = 2.0
 DEFAULT_PLACEMENT_SAMPLE_SIZE = 3
+DEFAULT_ACTIVE_EXPIRED_LEASE_EXTENSION_SECONDS = 300.0
 COMPUTE_SLOTS_LOOP_ERROR_KEY = "compute-slots-loop"
+COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY = "compute-slots-expired-active-lease"
 COMPUTE_SLOTS_SYNC_TIMEOUT_SECONDS = 1.0
 
 DECISION_RUN_NOW = "run_now"
@@ -763,26 +765,20 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         )
 
     def _reserved_resources(self) -> dict[str, int]:
-        now = time.time()
         total = {"cpu": 0, "memory": 0, "storage": 0}
         with self.locked_state() as state:
             leases = [dataclass_from_wire(SlotLease, item) for item in state.leases.values()]
         for lease in leases:
-            if lease.expires_at <= now:
-                continue
             total["cpu"] += max(1, int(lease.request.cpu_cores))
             total["memory"] += max(0, int(lease.request.memory_bytes))
             total["storage"] += max(0, int(lease.request.temp_storage_bytes))
         return total
 
     def _reserved_cpu_core_ids(self) -> set[int]:
-        now = time.time()
         reserved: set[int] = set()
         with self.locked_state() as state:
             leases = [dataclass_from_wire(SlotLease, item) for item in state.leases.values()]
         for lease in leases:
-            if lease.expires_at <= now:
-                continue
             reserved.update(_lease_reserved_cpu_core_ids(lease))
         return reserved
 
@@ -852,11 +848,9 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             return False
         try:
             proxy = self.context.get_proxy(agent_id, self.context.address)
-            if proxy is None:
-                return False
-            return bool(proxy.info().get("active"))
+            return proxy is not None
         except Exception:
-            return False
+            return True
 
     def _set_agent_cpu_affinity(self, agent_id: str, cpu_core_ids: list[int]) -> CpuAffinityResult:
         host = getattr(self.context, "host", None)
@@ -1000,10 +994,23 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
     @state_locked
     def _expire_leases(self) -> None:
         now = time.time()
+        retained_expired = 0
         for lease_id, wire in list(self.state.leases.items()):
             lease = dataclass_from_wire(SlotLease, wire)
             if lease.expires_at <= now:
-                self.state.leases.pop(lease_id, None)
+                if self._is_agent_active(lease.request.agent_id):
+                    retained_expired += 1
+                    self.state.leases[lease_id] = dataclass_to_wire(
+                        replace(lease, expires_at=now + DEFAULT_ACTIVE_EXPIRED_LEASE_EXTENSION_SECONDS)
+                    )
+                else:
+                    self.state.leases.pop(lease_id, None)
+        if retained_expired:
+            self.state.errors[COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY] = (
+                f"retained {retained_expired} expired active lease(s)"
+            )
+        else:
+            self.state.errors.pop(COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY, None)
 
     def _record_error(self, key: str, error: str) -> None:
         with self.locked_state() as state:
