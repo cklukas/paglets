@@ -14,6 +14,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from paglets.artifacts import STREAM_CHUNK_BYTES, ArtifactRef, copy_stream, file_sha256
+from paglets.config.env import DEFAULT_API_KEY_ENV
 from paglets.core.errors import (
     AuthenticationError,
     ForbiddenError,
@@ -239,7 +240,13 @@ class HostClient:
                 return restore_json_safe(json.loads(raw)) if raw else None
         except HTTPError as exc:
             raw = exc.read().decode("utf-8", errors="replace")
-            raise _error_from_response(exc.code, raw, url) from exc
+            error = _error_from_response(exc.code, raw, url)
+            if isinstance(error, AuthenticationError) and not self.api_key:
+                raise AuthenticationError(
+                    f"{error}; set {DEFAULT_API_KEY_ENV} or pass --api-key-env with an environment variable "
+                    "containing a Paglets bearer API key"
+                ) from exc
+            raise error from exc
         except URLError as exc:
             raise RemoteHostError(f"Could not reach {url}: {exc.reason}") from exc
 

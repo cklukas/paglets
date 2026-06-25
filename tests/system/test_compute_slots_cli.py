@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from paglets.remote.admin import AgentRecord
+from paglets.remote.client import HostClient
 from paglets.system.compute_slots import (
     CancelSlotRequestsRequest,
     ComputeSlotRequest,
@@ -139,3 +142,22 @@ def test_compute_slots_json_flag_is_accepted_before_or_after_subcommands():
     assert _parser().parse_args(["status", "--json"]).json is True
     assert _parser().parse_args(["jobs", "list", "--json"]).json is True
     assert _parser().parse_args(["jobs", "clear", "--json"]).json is True
+
+
+def test_compute_slots_entry_url_is_used_directly(monkeypatch):
+    from paglets.remote.admin import select_reachable_entry_server
+
+    def fake_get_json(url, *, timeout=None):
+        assert url == "https://aqre.ap.basf.net/paglets/health"
+        return {"name": "aqre", "address": "https://aqre.ap.basf.net/paglets"}
+
+    client = HostClient(timeout=1)
+    monkeypatch.setattr(client, "get_json", fake_get_json)
+
+    entry = select_reachable_entry_server(
+        entry_name="https://aqre.ap.basf.net/paglets",
+        client=client,
+    )
+
+    assert entry.name == "aqre"
+    assert entry.url == "https://aqre.ap.basf.net/paglets"

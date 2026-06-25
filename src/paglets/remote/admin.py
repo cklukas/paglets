@@ -11,7 +11,8 @@ from time import perf_counter
 from typing import Any
 from urllib.parse import urlencode
 
-from paglets.core.errors import RemoteHostError
+from paglets.config.env import DEFAULT_API_KEY_ENV
+from paglets.core.errors import AuthenticationError, RemoteHostError
 from paglets.core.messages import Message
 from paglets.core.runtime_values import ServiceScope, enum_from_wire, require_enum
 from paglets.remote.client import HostClient
@@ -124,12 +125,31 @@ def select_reachable_entry_server(
     client: HostClient,
     timeout: float = 1.0,
 ) -> ServerRef:
+    if entry_name is not None and "://" in entry_name:
+        url = normalize_server_url(entry_name)
+        try:
+            health = client.get_json(f"{url.rstrip('/')}/health", timeout=timeout)
+        except AuthenticationError as exc:
+            raise ValueError(
+                f"Entry server requires authentication; set {DEFAULT_API_KEY_ENV} or pass --api-key-env with an "
+                "environment variable containing a Paglets bearer API key"
+            ) from exc
+        return ServerRef(
+            name=str(health.get("name") or url),
+            url=normalize_server_url(str(health.get("address") or url)),
+            enabled=True,
+            local_start=False,
+        )
     entry_candidates = _ambient_entry_candidates()
     tried: list[str] = []
+    auth_errors: list[str] = []
     for candidate in _dedupe_servers(entry_candidates):
         tried.append(candidate.url)
         try:
             health = client.get_json(f"{candidate.url.rstrip('/')}/health", timeout=timeout)
+        except AuthenticationError as exc:
+            auth_errors.append(str(exc))
+            continue
         except Exception:
             continue
         selected = ServerRef(
@@ -142,6 +162,11 @@ def select_reachable_entry_server(
             continue
         return selected
     tried_text = ", ".join(tried) if tried else "none"
+    if auth_errors:
+        raise ValueError(
+            f"Entry server requires authentication; set {DEFAULT_API_KEY_ENV} or pass --api-key-env with an "
+            "environment variable containing a Paglets bearer API key"
+        )
     if entry_name is not None:
         raise ValueError(f"No reachable entry server named {entry_name!r} found; tried {tried_text}")
     raise ValueError(f"No reachable entry server found; tried {tried_text}")
