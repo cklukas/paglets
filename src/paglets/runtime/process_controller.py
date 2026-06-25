@@ -196,6 +196,8 @@ class ChildProcessController:
                     message = self._conn.recv()
                 except EOFError:
                     break
+                except TypeError:
+                    break
                 if not isinstance(message, dict):
                     continue
                 kind = message.get("type")

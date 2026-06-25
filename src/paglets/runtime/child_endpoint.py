@@ -86,6 +86,8 @@ class _ChildEndpoint:
                     message = self._conn.recv()
                 except EOFError:
                     break
+                except TypeError:
+                    break
                 if not isinstance(message, dict):
                     continue
                 if message.get("type") == "reply":
