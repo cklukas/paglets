@@ -12,8 +12,7 @@ from paglets.core.agent import Paglet, PagletState
 from paglets.core.errors import PagletInactiveError
 from paglets.core.messages import DEACTIVATE, Message
 from paglets.core.runtime_values import EnvelopeKind
-from paglets.persistence.persistency import DeactivationPolicy
-from paglets.persistence.persistency import DeactivationRequest, InactiveRecord
+from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord
 from paglets.runtime.envelope import PagletEnvelope
 from paglets.runtime.host import Host
 from paglets.runtime.inactive_records import _repair_inactive_compute_job_policy
@@ -141,6 +140,27 @@ def test_inactive_waiting_compute_job_policy_is_repaired_for_startup():
     assert _repair_inactive_compute_job_policy(record) is True
     assert record.policy.activate_on_startup is True
     assert request_policy.activate_on_startup is True
+
+
+def test_resident_services_start_before_startup_activation(tmp_path: Path):
+    host = _host("alpha", free_port(), tmp_path / "alpha")
+    calls: list[str] = []
+
+    def start_resident_services() -> None:
+        calls.append("resident")
+
+    def activate_startup_records() -> None:
+        calls.append("activate")
+        assert "resident" in calls
+
+    host._start_resident_services = start_resident_services  # type: ignore[method-assign]
+    host._activate_startup_records = activate_startup_records  # type: ignore[method-assign]
+
+    host.start_background()
+    try:
+        assert calls[:2] == ["resident", "activate"]
+    finally:
+        host.stop()
 
 
 def test_scheduled_activation_restores_due_inactive_paglet(tmp_path: Path):
