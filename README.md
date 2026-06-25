@@ -166,7 +166,10 @@ tests/                       behavior-oriented test suites by topic
 
 ## Status
 
-`paglets` is early-stage software for experiments and trusted local/LAN meshes. Use API-key authentication for shared networks and relay deployments.
+`paglets` is early-stage software for experiments and trusted local/LAN meshes.
+Use API-key authentication for shared networks and relay deployments. Packaged
+commands read `PAGLETS_API_KEY` automatically; pass `--api-key-env NAME` only
+when the key lives in a different environment variable.
 
 ## License
 

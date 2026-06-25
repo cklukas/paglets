@@ -97,11 +97,12 @@ snippet from that server block. Test with `sudo nginx -t` before reloading.
 ```bash
 export PAGLETS_API_KEY='change-me'
 uv run paglets-host --name A --host 127.0.0.1 --port 8765 \
-  --public-url https://server-a.example.com/paglets \
-  --api-key-env PAGLETS_API_KEY
-uv run paglets-host --name B --connect-to https://server-a.example.com/paglets \
-  --api-key-env PAGLETS_API_KEY
+  --public-url https://server-a.example.com/paglets
+uv run paglets-host --name B --connect-to https://server-a.example.com/paglets
 ```
+
+Paglets commands read `PAGLETS_API_KEY` automatically. Use `--api-key-env NAME`
+only when the key lives in a different environment variable.
 
 Connect-mode hosts do not open inbound ports. Movement and messages are relayed
 through A over authenticated HTTP long-polling, and git auto-update is disabled

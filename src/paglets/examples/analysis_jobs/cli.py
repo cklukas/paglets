@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import PagletsAdminClient, select_reachable_entry_server
 from paglets.remote.client import HostClient
@@ -36,9 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-        if args.api_key_env and not api_key:
-            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        api_key = resolve_api_key(args.api_key_env)
         client = HostClient(timeout=args.timeout, api_key=api_key)
         entry = select_reachable_entry_server(entry_name=args.entry, client=client)
         request = AnalysisCampaignRequest(
@@ -86,7 +84,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--entry", default=None, help="Discovered entry/home host name")
     parser.add_argument("--timeout", type=float, default=20.0, help="HTTP timeout in seconds")
     parser.add_argument(
-        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+        "--api-key-env",
+        default=None,
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     parser.add_argument("--tasks", type=int, default=DEFAULT_TASK_COUNT, help="Number of analysis jobs")
     parser.add_argument("--db", default=default_result_db(), help="SQLite result DB path on the home host")

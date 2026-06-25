@@ -85,11 +85,12 @@ uv run paglets-search [--entry alpha] grep TODO .
 ```
 
 Direct local examples can still run without an API key. For proxied or shared
-networks, start hosts with `--api-key-env` and use the relay setup from the main
-guide so the HTTP API requires bearer authentication.
+networks, set `PAGLETS_API_KEY` and use the relay setup from the main guide so
+the HTTP API requires bearer authentication.
 
-All packaged example CLIs that contact an entry host accept `--api-key-env`,
-including `paglets-sysinfo`, `paglets-mesh-info`, `paglets-artifacts`,
+All packaged example CLIs that contact an entry host read `PAGLETS_API_KEY`
+automatically and accept `--api-key-env NAME` as an override, including
+`paglets-sysinfo`, `paglets-mesh-info`, `paglets-artifacts`,
 `paglets-compute-slots`, `paglets-compute-groups`, `paglets-analysis-jobs`,
 `paglets-file-grabber`, `paglets-pi-compute`, `paglets-perf-test`,
 `paglets-mesh-benchmark`, and `paglets-search`. The paglet classes themselves

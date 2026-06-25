@@ -222,11 +222,27 @@ class SchedulerStatusSyncReply:
     statuses: list[SchedulerHostStatus] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class CancelSlotRequestsRequest:
+    request_ids: tuple[str, ...] = ()
+    agent_ids: tuple[str, ...] = ()
+    job_ids: tuple[str, ...] = ()
+    all: bool = False
+    include_leases: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class CancelSlotRequestsReply:
+    cancelled_requests: int = 0
+    cancelled_leases: int = 0
+
+
 CANDIDATE_HOSTS = ServiceOperation("candidate_hosts", CandidateHostsRequest, CandidateHostsReply)
 REQUEST_SLOT = ServiceOperation("request_slot", ComputeSlotRequest, SlotDecisionReply)
 RELEASE_SLOT = ServiceOperation("release_slot", SlotReleaseRequest, SlotReleaseReply)
 SCHEDULER_STATUS = ServiceOperation("scheduler_status", SchedulerStatusRequest, SchedulerStatusReply)
 SYNC_SCHEDULER_STATUS = ServiceOperation("sync_scheduler_status", SchedulerStatusSyncRequest, SchedulerStatusSyncReply)
+CANCEL_SLOT_REQUESTS = ServiceOperation("cancel_slot_requests", CancelSlotRequestsRequest, CancelSlotRequestsReply)
 
 COMPUTE_SLOTS = ServiceContract(
     "compute-slots",
@@ -236,6 +252,7 @@ COMPUTE_SLOTS = ServiceContract(
         RELEASE_SLOT,
         SCHEDULER_STATUS,
         SYNC_SCHEDULER_STATUS,
+        CANCEL_SLOT_REQUESTS,
     ),
     version="1",
 )
@@ -312,6 +329,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                 RELEASE_SLOT: self.release_slot,
                 SCHEDULER_STATUS: self.scheduler_status,
                 SYNC_SCHEDULER_STATUS: self.sync_scheduler_status,
+                CANCEL_SLOT_REQUESTS: self.cancel_slot_requests,
             },
             default=self.not_handled(),
         )
@@ -401,6 +419,34 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             queued = []
             leases = []
         return SchedulerStatusReply(status=status, queued_requests=queued, leases=leases, active_jobs=active_jobs)
+
+    @state_locked
+    def cancel_slot_requests(self, request: CancelSlotRequestsRequest) -> CancelSlotRequestsReply:
+        if not _has_cancel_filter(request):
+            return CancelSlotRequestsReply()
+
+        remaining_requests: list[dict[str, Any]] = []
+        cancelled_requests = 0
+        for item in self.state.queued_requests:
+            queued_request = dataclass_from_wire(ComputeSlotRequest, item)
+            if _matches_cancel_filter(queued_request, request):
+                cancelled_requests += 1
+            else:
+                remaining_requests.append(item)
+        self.state.queued_requests = remaining_requests
+
+        cancelled_leases = 0
+        if request.include_leases:
+            for lease_id, wire in list(self.state.leases.items()):
+                lease = dataclass_from_wire(SlotLease, wire)
+                if _matches_cancel_filter(lease.request, request):
+                    self.state.leases.pop(lease_id, None)
+                    cancelled_leases += 1
+
+        return CancelSlotRequestsReply(
+            cancelled_requests=cancelled_requests,
+            cancelled_leases=cancelled_leases,
+        )
 
     def sync_scheduler_status(self, request: SchedulerStatusSyncRequest) -> SchedulerStatusSyncReply:
         accepted = 0
@@ -1049,6 +1095,20 @@ def _normalize_request(request: ComputeSlotRequest, *, default_host_url: str) ->
         last_redirect_at=max(0.0, float(request.last_redirect_at)),
         last_redirect_from_host_url=request.last_redirect_from_host_url.rstrip("/"),
     )
+
+
+def _has_cancel_filter(request: CancelSlotRequestsRequest) -> bool:
+    return bool(request.all or request.request_ids or request.agent_ids or request.job_ids)
+
+
+def _matches_cancel_filter(slot_request: ComputeSlotRequest, request: CancelSlotRequestsRequest) -> bool:
+    if request.all:
+        return True
+    if slot_request.request_id and slot_request.request_id in request.request_ids:
+        return True
+    if slot_request.agent_id and slot_request.agent_id in request.agent_ids:
+        return True
+    return bool(slot_request.job_id and slot_request.job_id in request.job_ids)
 
 
 def _can_ever_satisfy(status: SchedulerHostStatus, request: ComputeSlotRequest) -> str:

@@ -421,8 +421,6 @@ def test_paglets_mesh_benchmark_uses_relay_without_intermediate_arrival(tmp_path
                 "--clock-probes",
                 "1",
                 "--exclude-self",
-                "--api-key-env",
-                "PAGLETS_API_KEY",
             ]
         )
 

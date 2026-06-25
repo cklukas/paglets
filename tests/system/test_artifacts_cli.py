@@ -35,3 +35,27 @@ def test_artifacts_cli_lists_json_and_table(tmp_path: Path, capsys):
         assert "7 B" in output
     finally:
         host.stop()
+
+
+def test_artifacts_cli_uses_default_api_key_env(tmp_path: Path, capsys, monkeypatch):
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        api_key="secret",
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=tmp_path / "alpha",
+    )
+    source = tmp_path / "artifact.bin"
+    source.write_bytes(b"payload")
+    monkeypatch.setenv("PAGLETS_API_KEY", "secret")
+    host.start_background()
+    try:
+        ref = host.client.upload_artifact(host.address, source, owner_agent_id="agent", name="artifact.bin")
+
+        assert main(["--host", host.address, "list", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["artifacts"][0]["artifact_id"] == ref.artifact_id
+    finally:
+        host.stop()

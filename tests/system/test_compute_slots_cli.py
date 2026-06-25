@@ -2,7 +2,17 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-from paglets.system.compute_slots.cli import _print_status
+import time
+
+from paglets.remote.admin import AgentRecord
+from paglets.system.compute_slots import (
+    CancelSlotRequestsRequest,
+    ComputeSlotRequest,
+    SchedulerHostStatus,
+    SchedulerStatusReply,
+    SlotLease,
+)
+from paglets.system.compute_slots.cli import _cancel_preview_payload, _parser, _print_jobs, _print_status, _public_jobs
 
 
 def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
@@ -60,3 +70,72 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
     assert "active jobs:" in output
     assert "87.5" in output
     assert "4:0,1,2,3" in output
+
+
+def test_compute_slots_cancel_preview_matches_requests_and_leases():
+    keep_request = ComputeSlotRequest(request_id="request-keep", agent_id="agent-1", job_id="job-1")
+    cancel_request = ComputeSlotRequest(request_id="request-cancel", agent_id="agent-0", job_id="job-0")
+    cancel_lease = SlotLease(
+        lease_id="lease-cancel",
+        request=cancel_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+    )
+    reply = SchedulerStatusReply(
+        status=SchedulerHostStatus(host_name="alpha", host_url="http://alpha", observed_at=time.time()),
+        queued_requests=[keep_request, cancel_request],
+        leases=[cancel_lease],
+    )
+
+    payload = _cancel_preview_payload(
+        reply,
+        CancelSlotRequestsRequest(agent_ids=("agent-0",), include_leases=True),
+    )
+
+    assert [item["request_id"] for item in payload["matched_requests"]] == ["request-cancel"]
+    assert [item["lease_id"] for item in payload["matched_leases"]] == ["lease-cancel"]
+
+
+def test_compute_slots_jobs_prints_compute_job_details(capsys):
+    _print_jobs(
+        [
+            {
+                "agent_id": "agent-0",
+                "active": False,
+                "class_name": "paglets.examples:ExampleComputeJob",
+                "compute_status": "WAITING_FOR_SLOT",
+                "status": "NEW",
+                "job_id": "job-0",
+                "request_id": "request-0",
+            }
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "WAITING_FOR_SLOT" in output
+    assert "job-0" in output
+    assert "ExampleComputeJob" in output
+
+
+def test_compute_slots_public_jobs_omits_internal_agent_record():
+    agent = AgentRecord(
+        server_name="alpha",
+        host_url="http://alpha",
+        agent_id="agent-0",
+        class_name="paglets.examples:ExampleComputeJob",
+        state_class_name="paglets.examples:ExampleComputeState",
+        active=False,
+    )
+    [public] = _public_jobs([{"agent_id": "agent-0", "_agent": agent}])
+
+    assert public == {"agent_id": "agent-0"}
+
+
+def test_compute_slots_json_flag_is_accepted_before_or_after_subcommands():
+    assert _parser().parse_args(["--json", "status"]).json is True
+    assert _parser().parse_args(["status", "--json"]).json is True
+    assert _parser().parse_args(["jobs", "list", "--json"]).json is True
+    assert _parser().parse_args(["jobs", "clear", "--json"]).json is True

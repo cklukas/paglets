@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import sys
 from pathlib import Path
 
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.patterns.tasks import TaskClient, TaskSnapshot, TaskStatus
 from paglets.remote.admin import PagletsAdminClient, ServerRef, normalize_server_url, select_reachable_entry_server
 from paglets.remote.client import HostClient
@@ -30,9 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.error("a command is required")
     try:
-        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-        if args.api_key_env and not api_key:
-            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        api_key = resolve_api_key(args.api_key_env)
         client = HostClient(timeout=max(1.0, float(args.request_timeout)), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         remote = _resolve_remote(entry, args.remote, client=client)
@@ -56,7 +54,11 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
         help="HTTP request timeout in seconds",
     )
-    parser.add_argument("--api-key-env", default=None, help="Environment variable containing the paglets API key")
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
+    )
     subparsers = parser.add_subparsers(dest="command")
     for command, help_text in (
         ("push", "copy or move a file from the entry host to the remote host"),

@@ -4,12 +4,15 @@
 
 from .affinity import CpuAffinityResult, apply_current_process_cpu_affinity, apply_process_cpu_affinity
 from .agent import (
+    CANCEL_SLOT_REQUESTS,
     CANDIDATE_HOSTS,
     COMPUTE_SLOTS,
     RELEASE_SLOT,
     REQUEST_SLOT,
     SCHEDULER_STATUS,
     SYNC_SCHEDULER_STATUS,
+    CancelSlotRequestsReply,
+    CancelSlotRequestsRequest,
     CandidateHost,
     CandidateHostsReply,
     CandidateHostsRequest,
@@ -51,6 +54,7 @@ from .job import (
 )
 
 __all__ = [
+    "CANCEL_SLOT_REQUESTS",
     "CANDIDATE_HOSTS",
     "COMPUTE_SLOTS",
     "COMPUTE_STATUS_COMPLETED",
@@ -67,6 +71,8 @@ __all__ = [
     "REQUEST_SLOT",
     "SCHEDULER_STATUS",
     "SYNC_SCHEDULER_STATUS",
+    "CancelSlotRequestsReply",
+    "CancelSlotRequestsRequest",
     "CandidateHost",
     "CandidateHostsReply",
     "CandidateHostsRequest",

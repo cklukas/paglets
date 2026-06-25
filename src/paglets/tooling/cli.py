@@ -13,6 +13,7 @@ from pathlib import Path, PureWindowsPath
 from urllib.parse import urlparse
 
 import paglets.tooling.git_update as git_update
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.config.startup import DEFAULT_LAUNCH_CONFIG_PATH, load_launch_config, sync_launch_config
 from paglets.core.errors import PagletError
 from paglets.core.runtime_values import LaunchConfigSyncAction
@@ -30,11 +31,12 @@ def main(argv: list[str] | None = None) -> int:
         host_properties = _parse_properties(args.property)
     except ValueError as exc:
         parser.error(str(exc))
-    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-    if args.api_key_env and not api_key:
-        parser.error(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+    try:
+        api_key = resolve_api_key(args.api_key_env)
+    except ValueError as exc:
+        parser.error(str(exc))
     if (args.connect_to or args.public_url) and not api_key:
-        parser.error("--public-url and --connect-to require --api-key-env")
+        parser.error(f"--public-url and --connect-to require an API key from {DEFAULT_API_KEY_ENV} or --api-key-env")
     reexec_args = list(argv) if argv is not None else sys.argv[1:]
     restart_requested = threading.Event()
     git_repo_root: Path | None = None
@@ -238,7 +240,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Maximum queued relay deliveries per connected host",
     )
     parser.add_argument(
-        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+        "--api-key-env",
+        default=None,
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     parser.add_argument("--mesh-version", default=None, help="Override mesh code-version gate")
     parser.add_argument("--tag", action="append", default=[], help="Advertise a host tag; repeatable")

@@ -16,7 +16,9 @@ uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
 uv run paglets-host --name labbox --bind-public 192.168.86.42 --port 8765 --mesh-version dev
 ```
 
-Use `--api-key-env NAME` on shared or proxied networks so HTTP requests require bearer authentication.
+Set `PAGLETS_API_KEY` on shared or proxied networks so HTTP requests require
+bearer authentication. Use `--api-key-env NAME` when the key lives in a
+different environment variable.
 
 Advertise host roles and compatibility hints with tags and properties:
 

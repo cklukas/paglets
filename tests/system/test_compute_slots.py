@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from paglets.system.compute_slots import (
+    CancelSlotRequestsRequest,
     ComputeJobRuntimeInfo,
     ComputeSlotRequest,
     CpuAffinityResult,
@@ -315,6 +316,106 @@ def test_compute_slot_cleanup_removes_lease_for_missing_active_agent():
 
     with agent.locked_state() as state:
         assert state.leases == {}
+
+
+def test_compute_slot_cancel_by_agent_id_removes_matching_queued_requests():
+    requests = [
+        ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0"),
+        ComputeSlotRequest(request_id="request-1", agent_id="agent-1", job_id="job-1"),
+        ComputeSlotRequest(request_id="request-2", agent_id="agent-0", job_id="job-2"),
+    ]
+    agent = ComputeSlotsAgent(ComputeSlotsState(queued_requests=[dataclass_to_wire(item) for item in requests]))
+
+    reply = agent.cancel_slot_requests(CancelSlotRequestsRequest(agent_ids=("agent-0",)))
+
+    assert reply.cancelled_requests == 2
+    assert reply.cancelled_leases == 0
+    with agent.locked_state() as state:
+        remaining = [dataclass_from_wire(ComputeSlotRequest, item).request_id for item in state.queued_requests]
+        assert remaining == ["request-1"]
+
+
+def test_compute_slot_cancel_all_clears_queued_requests_without_leases_by_default():
+    request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(request)],
+            leases={lease.lease_id: dataclass_to_wire(lease)},
+        )
+    )
+
+    reply = agent.cancel_slot_requests(CancelSlotRequestsRequest(all=True))
+
+    assert reply.cancelled_requests == 1
+    assert reply.cancelled_leases == 0
+    with agent.locked_state() as state:
+        assert state.queued_requests == []
+        assert list(state.leases) == ["lease-0"]
+
+
+def test_compute_slot_cancel_can_include_matching_leases():
+    keep_request = ComputeSlotRequest(request_id="request-keep", agent_id="agent-1", job_id="job-1")
+    cancel_request = ComputeSlotRequest(request_id="request-cancel", agent_id="agent-0", job_id="job-0")
+    keep_lease = SlotLease(
+        lease_id="lease-keep",
+        request=keep_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+    )
+    cancel_lease = SlotLease(
+        lease_id="lease-cancel",
+        request=cancel_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+    )
+    agent = ComputeSlotsAgent(
+        ComputeSlotsState(
+            queued_requests=[dataclass_to_wire(keep_request), dataclass_to_wire(cancel_request)],
+            leases={
+                keep_lease.lease_id: dataclass_to_wire(keep_lease),
+                cancel_lease.lease_id: dataclass_to_wire(cancel_lease),
+            },
+        )
+    )
+
+    reply = agent.cancel_slot_requests(
+        CancelSlotRequestsRequest(job_ids=("job-0",), include_leases=True)
+    )
+
+    assert reply.cancelled_requests == 1
+    assert reply.cancelled_leases == 1
+    with agent.locked_state() as state:
+        assert [dataclass_from_wire(ComputeSlotRequest, item).request_id for item in state.queued_requests] == [
+            "request-keep"
+        ]
+        assert list(state.leases) == ["lease-keep"]
+
+
+def test_compute_slot_cancel_without_filter_is_noop():
+    request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    agent = ComputeSlotsAgent(ComputeSlotsState(queued_requests=[dataclass_to_wire(request)]))
+
+    reply = agent.cancel_slot_requests(CancelSlotRequestsRequest())
+
+    assert reply.cancelled_requests == 0
+    assert reply.cancelled_leases == 0
+    with agent.locked_state() as state:
+        assert state.queued_requests == [dataclass_to_wire(request)]
 
 
 def test_compute_slot_expiry_retains_reservation_for_active_agent():

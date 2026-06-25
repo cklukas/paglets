@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import sys
 import time
 from typing import Any
 
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
@@ -35,9 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-        if args.api_key_env and not api_key:
-            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        api_key = resolve_api_key(args.api_key_env)
         client = HostClient(timeout=args.timeout, api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         operation, request = _operation_request(args)
@@ -58,7 +56,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait for mesh replies")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     parser.add_argument(
-        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+        "--api-key-env",
+        default=None,
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

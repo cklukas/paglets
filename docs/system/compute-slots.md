@@ -629,6 +629,34 @@ uv run paglets-compute-slots candidates --cpu-cores 2 --memory 4G --temp-storage
 uv run paglets-compute-slots candidates --require-tag linux --prefer-tag gpu --exclude-host laptop
 ```
 
+Cancel queued scheduler requests:
+
+```bash
+uv run paglets-compute-slots cancel --request-id compute-slot-abc --dry-run
+uv run paglets-compute-slots cancel --agent-id agent-abc --confirm
+uv run paglets-compute-slots cancel --all --confirm
+```
+
+`cancel` removes matching queued slot requests from the scheduler. Match by
+request ID, agent ID, job ID, or use `--all`. Destructive cancellation requires
+`--confirm`; use `--dry-run` to preview matching queued requests. Active leases
+are not cancelled unless `--include-leases` is also supplied.
+
+List or clear compute job paglets:
+
+```bash
+uv run paglets-compute-slots jobs list --inactive
+uv run paglets-compute-slots jobs list --inactive --status WAITING_FOR_SLOT
+uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --dry-run
+uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --confirm
+```
+
+`jobs list` uses the host admin API to inspect active or inactive paglets whose
+state includes `compute_status`. If neither `--active` nor `--inactive` is
+provided, inactive jobs are listed. `jobs clear` disposes inactive compute job
+paglets only; by default it targets `WAITING_FOR_SLOT` jobs and requires
+`--confirm` unless `--dry-run` is used.
+
 Inspect compute job groups:
 
 ```bash
@@ -636,5 +664,6 @@ uv run paglets-compute-groups
 uv run paglets-compute-groups --group group-abc --json
 ```
 
-For shared or relayed deployments, pass the same `--api-key-env` used by the
-host.
+For shared or relayed deployments, set `PAGLETS_API_KEY` for the host and
+compute-slot commands. Use `--api-key-env NAME` only when the key lives in a
+different environment variable.

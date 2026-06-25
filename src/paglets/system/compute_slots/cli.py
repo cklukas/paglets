@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.core.runtime_values import ServiceScope
-from paglets.remote.admin import ServerRef, select_reachable_entry_server
+from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.services.contracts import ServiceHandle, ServiceRecord
 
 from .agent import (
+    CANCEL_SLOT_REQUESTS,
     CANDIDATE_HOSTS,
     COMPUTE_SLOTS,
     SCHEDULER_STATUS,
+    CancelSlotRequestsRequest,
     CandidateHostsRequest,
     ComputeSlotRequest,
     SchedulerStatusRequest,
@@ -26,13 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     try:
-        api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-        if args.api_key_env and not api_key:
-            raise ValueError(f"--api-key-env {args.api_key_env!r} is not set or is empty")
+        api_key = resolve_api_key(args.api_key_env)
         client = HostClient(timeout=args.timeout, api_key=api_key)
         entry = select_reachable_entry_server(entry_name=args.entry, client=client)
-        handle = _handle(entry, client, SCHEDULER_STATUS.name)
         if args.command == "status":
+            handle = _handle(entry, client, SCHEDULER_STATUS.name)
             reply = handle.call(
                 SCHEDULER_STATUS,
                 SchedulerStatusRequest(include_queue=args.queue, include_jobs=args.jobs),
@@ -43,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 _print_status(payload)
             return 0
+        if args.command == "cancel":
+            return _run_cancel(args, entry, client)
+        if args.command == "jobs":
+            return _run_jobs(args, entry, client)
+        handle = _handle(entry, client, CANDIDATE_HOSTS.name)
         request = CandidateHostsRequest(
             slot=ComputeSlotRequest(
                 cpu_cores=max(1, args.cpu_cores),
@@ -76,13 +81,40 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=20.0, help="HTTP timeout in seconds")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     parser.add_argument(
-        "--api-key-env", default=None, help="Environment variable containing the paglets bearer API key"
+        "--api-key-env",
+        default=None,
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     status = subparsers.add_parser("status", help="Show local scheduler status")
+    _add_json_arg(status)
     status.add_argument("--queue", action="store_true", help="Include queued requests and leases")
     status.add_argument("--jobs", action="store_true", help="Include active leased job process metrics")
+    cancel = subparsers.add_parser("cancel", help="Cancel queued slot requests")
+    _add_json_arg(cancel)
+    cancel.add_argument("--request-id", action="append", default=[], help="Cancel a queued request ID; repeatable")
+    cancel.add_argument(
+        "--agent-id", action="append", default=[], help="Cancel queued requests for an agent; repeatable"
+    )
+    cancel.add_argument("--job-id", action="append", default=[], help="Cancel queued requests for a job; repeatable")
+    cancel.add_argument("--all", action="store_true", help="Cancel all queued requests")
+    cancel.add_argument("--include-leases", action="store_true", help="Also cancel matching active leases")
+    cancel.add_argument("--dry-run", action="store_true", help="Print matching queued requests without cancelling")
+    cancel.add_argument("--confirm", action="store_true", help="Confirm cancellation")
+    jobs = subparsers.add_parser("jobs", help="List or clear compute job paglets")
+    jobs_subparsers = jobs.add_subparsers(dest="jobs_command", required=True)
+    jobs_list = jobs_subparsers.add_parser("list", help="List compute job paglets")
+    _add_json_arg(jobs_list)
+    _add_job_filter_args(jobs_list)
+    jobs_list.add_argument("--active", action="store_true", help="Include active compute jobs")
+    jobs_list.add_argument("--inactive", action="store_true", help="Include inactive compute jobs")
+    jobs_clear = jobs_subparsers.add_parser("clear", help="Dispose inactive compute job paglets")
+    _add_json_arg(jobs_clear)
+    _add_job_filter_args(jobs_clear)
+    jobs_clear.add_argument("--dry-run", action="store_true", help="Print matching jobs without disposing")
+    jobs_clear.add_argument("--confirm", action="store_true", help="Confirm disposal")
     candidates = subparsers.add_parser("candidates", help="Find hosts suitable for a slot request")
+    _add_json_arg(candidates)
     candidates.add_argument("--limit", type=int, default=5, help="Maximum candidates to print")
     candidates.add_argument("--cpu-cores", type=int, default=1, help="Requested CPU cores")
     candidates.add_argument("--memory", type=_parse_size, default=0, help="Requested RAM, e.g. 512M")
@@ -96,6 +128,127 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_json_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Print machine-readable JSON",
+    )
+
+
+def _add_job_filter_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--agent-id", action="append", default=[], help="Filter by agent ID; repeatable")
+    parser.add_argument("--job-id", action="append", default=[], help="Filter by compute job ID; repeatable")
+    parser.add_argument("--status", action="append", default=[], help="Filter by compute or job status; repeatable")
+    parser.add_argument("--class-name", action="append", default=[], help="Filter by class name or suffix; repeatable")
+
+
+def _run_cancel(args: argparse.Namespace, entry: ServerRef, client: HostClient) -> int:
+    request = CancelSlotRequestsRequest(
+        request_ids=tuple(args.request_id),
+        agent_ids=tuple(args.agent_id),
+        job_ids=tuple(args.job_id),
+        all=bool(args.all),
+        include_leases=bool(args.include_leases),
+    )
+    if not request.all and not request.request_ids and not request.agent_ids and not request.job_ids:
+        raise ValueError("cancel requires at least one filter or --all")
+    handle = _handle(entry, client, CANCEL_SLOT_REQUESTS.name)
+    if args.dry_run:
+        status_reply = _handle(entry, client, SCHEDULER_STATUS.name).call(
+            SCHEDULER_STATUS,
+            SchedulerStatusRequest(include_queue=True, include_jobs=False),
+        )
+        payload = _cancel_preview_payload(status_reply, request)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            _print_cancel_preview(payload)
+        return 0
+    if not args.confirm:
+        raise ValueError("cancel requires --confirm (or use --dry-run)")
+    reply = handle.call(CANCEL_SLOT_REQUESTS, request)
+    payload = CANCEL_SLOT_REQUESTS.encode_reply(reply)
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"cancelled queued_requests={payload['cancelled_requests']} "
+            f"leases={payload['cancelled_leases']}"
+        )
+    return 0
+
+
+def _run_jobs(args: argparse.Namespace, entry: ServerRef, client: HostClient) -> int:
+    admin = PagletsAdminClient([entry], client=client)
+    if args.jobs_command == "list":
+        include_active = bool(args.active)
+        include_inactive = bool(args.inactive)
+        if not include_active and not include_inactive:
+            include_inactive = True
+        jobs = _load_compute_jobs(
+            admin,
+            entry,
+            include_active=include_active,
+            include_inactive=include_inactive,
+            agent_ids=tuple(args.agent_id),
+            job_ids=tuple(args.job_id),
+            statuses=tuple(args.status),
+            class_names=tuple(args.class_name),
+        )
+        if args.json:
+            print(json.dumps({"jobs": _public_jobs(jobs)}, indent=2, sort_keys=True))
+        else:
+            _print_jobs(jobs)
+        return 0
+
+    statuses = tuple(args.status) if args.status else ("WAITING_FOR_SLOT",)
+    jobs = _load_compute_jobs(
+        admin,
+        entry,
+        include_active=False,
+        include_inactive=True,
+        agent_ids=tuple(args.agent_id),
+        job_ids=tuple(args.job_id),
+        statuses=statuses,
+        class_names=tuple(args.class_name),
+    )
+    if args.dry_run:
+        if args.json:
+            print(
+                json.dumps(
+                    {"dry_run": True, "matched": len(jobs), "jobs": _public_jobs(jobs)},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"matched {len(jobs)} inactive compute job(s)")
+            _print_jobs(jobs)
+        return 0
+    if not args.confirm:
+        raise ValueError("jobs clear requires --confirm (or use --dry-run)")
+    disposed = 0
+    errors: dict[str, str] = {}
+    by_agent_id = {job["agent_id"]: job["_agent"] for job in jobs}
+    for agent_id, agent in by_agent_id.items():
+        try:
+            admin.dispose(agent)
+        except Exception as exc:
+            errors[agent_id] = str(exc)
+        else:
+            disposed += 1
+    payload = {"disposed": disposed, "errors": errors}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(f"disposed {disposed} inactive compute job(s)")
+        for agent_id, error in sorted(errors.items()):
+            print(f"  - {agent_id}: {error}")
+    return 1 if errors else 0
+
+
 def _handle(entry: ServerRef, client: HostClient, capability: str) -> ServiceHandle:
     payload = client.get_json(
         f"{entry.url.rstrip('/')}/services?name={COMPUTE_SLOTS.name}"
@@ -105,6 +258,121 @@ def _handle(entry: ServerRef, client: HostClient, capability: str) -> ServiceHan
     if not records:
         raise ValueError(f"No {COMPUTE_SLOTS.name!r} service advertised on {entry.name}")
     return ServiceHandle(COMPUTE_SLOTS, records[0], client)
+
+
+def _load_compute_jobs(
+    admin: PagletsAdminClient,
+    entry: ServerRef,
+    *,
+    include_active: bool,
+    include_inactive: bool,
+    agent_ids: tuple[str, ...] = (),
+    job_ids: tuple[str, ...] = (),
+    statuses: tuple[str, ...] = (),
+    class_names: tuple[str, ...] = (),
+) -> list[dict[str, object]]:
+    jobs: list[dict[str, object]] = []
+    for agent in admin.list_agents(entry):
+        if agent.active and not include_active:
+            continue
+        if not agent.active and not include_inactive:
+            continue
+        if agent_ids and agent.agent_id not in agent_ids:
+            continue
+        if class_names and not _matches_class_name(agent.class_name, class_names):
+            continue
+        try:
+            payload = admin.get_agent_state(agent)
+        except Exception:
+            continue
+        state = payload.get("state") if isinstance(payload, dict) else None
+        if not isinstance(state, dict) or "compute_status" not in state:
+            continue
+        job_id = str(state.get("job_id") or state.get("slot_request_id") or "")
+        if job_ids and job_id not in job_ids:
+            continue
+        compute_status = str(state.get("compute_status") or "")
+        job_status = str(state.get("status") or "")
+        if statuses and compute_status not in statuses and job_status not in statuses:
+            continue
+        jobs.append(
+            {
+                "agent_id": agent.agent_id,
+                "active": agent.active,
+                "class_name": agent.class_name,
+                "state_class_name": agent.state_class_name,
+                "host": agent.server_name,
+                "host_url": agent.host_url,
+                "job_id": job_id,
+                "compute_status": compute_status,
+                "status": job_status,
+                "request_id": str(state.get("slot_request_id") or ""),
+                "lease_id": str(state.get("slot_lease_id") or ""),
+                "deactivated_at": payload.get("deactivated_at"),
+                "_agent": agent,
+            }
+        )
+    jobs.sort(key=lambda item: (str(item["host"]), str(item["job_id"]), str(item["agent_id"])))
+    return jobs
+
+
+def _public_jobs(jobs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [{key: value for key, value in item.items() if key != "_agent"} for item in jobs]
+
+
+def _matches_class_name(class_name: str, filters: tuple[str, ...]) -> bool:
+    return any(class_name == item or class_name.endswith(item) for item in filters)
+
+
+def _cancel_preview_payload(reply, request: CancelSlotRequestsRequest) -> dict[str, object]:
+    queued = [item for item in reply.queued_requests if _matches_cancel_preview(item, request)]
+    leases = [
+        item for item in reply.leases if request.include_leases and _matches_cancel_preview(item.request, request)
+    ]
+    return {
+        "dry_run": True,
+        "matched_requests": [_wire_dataclass(item) for item in queued],
+        "matched_leases": [_wire_dataclass(item) for item in leases],
+    }
+
+
+def _wire_dataclass(value) -> dict:
+    from paglets.serialization.codec import dataclass_to_wire
+
+    return dataclass_to_wire(value)
+
+
+def _matches_cancel_preview(slot_request: ComputeSlotRequest, request: CancelSlotRequestsRequest) -> bool:
+    if request.all:
+        return True
+    if slot_request.request_id and slot_request.request_id in request.request_ids:
+        return True
+    if slot_request.agent_id and slot_request.agent_id in request.agent_ids:
+        return True
+    return bool(slot_request.job_id and slot_request.job_id in request.job_ids)
+
+
+def _print_cancel_preview(payload: dict[str, object]) -> None:
+    requests = payload.get("matched_requests") or []
+    leases = payload.get("matched_leases") or []
+    print(f"matched queued_requests={len(requests)} leases={len(leases)}")
+
+
+def _print_jobs(jobs: list[dict[str, object]]) -> None:
+    print(
+        f"{'agent':<14} {'state':<8} {'compute':<18} {'status':<22} "
+        f"{'job':<22} {'request':<20} {'class':<24}"
+    )
+    for item in jobs:
+        print(
+            f"{_short(item.get('agent_id'), 14):<14} "
+            f"{('active' if item.get('active') else 'inactive'):<8} "
+            f"{_short(item.get('compute_status'), 18):<18} "
+            f"{_short(item.get('status'), 22):<22} "
+            f"{_short(item.get('job_id'), 22):<22} "
+            f"{_short(item.get('request_id'), 20):<20} "
+            f"{_short(str(item.get('class_name')).split(':')[-1], 24):<24}"
+        )
 
 
 def _print_status(payload: dict) -> None:

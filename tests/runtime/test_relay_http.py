@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -373,3 +374,51 @@ def test_cli_rejects_connect_mode_with_auto_update():
         host_cli_main(["--name", "B", "--connect-to", "http://example.test/paglets", "--auto-update-from-git"])
 
     assert error.value.code == 2
+
+
+def test_cli_rejects_connect_mode_without_api_key(monkeypatch):
+    monkeypatch.delenv("PAGLETS_API_KEY", raising=False)
+
+    with pytest.raises(SystemExit) as error:
+        host_cli_main(["--name", "B", "--connect-to", "http://example.test/paglets"])
+
+    assert error.value.code == 2
+
+
+def test_cli_connect_mode_uses_default_api_key_env(tmp_path: Path, monkeypatch):
+    hosts: list[dict] = []
+
+    class FakeHost:
+        def __init__(self, **kwargs):
+            hosts.append(kwargs)
+            self.name = kwargs["name"]
+            self.address = "http://127.0.0.1:8765"
+            self.port = kwargs["port"]
+            self.mesh = SimpleNamespace(version_warning="", code_version="test")
+
+        def shutdown(self) -> None:
+            pass
+
+        def start_background(self) -> None:
+            pass
+
+        def serve_forever(self) -> None:
+            pass
+
+    monkeypatch.setenv("PAGLETS_API_KEY", "secret")
+    monkeypatch.setattr("paglets.tooling.cli.Host", FakeHost)
+
+    result = host_cli_main(
+        [
+            "--name",
+            "B",
+            "--connect-to",
+            "http://example.test/paglets",
+            "--launch-config",
+            str(tmp_path / "launch.toml"),
+            "--no-sync-launch-config",
+        ]
+    )
+
+    assert result == 0
+    assert hosts[0]["api_key"] == "secret"

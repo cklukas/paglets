@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from paglets.artifacts import ArtifactRef
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.remote.admin import select_reachable_entry_server
 from paglets.remote.client import HostClient
 
@@ -16,9 +16,9 @@ from paglets.remote.client import HostClient
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
-    api_key = os.environ.get(args.api_key_env) if args.api_key_env else None
-    client = HostClient(timeout=args.timeout, api_key=api_key)
     try:
+        api_key = resolve_api_key(args.api_key_env)
+        client = HostClient(timeout=args.timeout, api_key=api_key)
         host_url = args.host or select_reachable_entry_server(entry_name=args.entry, client=client).url
         if args.command == "list":
             refs = client.list_artifacts(host_url, owner_agent_id=args.owner, timeout=args.timeout)
@@ -56,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--api-key-env",
         default=None,
-        help="Environment variable containing the paglets bearer API key",
+        help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
