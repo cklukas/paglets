@@ -40,6 +40,8 @@ DEFAULT_BURST_LOAD_PER_CPU_LIMIT = 0.5
 DEFAULT_BURST_RESOURCE_HEADROOM_FACTOR = 2.0
 DEFAULT_PLACEMENT_SAMPLE_SIZE = 3
 DEFAULT_ACTIVE_EXPIRED_LEASE_EXTENSION_SECONDS = 300.0
+DEFAULT_USAGE_SAMPLE_INTERVAL_SECONDS = 60.0
+DEFAULT_USAGE_HISTORY_LIMIT = 100
 COMPUTE_SLOTS_LOOP_ERROR_KEY = "compute-slots-loop"
 COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY = "compute-slots-expired-active-lease"
 COMPUTE_SLOTS_SYNC_TIMEOUT_SECONDS = 1.0
@@ -180,6 +182,7 @@ class ComputeJobRuntimeInfo:
     request_id: str
     job_id: str
     agent_id: str
+    class_name: str = ""
     active: bool = False
     pid: int = 0
     declared_cpu_cores: int = 0
@@ -201,6 +204,14 @@ class ComputeJobRuntimeInfo:
     extra_work_paths: list[str] = field(default_factory=list)
     extra_work_bytes: int = 0
     extra_work_file_count: int = 0
+    sample_count: int = 0
+    last_sampled_at: float = 0.0
+    max_cpu_percent: float = 0.0
+    max_memory_rss_bytes: int = 0
+    max_process_tree_memory_rss_bytes: int = 0
+    max_work_dir_bytes: int = 0
+    max_extra_work_bytes: int = 0
+    max_total_work_bytes: int = 0
     usage_error: str = ""
     process_status: str = ""
     error: str = ""
@@ -211,6 +222,7 @@ class SchedulerStatusRequest:
     include_queue: bool = False
     include_jobs: bool = False
     include_usage: bool = False
+    include_usage_history: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +231,7 @@ class SchedulerStatusReply:
     queued_requests: list[ComputeSlotRequest] = field(default_factory=list)
     leases: list[SlotLease] = field(default_factory=list)
     active_jobs: list[ComputeJobRuntimeInfo] = field(default_factory=list)
+    finished_usage: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +304,11 @@ class ComputeSlotsState(PagletState):
     errors: dict[str, str] = field(default_factory=dict)
     last_grant_at: float = 0.0
     last_gossip_at: float = 0.0
+    usage_sample_interval: float = DEFAULT_USAGE_SAMPLE_INTERVAL_SECONDS
+    usage_history_limit: int = DEFAULT_USAGE_HISTORY_LIMIT
+    last_usage_sample_at: float = 0.0
+    active_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
+    finished_usage: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
@@ -415,6 +433,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         if lease is not None:
             stored = dataclass_from_wire(SlotLease, lease)
             if not request.agent_id or request.agent_id == stored.request.agent_id:
+                self._finish_usage_for_lease_locked(stored, reason="released")
                 self.state.leases.pop(request.lease_id, None)
         return SlotReleaseReply(ok=True)
 
@@ -422,10 +441,14 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         status = self._local_status()
         queued: list[ComputeSlotRequest] = []
         leases: list[SlotLease] = []
+        finished_usage: list[dict[str, Any]] = []
         if request.include_queue or request.include_jobs:
             with self.locked_state() as state:
                 queued = [dataclass_from_wire(ComputeSlotRequest, item) for item in state.queued_requests]
                 leases = [dataclass_from_wire(SlotLease, item) for item in state.leases.values()]
+        if request.include_usage_history:
+            with self.locked_state() as state:
+                finished_usage = list(state.finished_usage)
         active_jobs = (
             self._runtime_info_for_leases(leases, include_usage=request.include_usage)
             if request.include_jobs
@@ -434,7 +457,13 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         if not request.include_queue:
             queued = []
             leases = []
-        return SchedulerStatusReply(status=status, queued_requests=queued, leases=leases, active_jobs=active_jobs)
+        return SchedulerStatusReply(
+            status=status,
+            queued_requests=queued,
+            leases=leases,
+            active_jobs=active_jobs,
+            finished_usage=finished_usage,
+        )
 
     @state_locked
     def cancel_slot_requests(self, request: CancelSlotRequestsRequest) -> CancelSlotRequestsReply:
@@ -456,6 +485,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             for lease_id, wire in list(self.state.leases.items()):
                 lease = dataclass_from_wire(SlotLease, wire)
                 if _matches_cancel_filter(lease.request, request):
+                    self._finish_usage_for_lease_locked(lease, reason="cancelled")
                     self.state.leases.pop(lease_id, None)
                     cancelled_leases += 1
 
@@ -494,6 +524,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                 self._maybe_gossip()
                 self._grant_queued_requests()
                 self._rebalance_elastic_affinity()
+                self._maybe_sample_usage()
             except Exception as exc:  # pragma: no cover - background diagnostics
                 with self.locked_state() as state:
                     state.errors[COMPUTE_SLOTS_LOOP_ERROR_KEY] = str(exc)
@@ -862,7 +893,11 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         if not stale:
             return
         with self.locked_state() as state:
+            lease_by_id = {item.lease_id: item for item in leases}
             for lease_id in stale:
+                lease = lease_by_id.get(lease_id)
+                if lease is not None:
+                    self._finish_usage_for_lease_locked(lease, reason="inactive")
                 state.leases.pop(lease_id, None)
 
     def _rebalance_elastic_affinity(self) -> None:
@@ -968,9 +1003,11 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             extra_work_file_count = 0
             usage_error = ""
             error = ""
+            class_name = ""
             try:
                 proxy = self.context.get_proxy(lease.request.agent_id, self.context.address)
                 agent_info = proxy.info() if proxy is not None else {}
+                class_name = str(agent_info.get("class_name") or "")
                 active = bool(agent_info.get("active"))
                 pid = int(agent_info.get("pid") or 0)
                 if pid > 0:
@@ -1003,12 +1040,15 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                 error = str(exc)
             except Exception as exc:
                 error = str(exc)
+            with self.locked_state() as state:
+                stored_usage = dict(state.active_usage.get(lease.lease_id) or {})
             info.append(
                 ComputeJobRuntimeInfo(
                     lease_id=lease.lease_id,
                     request_id=lease.request.request_id,
                     job_id=lease.request.job_id,
                     agent_id=lease.request.agent_id,
+                    class_name=class_name or str(stored_usage.get("class_name") or ""),
                     active=active,
                     pid=pid,
                     declared_cpu_cores=max(1, int(lease.request.cpu_cores)),
@@ -1030,6 +1070,16 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                     extra_work_paths=extra_work_paths,
                     extra_work_bytes=extra_work_bytes,
                     extra_work_file_count=extra_work_file_count,
+                    sample_count=int(stored_usage.get("sample_count") or 0),
+                    last_sampled_at=float(stored_usage.get("last_sampled_at") or 0.0),
+                    max_cpu_percent=float(stored_usage.get("max_cpu_percent") or 0.0),
+                    max_memory_rss_bytes=int(stored_usage.get("max_memory_rss_bytes") or 0),
+                    max_process_tree_memory_rss_bytes=int(
+                        stored_usage.get("max_process_tree_memory_rss_bytes") or 0
+                    ),
+                    max_work_dir_bytes=int(stored_usage.get("max_work_dir_bytes") or 0),
+                    max_extra_work_bytes=int(stored_usage.get("max_extra_work_bytes") or 0),
+                    max_total_work_bytes=int(stored_usage.get("max_total_work_bytes") or 0),
                     usage_error=usage_error,
                     process_status=process_status,
                     error=error,
@@ -1037,6 +1087,54 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             )
         info.sort(key=lambda item: (item.job_id, item.agent_id, item.lease_id))
         return info
+
+    def _maybe_sample_usage(self) -> None:
+        now = time.time()
+        with self.locked_state() as state:
+            interval = max(0.0, float(state.usage_sample_interval))
+            if interval and now - float(state.last_usage_sample_at or 0.0) < interval:
+                return
+            state.last_usage_sample_at = now
+            leases = [dataclass_from_wire(SlotLease, item) for item in state.leases.values()]
+        self._sample_usage(leases, now=now)
+
+    def _sample_usage(self, leases: list[SlotLease], *, now: float | None = None) -> None:
+        sampled_at = time.time() if now is None else now
+        lease_by_id = {lease.lease_id: lease for lease in leases}
+        active_ids = {lease.lease_id for lease in leases}
+        samples = self._runtime_info_for_leases(leases, include_usage=True)
+        with self.locked_state() as state:
+            for lease_id in list(state.active_usage):
+                if lease_id not in active_ids:
+                    state.active_usage.pop(lease_id, None)
+            for sample in samples:
+                record = dict(state.active_usage.get(sample.lease_id) or {})
+                if not record and sample.lease_id in lease_by_id:
+                    record = _usage_record_from_lease(lease_by_id[sample.lease_id])
+                state.active_usage[sample.lease_id] = _merge_usage_sample(
+                    record,
+                    sample,
+                    sampled_at=sampled_at,
+                )
+
+    def _finish_usage_for_lease_locked(self, lease: SlotLease, *, reason: str) -> None:
+        finished_at = time.time()
+        usage = dict(self.state.active_usage.pop(lease.lease_id, {}))
+        if not usage:
+            usage = _usage_record_from_lease(lease)
+        usage.update(
+            {
+                "finished_at": finished_at,
+                "finish_reason": reason,
+                "runtime_seconds": max(0.0, finished_at - float(lease.granted_at or finished_at)),
+            }
+        )
+        self.state.finished_usage.append(usage)
+        limit = max(0, int(self.state.usage_history_limit))
+        if limit:
+            self.state.finished_usage = self.state.finished_usage[-limit:]
+        else:
+            self.state.finished_usage = []
 
     def _fresh_statuses(self, max_age: float) -> dict[str, SchedulerHostStatus]:
         now = time.time()
@@ -1107,6 +1205,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                         replace(lease, expires_at=now + DEFAULT_ACTIVE_EXPIRED_LEASE_EXTENSION_SECONDS)
                     )
                 else:
+                    self._finish_usage_for_lease_locked(lease, reason="expired")
                     self.state.leases.pop(lease_id, None)
         if retained_expired:
             self.state.errors[COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY] = (
@@ -1449,6 +1548,58 @@ def _paths_usage(paths: list[str]) -> dict[str, int | str]:
         except OSError as exc:
             errors.append(str(exc))
     return {"bytes": total_bytes, "files": file_count, "error": "; ".join(errors[:3])}
+
+
+def _merge_usage_sample(record: dict[str, Any], sample: ComputeJobRuntimeInfo, *, sampled_at: float) -> dict[str, Any]:
+    total_work_bytes = max(0, int(sample.work_dir_bytes)) + max(0, int(sample.extra_work_bytes))
+    record.setdefault("lease_id", sample.lease_id)
+    record.setdefault("request_id", sample.request_id)
+    record.setdefault("job_id", sample.job_id)
+    record.setdefault("agent_id", sample.agent_id)
+    if sample.class_name:
+        record["class_name"] = sample.class_name
+    else:
+        record.setdefault("class_name", "")
+    record.setdefault("granted_at", 0.0)
+    record.setdefault("first_sampled_at", sampled_at)
+    record["last_sampled_at"] = sampled_at
+    record["sample_count"] = int(record.get("sample_count") or 0) + 1
+    record["current_cpu_percent"] = float(sample.current_cpu_percent)
+    record["current_memory_rss_bytes"] = int(sample.current_memory_rss_bytes)
+    record["current_process_tree_memory_rss_bytes"] = int(sample.process_tree_memory_rss_bytes)
+    record["current_work_dir_bytes"] = int(sample.work_dir_bytes)
+    record["current_extra_work_bytes"] = int(sample.extra_work_bytes)
+    record["current_total_work_bytes"] = total_work_bytes
+    record["max_cpu_percent"] = max(float(record.get("max_cpu_percent") or 0.0), float(sample.current_cpu_percent))
+    record["max_memory_rss_bytes"] = max(
+        int(record.get("max_memory_rss_bytes") or 0), int(sample.current_memory_rss_bytes)
+    )
+    record["max_process_tree_memory_rss_bytes"] = max(
+        int(record.get("max_process_tree_memory_rss_bytes") or 0), int(sample.process_tree_memory_rss_bytes)
+    )
+    record["max_work_dir_bytes"] = max(int(record.get("max_work_dir_bytes") or 0), int(sample.work_dir_bytes))
+    record["max_extra_work_bytes"] = max(int(record.get("max_extra_work_bytes") or 0), int(sample.extra_work_bytes))
+    record["max_total_work_bytes"] = max(int(record.get("max_total_work_bytes") or 0), total_work_bytes)
+    record["usage_error"] = sample.usage_error or record.get("usage_error") or ""
+    return record
+
+
+def _usage_record_from_lease(lease: SlotLease) -> dict[str, Any]:
+    return {
+        "lease_id": lease.lease_id,
+        "request_id": lease.request.request_id,
+        "job_id": lease.request.job_id,
+        "agent_id": lease.request.agent_id,
+        "class_name": "",
+        "granted_at": lease.granted_at,
+        "sample_count": 0,
+        "max_cpu_percent": 0.0,
+        "max_memory_rss_bytes": 0,
+        "max_process_tree_memory_rss_bytes": 0,
+        "max_work_dir_bytes": 0,
+        "max_extra_work_bytes": 0,
+        "max_total_work_bytes": 0,
+    }
 
 
 def _compute_job_usage_paths(proxy) -> list[str]:

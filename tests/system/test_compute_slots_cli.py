@@ -21,6 +21,7 @@ from paglets.system.compute_slots.cli import (
     _parser,
     _print_jobs,
     _print_status,
+    _print_usage_history,
     _public_jobs,
 )
 
@@ -127,6 +128,31 @@ def test_compute_slots_status_prints_usage_details(capsys):
     assert "extra=1.0G" in output
     assert "files=5" in output
     assert "affinity=0,1" in output
+
+
+def test_compute_slots_prints_finished_usage_history(capsys):
+    _print_usage_history(
+        [
+            {
+                "finished_at": 1782457708.0,
+                "runtime_seconds": 125.0,
+                "finish_reason": "released",
+                "job_id": "job-0",
+                "class_name": "example:ExampleComputeJob",
+                "max_cpu_percent": 25.5,
+                "max_process_tree_memory_rss_bytes": 768 * 1024**2,
+                "max_total_work_bytes": 1024**3,
+            }
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "runtime" in output
+    assert "released" in output
+    assert "2.1m" in output
+    assert "25.5%" in output
+    assert "768.0M" in output
+    assert "1.0G" in output
 
 
 def test_compute_slots_status_prints_blocked_queue_diagnostics(capsys):
@@ -276,6 +302,7 @@ def test_compute_slots_json_flag_is_accepted_before_or_after_subcommands():
     assert _parser().parse_args(["status", "--usage"]).usage is True
     assert _parser().parse_args(["jobs", "list", "--json"]).json is True
     assert _parser().parse_args(["jobs", "clear", "--json"]).json is True
+    assert _parser().parse_args(["jobs", "history", "--limit", "3"]).limit == 3
 
 
 def test_compute_slots_jobs_list_defaults_to_active_and_inactive():

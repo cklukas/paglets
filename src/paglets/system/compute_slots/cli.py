@@ -125,6 +125,9 @@ def _parser() -> argparse.ArgumentParser:
     _add_job_filter_args(jobs_clear)
     jobs_clear.add_argument("--dry-run", action="store_true", help="Print matching jobs without disposing")
     jobs_clear.add_argument("--confirm", action="store_true", help="Confirm disposal")
+    jobs_history = jobs_subparsers.add_parser("history", help="Show recent finished compute job usage")
+    _add_json_arg(jobs_history)
+    jobs_history.add_argument("--limit", type=int, default=20, help="Maximum finished jobs to print; 0 prints all")
     candidates = subparsers.add_parser("candidates", help="Find hosts suitable for a slot request")
     _add_json_arg(candidates)
     candidates.add_argument("--limit", type=int, default=5, help="Maximum candidates to print")
@@ -193,6 +196,19 @@ def _run_cancel(args: argparse.Namespace, entry: ServerRef, client: HostClient) 
 
 
 def _run_jobs(args: argparse.Namespace, entry: ServerRef, client: HostClient) -> int:
+    if args.jobs_command == "history":
+        handle = _handle(entry, client, SCHEDULER_STATUS.name)
+        reply = handle.call(SCHEDULER_STATUS, SchedulerStatusRequest(include_usage_history=True))
+        history = SCHEDULER_STATUS.encode_reply(reply).get("finished_usage") or []
+        limit = max(0, int(args.limit))
+        if limit:
+            history = history[-limit:]
+        if args.json:
+            print(json.dumps({"finished_usage": history}, indent=2, sort_keys=True))
+        else:
+            _print_usage_history(history)
+        return 0
+
     admin = PagletsAdminClient([entry], client=client)
     if args.jobs_command == "list":
         include_active, include_inactive = _jobs_list_inclusion(args)
@@ -532,7 +548,9 @@ def _print_status(payload: dict) -> None:
                     f"tree_rss={_bytes(int(item.get('process_tree_memory_rss_bytes') or 0))} "
                     f"work={_bytes(int(item.get('work_dir_bytes') or 0))} "
                     f"extra={_bytes(int(item.get('extra_work_bytes') or 0))} "
-                    f"files={int(item.get('work_dir_file_count') or 0) + int(item.get('extra_work_file_count') or 0)}"
+                    f"files={int(item.get('work_dir_file_count') or 0) + int(item.get('extra_work_file_count') or 0)} "
+                    f"max_total={_bytes(int(item.get('max_total_work_bytes') or 0))} "
+                    f"samples={int(item.get('sample_count') or 0)}"
                 )
             else:
                 print(
@@ -557,6 +575,42 @@ def _print_candidates(payload: dict) -> None:
         print("\nrejected:")
         for host, reason in sorted(payload["rejected"].items()):
             print(f"  - {host}: {reason}")
+
+
+def _print_usage_history(history: list[dict[str, object]]) -> None:
+    print(
+        f"{'finished':<19} {'runtime':>9} {'reason':<10} {'job':<20} {'class':<22} "
+        f"{'max cpu':>7} {'max rss':>9} {'max disk':>9}"
+    )
+    for item in history:
+        print(
+            f"{_format_time(float(item.get('finished_at') or 0.0)):<19} "
+            f"{_duration(float(item.get('runtime_seconds') or 0.0)):>9} "
+            f"{_short(item.get('finish_reason'), 10):<10} "
+            f"{_short(item.get('job_id'), 20):<20} "
+            f"{_short(str(item.get('class_name') or '').split(':')[-1], 22):<22} "
+            f"{float(item.get('max_cpu_percent') or 0.0):>6.1f}% "
+            f"{_bytes(int(item.get('max_process_tree_memory_rss_bytes') or 0)):>9} "
+            f"{_bytes(int(item.get('max_total_work_bytes') or 0)):>9}"
+        )
+
+
+def _format_time(timestamp: float) -> str:
+    if timestamp <= 0.0:
+        return "-"
+    import time
+
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+
+def _duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    if seconds < 60.0:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60.0
+    if minutes < 60.0:
+        return f"{minutes:.1f}m"
+    return f"{minutes / 60.0:.1f}h"
 
 
 def _parse_size(value: str) -> int:

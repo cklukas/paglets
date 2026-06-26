@@ -15,6 +15,7 @@ from paglets.system.compute_slots import (
     SchedulerHostStatus,
     SchedulerStatusRequest,
     SlotLease,
+    SlotReleaseRequest,
 )
 from paglets.system.compute_slots.agent import (
     COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY,
@@ -522,6 +523,62 @@ def test_compute_slot_usage_sums_files_and_directories(tmp_path: Path):
         "files": 3,
         "error": "",
     }
+
+
+def test_compute_slot_usage_sampling_tracks_maxima_and_finished_history():
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0"),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=90.0,
+        expires_at=3600.0,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    samples = [
+        ComputeJobRuntimeInfo(
+            lease_id="lease-0",
+            request_id="request-0",
+            job_id="job-0",
+            agent_id="agent-0",
+            class_name="example:Job",
+            current_cpu_percent=12.0,
+            current_memory_rss_bytes=100,
+            process_tree_memory_rss_bytes=120,
+            extra_work_bytes=300,
+        ),
+        ComputeJobRuntimeInfo(
+            lease_id="lease-0",
+            request_id="request-0",
+            job_id="job-0",
+            agent_id="agent-0",
+            class_name="example:Job",
+            current_cpu_percent=8.0,
+            current_memory_rss_bytes=150,
+            process_tree_memory_rss_bytes=200,
+            work_dir_bytes=25,
+            extra_work_bytes=250,
+        ),
+    ]
+    agent._runtime_info_for_leases = lambda leases, **kwargs: [samples.pop(0)]  # type: ignore[method-assign]
+
+    agent._sample_usage([lease], now=100.0)
+    agent._sample_usage([lease], now=160.0)
+    agent.release_slot(SlotReleaseRequest(lease_id="lease-0", agent_id="agent-0"))
+
+    with agent.locked_state() as state:
+        assert state.active_usage == {}
+        [finished] = state.finished_usage
+    assert finished["job_id"] == "job-0"
+    assert finished["class_name"] == "example:Job"
+    assert finished["sample_count"] == 2
+    assert finished["max_cpu_percent"] == 12.0
+    assert finished["max_memory_rss_bytes"] == 150
+    assert finished["max_process_tree_memory_rss_bytes"] == 200
+    assert finished["max_total_work_bytes"] == 300
+    assert finished["finish_reason"] == "released"
+    assert finished["runtime_seconds"] >= 0
 
 
 def test_compute_slot_redirect_target_prefers_suitable_empty_peer_queue():
