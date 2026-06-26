@@ -232,6 +232,8 @@ The defaults are conservative:
 | -------------------------------- | -------------: | ----------------------------------------------------------------------------- |
 | `grant_interval`                 | `15.0` seconds | Normal wait between local grants.                                             |
 | `max_grants_per_tick`            |            `4` | Hard cap for grants sent during one scheduler pass.                           |
+| `usage_sample_interval`          | `60.0` seconds | Minimum interval between active job usage samples.                            |
+| `usage_history_limit`            |          `100` | Number of finished job usage summaries retained in scheduler state.           |
 | `burst_load_per_cpu`             |          `0.5` | Maximum load per CPU for burst grants after the first grant.                  |
 | `burst_resource_headroom_factor` |          `2.0` | Free CPU/RAM/temp-storage multiplier required for burst grants.               |
 | `max_redirects_per_tick`         |            `4` | Hard cap for peer spillover in one scheduler pass.                            |
@@ -289,6 +291,24 @@ This matters because operating systems often use otherwise idle memory for file
 cache. Reclaimable cache should not by itself prevent a job from starting. The
 `memory_bytes` field remains an expected peak estimate; v1 does not create
 cgroups, Windows Job Objects, or other hard memory limits.
+
+Active job usage is sampled separately from the scheduler loop. The scheduler
+keeps maxima for CPU percent, process RSS, process-tree RSS, Paglets work-dir
+bytes, and application-provided extra work bytes. Sampling defaults to once per
+minute so expensive filesystem walks are not run every scheduler tick.
+
+Compute jobs can expose application-specific scratch files or directories by
+overriding `compute_usage_paths()`:
+
+```python
+class MyJobPaglet(ComputeJobPaglet[MyJobState]):
+  def compute_usage_paths(self):
+    return [self.state.scratch_dir]
+```
+
+The default hook returns no extra paths. `paglets-compute-slots status --usage`
+recursively sums returned directories and regular files in addition to the
+Paglets-owned work directory.
 
 ### Initial Placement
 
@@ -613,14 +633,19 @@ uv run paglets-compute-slots status
 uv run paglets-compute-slots status --queue
 uv run paglets-compute-slots status --jobs
 uv run paglets-compute-slots status --queue --jobs
+uv run paglets-compute-slots status --blocked
+uv run paglets-compute-slots status --usage
+uv run paglets-compute-slots status --blocked --usage
 ```
 
 `status` prints aggregate host capacity including waiting job count and active
 lease count. `--queue` adds queued requests and leases with declared CPU core,
-memory, and temp-storage reservations. `--jobs` adds active leased paglet
+memory, and temp-storage reservations. `--blocked` explains which resource is
+preventing queued requests from running. `--jobs` adds active leased paglet
 processes with declared CPU cores, assigned CPU IDs, declared memory, current
 RSS memory, process CPU percent, process memory percent, PID, and process
-status.
+status. `--usage` adds process-tree RSS, Paglets work-dir usage,
+application-provided extra work usage, sampled maxima, and sample counts.
 
 Check candidate hosts for a resource request:
 
@@ -649,13 +674,17 @@ uv run paglets-compute-slots jobs list --inactive
 uv run paglets-compute-slots jobs list --inactive --status WAITING_FOR_SLOT
 uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --dry-run
 uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --confirm
+uv run paglets-compute-slots jobs history --limit 20
 ```
 
 `jobs list` uses the host admin API to inspect active or inactive paglets whose
 state includes `compute_status`. If neither `--active` nor `--inactive` is
-provided, inactive jobs are listed. `jobs clear` disposes inactive compute job
-paglets only; by default it targets `WAITING_FOR_SLOT` jobs and requires
-`--confirm` unless `--dry-run` is used.
+provided, both active and inactive jobs are listed. `jobs clear` disposes
+inactive compute job paglets only; by default it targets `WAITING_FOR_SLOT` jobs
+and requires `--confirm` unless `--dry-run` is used. `jobs history` prints the
+recent finished-job usage summaries retained by the local scheduler, including
+runtime, finish reason, job class, max CPU, max process-tree RSS, and max disk
+usage.
 
 Inspect compute job groups:
 

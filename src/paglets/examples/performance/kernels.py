@@ -495,7 +495,7 @@ def _memory_copy_kernel(duration_seconds: float) -> BenchmarkMetric:
     destination = bytearray(len(source))
     bytes_processed = 0
     operations = 0
-    while time.perf_counter() < deadline:
+    while operations == 0 or time.perf_counter() < deadline:
         destination[:] = source
         bytes_processed += len(source)
         operations += 1
@@ -512,7 +512,7 @@ def _memory_scan_kernel(duration_seconds: float) -> BenchmarkMetric:
     bytes_processed = 0
     operations = 0
     checksum = 0
-    while time.perf_counter() < deadline:
+    while operations == 0 or time.perf_counter() < deadline:
         checksum ^= sum(source) & 0xFFFFFFFF
         bytes_processed += len(source)
         operations += 1

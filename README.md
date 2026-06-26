@@ -61,6 +61,10 @@ The built-in `compute-slots` service admits coarse jobs by explicit
 can best-effort pin granted jobs to allocated CPU IDs. New compute job paglets
 can derive from `ComputeJobPaglet` so scheduling, wakeup, redirects, affinity
 metadata, and lease release stay out of job-specific code.
+`paglets-compute-slots status --blocked --usage` explains blocked queued jobs
+and reports active job process-tree memory plus Paglets and application scratch
+usage. `paglets-compute-slots jobs history` shows recent finished job runtime
+and peak usage summaries.
 
 For detached multi-job workflows, `ResultCollectorPaglet`,
 `CollectingComputeJobPaglet`, and `submit_compute_job_group(...)` provide a

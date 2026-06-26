@@ -39,7 +39,6 @@ def test_resolve_api_key_missing_explicit_env_raises(monkeypatch):
         resolve_api_key("CUSTOM_PAGLETS_KEY")
 
 
-
 def test_resolve_api_key_empty_explicit_env_raises(monkeypatch):
     monkeypatch.setenv("CUSTOM_PAGLETS_KEY", "")
 

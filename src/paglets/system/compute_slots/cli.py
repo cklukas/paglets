@@ -194,10 +194,7 @@ def _run_cancel(args: argparse.Namespace, entry: ServerRef, client: HostClient) 
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(
-            f"cancelled queued_requests={payload['cancelled_requests']} "
-            f"leases={payload['cancelled_leases']}"
-        )
+        print(f"cancelled queued_requests={payload['cancelled_requests']} leases={payload['cancelled_leases']}")
     return 0
 
 

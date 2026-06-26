@@ -451,9 +451,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             with self.locked_state() as state:
                 finished_usage = list(state.finished_usage)
         active_jobs = (
-            self._runtime_info_for_leases(leases, include_usage=request.include_usage)
-            if request.include_jobs
-            else []
+            self._runtime_info_for_leases(leases, include_usage=request.include_usage) if request.include_jobs else []
         )
         if not request.include_queue:
             queued = []
@@ -1076,9 +1074,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                     last_sampled_at=float(stored_usage.get("last_sampled_at") or 0.0),
                     max_cpu_percent=float(stored_usage.get("max_cpu_percent") or 0.0),
                     max_memory_rss_bytes=int(stored_usage.get("max_memory_rss_bytes") or 0),
-                    max_process_tree_memory_rss_bytes=int(
-                        stored_usage.get("max_process_tree_memory_rss_bytes") or 0
-                    ),
+                    max_process_tree_memory_rss_bytes=int(stored_usage.get("max_process_tree_memory_rss_bytes") or 0),
                     max_work_dir_bytes=int(stored_usage.get("max_work_dir_bytes") or 0),
                     max_extra_work_bytes=int(stored_usage.get("max_extra_work_bytes") or 0),
                     max_total_work_bytes=int(stored_usage.get("max_total_work_bytes") or 0),

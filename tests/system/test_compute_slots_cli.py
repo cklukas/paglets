@@ -14,8 +14,8 @@ from paglets.system.compute_slots import (
     SlotLease,
 )
 from paglets.system.compute_slots.cli import (
-    _blocked_request_payload,
     _apply_lease_times_to_active_jobs,
+    _blocked_request_payload,
     _cancel_preview_payload,
     _core_summary,
     _jobs_list_inclusion,
@@ -242,7 +242,7 @@ def test_compute_slots_status_prints_blocked_queue_diagnostics(capsys):
                 "cpu_cores": 1,
                 "memory_bytes": 32 * 1024**3,
                 "temp_storage_bytes": 100 * 1024**3,
-            }
+            },
         ],
     }
     payload["blocked_requests"] = _blocked_request_payload(payload)

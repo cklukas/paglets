@@ -397,9 +397,7 @@ def test_compute_slot_cancel_can_include_matching_leases():
         )
     )
 
-    reply = agent.cancel_slot_requests(
-        CancelSlotRequestsRequest(job_ids=("job-0",), include_leases=True)
-    )
+    reply = agent.cancel_slot_requests(CancelSlotRequestsRequest(job_ids=("job-0",), include_leases=True))
 
     assert reply.cancelled_requests == 1
     assert reply.cancelled_leases == 1
