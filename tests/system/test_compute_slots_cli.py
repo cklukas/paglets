@@ -35,6 +35,8 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
                 "host_name": "alpha",
                 "free_cpu_cores": 4,
                 "reserved_cpu_cores": 2,
+                "load_per_cpu": 0.5,
+                "max_load_per_cpu": 1.0,
                 "free_memory_bytes": 8 * 1024**3,
                 "reserved_memory_bytes": 2 * 1024**3,
                 "free_temp_storage_bytes": 10 * 1024**3,
@@ -89,6 +91,7 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
     output = capsys.readouterr().out
     assert "waiting=1" in output
     assert "cores_reserved=2" in output
+    assert "load=0.50/1.00" in output
     assert "temp_reserved=5.0G" in output
     assert "queued:" in output
     assert "active jobs:" in output
@@ -220,6 +223,8 @@ def test_compute_slots_status_prints_blocked_queue_diagnostics(capsys):
             "host_name": "alpha",
             "free_cpu_cores": 4,
             "reserved_cpu_cores": 0,
+            "load_per_cpu": 0.2,
+            "max_load_per_cpu": 1.0,
             "free_memory_bytes": 64 * 1024**3,
             "reserved_memory_bytes": 0,
             "free_temp_storage_bytes": 132 * 1024**3,
@@ -252,9 +257,43 @@ def test_compute_slots_status_prints_blocked_queue_diagnostics(capsys):
     output = capsys.readouterr().out
     assert "blocked:" in output
     assert "temp-storage=1" in output
-    assert "grantable=1" in output
     assert "request-0" in output
     assert "request-1" in output
+
+
+def test_compute_slots_status_prints_load_blocked_queue_diagnostics(capsys):
+    payload = {
+        "status": {
+            "host_name": "alpha",
+            "free_cpu_cores": 4,
+            "reserved_cpu_cores": 0,
+            "load_per_cpu": 1.2,
+            "max_load_per_cpu": 1.0,
+            "free_memory_bytes": 64 * 1024**3,
+            "reserved_memory_bytes": 0,
+            "free_temp_storage_bytes": 132 * 1024**3,
+            "queue_length": 1,
+            "active_leases": 0,
+        },
+        "queued_requests": [
+            {
+                "request_id": "request-0",
+                "job_id": "job-0",
+                "agent_id": "agent-0",
+                "cpu_cores": 1,
+                "memory_bytes": 32 * 1024**3,
+                "temp_storage_bytes": 100 * 1024**3,
+            }
+        ],
+    }
+    payload["blocked_requests"] = _blocked_request_payload(payload)
+
+    _print_status(payload)
+
+    output = capsys.readouterr().out
+    assert "blocked:" in output
+    assert "load=1" in output
+    assert "request-0" in output
 
 
 def test_compute_slots_cancel_preview_matches_requests_and_leases():

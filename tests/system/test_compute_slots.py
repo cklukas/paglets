@@ -24,6 +24,7 @@ from paglets.system.compute_slots.agent import (
     _can_ever_satisfy,
     _can_run_now,
     _candidate_score,
+    _current_load_rejection,
     _directory_usage,
     _elastic_cpu_assignments,
     _paths_usage,
@@ -92,6 +93,29 @@ def test_compute_slot_can_run_when_reserved_free_resources_fit():
     request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)
 
     assert _can_run_now(status, request) is True
+
+
+def test_compute_slot_load_limit_blocks_new_grants():
+    status = SchedulerHostStatus(
+        host_name="alpha",
+        host_url="http://alpha",
+        observed_at=time.time(),
+        cpu_count_logical=8,
+        load_average=[12.0, 8.0, 6.0],
+        load_per_cpu=1.5,
+        max_load_per_cpu=1.0,
+        memory_total_bytes=16 * 1024**3,
+        memory_available_bytes=8 * 1024**3,
+        work_total_bytes=100 * 1024**3,
+        work_free_bytes=50 * 1024**3,
+        free_cpu_cores=4,
+        free_memory_bytes=8 * 1024**3,
+        free_temp_storage_bytes=50 * 1024**3,
+    )
+    request = ComputeSlotRequest(cpu_cores=1, memory_bytes=1024**3, temp_storage_bytes=1024**3)
+
+    assert _can_run_now(status, request) is False
+    assert _current_load_rejection(status) == "load-per-cpu 1.50 >= limit 1.00"
 
 
 def test_compute_slot_direct_requests_respect_reserved_capacity():

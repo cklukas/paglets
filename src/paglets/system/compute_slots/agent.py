@@ -98,6 +98,7 @@ class SchedulerHostStatus:
     cpu_percent: float = 0.0
     load_average: list[float] = field(default_factory=list)
     load_per_cpu: float = 0.0
+    max_load_per_cpu: float = DEFAULT_LOAD_PER_CPU_LIMIT
     memory_total_bytes: int = 0
     memory_available_bytes: int = 0
     work_dir_base: str = ""
@@ -381,6 +382,10 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             health = _current_health_rejection(status)
             if health:
                 rejected[key] = health
+                continue
+            load_rejection = _current_load_rejection(status)
+            if load_rejection:
+                rejected[key] = load_rejection
                 continue
             candidates.append(
                 CandidateHost(status=status, score=_candidate_score(status, request.slot), reasons=["suitable"])
@@ -840,6 +845,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             cpu_percent=float(load.cpu_percent if load is not None else 0.0),
             load_average=load_average,
             load_per_cpu=round(load_per_cpu, 4),
+            max_load_per_cpu=max(0.0, float(self.state.max_load_per_cpu)),
             memory_total_bytes=memory_total,
             memory_available_bytes=memory_available,
             work_dir_base=str(Path(work_dir).parent),
@@ -1298,11 +1304,20 @@ def _can_run_now(status: SchedulerHostStatus, request: ComputeSlotRequest) -> bo
         return False
     if _current_health_rejection(status):
         return False
+    if _current_load_rejection(status):
+        return False
     if request.cpu_cores > max(0, status.free_cpu_cores):
         return False
     if request.memory_bytes > max(0, status.free_memory_bytes):
         return False
     return request.temp_storage_bytes <= max(0, status.free_temp_storage_bytes)
+
+
+def _current_load_rejection(status: SchedulerHostStatus) -> str:
+    limit = float(status.max_load_per_cpu)
+    if limit > 0 and status.load_per_cpu >= limit:
+        return f"load-per-cpu {status.load_per_cpu:.2f} >= limit {limit:.2f}"
+    return ""
 
 
 def _redirect_budget(*, queue_length: int, max_fraction: float, max_per_tick: int) -> int:
@@ -1365,6 +1380,7 @@ def _reserve_projected_capacity(status: SchedulerHostStatus, request: ComputeSlo
         cpu_percent=status.cpu_percent,
         load_average=list(status.load_average),
         load_per_cpu=status.load_per_cpu,
+        max_load_per_cpu=status.max_load_per_cpu,
         memory_total_bytes=status.memory_total_bytes,
         memory_available_bytes=status.memory_available_bytes,
         work_dir_base=status.work_dir_base,

@@ -449,6 +449,9 @@ def _request_blockers(
     blockers: list[str] = []
     if status.get("errors"):
         blockers.append("host-status")
+    max_load_per_cpu = float(status.get("max_load_per_cpu") or 0.0)
+    if max_load_per_cpu > 0 and float(status.get("load_per_cpu") or 0.0) >= max_load_per_cpu:
+        blockers.append("load")
     if int(request.get("cpu_cores") or 0) > free_cpu:
         blockers.append("cpu")
     if int(request.get("memory_bytes") or 0) > free_memory:
@@ -489,6 +492,7 @@ def _print_status(payload: dict) -> None:
     print(
         f"{status['host_name']} cores_free={status['free_cpu_cores']} "
         f"cores_reserved={status['reserved_cpu_cores']} "
+        f"load={float(status.get('load_per_cpu') or 0.0):.2f}/{float(status.get('max_load_per_cpu') or 0.0):.2f} "
         f"ram_free={_bytes(status['free_memory_bytes'])} "
         f"ram_reserved={_bytes(status['reserved_memory_bytes'])} "
         f"temp_free={_bytes(status['free_temp_storage_bytes'])} "

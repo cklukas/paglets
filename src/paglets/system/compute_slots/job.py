@@ -149,9 +149,17 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
 
     def on_activation(self, event) -> None:
         _ = event
+        should_start = False
         with self.locked_state() as state:
             if state.compute_status == COMPUTE_STATUS_RUNNING and state.restart_running_on_host_startup:
                 self._restore_restart_initial_state_locked(state)
+            should_start = state.compute_status in {
+                COMPUTE_STATUS_NEW,
+                COMPUTE_STATUS_PLACING,
+                COMPUTE_STATUS_WAITING_FOR_SLOT,
+            }
+        if should_start:
+            self.start_compute_worker()
 
     def advance_compute_job(self) -> None:
         with self.locked_state() as state:

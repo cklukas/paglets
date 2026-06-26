@@ -289,6 +289,16 @@ def test_waiting_compute_job_requeues_slot_request_after_startup_activation():
     assert len(policies) == 1
 
 
+def test_waiting_compute_job_startup_activation_starts_worker():
+    paglet = DemoComputePaglet(DemoComputeState(compute_status=COMPUTE_STATUS_WAITING_FOR_SLOT))
+    started: list[bool] = []
+    paglet.start_compute_worker = lambda: started.append(True)  # type: ignore[method-assign]
+
+    paglet.on_activation(None)
+
+    assert started == [True]
+
+
 def test_running_compute_job_shutdown_restarts_from_submitted_state():
     paglet = DemoComputePaglet(DemoComputeState(allow_home_compute=True))
     with paglet.locked_state() as state:
