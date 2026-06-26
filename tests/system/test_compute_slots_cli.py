@@ -15,7 +15,9 @@ from paglets.system.compute_slots import (
 )
 from paglets.system.compute_slots.cli import (
     _blocked_request_payload,
+    _apply_lease_times_to_active_jobs,
     _cancel_preview_payload,
+    _core_summary,
     _jobs_list_inclusion,
     _load_compute_jobs,
     _parser,
@@ -36,6 +38,7 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
                 "free_memory_bytes": 8 * 1024**3,
                 "reserved_memory_bytes": 2 * 1024**3,
                 "free_temp_storage_bytes": 10 * 1024**3,
+                "reserved_temp_storage_bytes": 5 * 1024**3,
                 "queue_length": 1,
                 "active_leases": 1,
             },
@@ -52,7 +55,12 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
             "leases": [
                 {
                     "lease_id": "lease-0",
-                    "request": {"job_id": "job-1", "cpu_cores": 2, "memory_bytes": 2 * 1024**3},
+                    "request": {
+                        "job_id": "job-1",
+                        "cpu_cores": 2,
+                        "memory_bytes": 2 * 1024**3,
+                        "temp_storage_bytes": 5 * 1024**3,
+                    },
                     "reserved_cpu_core_ids": [0, 1],
                     "cpu_core_ids": [0, 1, 2, 3],
                 }
@@ -61,6 +69,7 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
                 {
                     "job_id": "job-1",
                     "agent_id": "agent-1",
+                    "granted_at": time.time() - 3661,
                     "pid": 123,
                     "declared_cpu_cores": 2,
                     "assigned_cpu_core_ids": [0, 1, 2, 3],
@@ -80,10 +89,12 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
     output = capsys.readouterr().out
     assert "waiting=1" in output
     assert "cores_reserved=2" in output
+    assert "temp_reserved=5.0G" in output
     assert "queued:" in output
     assert "active jobs:" in output
-    assert "cpu=87.5%" in output
-    assert "affinity=0,1,2,3" in output
+    assert "5.0G" in output
+    assert "87.5%" in output
+    assert "0-3" in output
 
 
 def test_compute_slots_status_prints_usage_details(capsys):
@@ -104,6 +115,7 @@ def test_compute_slots_status_prints_usage_details(capsys):
                 {
                     "job_id": "job-1",
                     "agent_id": "agent-1",
+                    "granted_at": time.time() - 3661,
                     "pid": 123,
                     "declared_cpu_cores": 2,
                     "assigned_cpu_core_ids": [0, 1],
@@ -114,6 +126,8 @@ def test_compute_slots_status_prints_usage_details(capsys):
                     "extra_work_bytes": 1024**3,
                     "work_dir_file_count": 3,
                     "extra_work_file_count": 2,
+                    "max_memory_rss_bytes": 700 * 1024**2,
+                    "max_process_tree_memory_rss_bytes": 900 * 1024**2,
                     "process_status": "running",
                 }
             ],
@@ -121,13 +135,58 @@ def test_compute_slots_status_prints_usage_details(capsys):
     )
 
     output = capsys.readouterr().out
-    assert "tree_rss=768.0M" in output
-    assert "work=256.0M" in output
+    assert "runtime" in output
+    assert "1.0h" in output
+    assert "tree rss" in output
+    assert "max rss" in output
+    assert "max tree" in output
+    assert "work" in output
     assert "768.0M" in output
+    assert "700.0M" in output
+    assert "900.0M" in output
     assert "256.0M" in output
-    assert "extra=1.0G" in output
-    assert "files=5" in output
-    assert "affinity=0,1" in output
+    assert "1.0G" in output
+    assert "|     5 |" in output
+
+
+def test_compute_slots_usage_runtime_can_come_from_lease(capsys):
+    payload = {
+        "status": {
+            "host_name": "alpha",
+            "free_cpu_cores": 4,
+            "reserved_cpu_cores": 1,
+            "free_memory_bytes": 8 * 1024**3,
+            "reserved_memory_bytes": 1024**3,
+            "free_temp_storage_bytes": 10 * 1024**3,
+            "queue_length": 0,
+            "active_leases": 1,
+        },
+        "leases": [{"lease_id": "lease-0", "granted_at": time.time() - 3661, "request": {}}],
+        "active_jobs": [
+            {
+                "lease_id": "lease-0",
+                "job_id": "job-1",
+                "agent_id": "agent-1",
+                "pid": 123,
+                "declared_cpu_cores": 1,
+                "declared_memory_bytes": 1024**3,
+                "current_memory_rss_bytes": 128 * 1024**2,
+                "process_status": "running",
+            }
+        ],
+        "_include_usage": True,
+        "_hide_leases": True,
+    }
+    _apply_lease_times_to_active_jobs(payload)
+
+    _print_status(payload)
+
+    assert "1.0h" in capsys.readouterr().out
+
+
+def test_core_summary_compacts_long_affinity_lists():
+    assert _core_summary([0, 1, 2, 3]) == "0-3"
+    assert _core_summary([1, 9, 18, 27, 36, 45, 54, 63]) == "1,9,18,27,+4"
 
 
 def test_compute_slots_prints_finished_usage_history(capsys):

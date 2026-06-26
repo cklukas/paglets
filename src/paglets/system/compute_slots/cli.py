@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
 from paglets.core.runtime_values import ServiceScope
@@ -36,16 +37,21 @@ def main(argv: list[str] | None = None) -> int:
             reply = handle.call(
                 SCHEDULER_STATUS,
                 SchedulerStatusRequest(
-                    include_queue=args.queue or args.blocked,
+                    include_queue=args.queue or args.blocked or args.usage,
                     include_jobs=args.jobs or args.usage,
                     include_usage=args.usage,
                 ),
             )
             payload = SCHEDULER_STATUS.encode_reply(reply)
+            if args.usage:
+                _apply_lease_times_to_active_jobs(payload)
             if args.blocked:
                 payload["blocked_requests"] = _blocked_request_payload(payload)
                 if not args.queue and not args.json:
                     payload["_hide_queued_requests"] = True
+            if args.usage and not args.queue and not args.blocked and not args.json:
+                payload["_hide_queued_requests"] = True
+                payload["_hide_leases"] = True
             if args.usage and not args.json:
                 payload["_include_usage"] = True
             if args.json:
@@ -452,21 +458,30 @@ def _request_blockers(
     return blockers
 
 
+def _apply_lease_times_to_active_jobs(payload: dict) -> None:
+    leases = {item.get("lease_id"): item for item in payload.get("leases") or []}
+    for item in payload.get("active_jobs") or []:
+        lease = leases.get(item.get("lease_id"))
+        if lease is not None and not item.get("granted_at"):
+            item["granted_at"] = lease.get("granted_at") or 0.0
+
+
 def _print_jobs(jobs: list[dict[str, object]]) -> None:
-    print(
-        f"{'agent':<14} {'state':<8} {'compute':<18} {'status':<22} "
-        f"{'job':<22} {'request':<20} {'class':<24}"
+    _print_table(
+        ["agent", "state", "compute", "status", "job", "request", "class"],
+        [
+            [
+                _short(item.get("agent_id"), 14),
+                "active" if item.get("active") else "inactive",
+                _short(item.get("compute_status"), 18),
+                _short(item.get("status"), 22),
+                _short(item.get("job_id"), 22),
+                _short(item.get("request_id"), 20),
+                _short(str(item.get("class_name")).split(":")[-1], 24),
+            ]
+            for item in jobs
+        ],
     )
-    for item in jobs:
-        print(
-            f"{_short(item.get('agent_id'), 14):<14} "
-            f"{('active' if item.get('active') else 'inactive'):<8} "
-            f"{_short(item.get('compute_status'), 18):<18} "
-            f"{_short(item.get('status'), 22):<22} "
-            f"{_short(item.get('job_id'), 22):<22} "
-            f"{_short(item.get('request_id'), 20):<20} "
-            f"{_short(str(item.get('class_name')).split(':')[-1], 24):<24}"
-        )
 
 
 def _print_status(payload: dict) -> None:
@@ -477,20 +492,26 @@ def _print_status(payload: dict) -> None:
         f"ram_free={_bytes(status['free_memory_bytes'])} "
         f"ram_reserved={_bytes(status['reserved_memory_bytes'])} "
         f"temp_free={_bytes(status['free_temp_storage_bytes'])} "
+        f"temp_reserved={_bytes(int(status.get('reserved_temp_storage_bytes') or 0))} "
         f"waiting={status['queue_length']} leases={status['active_leases']}"
     )
     if payload.get("queued_requests") and not payload.get("_hide_queued_requests"):
         print("\nqueued:")
-        print(f"{'request':<20} {'job':<22} {'agent':<14} {'cpu':>4} {'mem':>9} {'temp':>9}")
-        for item in payload["queued_requests"]:
-            print(
-                f"{_short(item.get('request_id'), 20):<20} "
-                f"{_short(item.get('job_id'), 22):<22} "
-                f"{_short(item.get('agent_id'), 14):<14} "
-                f"{int(item.get('cpu_cores') or 0):>4} "
-                f"{_bytes(int(item.get('memory_bytes') or 0)):>9} "
-                f"{_bytes(int(item.get('temp_storage_bytes') or 0)):>9}"
-            )
+        _print_table(
+            ["request", "job", "agent", "cpu", "mem", "temp"],
+            [
+                [
+                    _short(item.get("request_id"), 20),
+                    _short(item.get("job_id"), 22),
+                    _short(item.get("agent_id"), 14),
+                    int(item.get("cpu_cores") or 0),
+                    _bytes(int(item.get("memory_bytes") or 0)),
+                    _bytes(int(item.get("temp_storage_bytes") or 0)),
+                ]
+                for item in payload["queued_requests"]
+            ],
+            right={"cpu", "mem", "temp"},
+        )
     if payload.get("blocked_requests"):
         counts: dict[str, int] = {}
         for item in payload["blocked_requests"]:
@@ -498,68 +519,77 @@ def _print_status(payload: dict) -> None:
                 counts[str(blocker)] = counts.get(str(blocker), 0) + 1
         summary = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
         print(f"\nblocked: {summary}")
-        print(f"{'request':<20} {'job':<22} {'blockers':<24}")
-        for item in payload["blocked_requests"][:10]:
-            print(
-                f"{_short(item.get('request_id'), 20):<20} "
-                f"{_short(item.get('job_id'), 22):<22} "
-                f"{','.join(str(value) for value in item.get('blockers') or []):<24}"
-            )
+        _print_table(
+            ["request", "job", "blockers"],
+            [
+                [
+                    _short(item.get("request_id"), 20),
+                    _short(item.get("job_id"), 22),
+                    ",".join(str(value) for value in item.get("blockers") or []),
+                ]
+                for item in payload["blocked_requests"][:10]
+            ],
+        )
         remaining = len(payload["blocked_requests"]) - 10
         if remaining > 0:
             print(f"... {remaining} more queued request(s)")
-    if payload.get("leases"):
+    if payload.get("leases") and not payload.get("_hide_leases"):
         print("\nleases:")
-        print(f"{'lease':<18} {'job':<22} {'decl':>4} {'resv':>5} {'aff':>5} {'mem':>9}")
-        for item in payload["leases"]:
-            request = item.get("request") or {}
-            reserved = item.get("reserved_cpu_core_ids") or item.get("cpu_core_ids") or []
-            assigned = item.get("cpu_core_ids") or []
-            print(
-                f"{_short(item.get('lease_id'), 18):<18} "
-                f"{_short(request.get('job_id'), 22):<22} "
-                f"{int(request.get('cpu_cores') or 0):>4} "
-                f"{len(reserved):>5} "
-                f"{len(assigned):>5} "
-                f"{_bytes(int(request.get('memory_bytes') or 0)):>9}"
-            )
-            if reserved or assigned:
-                print(f"  cpus reserved={_core_ids(reserved) or '-'} affinity={_core_ids(assigned) or '-'}")
+        _print_table(
+            ["lease", "job", "decl", "resv", "aff", "mem", "temp"],
+            [_lease_row(item) for item in payload["leases"]],
+            right={"decl", "resv", "aff", "mem", "temp"},
+        )
+        print("\nlease cpus:")
+        _print_table(
+            ["lease", "reserved cpus", "affinity cpus"],
+            [_lease_cpu_row(item) for item in payload["leases"]],
+        )
     if payload.get("active_jobs"):
         include_usage = bool(payload.get("_include_usage"))
         print("\nactive jobs:")
-        print(f"{'job':<20} {'agent':<12} {'pid':>7} {'cpu':>3} {'aff':>3} {'mem':>8} {'rss':>8} {'status':<10}")
-        for item in payload["active_jobs"]:
-            assigned = item.get('assigned_cpu_core_ids') or []
-            prefix = (
-                f"{_short(item.get('job_id'), 20):<20} "
-                f"{_short(item.get('agent_id'), 12):<12} "
-                f"{int(item.get('pid') or 0):>7} "
-                f"{int(item.get('declared_cpu_cores') or 0):>3} "
-                f"{len(assigned):>3} "
-                f"{_bytes(int(item.get('declared_memory_bytes') or 0)):>8} "
-                f"{_bytes(int(item.get('current_memory_rss_bytes') or 0)):>8} "
+        headers = ["job", "agent", "pid", "cpu", "aff", "mem", "rss", "status"]
+        if include_usage:
+            usage_headers = [
+                "job",
+                "runtime",
+                "tree rss",
+                "max rss",
+                "max tree",
+                "work",
+                "extra",
+                "files",
+                "max disk",
+                "samples",
+            ]
+        else:
+            headers.extend(["cpu%", "mem%", "affinity cpus"])
+        _print_table(
+            headers,
+            [_active_job_row(item, include_usage=include_usage) for item in payload["active_jobs"]],
+            right={
+                "pid",
+                "cpu",
+                "aff",
+                "mem",
+                "rss",
+                "tree rss",
+                "work",
+                "extra",
+                "files",
+                "max disk",
+                "samples",
+                "cpu%",
+                "mem%",
+            },
+        )
+        if include_usage:
+            print("\nactive usage:")
+            _print_table(
+                usage_headers,
+                [_active_usage_row(item) for item in payload["active_jobs"]],
+                right={"tree rss", "max rss", "max tree", "work", "extra", "files", "max disk", "samples"},
             )
-            status_text = _short(item.get('process_status') or item.get('usage_error') or item.get('error'), 10)
-            print(prefix + f"{status_text:<10}")
-            if include_usage:
-                print(
-                    "  usage "
-                    f"tree_rss={_bytes(int(item.get('process_tree_memory_rss_bytes') or 0))} "
-                    f"work={_bytes(int(item.get('work_dir_bytes') or 0))} "
-                    f"extra={_bytes(int(item.get('extra_work_bytes') or 0))} "
-                    f"files={int(item.get('work_dir_file_count') or 0) + int(item.get('extra_work_file_count') or 0)} "
-                    f"max_total={_bytes(int(item.get('max_total_work_bytes') or 0))} "
-                    f"samples={int(item.get('sample_count') or 0)}"
-                )
-            else:
-                print(
-                    "  usage "
-                    f"cpu={float(item.get('current_cpu_percent') or 0.0):.1f}% "
-                    f"mem={float(item.get('current_memory_percent') or 0.0):.2f}%"
-                )
-            if assigned:
-                print(f"  affinity={_core_ids(assigned)}")
 
 
 def _print_candidates(payload: dict) -> None:
@@ -578,28 +608,123 @@ def _print_candidates(payload: dict) -> None:
 
 
 def _print_usage_history(history: list[dict[str, object]]) -> None:
-    print(
-        f"{'finished':<19} {'runtime':>9} {'reason':<10} {'job':<20} {'class':<22} "
-        f"{'max cpu':>7} {'max rss':>9} {'max disk':>9}"
+    _print_table(
+        ["finished", "runtime", "reason", "job", "class", "max cpu", "max rss", "max disk"],
+        [
+            [
+                _format_time(float(item.get("finished_at") or 0.0)),
+                _duration(float(item.get("runtime_seconds") or 0.0)),
+                _short(item.get("finish_reason"), 10),
+                _short(item.get("job_id"), 20),
+                _short(str(item.get("class_name") or "").split(":")[-1], 22),
+                f"{float(item.get('max_cpu_percent') or 0.0):.1f}%",
+                _bytes(int(item.get("max_process_tree_memory_rss_bytes") or 0)),
+                _bytes(int(item.get("max_total_work_bytes") or 0)),
+            ]
+            for item in history
+        ],
+        right={"runtime", "max cpu", "max rss", "max disk"},
     )
-    for item in history:
-        print(
-            f"{_format_time(float(item.get('finished_at') or 0.0)):<19} "
-            f"{_duration(float(item.get('runtime_seconds') or 0.0)):>9} "
-            f"{_short(item.get('finish_reason'), 10):<10} "
-            f"{_short(item.get('job_id'), 20):<20} "
-            f"{_short(str(item.get('class_name') or '').split(':')[-1], 22):<22} "
-            f"{float(item.get('max_cpu_percent') or 0.0):>6.1f}% "
-            f"{_bytes(int(item.get('max_process_tree_memory_rss_bytes') or 0)):>9} "
-            f"{_bytes(int(item.get('max_total_work_bytes') or 0)):>9}"
+
+
+def _lease_row(item: dict) -> list[object]:
+    request = item.get("request") or {}
+    reserved = item.get("reserved_cpu_core_ids") or item.get("cpu_core_ids") or []
+    assigned = item.get("cpu_core_ids") or []
+    return [
+        _short(item.get("lease_id"), 18),
+        _short(request.get("job_id"), 22),
+        int(request.get("cpu_cores") or 0),
+        len(reserved),
+        len(assigned),
+        _bytes(int(request.get("memory_bytes") or 0)),
+        _bytes(int(request.get("temp_storage_bytes") or 0)),
+    ]
+
+
+def _lease_cpu_row(item: dict) -> list[object]:
+    reserved = item.get("reserved_cpu_core_ids") or item.get("cpu_core_ids") or []
+    assigned = item.get("cpu_core_ids") or []
+    return [
+        _short(item.get("lease_id"), 18),
+        _core_summary(reserved),
+        _core_summary(assigned),
+    ]
+
+
+def _active_job_row(item: dict, *, include_usage: bool) -> list[object]:
+    assigned = item.get("assigned_cpu_core_ids") or []
+    row: list[object] = [
+        _short(item.get("job_id"), 20),
+        _short(item.get("agent_id"), 12),
+        int(item.get("pid") or 0),
+        int(item.get("declared_cpu_cores") or 0),
+        len(assigned),
+        _bytes(int(item.get("declared_memory_bytes") or 0)),
+        _bytes(int(item.get("current_memory_rss_bytes") or 0)),
+        _short(item.get("process_status") or item.get("usage_error") or item.get("error"), 10),
+    ]
+    if include_usage:
+        return row
+    else:
+        row.extend(
+            [
+                f"{float(item.get('current_cpu_percent') or 0.0):.1f}%",
+                f"{float(item.get('current_memory_percent') or 0.0):.2f}%",
+                _core_summary(assigned),
+            ]
         )
+    return row
+
+
+def _active_usage_row(item: dict) -> list[object]:
+    runtime_seconds = max(0.0, time.time() - float(item.get("granted_at") or time.time()))
+    return [
+        _short(item.get("job_id"), 20),
+        _duration(runtime_seconds),
+        _bytes(int(item.get("process_tree_memory_rss_bytes") or 0)),
+        _bytes(int(item.get("max_memory_rss_bytes") or 0)),
+        _bytes(int(item.get("max_process_tree_memory_rss_bytes") or 0)),
+        _bytes(int(item.get("work_dir_bytes") or 0)),
+        _bytes(int(item.get("extra_work_bytes") or 0)),
+        int(item.get("work_dir_file_count") or 0) + int(item.get("extra_work_file_count") or 0),
+        _bytes(int(item.get("max_total_work_bytes") or 0)),
+        int(item.get("sample_count") or 0),
+    ]
+
+
+def _print_table(headers: list[str], rows: list[list[object]], *, right: set[str] | None = None) -> None:
+    right = right or set()
+    text_rows = [[str(value) for value in row] for row in rows]
+    widths = [len(header) for header in headers]
+    for row in text_rows:
+        for index, value in enumerate(row):
+            widths[index] = max(widths[index], len(value))
+    print(_table_row(headers, widths, right=right, headers=headers))
+    print(_table_separator(headers, widths, right=right))
+    for row in text_rows:
+        print(_table_row(row, widths, right=right, headers=headers))
+
+
+def _table_row(values: list[str], widths: list[int], *, right: set[str], headers: list[str]) -> str:
+    cells = []
+    for index, value in enumerate(values):
+        header = headers[index]
+        cells.append(value.rjust(widths[index]) if header in right else value.ljust(widths[index]))
+    return "| " + " | ".join(cells) + " |"
+
+
+def _table_separator(headers: list[str], widths: list[int], *, right: set[str]) -> str:
+    cells = []
+    for header, width in zip(headers, widths, strict=True):
+        marker = "-" * max(3, width)
+        cells.append(marker[:-1] + ":" if header in right else marker)
+    return "| " + " | ".join(cells) + " |"
 
 
 def _format_time(timestamp: float) -> str:
     if timestamp <= 0.0:
         return "-"
-    import time
-
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 
@@ -666,6 +791,33 @@ def _core_count(cpu_core_ids: list[int]) -> str:
 
 def _core_ids(cpu_core_ids: list[int]) -> str:
     return ",".join(str(item) for item in cpu_core_ids)
+
+
+def _core_ranges(cpu_core_ids: list[int]) -> str:
+    values = sorted({int(item) for item in cpu_core_ids})
+    if not values:
+        return "-"
+    ranges: list[str] = []
+    start = previous = values[0]
+    for value in values[1:]:
+        if value == previous + 1:
+            previous = value
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = value
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
+def _core_summary(cpu_core_ids: list[int], *, max_items: int = 4) -> str:
+    values = sorted({int(item) for item in cpu_core_ids})
+    if not values:
+        return "-"
+    ranges = _core_ranges(values)
+    if len(values) <= max_items or len(ranges) <= 18:
+        return ranges
+    visible = ",".join(str(item) for item in values[:max_items])
+    return f"{visible},+{len(values) - max_items}"
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -183,6 +183,7 @@ class ComputeJobRuntimeInfo:
     job_id: str
     agent_id: str
     class_name: str = ""
+    granted_at: float = 0.0
     active: bool = False
     pid: int = 0
     declared_cpu_cores: int = 0
@@ -1049,6 +1050,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                     job_id=lease.request.job_id,
                     agent_id=lease.request.agent_id,
                     class_name=class_name or str(stored_usage.get("class_name") or ""),
+                    granted_at=lease.granted_at,
                     active=active,
                     pid=pid,
                     declared_cpu_cores=max(1, int(lease.request.cpu_cores)),
