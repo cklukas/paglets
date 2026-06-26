@@ -479,12 +479,16 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
     # ------------------------------------------------------------------
     # Local management API
     # ------------------------------------------------------------------
-    def get_proxy(self, agent_id: str) -> PagletProxy | None:
+    def get_proxy(self, agent_id: str, *, include_inactive: bool = False) -> PagletProxy | None:
         with self._lock:
             record = self._agents.get(agent_id)
-            if record is None or not record.ready or record.crashed:
+            if record is not None:
+                if record.ready and not record.crashed:
+                    return PagletProxy(self.address, agent_id, self.client)
                 return None
-        return PagletProxy(self.address, agent_id, self.client)
+            if include_inactive and agent_id in self._inactive:
+                return PagletProxy(self.address, agent_id, self.client)
+            return None
 
     def get_proxies(self, state: int = ACTIVE) -> list[PagletProxy]:
         proxies: list[PagletProxy] = []

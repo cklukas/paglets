@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from paglets.core.agent import Paglet, PagletState
+from paglets.core.agent import Paglet, PagletContext, PagletState
 from paglets.core.errors import PagletInactiveError
 from paglets.core.messages import DEACTIVATE, Message
 from paglets.core.runtime_values import EnvelopeKind
@@ -95,6 +95,24 @@ def test_paglet_can_deactivate_itself_from_message_handler(tmp_path: Path):
         assert reply == {"host_url": host.address, "agent_id": proxy.agent_id}
         assert host.get_proxy(proxy.agent_id) is None
         assert host.client.get_json(f"{host.address}/agents/{proxy.agent_id}")["active"] is False
+    finally:
+        host.stop()
+
+
+def test_paglet_context_get_proxy_returns_inactive_local_proxy(tmp_path: Path):
+    host = _host("alpha", free_port(), tmp_path / "alpha")
+    host.start_background()
+    try:
+        proxy = host.create(DurableAgent, DurableState())
+        proxy.deactivate()
+
+        assert host.get_proxy(proxy.agent_id) is None
+
+        inactive_proxy = PagletContext(host).get_proxy(proxy.agent_id)
+
+        assert inactive_proxy is not None
+        assert inactive_proxy.agent_id == proxy.agent_id
+        assert inactive_proxy.is_state(False)
     finally:
         host.stop()
 

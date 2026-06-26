@@ -44,7 +44,7 @@ class _ChildCallMixin:
 
     def _handle_child_host_call(self, agent_id: str, op: str, payload: dict[str, Any]) -> Any:
         if op == "get_proxy":
-            proxy = self.get_proxy(str(payload["agent_id"]))
+            proxy = self.get_proxy(str(payload["agent_id"]), include_inactive=bool(payload.get("include_inactive")))
             return {"proxy": proxy.to_wire() if proxy is not None else None}
         if op == "get_proxies":
             proxies = self.get_proxies(int(payload.get("state", ACTIVE)))

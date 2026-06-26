@@ -93,7 +93,7 @@ class PagletContext:
 
     def get_proxy(self, agent_id: str, host_url: str | None = None) -> PagletProxy | None:
         if host_url is None or host_url.rstrip("/") == self.address.rstrip("/"):
-            return self._host.get_proxy(agent_id)
+            return self._host.get_proxy(agent_id, include_inactive=True)
         from paglets.remote.proxy import PagletProxy
 
         return PagletProxy(host_url=host_url, agent_id=agent_id, client=self._host.client)

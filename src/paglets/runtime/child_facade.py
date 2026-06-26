@@ -101,10 +101,16 @@ class _ChildHostFacade:
         finally:
             release_local_pickle_sender(stream)
 
-    def get_proxy(self, agent_id: str, host_url: str | None = None) -> PagletProxy | None:
+    def get_proxy(
+        self,
+        agent_id: str,
+        host_url: str | None = None,
+        *,
+        include_inactive: bool = True,
+    ) -> PagletProxy | None:
         if host_url is not None and host_url.rstrip("/") != self.address.rstrip("/"):
             return PagletProxy(host_url.rstrip("/"), agent_id, self.client)
-        payload = self._call("get_proxy", {"agent_id": agent_id})
+        payload = self._call("get_proxy", {"agent_id": agent_id, "include_inactive": include_inactive})
         proxy = payload.get("proxy")
         return PagletProxy.from_wire(proxy, self.client) if proxy is not None else None
 
