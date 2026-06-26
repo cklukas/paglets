@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import os
@@ -42,6 +43,7 @@ DEFAULT_ACTIVE_EXPIRED_LEASE_EXTENSION_SECONDS = 300.0
 COMPUTE_SLOTS_LOOP_ERROR_KEY = "compute-slots-loop"
 COMPUTE_SLOTS_EXPIRED_ACTIVE_LEASE_ERROR_KEY = "compute-slots-expired-active-lease"
 COMPUTE_SLOTS_SYNC_TIMEOUT_SECONDS = 1.0
+COMPUTE_USAGE_PATHS_MESSAGE = "compute_usage_paths"
 
 DECISION_RUN_NOW = "run_now"
 DECISION_SLEEP = "sleep"
@@ -191,6 +193,15 @@ class ComputeJobRuntimeInfo:
     current_cpu_percent: float = 0.0
     current_memory_rss_bytes: int = 0
     current_memory_percent: float = 0.0
+    process_tree_count: int = 0
+    process_tree_memory_rss_bytes: int = 0
+    work_dir_path: str = ""
+    work_dir_bytes: int = 0
+    work_dir_file_count: int = 0
+    extra_work_paths: list[str] = field(default_factory=list)
+    extra_work_bytes: int = 0
+    extra_work_file_count: int = 0
+    usage_error: str = ""
     process_status: str = ""
     error: str = ""
 
@@ -199,6 +210,7 @@ class ComputeJobRuntimeInfo:
 class SchedulerStatusRequest:
     include_queue: bool = False
     include_jobs: bool = False
+    include_usage: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,7 +426,11 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             with self.locked_state() as state:
                 queued = [dataclass_from_wire(ComputeSlotRequest, item) for item in state.queued_requests]
                 leases = [dataclass_from_wire(SlotLease, item) for item in state.leases.values()]
-        active_jobs = self._runtime_info_for_leases(leases) if request.include_jobs else []
+        active_jobs = (
+            self._runtime_info_for_leases(leases, include_usage=request.include_usage)
+            if request.include_jobs
+            else []
+        )
         if not request.include_queue:
             queued = []
             leases = []
@@ -928,7 +944,12 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                 error=str(exc),
             )
 
-    def _runtime_info_for_leases(self, leases: list[SlotLease]) -> list[ComputeJobRuntimeInfo]:
+    def _runtime_info_for_leases(
+        self,
+        leases: list[SlotLease],
+        *,
+        include_usage: bool = False,
+    ) -> list[ComputeJobRuntimeInfo]:
         info: list[ComputeJobRuntimeInfo] = []
         for lease in leases:
             active = False
@@ -937,6 +958,15 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             cpu_percent = 0.0
             memory_rss = 0
             memory_percent = 0.0
+            process_tree_count = 0
+            process_tree_memory_rss = 0
+            work_dir_path = ""
+            work_dir_bytes = 0
+            work_dir_file_count = 0
+            extra_work_paths: list[str] = []
+            extra_work_bytes = 0
+            extra_work_file_count = 0
+            usage_error = ""
             error = ""
             try:
                 proxy = self.context.get_proxy(lease.request.agent_id, self.context.address)
@@ -951,6 +981,24 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                         memory_rss = int(memory.rss)
                         memory_percent = float(process.memory_percent())
                     cpu_percent = float(process.cpu_percent(interval=None))
+                    if include_usage:
+                        tree_usage = _process_tree_memory_usage(process)
+                        process_tree_count = tree_usage["process_count"]
+                        process_tree_memory_rss = tree_usage["rss_bytes"]
+                if include_usage:
+                    work_dir = _agent_work_dir(lease.work_dir_base, lease.request.agent_id)
+                    work_dir_path = str(work_dir)
+                    disk_usage = _directory_usage(work_dir)
+                    work_dir_bytes = disk_usage["bytes"]
+                    work_dir_file_count = disk_usage["files"]
+                    usage_error = disk_usage["error"]
+                    if proxy is not None and active:
+                        extra_work_paths = _compute_job_usage_paths(proxy)
+                        extra_usage = _paths_usage(extra_work_paths)
+                        extra_work_bytes = extra_usage["bytes"]
+                        extra_work_file_count = extra_usage["files"]
+                        if extra_usage["error"]:
+                            usage_error = _join_errors(usage_error, extra_usage["error"])
             except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
                 error = str(exc)
             except Exception as exc:
@@ -974,6 +1022,15 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                     current_cpu_percent=round(cpu_percent, 2),
                     current_memory_rss_bytes=memory_rss,
                     current_memory_percent=round(memory_percent, 4),
+                    process_tree_count=process_tree_count,
+                    process_tree_memory_rss_bytes=process_tree_memory_rss,
+                    work_dir_path=work_dir_path,
+                    work_dir_bytes=work_dir_bytes,
+                    work_dir_file_count=work_dir_file_count,
+                    extra_work_paths=extra_work_paths,
+                    extra_work_bytes=extra_work_bytes,
+                    extra_work_file_count=extra_work_file_count,
+                    usage_error=usage_error,
                     process_status=process_status,
                     error=error,
                 )
@@ -1326,6 +1383,94 @@ def _candidate_score(status: SchedulerHostStatus, request: ComputeSlotRequest | 
     return round(
         max(0.0, cpu_pressure + memory_pressure + storage_pressure + status.queue_length * 0.1 - preferred_bonus), 6
     )
+
+
+def _process_tree_memory_usage(process: psutil.Process) -> dict[str, int]:
+    processes = [process]
+    with contextlib.suppress(psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+        processes.extend(process.children(recursive=True))
+    seen: set[int] = set()
+    rss_bytes = 0
+    process_count = 0
+    for item in processes:
+        try:
+            pid = int(item.pid)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            rss_bytes += int(item.memory_info().rss)
+            process_count += 1
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+    return {"process_count": process_count, "rss_bytes": rss_bytes}
+
+
+def _directory_usage(path: Path) -> dict[str, int | str]:
+    total_bytes = 0
+    file_count = 0
+    errors: list[str] = []
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False):
+                            total_bytes += int(entry.stat(follow_symlinks=False).st_size)
+                            file_count += 1
+                    except OSError as exc:
+                        errors.append(str(exc))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(str(exc))
+    return {"bytes": total_bytes, "files": file_count, "error": "; ".join(errors[:3])}
+
+
+def _paths_usage(paths: list[str]) -> dict[str, int | str]:
+    total_bytes = 0
+    file_count = 0
+    errors: list[str] = []
+    for value in paths:
+        path = Path(value).expanduser()
+        try:
+            if path.is_dir():
+                usage = _directory_usage(path)
+                total_bytes += int(usage["bytes"])
+                file_count += int(usage["files"])
+                if usage["error"]:
+                    errors.append(str(usage["error"]))
+            elif path.is_file():
+                total_bytes += int(path.stat().st_size)
+                file_count += 1
+        except OSError as exc:
+            errors.append(str(exc))
+    return {"bytes": total_bytes, "files": file_count, "error": "; ".join(errors[:3])}
+
+
+def _compute_job_usage_paths(proxy) -> list[str]:
+    reply = proxy.send(Message(COMPUTE_USAGE_PATHS_MESSAGE), no_delay=True, timeout=1.0)
+    if not isinstance(reply, dict):
+        return []
+    paths = reply.get("paths") or []
+    if not isinstance(paths, list):
+        return []
+    return [str(path) for path in paths if str(path)]
+
+
+def _join_errors(*errors: str) -> str:
+    return "; ".join(error for error in errors if error)
+
+
+def _agent_work_dir(work_dir_base: str, agent_id: str) -> Path:
+    return Path(work_dir_base) / _safe_storage_name(agent_id)
+
+
+def _safe_storage_name(value: str) -> str:
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "storage"
 
 
 def _host_policy_rejection(status: SchedulerHostStatus, request: ComputeSlotRequest) -> str:

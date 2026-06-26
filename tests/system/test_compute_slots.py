@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
@@ -22,7 +23,9 @@ from paglets.system.compute_slots.agent import (
     _can_ever_satisfy,
     _can_run_now,
     _candidate_score,
+    _directory_usage,
     _elastic_cpu_assignments,
+    _paths_usage,
     _redirect_budget,
 )
 
@@ -494,13 +497,31 @@ def test_compute_slot_scheduler_status_can_include_active_job_metrics_without_qu
     )
     agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
     agent._local_status = lambda: local  # type: ignore[method-assign]
-    agent._runtime_info_for_leases = lambda leases: [runtime]  # type: ignore[method-assign]
+    agent._runtime_info_for_leases = lambda leases, **kwargs: [runtime]  # type: ignore[method-assign]
 
     reply = agent.scheduler_status(SchedulerStatusRequest(include_jobs=True, include_queue=False))
 
     assert reply.active_jobs == [runtime]
     assert reply.queued_requests == []
     assert reply.leases == []
+
+
+def test_compute_slot_usage_sums_files_and_directories(tmp_path: Path):
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "a.bin").write_bytes(b"1234")
+    nested = work_dir / "nested"
+    nested.mkdir()
+    (nested / "b.bin").write_bytes(b"12")
+    file_path = tmp_path / "single.bin"
+    file_path.write_bytes(b"123")
+
+    assert _directory_usage(work_dir) == {"bytes": 6, "files": 2, "error": ""}
+    assert _paths_usage([str(work_dir), str(file_path), str(tmp_path / "missing")]) == {
+        "bytes": 9,
+        "files": 3,
+        "error": "",
+    }
 
 
 def test_compute_slot_redirect_target_prefers_suitable_empty_peer_queue():

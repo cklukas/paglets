@@ -35,9 +35,19 @@ def main(argv: list[str] | None = None) -> int:
             handle = _handle(entry, client, SCHEDULER_STATUS.name)
             reply = handle.call(
                 SCHEDULER_STATUS,
-                SchedulerStatusRequest(include_queue=args.queue, include_jobs=args.jobs),
+                SchedulerStatusRequest(
+                    include_queue=args.queue or args.blocked,
+                    include_jobs=args.jobs or args.usage,
+                    include_usage=args.usage,
+                ),
             )
             payload = SCHEDULER_STATUS.encode_reply(reply)
+            if args.blocked:
+                payload["blocked_requests"] = _blocked_request_payload(payload)
+                if not args.queue and not args.json:
+                    payload["_hide_queued_requests"] = True
+            if args.usage and not args.json:
+                payload["_include_usage"] = True
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
@@ -90,6 +100,8 @@ def _parser() -> argparse.ArgumentParser:
     _add_json_arg(status)
     status.add_argument("--queue", action="store_true", help="Include queued requests and leases")
     status.add_argument("--jobs", action="store_true", help="Include active leased job process metrics")
+    status.add_argument("--blocked", action="store_true", help="Explain resource limits blocking queued requests")
+    status.add_argument("--usage", action="store_true", help="Include process-tree memory and Paglets work-dir usage")
     cancel = subparsers.add_parser("cancel", help="Cancel queued slot requests")
     _add_json_arg(cancel)
     cancel.add_argument("--request-id", action="append", default=[], help="Cancel a queued request ID; repeatable")
@@ -379,6 +391,51 @@ def _print_cancel_preview(payload: dict[str, object]) -> None:
     print(f"matched queued_requests={len(requests)} leases={len(leases)}")
 
 
+def _blocked_request_payload(payload: dict) -> list[dict[str, object]]:
+    status = payload.get("status") or {}
+    queued = payload.get("queued_requests") or []
+    result: list[dict[str, object]] = []
+    free_cpu = int(status.get("free_cpu_cores") or 0)
+    free_memory = int(status.get("free_memory_bytes") or 0)
+    free_temp = int(status.get("free_temp_storage_bytes") or 0)
+    for item in queued:
+        blockers = _request_blockers(status, item, free_cpu=free_cpu, free_memory=free_memory, free_temp=free_temp)
+        if not blockers:
+            blockers = ["grantable"]
+            free_cpu -= int(item.get("cpu_cores") or 0)
+            free_memory -= int(item.get("memory_bytes") or 0)
+            free_temp -= int(item.get("temp_storage_bytes") or 0)
+        result.append(
+            {
+                "request_id": item.get("request_id") or "",
+                "job_id": item.get("job_id") or "",
+                "agent_id": item.get("agent_id") or "",
+                "blockers": blockers,
+            }
+        )
+    return result
+
+
+def _request_blockers(
+    status: dict,
+    request: dict,
+    *,
+    free_cpu: int,
+    free_memory: int,
+    free_temp: int,
+) -> list[str]:
+    blockers: list[str] = []
+    if status.get("errors"):
+        blockers.append("host-status")
+    if int(request.get("cpu_cores") or 0) > free_cpu:
+        blockers.append("cpu")
+    if int(request.get("memory_bytes") or 0) > free_memory:
+        blockers.append("memory")
+    if int(request.get("temp_storage_bytes") or 0) > free_temp:
+        blockers.append("temp-storage")
+    return blockers
+
+
 def _print_jobs(jobs: list[dict[str, object]]) -> None:
     print(
         f"{'agent':<14} {'state':<8} {'compute':<18} {'status':<22} "
@@ -406,7 +463,7 @@ def _print_status(payload: dict) -> None:
         f"temp_free={_bytes(status['free_temp_storage_bytes'])} "
         f"waiting={status['queue_length']} leases={status['active_leases']}"
     )
-    if payload.get("queued_requests"):
+    if payload.get("queued_requests") and not payload.get("_hide_queued_requests"):
         print("\nqueued:")
         print(f"{'request':<20} {'job':<22} {'agent':<14} {'cpu':>4} {'mem':>9} {'temp':>9}")
         for item in payload["queued_requests"]:
@@ -418,9 +475,26 @@ def _print_status(payload: dict) -> None:
                 f"{_bytes(int(item.get('memory_bytes') or 0)):>9} "
                 f"{_bytes(int(item.get('temp_storage_bytes') or 0)):>9}"
             )
+    if payload.get("blocked_requests"):
+        counts: dict[str, int] = {}
+        for item in payload["blocked_requests"]:
+            for blocker in item.get("blockers") or []:
+                counts[str(blocker)] = counts.get(str(blocker), 0) + 1
+        summary = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+        print(f"\nblocked: {summary}")
+        print(f"{'request':<20} {'job':<22} {'blockers':<24}")
+        for item in payload["blocked_requests"][:10]:
+            print(
+                f"{_short(item.get('request_id'), 20):<20} "
+                f"{_short(item.get('job_id'), 22):<22} "
+                f"{','.join(str(value) for value in item.get('blockers') or []):<24}"
+            )
+        remaining = len(payload["blocked_requests"]) - 10
+        if remaining > 0:
+            print(f"... {remaining} more queued request(s)")
     if payload.get("leases"):
         print("\nleases:")
-        print(f"{'lease':<18} {'job':<22} {'decl':>4} {'reserved':>10} {'assigned':>10} {'mem':>9}")
+        print(f"{'lease':<18} {'job':<22} {'decl':>4} {'resv':>5} {'aff':>5} {'mem':>9}")
         for item in payload["leases"]:
             request = item.get("request") or {}
             reserved = item.get("reserved_cpu_core_ids") or item.get("cpu_core_ids") or []
@@ -429,29 +503,45 @@ def _print_status(payload: dict) -> None:
                 f"{_short(item.get('lease_id'), 18):<18} "
                 f"{_short(request.get('job_id'), 22):<22} "
                 f"{int(request.get('cpu_cores') or 0):>4} "
-                f"{_core_count(reserved):>10} "
-                f"{_core_count(assigned):>10} "
+                f"{len(reserved):>5} "
+                f"{len(assigned):>5} "
                 f"{_bytes(int(request.get('memory_bytes') or 0)):>9}"
             )
+            if reserved or assigned:
+                print(f"  cpus reserved={_core_ids(reserved) or '-'} affinity={_core_ids(assigned) or '-'}")
     if payload.get("active_jobs"):
+        include_usage = bool(payload.get("_include_usage"))
         print("\nactive jobs:")
-        print(
-            f"{'job':<22} {'agent':<14} {'pid':>7} {'decl':>4} {'assigned':>8} "
-            f"{'mem decl':>9} {'rss':>9} {'cpu%':>7} {'mem%':>7} {'status':<10}"
-        )
+        print(f"{'job':<20} {'agent':<12} {'pid':>7} {'cpu':>3} {'aff':>3} {'mem':>8} {'rss':>8} {'status':<10}")
         for item in payload["active_jobs"]:
-            print(
-                f"{_short(item.get('job_id'), 22):<22} "
-                f"{_short(item.get('agent_id'), 14):<14} "
+            assigned = item.get('assigned_cpu_core_ids') or []
+            prefix = (
+                f"{_short(item.get('job_id'), 20):<20} "
+                f"{_short(item.get('agent_id'), 12):<12} "
                 f"{int(item.get('pid') or 0):>7} "
-                f"{int(item.get('declared_cpu_cores') or 0):>4} "
-                f"{_core_count(item.get('assigned_cpu_core_ids') or []):>8} "
-                f"{_bytes(int(item.get('declared_memory_bytes') or 0)):>9} "
-                f"{_bytes(int(item.get('current_memory_rss_bytes') or 0)):>9} "
-                f"{float(item.get('current_cpu_percent') or 0.0):>7.1f} "
-                f"{float(item.get('current_memory_percent') or 0.0):>7.2f} "
-                f"{_short(item.get('process_status') or item.get('error'), 10):<10}"
+                f"{int(item.get('declared_cpu_cores') or 0):>3} "
+                f"{len(assigned):>3} "
+                f"{_bytes(int(item.get('declared_memory_bytes') or 0)):>8} "
+                f"{_bytes(int(item.get('current_memory_rss_bytes') or 0)):>8} "
             )
+            status_text = _short(item.get('process_status') or item.get('usage_error') or item.get('error'), 10)
+            print(prefix + f"{status_text:<10}")
+            if include_usage:
+                print(
+                    "  usage "
+                    f"tree_rss={_bytes(int(item.get('process_tree_memory_rss_bytes') or 0))} "
+                    f"work={_bytes(int(item.get('work_dir_bytes') or 0))} "
+                    f"extra={_bytes(int(item.get('extra_work_bytes') or 0))} "
+                    f"files={int(item.get('work_dir_file_count') or 0) + int(item.get('extra_work_file_count') or 0)}"
+                )
+            else:
+                print(
+                    "  usage "
+                    f"cpu={float(item.get('current_cpu_percent') or 0.0):.1f}% "
+                    f"mem={float(item.get('current_memory_percent') or 0.0):.2f}%"
+                )
+            if assigned:
+                print(f"  affinity={_core_ids(assigned)}")
 
 
 def _print_candidates(payload: dict) -> None:
@@ -518,6 +608,10 @@ def _core_count(cpu_core_ids: list[int]) -> str:
     if not cpu_core_ids:
         return "-"
     return f"{len(cpu_core_ids)}:{','.join(str(item) for item in cpu_core_ids)}"
+
+
+def _core_ids(cpu_core_ids: list[int]) -> str:
+    return ",".join(str(item) for item in cpu_core_ids)
 
 
 if __name__ == "__main__":  # pragma: no cover

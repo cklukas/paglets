@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
-from paglets.remote.admin import AgentRecord
-from paglets.remote.admin import ServerRef
+from paglets.remote.admin import AgentRecord, ServerRef
 from paglets.remote.client import HostClient
 from paglets.system.compute_slots import (
     CancelSlotRequestsRequest,
@@ -16,8 +13,16 @@ from paglets.system.compute_slots import (
     SchedulerStatusReply,
     SlotLease,
 )
-from paglets.system.compute_slots.cli import _cancel_preview_payload, _load_compute_jobs, _parser, _print_jobs, _print_status, _public_jobs
-from paglets.system.compute_slots.cli import _jobs_list_inclusion
+from paglets.system.compute_slots.cli import (
+    _blocked_request_payload,
+    _cancel_preview_payload,
+    _jobs_list_inclusion,
+    _load_compute_jobs,
+    _parser,
+    _print_jobs,
+    _print_status,
+    _public_jobs,
+)
 
 
 def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
@@ -62,6 +67,9 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
                     "current_memory_rss_bytes": 640 * 1024**2,
                     "current_cpu_percent": 87.5,
                     "current_memory_percent": 1.25,
+                    "process_tree_memory_rss_bytes": 768 * 1024**2,
+                    "work_dir_bytes": 256 * 1024**2,
+                    "work_dir_file_count": 3,
                     "process_status": "running",
                 }
             ],
@@ -73,8 +81,95 @@ def test_compute_slots_status_prints_queue_and_job_resource_details(capsys):
     assert "cores_reserved=2" in output
     assert "queued:" in output
     assert "active jobs:" in output
-    assert "87.5" in output
-    assert "4:0,1,2,3" in output
+    assert "cpu=87.5%" in output
+    assert "affinity=0,1,2,3" in output
+
+
+def test_compute_slots_status_prints_usage_details(capsys):
+    _print_status(
+        {
+            "_include_usage": True,
+            "status": {
+                "host_name": "alpha",
+                "free_cpu_cores": 4,
+                "reserved_cpu_cores": 2,
+                "free_memory_bytes": 8 * 1024**3,
+                "reserved_memory_bytes": 2 * 1024**3,
+                "free_temp_storage_bytes": 10 * 1024**3,
+                "queue_length": 0,
+                "active_leases": 1,
+            },
+            "active_jobs": [
+                {
+                    "job_id": "job-1",
+                    "agent_id": "agent-1",
+                    "pid": 123,
+                    "declared_cpu_cores": 2,
+                    "assigned_cpu_core_ids": [0, 1],
+                    "declared_memory_bytes": 2 * 1024**3,
+                    "current_memory_rss_bytes": 640 * 1024**2,
+                    "process_tree_memory_rss_bytes": 768 * 1024**2,
+                    "work_dir_bytes": 256 * 1024**2,
+                    "extra_work_bytes": 1024**3,
+                    "work_dir_file_count": 3,
+                    "extra_work_file_count": 2,
+                    "process_status": "running",
+                }
+            ],
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "tree_rss=768.0M" in output
+    assert "work=256.0M" in output
+    assert "768.0M" in output
+    assert "256.0M" in output
+    assert "extra=1.0G" in output
+    assert "files=5" in output
+    assert "affinity=0,1" in output
+
+
+def test_compute_slots_status_prints_blocked_queue_diagnostics(capsys):
+    payload = {
+        "status": {
+            "host_name": "alpha",
+            "free_cpu_cores": 4,
+            "reserved_cpu_cores": 0,
+            "free_memory_bytes": 64 * 1024**3,
+            "reserved_memory_bytes": 0,
+            "free_temp_storage_bytes": 132 * 1024**3,
+            "queue_length": 2,
+            "active_leases": 0,
+        },
+        "queued_requests": [
+            {
+                "request_id": "request-0",
+                "job_id": "job-0",
+                "agent_id": "agent-0",
+                "cpu_cores": 1,
+                "memory_bytes": 32 * 1024**3,
+                "temp_storage_bytes": 100 * 1024**3,
+            },
+            {
+                "request_id": "request-1",
+                "job_id": "job-1",
+                "agent_id": "agent-1",
+                "cpu_cores": 1,
+                "memory_bytes": 32 * 1024**3,
+                "temp_storage_bytes": 100 * 1024**3,
+            }
+        ],
+    }
+    payload["blocked_requests"] = _blocked_request_payload(payload)
+
+    _print_status(payload)
+
+    output = capsys.readouterr().out
+    assert "blocked:" in output
+    assert "temp-storage=1" in output
+    assert "grantable=1" in output
+    assert "request-0" in output
+    assert "request-1" in output
 
 
 def test_compute_slots_cancel_preview_matches_requests_and_leases():
@@ -177,6 +272,8 @@ def test_compute_slots_load_jobs_uses_bulk_state_payloads():
 def test_compute_slots_json_flag_is_accepted_before_or_after_subcommands():
     assert _parser().parse_args(["--json", "status"]).json is True
     assert _parser().parse_args(["status", "--json"]).json is True
+    assert _parser().parse_args(["status", "--blocked"]).blocked is True
+    assert _parser().parse_args(["status", "--usage"]).usage is True
     assert _parser().parse_args(["jobs", "list", "--json"]).json is True
     assert _parser().parse_args(["jobs", "clear", "--json"]).json is True
 

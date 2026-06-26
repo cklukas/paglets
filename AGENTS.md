@@ -47,7 +47,6 @@ committed and pushed.
    `git log --oneline`.
 
 2. Choose the next version number deliberately:
-
    - patch version for compatible fixes and documentation/tooling polish;
    - minor version for new compatible features or meaningful public additions;
    - major version for breaking public API, CLI, package layout, config, or
@@ -70,7 +69,6 @@ committed and pushed.
    explicitly.
 
 4. Update release metadata:
-
    - bump `project.version` in `pyproject.toml`;
    - update `uv.lock` if dependency metadata changes require it;
    - update README or MkDocs pages if installation, CLI commands, public APIs,
@@ -117,3 +115,33 @@ IEC labels such as `KiB`, `MiB`, or `GiB`.
 
 For network-style bit throughput, use decimal-scaled units such as `kbit/s`,
 `Mbit/s`, and `Gbit/s`, scaled by 1000.
+
+## AQRE Live Service Notes
+
+- The live AQRE DS-DIA host service is `paglets-aqre-main.service` and runs from
+  `/home/klukasc/ds-dia-install-check` with the interpreter at
+  `/home/klukasc/ds-dia-install-check/.venv/bin/python`.
+- That service imports Paglets from this checkout:
+  `/home/klukasc/ds-dia-install-check/paglets/paglets/src/paglets`. Restarting
+  `paglets-aqre-main.service` loads current working-tree Paglets code.
+- The service unit stores the API key in `Environment=PAGLETS_API_KEY=...`; do
+  not print the key. To run authenticated local checks without exposing it, read
+  it into the process environment, for example:
+
+  ```bash
+  export PAGLETS_API_KEY="$(sed -n 's/^Environment=PAGLETS_API_KEY=//p' /home/klukasc/.config/systemd/user/paglets-aqre-main.service)"
+  /home/klukasc/ds-dia-install-check/.venv/bin/paglets-compute-slots status --queue --jobs
+  ```
+
+- The Windows laptop view goes through the public API at
+  `https://aqre.ap.basf.net/paglets`; local `pgrep` can briefly see child
+  processes that are not yet reflected in the public API. Prefer the public API
+  or `paglets-compute-slots` for scheduler/inventory truth.
+- `paglets-state/work` is Paglets-owned runtime work storage. It is cleared on
+  host startup by `Host._clear_work_root()`. Do not confuse it with application
+  scratch directories outside Paglets persistence.
+- Compute jobs waiting for slots are inactive paglets. Paglet-facing proxy lookup
+  must be able to return inactive local proxies so `send(...,
+ activate_if_inactive=True)` can wake them. Avoid fixing this only in one
+  caller such as `compute-slots`; keep the behavior at the proxy/context
+  abstraction boundary.

@@ -16,6 +16,7 @@ from paglets.system.compute_slots import (
     COMPUTE_STATUS_PLACING,
     COMPUTE_STATUS_RUNNING,
     COMPUTE_STATUS_WAITING_FOR_SLOT,
+    COMPUTE_USAGE_PATHS_MESSAGE,
     CandidateHost,
     CandidateHostsReply,
     ComputeJobPaglet,
@@ -53,6 +54,11 @@ class DemoComputePaglet(ComputeJobPaglet[DemoComputeState]):
             state.events.append(f"failure:{message}")
 
 
+class UsageComputePaglet(DemoComputePaglet):
+    def compute_usage_paths(self):
+        return ["/tmp/work", ""]
+
+
 class ContinuingComputePaglet(DemoComputePaglet):
     def continue_after_compute_success(self) -> None:
         with self.locked_state() as state:
@@ -74,6 +80,14 @@ def test_compute_slot_grant_wakes_and_advances_without_subclass_boilerplate():
     _wait_until(lambda: paglet.state.events == ["run", "success"])
     assert paglet.state.compute_status == COMPUTE_STATUS_COMPLETED
     assert paglet.state.slot_lease_id == ""
+
+
+def test_compute_usage_paths_message_uses_subclass_hook():
+    paglet = UsageComputePaglet(DemoComputeState())
+
+    result = paglet.handle_message(Message(COMPUTE_USAGE_PATHS_MESSAGE))
+
+    assert result == {"paths": ["/tmp/work"]}
 
 
 def test_compute_slot_redirect_records_metadata_and_starts_placement():

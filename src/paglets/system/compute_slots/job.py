@@ -6,7 +6,9 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, replace
+from pathlib import Path
 from typing import Any, Generic, TypeVar, final
 
 from paglets.core.agent import Paglet, PagletState
@@ -18,6 +20,7 @@ from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from .agent import (
     CANDIDATE_HOSTS,
     COMPUTE_SLOTS,
+    COMPUTE_USAGE_PATHS_MESSAGE,
     RELEASE_SLOT,
     REQUEST_SLOT,
     CandidateHost,
@@ -89,6 +92,9 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
         handled = self.handle_compute_slot_message(message)
         if handled is not None:
             return handled
+        usage = self.handle_compute_usage_message(message)
+        if usage is not None:
+            return usage
         custom = self.handle_compute_job_message(message)
         if custom is not None:
             return custom
@@ -114,6 +120,15 @@ class ComputeJobPaglet(Paglet[StateT], Generic[StateT]):
     def handle_compute_job_message(self, message: Message) -> Any | None:
         _ = message
         return None
+
+    def handle_compute_usage_message(self, message: Message) -> dict[str, list[str]] | None:
+        if message.kind != COMPUTE_USAGE_PATHS_MESSAGE:
+            return None
+        paths = [str(path) for path in (self.compute_usage_paths() or ()) if str(path)]
+        return {"paths": paths}
+
+    def compute_usage_paths(self) -> Iterable[str | Path] | None:
+        return ()
 
     def start_compute_worker(self) -> None:
         with self.locked():
