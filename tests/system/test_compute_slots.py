@@ -629,6 +629,43 @@ def test_compute_slot_usage_sampling_tracks_maxima_and_finished_history():
     assert finished["runtime_seconds"] >= 0
 
 
+def test_compute_slot_release_takes_final_usage_sample_for_short_job():
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0"),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time() - 5.0,
+        expires_at=time.time() + 60.0,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    final_sample = ComputeJobRuntimeInfo(
+        lease_id="lease-0",
+        request_id="request-0",
+        job_id="job-0",
+        agent_id="agent-0",
+        class_name="example:Job",
+        current_cpu_percent=3.0,
+        current_memory_rss_bytes=100,
+        process_tree_memory_rss_bytes=120,
+        work_dir_bytes=25,
+        extra_work_bytes=250,
+    )
+    agent._runtime_info_for_leases = lambda leases, **kwargs: [final_sample]  # type: ignore[method-assign]
+
+    agent.release_slot(SlotReleaseRequest(lease_id="lease-0", agent_id="agent-0"))
+
+    with agent.locked_state() as state:
+        [finished] = state.finished_usage
+    assert finished["class_name"] == "example:Job"
+    assert finished["sample_count"] == 1
+    assert finished["max_cpu_percent"] == 3.0
+    assert finished["max_memory_rss_bytes"] == 100
+    assert finished["max_process_tree_memory_rss_bytes"] == 120
+    assert finished["max_total_work_bytes"] == 275
+
+
 def test_compute_slot_redirect_target_prefers_suitable_empty_peer_queue():
     now = time.time()
     request = ComputeSlotRequest(cpu_cores=2, memory_bytes=2 * 1024**3, temp_storage_bytes=1024**3)

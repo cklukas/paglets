@@ -8,6 +8,9 @@
   CPU, memory, and temp-storage reservations after host restarts.
 - Prevented duplicate compute-slot leases and queued requests for the same
   compute job when a waiting job re-requests a slot.
+- Recorded one final compute-slot usage sample when a lease is released so
+  short jobs can populate `jobs history` max CPU, RSS, and disk columns even
+  when they finish before the periodic sampler runs.
 
 ## 1.1.0 - 2026-06-26
 

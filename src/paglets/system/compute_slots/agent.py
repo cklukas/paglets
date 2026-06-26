@@ -1133,6 +1133,11 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
     def _finish_usage_for_lease_locked(self, lease: SlotLease, *, reason: str) -> None:
         finished_at = time.time()
         usage = dict(self.state.active_usage.pop(lease.lease_id, {}))
+        final_sample = self._final_usage_sample(lease) if reason == "released" else None
+        if final_sample is not None:
+            if not usage:
+                usage = _usage_record_from_lease(lease)
+            usage = _merge_usage_sample(usage, final_sample, sampled_at=finished_at)
         if not usage:
             usage = _usage_record_from_lease(lease)
         usage.update(
@@ -1148,6 +1153,13 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             self.state.finished_usage = self.state.finished_usage[-limit:]
         else:
             self.state.finished_usage = []
+
+    def _final_usage_sample(self, lease: SlotLease) -> ComputeJobRuntimeInfo | None:
+        try:
+            samples = self._runtime_info_for_leases([lease], include_usage=True)
+        except Exception:
+            return None
+        return samples[0] if samples else None
 
     def _fresh_statuses(self, max_age: float) -> dict[str, SchedulerHostStatus]:
         now = time.time()
