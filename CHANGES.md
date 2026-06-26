@@ -1,5 +1,14 @@
 # Changes
 
+## Unreleased
+
+### Fixed
+
+- Fixed compute-slot lease cleanup so inactive local jobs do not keep stale
+  CPU, memory, and temp-storage reservations after host restarts.
+- Prevented duplicate compute-slot leases and queued requests for the same
+  compute job when a waiting job re-requests a slot.
+
 ## 1.1.0 - 2026-06-26
 
 ### Added

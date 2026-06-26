@@ -339,6 +339,43 @@ def test_compute_slot_cancel_by_agent_id_removes_matching_queued_requests():
         assert remaining == ["request-1"]
 
 
+def test_compute_slot_queue_replaces_existing_request_for_same_agent():
+    original = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    replacement = ComputeSlotRequest(request_id="request-1", agent_id="agent-0", job_id="job-0")
+    agent = ComputeSlotsAgent(ComputeSlotsState(queued_requests=[dataclass_to_wire(original)]))
+
+    agent._queue_request(replacement)
+
+    with agent.locked_state() as state:
+        requests = [dataclass_from_wire(ComputeSlotRequest, item) for item in state.queued_requests]
+
+    assert [item.request_id for item in requests] == ["request-1"]
+
+
+def test_compute_slot_request_reuses_existing_lease_for_same_agent():
+    lease_request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=lease_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+        cpu_core_ids=[0],
+        reserved_cpu_core_ids=[0],
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._context = SimpleNamespace(address="http://alpha")  # type: ignore[assignment]
+
+    reply = agent.request_slot(ComputeSlotRequest(request_id="request-1", agent_id="agent-0", job_id="job-0"))
+
+    assert reply.decision == "run_now"
+    assert reply.lease_id == "lease-0"
+    with agent.locked_state() as state:
+        assert list(state.leases) == ["lease-0"]
+
+
 def test_compute_slot_cancel_all_clears_queued_requests_without_leases_by_default():
     request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
     lease = SlotLease(
@@ -474,6 +511,19 @@ def test_compute_slot_active_check_is_conservative_on_control_error():
     agent._context = SimpleNamespace(address="http://alpha", get_proxy=raise_control_error)  # type: ignore[assignment]
 
     assert agent._is_agent_active("agent-0") is True
+
+
+def test_compute_slot_active_check_ignores_inactive_local_proxy():
+    agent = ComputeSlotsAgent(ComputeSlotsState())
+    host = SimpleNamespace(get_proxy=lambda agent_id, include_inactive=False: None)
+    inactive_proxy = SimpleNamespace(info=lambda: {"active": False})
+    agent._context = SimpleNamespace(
+        address="http://alpha",
+        host=host,
+        get_proxy=lambda agent_id, host_url: inactive_proxy,
+    )  # type: ignore[assignment]
+
+    assert agent._is_agent_active("agent-0") is False
 
 
 def test_compute_slot_scheduler_status_can_include_active_job_metrics_without_queue():
