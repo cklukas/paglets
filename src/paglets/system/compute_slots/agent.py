@@ -411,6 +411,9 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
 
     def request_slot(self, request: ComputeSlotRequest) -> SlotDecisionReply:
         request = _normalize_request(request, default_host_url=self.context.address)
+        existing = self._existing_lease_reply(request)
+        if existing is not None:
+            return existing
         local = self._local_status()
         rejection = _can_ever_satisfy(local, request)
         if rejection:
@@ -456,9 +459,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             with self.locked_state() as state:
                 finished_usage = list(state.finished_usage)
         active_jobs = (
-            self._runtime_info_for_leases(leases, include_usage=request.include_usage)
-            if request.include_jobs
-            else []
+            self._runtime_info_for_leases(leases, include_usage=request.include_usage) if request.include_jobs else []
         )
         if not request.include_queue:
             queued = []
@@ -627,6 +628,8 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         with self.locked_state() as state:
             queued = [dataclass_from_wire(ComputeSlotRequest, item) for item in state.queued_requests]
         for request in queued:
+            if self._existing_lease_reply(request) is not None:
+                continue
             if self._can_grant_now(request, local, allow_burst=allow_burst):
                 return request
         return None
@@ -950,9 +953,19 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
     def _is_agent_active(self, agent_id: str) -> bool:
         if not agent_id:
             return False
+        host = getattr(self.context, "host", None)
+        get_host_proxy = getattr(host, "get_proxy", None)
+        if callable(get_host_proxy):
+            try:
+                return get_host_proxy(agent_id, include_inactive=False) is not None
+            except Exception:
+                return True
         try:
             proxy = self.context.get_proxy(agent_id, self.context.address)
-            return proxy is not None
+            if proxy is None:
+                return False
+            info = proxy.info()
+            return bool(info.get("active", True))
         except Exception:
             return True
 
@@ -1082,9 +1095,7 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
                     last_sampled_at=float(stored_usage.get("last_sampled_at") or 0.0),
                     max_cpu_percent=float(stored_usage.get("max_cpu_percent") or 0.0),
                     max_memory_rss_bytes=int(stored_usage.get("max_memory_rss_bytes") or 0),
-                    max_process_tree_memory_rss_bytes=int(
-                        stored_usage.get("max_process_tree_memory_rss_bytes") or 0
-                    ),
+                    max_process_tree_memory_rss_bytes=int(stored_usage.get("max_process_tree_memory_rss_bytes") or 0),
                     max_work_dir_bytes=int(stored_usage.get("max_work_dir_bytes") or 0),
                     max_extra_work_bytes=int(stored_usage.get("max_extra_work_bytes") or 0),
                     max_total_work_bytes=int(stored_usage.get("max_total_work_bytes") or 0),
@@ -1128,6 +1139,11 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
     def _finish_usage_for_lease_locked(self, lease: SlotLease, *, reason: str) -> None:
         finished_at = time.time()
         usage = dict(self.state.active_usage.pop(lease.lease_id, {}))
+        final_sample = self._final_usage_sample(lease) if reason == "released" else None
+        if final_sample is not None:
+            if not usage:
+                usage = _usage_record_from_lease(lease)
+            usage = _merge_usage_sample(usage, final_sample, sampled_at=finished_at)
         if not usage:
             usage = _usage_record_from_lease(lease)
         usage.update(
@@ -1143,6 +1159,13 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
             self.state.finished_usage = self.state.finished_usage[-limit:]
         else:
             self.state.finished_usage = []
+
+    def _final_usage_sample(self, lease: SlotLease) -> ComputeJobRuntimeInfo | None:
+        try:
+            samples = self._runtime_info_for_leases([lease], include_usage=True)
+        except Exception:
+            return None
+        return samples[0] if samples else None
 
     def _fresh_statuses(self, max_age: float) -> dict[str, SchedulerHostStatus]:
         now = time.time()
@@ -1188,9 +1211,29 @@ class ComputeSlotsAgent(Paglet[ComputeSlotsState]):
         self.state.queued_requests = [
             item
             for item in self.state.queued_requests
-            if dataclass_from_wire(ComputeSlotRequest, item).request_id != request.request_id
+            if not _same_slot_request_owner(dataclass_from_wire(ComputeSlotRequest, item), request)
         ]
         self.state.queued_requests.append(dataclass_to_wire(request))
+
+    @state_locked
+    def _existing_lease_reply(self, request: ComputeSlotRequest) -> SlotDecisionReply | None:
+        for wire in self.state.leases.values():
+            lease = dataclass_from_wire(SlotLease, wire)
+            if not _same_slot_request_owner(lease.request, request):
+                continue
+            return SlotDecisionReply(
+                decision=DECISION_RUN_NOW,
+                request_id=request.request_id,
+                lease_id=lease.lease_id,
+                host_name=lease.host_name,
+                host_url=lease.host_url,
+                work_dir_base=lease.work_dir_base,
+                message="existing compute slot lease",
+                cpu_core_ids=list(lease.cpu_core_ids),
+                cpu_affinity_supported=lease.cpu_affinity_supported,
+                cpu_affinity_enforced=lease.cpu_affinity_enforced,
+                cpu_affinity_error=lease.cpu_affinity_error,
+            )
 
     @state_locked
     def _remove_queued_request(self, request_id: str) -> None:
@@ -1263,6 +1306,14 @@ def _normalize_request(request: ComputeSlotRequest, *, default_host_url: str) ->
 
 def _has_cancel_filter(request: CancelSlotRequestsRequest) -> bool:
     return bool(request.all or request.request_ids or request.agent_ids or request.job_ids)
+
+
+def _same_slot_request_owner(left: ComputeSlotRequest, right: ComputeSlotRequest) -> bool:
+    if left.agent_id and right.agent_id and left.agent_id == right.agent_id:
+        return True
+    if left.request_id and right.request_id and left.request_id == right.request_id:
+        return True
+    return bool(left.job_id and right.job_id and left.job_id == right.job_id)
 
 
 def _matches_cancel_filter(slot_request: ComputeSlotRequest, request: CancelSlotRequestsRequest) -> bool:

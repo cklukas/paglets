@@ -1,5 +1,57 @@
 # Changes
 
+## Unreleased
+
+### Fixed
+
+- Fixed compute-slot lease cleanup so inactive local jobs do not keep stale
+  CPU, memory, and temp-storage reservations after host restarts.
+- Prevented duplicate compute-slot leases and queued requests for the same
+  compute job when a waiting job re-requests a slot.
+- Recorded one final compute-slot usage sample when a lease is released so
+  short jobs can populate `jobs history` max CPU, RSS, and disk columns even
+  when they finish before the periodic sampler runs.
+
+## 1.1.0 - 2026-06-26
+
+### Added
+
+- Added artifact transport APIs and typed paglet patterns for sending and
+  tracking larger file-shaped payloads.
+- Added compute-slot lease expiration handling, active lease retention, and job
+  restart policy support for host restarts.
+- Added bulk agent state retrieval to speed up compute job listing.
+- Added `paglets-compute-slots status --blocked` to explain which resource is
+  preventing queued jobs from starting.
+- Added `paglets-compute-slots status --usage` with process RSS, process-tree
+  RSS, Paglets work-dir usage, application-provided extra work usage, sampled
+  maxima, and sample counts.
+- Added `ComputeJobPaglet.compute_usage_paths()` so compute jobs can report
+  application-specific scratch files or directories for scheduler diagnostics.
+- Added `paglets-compute-slots jobs history` to show recent finished job
+  runtime, finish reason, job class, max CPU, max RAM, and max disk usage.
+
+### Changed
+
+- Updated compute-slot CLI status tables to use Markdown-style table output and
+  to show temp storage reservations explicitly.
+- Updated compute job listing to use bulk state payloads and include active and
+  inactive jobs by default.
+- Improved Paglets API key handling across CLI tools and relayed deployments.
+- Improved child endpoint and runtime error handling around malformed control
+  calls.
+
+### Fixed
+
+- Fixed inactive local paglet proxy lookup so scheduler grant messages can wake
+  inactive queued compute jobs with `activate_if_inactive=True`.
+- Repaired stale inactive compute job policies so older `WAITING_FOR_SLOT`
+  records are startup-recoverable.
+- Started resident services before startup activation so restarted compute jobs
+  see required services such as `compute-slots`.
+- Fixed compute-slot diagnostics for stale leases, missing active agents, and
+  authentication failures with missing API keys.
+
 ## 1.0.0 - 2026-06-24
 
 ### Breaking Changes

@@ -363,6 +363,43 @@ def test_compute_slot_cancel_by_agent_id_removes_matching_queued_requests():
         assert remaining == ["request-1"]
 
 
+def test_compute_slot_queue_replaces_existing_request_for_same_agent():
+    original = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    replacement = ComputeSlotRequest(request_id="request-1", agent_id="agent-0", job_id="job-0")
+    agent = ComputeSlotsAgent(ComputeSlotsState(queued_requests=[dataclass_to_wire(original)]))
+
+    agent._queue_request(replacement)
+
+    with agent.locked_state() as state:
+        requests = [dataclass_from_wire(ComputeSlotRequest, item) for item in state.queued_requests]
+
+    assert [item.request_id for item in requests] == ["request-1"]
+
+
+def test_compute_slot_request_reuses_existing_lease_for_same_agent():
+    lease_request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=lease_request,
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time(),
+        expires_at=time.time() + 60.0,
+        cpu_core_ids=[0],
+        reserved_cpu_core_ids=[0],
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    agent._context = SimpleNamespace(address="http://alpha")  # type: ignore[assignment]
+
+    reply = agent.request_slot(ComputeSlotRequest(request_id="request-1", agent_id="agent-0", job_id="job-0"))
+
+    assert reply.decision == "run_now"
+    assert reply.lease_id == "lease-0"
+    with agent.locked_state() as state:
+        assert list(state.leases) == ["lease-0"]
+
+
 def test_compute_slot_cancel_all_clears_queued_requests_without_leases_by_default():
     request = ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0")
     lease = SlotLease(
@@ -421,9 +458,7 @@ def test_compute_slot_cancel_can_include_matching_leases():
         )
     )
 
-    reply = agent.cancel_slot_requests(
-        CancelSlotRequestsRequest(job_ids=("job-0",), include_leases=True)
-    )
+    reply = agent.cancel_slot_requests(CancelSlotRequestsRequest(job_ids=("job-0",), include_leases=True))
 
     assert reply.cancelled_requests == 1
     assert reply.cancelled_leases == 1
@@ -500,6 +535,19 @@ def test_compute_slot_active_check_is_conservative_on_control_error():
     agent._context = SimpleNamespace(address="http://alpha", get_proxy=raise_control_error)  # type: ignore[assignment]
 
     assert agent._is_agent_active("agent-0") is True
+
+
+def test_compute_slot_active_check_ignores_inactive_local_proxy():
+    agent = ComputeSlotsAgent(ComputeSlotsState())
+    host = SimpleNamespace(get_proxy=lambda agent_id, include_inactive=False: None)
+    inactive_proxy = SimpleNamespace(info=lambda: {"active": False})
+    agent._context = SimpleNamespace(
+        address="http://alpha",
+        host=host,
+        get_proxy=lambda agent_id, host_url: inactive_proxy,
+    )  # type: ignore[assignment]
+
+    assert agent._is_agent_active("agent-0") is False
 
 
 def test_compute_slot_scheduler_status_can_include_active_job_metrics_without_queue():
@@ -603,6 +651,43 @@ def test_compute_slot_usage_sampling_tracks_maxima_and_finished_history():
     assert finished["max_total_work_bytes"] == 300
     assert finished["finish_reason"] == "released"
     assert finished["runtime_seconds"] >= 0
+
+
+def test_compute_slot_release_takes_final_usage_sample_for_short_job():
+    lease = SlotLease(
+        lease_id="lease-0",
+        request=ComputeSlotRequest(request_id="request-0", agent_id="agent-0", job_id="job-0"),
+        host_name="alpha",
+        host_url="http://alpha",
+        work_dir_base="/tmp/paglets",
+        granted_at=time.time() - 5.0,
+        expires_at=time.time() + 60.0,
+    )
+    agent = ComputeSlotsAgent(ComputeSlotsState(leases={lease.lease_id: dataclass_to_wire(lease)}))
+    final_sample = ComputeJobRuntimeInfo(
+        lease_id="lease-0",
+        request_id="request-0",
+        job_id="job-0",
+        agent_id="agent-0",
+        class_name="example:Job",
+        current_cpu_percent=3.0,
+        current_memory_rss_bytes=100,
+        process_tree_memory_rss_bytes=120,
+        work_dir_bytes=25,
+        extra_work_bytes=250,
+    )
+    agent._runtime_info_for_leases = lambda leases, **kwargs: [final_sample]  # type: ignore[method-assign]
+
+    agent.release_slot(SlotReleaseRequest(lease_id="lease-0", agent_id="agent-0"))
+
+    with agent.locked_state() as state:
+        [finished] = state.finished_usage
+    assert finished["class_name"] == "example:Job"
+    assert finished["sample_count"] == 1
+    assert finished["max_cpu_percent"] == 3.0
+    assert finished["max_memory_rss_bytes"] == 100
+    assert finished["max_process_tree_memory_rss_bytes"] == 120
+    assert finished["max_total_work_bytes"] == 275
 
 
 def test_compute_slot_redirect_target_prefers_suitable_empty_peer_queue():
