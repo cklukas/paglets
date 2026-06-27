@@ -1,6 +1,6 @@
 # Mesh Movement Benchmark
 
-`paglets-mesh-benchmark` measures the cost of moving a paglet through the mesh
+`paglets examples mesh-benchmark` measures the cost of moving a paglet through the mesh
 instead of measuring CPU, memory, or disk throughput. The entry host keeps a
 starter/coordinator agent active and sends one mobile traveler across every
 directed host pair.
@@ -8,17 +8,17 @@ directed host pair.
 Run the default directional route:
 
 ```bash
-uv run paglets-mesh-benchmark
+uv run paglets examples mesh-benchmark
 ```
 
 Useful variations:
 
 ```bash
-uv run paglets-mesh-benchmark --repeats 3
-uv run paglets-mesh-benchmark --payload-size 64K
-uv run paglets-mesh-benchmark --exclude-self
-uv run paglets-mesh-benchmark --clock-probes 7 --digits 4
-uv run paglets-mesh-benchmark --json
+uv run paglets examples mesh-benchmark --repeats 3
+uv run paglets examples mesh-benchmark --payload-size 64K
+uv run paglets examples mesh-benchmark --exclude-self
+uv run paglets examples mesh-benchmark --clock-probes 7 --digits 4
+uv run paglets examples mesh-benchmark --json
 ```
 
 The text output is Markdown that is also padded for plain terminal reading. It

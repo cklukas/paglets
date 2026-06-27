@@ -1,6 +1,6 @@
 # Analysis Jobs
 
-`paglets-analysis-jobs` is a synthetic distributed dataframe analysis example.
+`paglets examples analysis` is a synthetic distributed dataframe analysis example.
 It demonstrates how application paglets can use the built-in
 [Compute Slots](../system/compute-slots.md) scheduler without putting
 application-specific result collection into the scheduler itself.
@@ -22,21 +22,21 @@ Start a laptop/home host and one or more Linux-style compute hosts in the same
 mesh:
 
 ```bash
-uv run paglets-host --name laptop --bind-public --port 8765 --mesh-version analysis
-uv run paglets-host --name linux-a --bind-public --peer http://laptop:8765 --port 8765 --mesh-version analysis
-uv run paglets-host --name linux-b --bind-public --peer http://laptop:8765 --port 8765 --mesh-version analysis
+uv run paglets host --name laptop --bind-public auto --port 8765 --mesh-version analysis
+uv run paglets host --name linux-a --bind-public auto --peer http://laptop:8765 --port 8765 --mesh-version analysis
+uv run paglets host --name linux-b --bind-public auto --peer http://laptop:8765 --port 8765 --mesh-version analysis
 ```
 
 Start the campaign from the laptop host:
 
 ```bash
-uv run paglets-analysis-jobs --entry laptop --tasks 20
+uv run paglets examples analysis --entry laptop --tasks 20
 ```
 
 Useful shorter development run:
 
 ```bash
-uv run paglets-analysis-jobs --entry laptop --tasks 3 --rows 2000 --target-runtime 3
+uv run paglets examples analysis --entry laptop --tasks 3 --rows 2000 --target-runtime 3
 ```
 
 The default target runtime is about 2-3 minutes per job. The job pads with CPU
@@ -46,7 +46,7 @@ work when the actual model training finishes sooner.
 
 ```mermaid
 flowchart LR
-    CLI["paglets-analysis-jobs CLI"]
+    CLI["paglets examples analysis CLI"]
     Seeder["CampaignSeederPaglet"]
     Job["AnalysisJobPaglet"]
     Slots["compute-slots"]

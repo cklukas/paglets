@@ -79,11 +79,11 @@ Collectors handle:
 Inspect groups from the command line:
 
 ```bash
-uv run paglets-compute-groups
-uv run paglets-compute-groups --group group-abc --json
+uv run paglets jobs groups
+uv run paglets jobs groups --group group-abc --json
 ```
 
-`paglets-compute-slots status --queue --jobs` remains the scheduler-local view
+`paglets jobs queue` remains the scheduler-local view
 for queues, leases, CPU IDs, and process resource metrics.
 
 ## Host Selection
@@ -91,10 +91,10 @@ for queues, leases, CPU IDs, and process resource metrics.
 Start hosts with role tags and properties:
 
 ```bash
-uv run paglets-host --name laptop --bind-public --mesh-version analysis --tag laptop
-uv run paglets-host --name linux-a --bind-public --peer http://laptop:8765 \
+uv run paglets host --name laptop --bind-public auto --mesh-version analysis --tag laptop
+uv run paglets host --name linux-a --bind-public auto --peer http://laptop:8765 \
   --mesh-version analysis --tag linux --property python=3.12
-uv run paglets-host --name gpu-a --bind-public --peer http://laptop:8765 \
+uv run paglets host --name gpu-a --bind-public auto --peer http://laptop:8765 \
   --mesh-version analysis --tag linux --tag gpu
 ```
 
@@ -109,7 +109,7 @@ Compute job states can set:
 You can preview placement with:
 
 ```bash
-uv run paglets-compute-slots candidates --require-tag linux --prefer-tag gpu --exclude-host laptop
+uv run paglets jobs hosts --tag linux --prefer-tag gpu --exclude-host laptop
 ```
 
 ## Result Files
@@ -136,7 +136,7 @@ an `ArtifactRef` in the collector result payload. It reports success itself, so
 do not also call `report_compute_success(...)` for the same job. The default
 `after_compute_success()` hook notices that a report was already sent and will
 not send a second JSON result. The collector can later download or delete that
-artifact through `HostClient` or `paglets-artifacts`.
+artifact through `HostClient` or `paglets artifacts`.
 
 For files that should travel with the job paglet itself, use natural file
 mobility:

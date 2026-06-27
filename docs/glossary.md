@@ -50,7 +50,7 @@ Itinerary
   points.
 
 LaunchConfig
-: The `~/.paglets/launch.toml` startup configuration read by `paglets-host`.
+: The `~/.paglets/launch.toml` startup configuration read by `paglets host`.
   The bundled config declares built-in resident services such as `server-info`,
   `mesh-info`, `compute-slots`, and `user-info`.
 
@@ -89,7 +89,7 @@ PagletProxyRef
   paglet state and later resolved to a `PagletProxy`.
 
 PerformanceBenchmarkAgent
-: The packaged example mobile benchmark agent used by `paglets-perf-test`. It
+: The packaged example mobile benchmark agent used by `paglets examples perf`. It
   clones workers across the mesh, runs local CPU, memory, and bounded disk I/O
   tests, and reports results to the parent agent.
 

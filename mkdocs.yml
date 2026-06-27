@@ -28,6 +28,7 @@ nav:
       - Usage Ideas: usage-ideas.md
   - Operations:
       - Overview: operations/index.md
+      - CLI: operations/cli.md
       - Host CLI: operations/host-cli.md
       - Configuration: operations/configuration.md
       - Local Multi-Host Development: operations/local-multi-host.md

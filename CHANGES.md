@@ -1,6 +1,31 @@
 # Changes
 
-## Unreleased
+## 2.0.0 - 2026-06-27
+
+### Breaking Changes
+
+- Replaced the separate packaged `paglets-*` console scripts with one
+  Typer-based `paglets` command tree. Use `paglets host`, `paglets sys`,
+  `paglets mesh`, `paglets jobs`, `paglets artifacts`, `paglets search`, and
+  `paglets examples ...`.
+- Renamed compute slot and artifact operator commands around task-oriented
+  verbs, such as `paglets jobs queue`, `paglets jobs why`,
+  `paglets jobs hosts`, `paglets jobs rm`, `paglets artifacts info`,
+  `paglets artifacts get`, and `paglets artifacts rm`.
+
+### Added
+
+- Added Typer and Rich as runtime dependencies for modern help output, shell
+  completion support, styled terminal tables, prompts, and progress/status
+  feedback.
+- Added a dedicated CLI reference page with completion setup, command groups,
+  option tables, and a migration map from the old console scripts.
+
+### Changed
+
+- Updated README and MkDocs examples to use the new `paglets ...` CLI surface.
+- Improved human-facing command output for system, mesh, jobs, and artifact
+  inspection with Rich tables and TTY-aware styling.
 
 ### Fixed
 

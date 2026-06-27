@@ -1,12 +1,12 @@
 # Git Auto-Update
 
-`paglets-host --auto-update-from-git` keeps trusted paglets hosts aligned with a
+`paglets host --auto-update-from-git` keeps trusted paglets hosts aligned with a
 git checkout. It is intended for small lab meshes where you develop on one
 machine, push commits, and want remote hosts to update and restart without
 logging into each machine.
 
-The feature is host-side only. Client commands such as `paglets-pi-compute`,
-`paglets-sysinfo`, and `paglets-search` do not need extra flags.
+The feature is host-side only. Client commands such as `paglets examples pi`,
+`paglets sys`, and `paglets search` do not need extra flags.
 
 !!! warning "Trusted networks only"
     The update endpoint runs `git fetch`, `git pull`, and `uv sync`. Use it only
@@ -19,28 +19,28 @@ Start every participating host from a git checkout and include
 `--auto-update-from-git`:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --auto-update-from-git
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --auto-update-from-git
+uv run paglets host --name alpha --port 8765 --auto-update-from-git
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --auto-update-from-git
 ```
 
-Across machines, add `--bind-public [IP]` so each host binds only a reachable
+Across machines, add `--bind-public 192.0.2.10` so each host binds only a reachable
 LAN address and publishes that URL to the mesh:
 
 ```bash
-uv run paglets-host --name mac --bind-public --port 8765 --auto-update-from-git
-uv run paglets-host --name windows --bind-public [IP] --port 8765 --auto-update-from-git
+uv run paglets host --name mac --bind-public auto --port 8765 --auto-update-from-git
+uv run paglets host --name windows --bind-public 192.0.2.10 --port 8765 --auto-update-from-git
 ```
 
-Repeat `--bind-public IP` to listen on multiple specific addresses. The first
-bound address is the one published to mesh peers. The auto form keeps watching
-for LAN address changes and rebinds/publishes the new address after DHCP or
-network reconnect changes it.
+Repeat explicit values such as `--bind-public 192.0.2.10` to listen on multiple
+specific addresses. The first bound address is the one published to mesh peers.
+The auto form keeps watching for LAN address changes and rebinds/publishes the
+new address after DHCP or network reconnect changes it.
 
 The checkout must be clean. If `git status --porcelain` reports uncommitted or
 untracked files, startup is cancelled before any fetch or pull runs:
 
 ```text
-paglets-host: --auto-update-from-git requires a clean git checkout; startup cancelled.
+paglets host: --auto-update-from-git requires a clean git checkout; startup cancelled.
 ```
 
 The normal workflow is:
@@ -59,7 +59,7 @@ inside the checkout.
 
 ```mermaid
 flowchart TD
-    Start["paglets-host starts with --auto-update-from-git"] --> Repo["Find git checkout"]
+    Start["paglets host starts with --auto-update-from-git"] --> Repo["Find git checkout"]
     Repo --> Head["Record process_start_head"]
     Head --> Lock["Acquire .git/paglets-auto-update.lock"]
     Lock --> Status["git status --porcelain"]
@@ -101,7 +101,7 @@ sequenceDiagram
     participant Git as Git Remote
 
     Dev->>Git: git push
-    Dev->>Local: start/restart paglets-host --auto-update-from-git
+    Dev->>Local: start/restart paglets host --auto-update-from-git
     Local->>Local: git fetch + git pull + uv sync if needed
     Local->>Remote: POST /admin/git-update { target_hash }
     Remote->>Git: git fetch
@@ -164,7 +164,7 @@ sync` just recreated.
 
 On Windows, auto-update defers the explicit `uv sync` step until that re-exec
 path. This avoids trying to replace the currently running
-`.venv\Scripts\paglets-host.exe` console wrapper, which Windows keeps locked
+`.venv\Scripts\paglets host.exe` console wrapper, which Windows keeps locked
 while the host process is active. The checkout is still pulled first, and the
 restart still goes through `uv run python -m paglets.tooling.cli ...`.
 

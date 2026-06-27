@@ -6,7 +6,7 @@ space, and active/inactive paglet counts, then exchanges bounded snapshot
 batches with peer `mesh-info` services.
 
 Snapshots also include host tags and properties advertised by
-`paglets-host --tag TAG --property KEY=VALUE`, so placement and diagnostics can
+`paglets host --tag TAG --property KEY=VALUE`, so placement and diagnostics can
 use the same host-role vocabulary.
 
 The core contract is:
@@ -18,9 +18,9 @@ from paglets.system.mesh_info import MESH_INFO, GET_LANDSCAPE, SELECT_TARGETS
 Useful CLI commands:
 
 ```bash
-uv run paglets-mesh-info summary
-uv run paglets-mesh-info targets --max-load-per-cpu 1.0 --min-work-free 1G
-uv run paglets-mesh-info targets --json
+uv run paglets mesh summary
+uv run paglets mesh targets --max-load-per-cpu 1.0 --disk 1G
+uv run paglets mesh targets --json
 ```
 
 The `summary` command prints the fresh landscape known to the entry host. The

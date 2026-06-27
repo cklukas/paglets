@@ -1,6 +1,6 @@
 # File Grabber
 
-`paglets-file-grabber` is a deliberately small example for one-file transfer
+`paglets examples file` is a deliberately small example for one-file transfer
 between an entry host and one remote host. It demonstrates the typed file
 mobility pattern:
 
@@ -14,33 +14,33 @@ mobility pattern:
 Start two hosts:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
 Preview a push from the entry host to the remote host:
 
 ```bash
-uv run paglets-file-grabber --entry alpha push ./data.bin --remote beta --dest /tmp/data.bin --dry
+uv run paglets examples file push --entry alpha ./data.bin --remote beta --dest /tmp/data.bin --dry
 ```
 
 Run the copy:
 
 ```bash
-uv run paglets-file-grabber --entry alpha push ./data.bin --remote beta --dest /tmp/data.bin
+uv run paglets examples file push --entry alpha ./data.bin --remote beta --dest /tmp/data.bin
 ```
 
 Pull a file from the remote host back to the entry host:
 
 ```bash
-uv run paglets-file-grabber --entry alpha pull /tmp/data.bin --remote beta --dest ./data-from-beta.bin
+uv run paglets examples file pull --entry alpha /tmp/data.bin --remote beta --dest ./data-from-beta.bin
 ```
 
 Use `--mode move` to delete the source after the dispatch imports the file on
 the destination host:
 
 ```bash
-uv run paglets-file-grabber --entry alpha pull /tmp/data.bin --remote beta --dest ./data-from-beta.bin --mode move
+uv run paglets examples file pull --entry alpha /tmp/data.bin --remote beta --dest ./data-from-beta.bin --mode move
 ```
 
 Use `--overwrite` when the destination file may already exist. Without it, the

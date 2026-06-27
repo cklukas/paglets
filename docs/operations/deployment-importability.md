@@ -28,8 +28,8 @@ For local multi-host development from one checkout:
 
 ```bash
 uv sync --dev --extra docs
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
 For multiple machines, install the same application package on every host. A
@@ -39,7 +39,7 @@ common editable workflow is:
 git clone <your-repo>
 cd <your-repo>
 uv sync
-uv run paglets-host --name linux-a --bind-public --mesh-version ds-dia-dev
+uv run paglets host --name linux-a --bind-public auto --mesh-version ds-dia-dev
 ```
 
 Use the same `--mesh-version` value only when hosts are actually running
@@ -58,7 +58,7 @@ Recommended production-ish small mesh setup:
 - Use `--tag` and `--property` to advertise host roles and compatibility hints,
   such as `--tag linux`, `--tag gpu`, or `--property python=3.12`.
 
-`paglets-host --auto-update-from-git` can keep trusted lab hosts aligned from a
+`paglets host --auto-update-from-git` can keep trusted lab hosts aligned from a
 git checkout. It runs `git fetch`, `git pull`, `uv sync`, and host restart
 logic, so use it only on trusted lab networks.
 
@@ -87,10 +87,10 @@ version string. It does not install missing application packages for you.
 
 Before submitting detached compute jobs:
 
-- `paglets-host` is running on the submitter and compute hosts.
+- `paglets host` is running on the submitter and compute hosts.
 - Every host can import the application paglet class and state classes.
 - Hosts use the same `--mesh-version` for compatible code.
 - Linux/GPU/collector/laptop roles are advertised with `--tag`.
-- Candidate placement is visible with `paglets-compute-slots candidates`.
-- Group status is visible with `paglets-compute-groups`.
+- Candidate placement is visible with `paglets jobs hosts`.
+- Group status is visible with `paglets jobs groups`.
 - Large result files have an application-level storage or return-home plan.

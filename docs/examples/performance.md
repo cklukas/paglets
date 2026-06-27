@@ -1,6 +1,6 @@
 # Performance Benchmark
 
-`paglets-perf-test` demonstrates a pure mobile-agent fan-out pattern. It does
+`paglets examples perf` demonstrates a pure mobile-agent fan-out pattern. It does
 not use a resident service and it is not started from launch config. The
 benchmark code is carried by the mobile agent class itself.
 
@@ -53,35 +53,35 @@ calibrated hardware certification results.
 Run all benchmark categories:
 
 ```bash
-uv run paglets-perf-test
+uv run paglets examples perf
 ```
 
 Useful variations:
 
 ```bash
-uv run paglets-perf-test --json
-uv run paglets-perf-test --duration 2 --disk-size 256M
-uv run paglets-perf-test --path /data --path /scratch
-uv run paglets-perf-test --no-disk
-uv run paglets-perf-test --workers 4
-uv run paglets-perf-test --verbose
+uv run paglets examples perf --json
+uv run paglets examples perf --duration 2 --disk-size 256M
+uv run paglets examples perf --path /data --path /scratch
+uv run paglets examples perf --no-disk
+uv run paglets examples perf --workers 4
+uv run paglets examples perf --verbose
 ```
 
 Example with two local hosts running in separate terminals:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
-Across machines, use `--bind-public [IP]` on each host instead of loopback.
-Repeat `--bind-public IP` only when the host must listen on multiple specific
-interfaces.
+Across machines, use `--bind-public 192.0.2.10` on each host instead of loopback.
+Repeat explicit values such as `--bind-public 192.0.2.10` only when the host
+must listen on multiple specific interfaces.
 
 Then run the benchmark from the repository checkout:
 
 ```text
-klukas@mac-studio paglets % uv run paglets-perf-test
+klukas@mac-studio paglets % uv run paglets examples perf
 host                int/s    float/s        sha  multi-int/s   mem copy    disk wr    disk rd err
 alpha               17.2M      19.8M     2.1G/s       140.2M    30.6G/s     3.7G/s    16.0G/s   0
 beta                17.2M      20.0M     2.2G/s       147.6M    31.0G/s     3.4G/s    15.7G/s   0
@@ -158,5 +158,5 @@ summary = client.call(
 )
 ```
 
-Most applications should use the `paglets-perf-test` CLI unless they need to
+Most applications should use the `paglets examples perf` CLI unless they need to
 embed benchmark collection into another paglet workflow.

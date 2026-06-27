@@ -187,7 +187,7 @@ def sync_launch_config(
         interactive = sys.stdin.isatty()
     if not interactive:
         update_hint = (
-            f"keeping existing {config_path}. Run paglets-host with --yes to update "
+            f"keeping existing {config_path}. Run paglets host with --yes to update "
             "or --no-sync-launch-config to suppress."
         )
         print(

@@ -1,13 +1,13 @@
 # Pi Compute
 
-`paglets-pi-compute` demonstrates using `mesh-info` as lightweight placement
+`paglets examples pi` demonstrates using `mesh-info` as lightweight placement
 input for a distributed compute job. It computes decimal digits of Pi by
 distributing Chudnovsky term batches and combining the integer partial sums on
 the coordinator.
 
 ```bash
-uv run paglets-pi-compute --digits 16 --batch-size 1
-uv run paglets-pi-compute --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
+uv run paglets examples pi --digits 16 --batch-size 1
+uv run paglets examples pi --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
 ```
 
 The coordinator stays on the dynamically discovered entry host, partitions the

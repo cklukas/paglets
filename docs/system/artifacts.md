@@ -94,7 +94,7 @@ delivery both succeed.
 
 Low-level artifacts are intentionally durable until explicit cleanup. They
 remain available until they are deleted with `delete_artifact(...)` or
-`paglets-artifacts delete`, downloaded with `move=True`, or expire by their
+`paglets artifacts rm`, downloaded with `move=True`, or expire by their
 `expires_at` timestamp. `send_artifact(..., move=True)` deletes the sender's
 source file after upload and message delivery; it does not delete the hosted
 artifact. Disposing the owner paglet removes its scratch/work files, but it
@@ -107,11 +107,11 @@ disposed.
 Inspect and recover artifacts:
 
 ```bash
-uv run paglets-artifacts list
-uv run paglets-artifacts list --json
-uv run paglets-artifacts metadata ARTIFACT_ID
-uv run paglets-artifacts download ARTIFACT_ID result.db
-uv run paglets-artifacts delete ARTIFACT_ID
+uv run paglets artifacts list
+uv run paglets artifacts list --json
+uv run paglets artifacts info ARTIFACT_ID
+uv run paglets artifacts get ARTIFACT_ID result.db
+uv run paglets artifacts rm ARTIFACT_ID
 ```
 
 Use `--host URL` to target a specific host or relay host URL.

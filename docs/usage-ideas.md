@@ -30,23 +30,23 @@ Send a paglet to each server and let it inspect local-only state:
 
 The paglet returns summarized findings instead of streaming raw machine data
 back to a central client. The built-in `server-info` service and
-`paglets-sysinfo` CLI provide this as a concrete demo:
+`paglets sys` CLI provide this as a concrete demo:
 
 ```bash
-uv run paglets-sysinfo df
-uv run paglets-sysinfo load
-uv run paglets-sysinfo plist python --limit 10
+uv run paglets sys df
+uv run paglets sys load
+uv run paglets sys ps python --limit 10
 ```
 
-For performance checks, `paglets-perf-test` demonstrates a service-free mobile
+For performance checks, `paglets examples perf` demonstrates a service-free mobile
 agent pattern. The entry host creates one parent paglet, the parent clones
 benchmark workers to all online same-version mesh hosts, and each worker runs
 local CPU, memory, and bounded disk I/O tests before reporting centrally:
 
 ```bash
-uv run paglets-perf-test
-uv run paglets-perf-test --duration 2 --disk-size 256M
-uv run paglets-perf-test --path /data --json
+uv run paglets examples perf
+uv run paglets examples perf --duration 2 --disk-size 256M
+uv run paglets examples perf --path /data --json
 ```
 
 Disk benchmarks write temporary files only under writable benchmark directories,

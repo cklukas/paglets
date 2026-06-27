@@ -1,6 +1,6 @@
 # Mesh Search
 
-`paglets-search` demonstrates a practical mobile-agent use case: move the
+`paglets search` demonstrates a practical mobile-agent use case: move the
 search logic to each host, scan local files there, and send only hits back to
 the caller. This avoids repeatedly pulling remote file contents to one machine
 and gives the caller incremental results while hosts are still scanning.
@@ -21,12 +21,12 @@ The command combines common `ripgrep` content search and `fd` filename search
 features:
 
 ```bash
-uv run paglets-search grep TODO .
-uv run paglets-search grep -C 2 -t py "class .*Agent" src tests
-uv run paglets-search grep -i --hidden -g "*.md" paglets docs
-uv run paglets-search find README .
-uv run paglets-search find report --extension md --kind file
-uv run paglets-search --jsonl grep TODO .
+uv run paglets search grep TODO .
+uv run paglets search grep -C 2 -t py "class .*Agent" src tests
+uv run paglets search grep -i --hidden -g "*.md" paglets docs
+uv run paglets search find README .
+uv run paglets search find report --extension md --kind file
+uv run paglets search grep --jsonl TODO .
 ```
 
 By default the CLI dynamically discovers a reachable entry host, then the
@@ -35,7 +35,7 @@ the entry host. Restrict the search to specific hosts with repeated `--host`
 flags:
 
 ```bash
-uv run paglets-search --host alpha --host beta grep TODO /srv/app
+uv run paglets search grep --host alpha --host beta TODO /srv/app
 ```
 
 Paths are interpreted locally by each target host process. Searching `.` means
@@ -113,7 +113,7 @@ filesystems:
 
 ```mermaid
 sequenceDiagram
-    participant CLI as "paglets-search CLI"
+    participant CLI as "paglets search CLI"
     participant Entry as "entry host"
     participant Parent as "parent MeshSearchAgent"
     participant Child as "child MeshSearchAgent"
@@ -184,13 +184,13 @@ Useful filename-search options:
 | `--kind` | Emit only `file`, `dir`, `symlink`, or `any` paths. |
 
 The implementation is intentionally a practical subset, not a byte-for-byte
-clone of `ripgrep` or `fd`. Use `paglets-search --help`,
-`paglets-search grep --help`, `paglets-search find --help`, and
-`paglets-search --type-list` for the supported command surface.
+clone of `ripgrep` or `fd`. Use `paglets search --help`,
+`paglets search grep --help`, `paglets search find --help`, and
+`paglets search --type-list` for the supported command surface.
 
 ### Programmatic Use
 
-Most users should use `paglets-search`, but other paglets can create the search
+Most users should use `paglets search`, but other paglets can create the search
 agent directly and drain streamed events:
 
 ```python

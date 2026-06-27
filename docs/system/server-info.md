@@ -10,7 +10,7 @@ demonstrates the resident-service pattern:
 4. The first call starts or activates the provider agent.
 5. Requests are ordinary paglet messages, but payloads and replies are typed
    dataclasses.
-6. The `paglets-sysinfo` CLI creates a short-lived collector paglet that clones
+6. The `paglets sys` CLI creates a short-lived collector paglet that clones
    to mesh hosts, calls each host's local `server-info` service, polls `drain`,
    and prints an aggregate result.
 7. After the idle timeout, the provider deactivates while the service remains
@@ -62,15 +62,15 @@ reply = service.call(GET_DISK, DiskRequest(paths=["/"], all_volumes=False))
 
 ## CLI Commands
 
-`paglets-sysinfo` provides familiar host-inspection commands across the mesh:
+`paglets sys` provides familiar host-inspection commands across the mesh:
 
 ```bash
-uv run paglets-sysinfo summary
-uv run paglets-sysinfo load
-uv run paglets-sysinfo df
-uv run paglets-sysinfo df / /data
-uv run paglets-sysinfo plist python --limit 10
-uv run paglets-sysinfo plist postgres --args --json
+uv run paglets sys summary
+uv run paglets sys load
+uv run paglets sys df
+uv run paglets sys df / /data
+uv run paglets sys ps python --limit 10
+uv run paglets sys ps postgres --args --json
 ```
 
 The CLI discovers a reachable entry host automatically. Use optional

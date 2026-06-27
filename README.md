@@ -39,21 +39,21 @@ python -m pip install paglets
 Start two local hosts:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
 Run a packaged example CLI:
 
 ```bash
-uv run paglets-sysinfo summary
-uv run paglets-artifacts list
-uv run paglets-compute-slots status
-uv run paglets-compute-groups
-uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
-uv run paglets-file-grabber push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets-search grep TODO .
-uv run paglets-pi-compute --digits 32
+uv run paglets sys summary
+uv run paglets artifacts list
+uv run paglets jobs status
+uv run paglets jobs groups
+uv run paglets examples analysis --tasks 3 --target-runtime 3
+uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
+uv run paglets search grep TODO .
+uv run paglets examples pi --digits 32
 ```
 
 The built-in `compute-slots` service admits coarse jobs by explicit
@@ -63,22 +63,22 @@ CPUs stops starting additional jobs once its one-minute load reaches `N`. On
 Linux and Windows it can best-effort pin granted jobs to allocated CPU IDs. New
 compute job paglets can derive from `ComputeJobPaglet` so scheduling, wakeup,
 redirects, affinity metadata, and lease release stay out of job-specific code.
-`paglets-compute-slots status --blocked --usage` explains blocked queued jobs
+`paglets jobs why` explains blocked queued jobs
 and reports active job process-tree memory plus Paglets and application scratch
-usage. `paglets-compute-slots jobs history` shows recent finished job runtime
+usage. `paglets jobs history` shows recent finished job runtime
 and peak usage summaries.
 
 For detached multi-job workflows, `ResultCollectorPaglet`,
 `CollectingComputeJobPaglet`, and `submit_compute_job_group(...)` provide a
 small job-group plus collector layer. Hosts can advertise placement metadata
-with `paglets-host --tag TAG --property KEY=VALUE`, and compute jobs can
+with `paglets host --tag TAG --property KEY=VALUE`, and compute jobs can
 require, exclude, or prefer host tags.
 
 Files that belong to a paglet instance can be registered with
 `register_file(...)` and then move naturally with dispatch or clone. Larger
 explicit payloads can use `ArtifactRef`, `HostClient.upload_artifact(...)`,
-`PagletProxy.send_artifact(...)`, and the `paglets-artifacts` CLI.
-The `paglets-file-grabber` example demonstrates this natural file mobility for
+`PagletProxy.send_artifact(...)`, and the `paglets artifacts` CLI.
+The `paglets examples file` example demonstrates this natural file mobility for
 one-file push and pull operations between an entry host and one remote host.
 Simple request/result paglets can use `TaskPaglet` and `TaskClient` from
 `paglets.patterns.tasks`. Paglets with several named operations can use

@@ -149,7 +149,7 @@ For file-moving paglets, choose the smallest helper layer that fits:
 
 The pattern helpers remove repeated protocol and bookkeeping code, but the
 domain action should still be visible in the example paglet. For example,
-`paglets-file-grabber` still shows "prepare file, dry-run or register,
+`paglets examples file` still shows "prepare file, dry-run or register,
 dispatch, save arrived file"; the helper only names the reusable steps.
 
 ## Handle Messages
@@ -482,7 +482,7 @@ data = store.read_bytes("checkpoint.txt")
 
 Persistent storage is rooted under the host persistence directory, shared by
 paglet class, and quota-accounted by the API. The default quota is 10 MB per
-class and can be changed with `paglets-host --persistent-storage-quota 20M` or
+class and can be changed with `paglets host --persistent-storage-quota 20M` or
 the `Host(..., persistent_storage_quota_bytes=...)` constructor argument.
 
 ## Query Mesh Placement

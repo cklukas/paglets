@@ -306,7 +306,7 @@ class MyJobPaglet(ComputeJobPaglet[MyJobState]):
     return [self.state.scratch_dir]
 ```
 
-The default hook returns no extra paths. `paglets-compute-slots status --usage`
+The default hook returns no extra paths. `paglets jobs top`
 recursively sums returned directories and regular files in addition to the
 Paglets-owned work directory.
 
@@ -629,59 +629,56 @@ durable centralized scheduling.
 Inspect scheduler state:
 
 ```bash
-uv run paglets-compute-slots status
-uv run paglets-compute-slots status --queue
-uv run paglets-compute-slots status --jobs
-uv run paglets-compute-slots status --queue --jobs
-uv run paglets-compute-slots status --blocked
-uv run paglets-compute-slots status --usage
-uv run paglets-compute-slots status --blocked --usage
+uv run paglets jobs status
+uv run paglets jobs queue
+uv run paglets jobs ps --active
+uv run paglets jobs why
+uv run paglets jobs top
 ```
 
 `status` prints aggregate host capacity including waiting job count and active
-lease count. `--queue` adds queued requests and leases with declared CPU core,
-memory, and temp-storage reservations. `--blocked` explains which resource is
-preventing queued requests from running. `--jobs` adds active leased paglet
-processes with declared CPU cores, assigned CPU IDs, declared memory, current
-RSS memory, process CPU percent, process memory percent, PID, and process
-status. `--usage` adds process-tree RSS, Paglets work-dir usage,
-application-provided extra work usage, sampled maxima, and sample counts.
+lease count. `queue` adds queued requests with declared CPU core, memory, and
+temp-storage reservations. `why` explains which resource is preventing queued
+requests from running. `ps --active` lists active compute job paglets. `top`
+adds process-tree RSS, Paglets work-dir usage, application-provided extra work
+usage, sampled maxima, and sample counts.
 
 Check candidate hosts for a resource request:
 
 ```bash
-uv run paglets-compute-slots candidates --cpu-cores 2 --memory 4G --temp-storage 1G
-uv run paglets-compute-slots candidates --require-tag linux --prefer-tag gpu --exclude-host laptop
+uv run paglets jobs hosts --cores 2 --mem 4G --disk 1G
+uv run paglets jobs hosts --tag linux --prefer-tag gpu --exclude-host laptop
 ```
 
-Cancel queued scheduler requests:
+Remove queued scheduler requests and inactive waiting jobs:
 
 ```bash
-uv run paglets-compute-slots cancel --request-id compute-slot-abc --dry-run
-uv run paglets-compute-slots cancel --agent-id agent-abc --confirm
-uv run paglets-compute-slots cancel --all --confirm
+uv run paglets jobs rm --job JOB_ID --dry-run
+uv run paglets jobs rm --agent agent-abc --force
+uv run paglets jobs rm --all --force
 ```
 
-`cancel` removes matching queued slot requests from the scheduler. Match by
-request ID, agent ID, job ID, or use `--all`. Destructive cancellation requires
-`--confirm`; use `--dry-run` to preview matching queued requests. Active leases
-are not cancelled unless `--include-leases` is also supplied.
+`rm` removes matching queued slot requests from the scheduler and disposes
+matching inactive waiting compute job paglets. Match by agent ID, job ID, or use
+`--all`. Destructive removal requires `--force`; use `--dry-run` to preview
+matches. Active leases and running job processes are intentionally not removed
+by this command.
 
 List or clear compute job paglets:
 
 ```bash
-uv run paglets-compute-slots jobs list --inactive
-uv run paglets-compute-slots jobs list --inactive --status WAITING_FOR_SLOT
-uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --dry-run
-uv run paglets-compute-slots jobs clear --status WAITING_FOR_SLOT --confirm
-uv run paglets-compute-slots jobs history --limit 20
+uv run paglets jobs ps --inactive
+uv run paglets jobs ps --inactive --state WAITING_FOR_SLOT
+uv run paglets jobs rm --state WAITING_FOR_SLOT --dry-run
+uv run paglets jobs rm --state WAITING_FOR_SLOT --force
+uv run paglets jobs history --limit 20
 ```
 
-`jobs list` uses the host admin API to inspect active or inactive paglets whose
+`ps` uses the host admin API to inspect active or inactive paglets whose
 state includes `compute_status`. If neither `--active` nor `--inactive` is
-provided, both active and inactive jobs are listed. `jobs clear` disposes
+provided, both active and inactive jobs are listed. `rm` disposes
 inactive compute job paglets only; by default it targets `WAITING_FOR_SLOT` jobs
-and requires `--confirm` unless `--dry-run` is used. `jobs history` prints the
+and requires `--force` unless `--dry-run` is used. `history` prints the
 recent finished-job usage summaries retained by the local scheduler, including
 runtime, finish reason, job class, max CPU, max process-tree RSS, and max disk
 usage.
@@ -689,8 +686,8 @@ usage.
 Inspect compute job groups:
 
 ```bash
-uv run paglets-compute-groups
-uv run paglets-compute-groups --group group-abc --json
+uv run paglets jobs groups
+uv run paglets jobs groups --group group-abc --json
 ```
 
 For shared or relayed deployments, set `PAGLETS_API_KEY` for the host and

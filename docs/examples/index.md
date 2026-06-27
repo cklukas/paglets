@@ -36,26 +36,26 @@ modules.
 Start two same-version hosts:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
 For hosts on different machines, use `--bind-public` so each host binds and
 publishes a reachable LAN address:
 
 ```bash
-uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
-uv run paglets-host --name windows --bind-public [IP] --port 8765 --mesh-version dev
+uv run paglets host --name mac --bind-public auto --port 8765 --mesh-version dev
+uv run paglets host --name windows --bind-public 192.0.2.10 --port 8765 --mesh-version dev
 ```
 
-`--bind-public` without an `IP` binds only the detected LAN address. Supplying
-an `IP` binds only that address, which is useful on machines with multiple
-network interfaces. Repeat the flag to bind multiple specific addresses; the
-first one is published to the mesh. The auto form keeps watching for LAN
-address changes and rebinds/publishes the new address after DHCP or network
-reconnect changes it.
+`--bind-public auto` binds only the detected LAN address. Supplying an explicit
+value such as `--bind-public 192.0.2.10` binds only that address, which is
+useful on machines with multiple network interfaces. Repeat the flag to bind
+multiple specific addresses; the first one is published to the mesh. The auto
+form keeps watching for LAN address changes and rebinds/publishes the new
+address after DHCP or network reconnect changes it.
 
-On first start, `paglets-host` copies the bundled launch config to
+On first start, `paglets host` copies the bundled launch config to
 `~/.paglets/launch.toml`. The bundled config declares built-in resident
 services:
 
@@ -72,16 +72,16 @@ same-version mesh hosts automatically. There is no saved server/IP membership
 file to maintain.
 
 ```bash
-uv run paglets-sysinfo [--entry alpha] df
-uv run paglets-mesh-info [--entry alpha] summary
-uv run paglets-artifacts [--entry alpha] list
-uv run paglets-compute-slots [--entry alpha] status
-uv run paglets-compute-groups [--entry alpha]
-uv run paglets-analysis-jobs [--entry alpha] --tasks 20
-uv run paglets-file-grabber [--entry alpha] push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets-pi-compute [--entry alpha] --digits 16
-uv run paglets-perf-test [--entry alpha]
-uv run paglets-search [--entry alpha] grep TODO .
+uv run paglets sys df --entry alpha
+uv run paglets mesh summary --entry alpha
+uv run paglets artifacts list --entry alpha
+uv run paglets jobs status --entry alpha
+uv run paglets jobs groups --entry alpha
+uv run paglets examples analysis --entry alpha --tasks 20
+uv run paglets examples file push --entry alpha ./data.bin --remote beta --dest /tmp/data.bin --dry
+uv run paglets examples pi --entry alpha --digits 16
+uv run paglets examples perf --entry alpha
+uv run paglets search grep --entry alpha TODO .
 ```
 
 Direct local examples can still run without an API key. For proxied or shared
@@ -90,10 +90,10 @@ the HTTP API requires bearer authentication.
 
 All packaged example CLIs that contact an entry host read `PAGLETS_API_KEY`
 automatically and accept `--api-key-env NAME` as an override, including
-`paglets-sysinfo`, `paglets-mesh-info`, `paglets-artifacts`,
-`paglets-compute-slots`, `paglets-compute-groups`, `paglets-analysis-jobs`,
-`paglets-file-grabber`, `paglets-pi-compute`, `paglets-perf-test`,
-`paglets-mesh-benchmark`, and `paglets-search`. The paglet classes themselves
+`paglets sys`, `paglets mesh`, `paglets artifacts`,
+`paglets jobs`, `paglets jobs groups`, `paglets examples analysis`,
+`paglets examples file`, `paglets examples pi`, `paglets examples perf`,
+`paglets examples mesh-benchmark`, and `paglets search`. The paglet classes themselves
 do not need relay-specific branches; use normal context, proxy, service,
 creation, clone, and dispatch APIs and the host transport forwards relayed URLs
 transparently.

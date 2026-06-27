@@ -52,22 +52,22 @@ uv run pytest -q
 Run two hosts:
 
 ```bash
-uv run paglets-host --name alpha --port 8765 --mesh-version dev
-uv run paglets-host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+uv run paglets host --name alpha --port 8765 --mesh-version dev
+uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```
 
 For hosts on different machines, start each host with `--bind-public`:
 
 ```bash
-uv run paglets-host --name mac --bind-public --port 8765 --mesh-version dev
-uv run paglets-host --name windows --bind-public [IP] --port 8765 --mesh-version dev
+uv run paglets host --name mac --bind-public auto --port 8765 --mesh-version dev
+uv run paglets host --name windows --bind-public 192.0.2.10 --port 8765 --mesh-version dev
 ```
 
-Without an `IP`, `--bind-public` binds only the detected LAN address. With an
-`IP`, it binds only that supplied address. Repeat the flag to bind multiple
-specific addresses; the first one is published to the mesh. The auto form
-keeps watching the detected address and rebinds/publishes a new one after DHCP
-or network reconnect changes it.
+`--bind-public auto` binds only the detected LAN address. With an explicit
+value such as `--bind-public 192.0.2.10`, it binds only that supplied address.
+Repeat the flag to bind multiple specific addresses; the first one is published
+to the mesh. The auto form keeps watching the detected address and
+rebinds/publishes a new one after DHCP or network reconnect changes it.
 
 For locked-down networks, one public HTTPS endpoint can act as a relay. Bind
 the paglets backend on server A to localhost, publish it through an existing
@@ -96,9 +96,9 @@ snippet from that server block. Test with `sudo nginx -t` before reloading.
 
 ```bash
 export PAGLETS_API_KEY='change-me'
-uv run paglets-host --name A --host 127.0.0.1 --port 8765 \
+uv run paglets host --name A --host 127.0.0.1 --port 8765 \
   --public-url https://server-a.example.com/paglets
-uv run paglets-host --name B --connect-to https://server-a.example.com/paglets
+uv run paglets host --name B --connect-to https://server-a.example.com/paglets
 ```
 
 Paglets commands read `PAGLETS_API_KEY` automatically. Use `--api-key-env NAME`
@@ -114,35 +114,35 @@ relay delivery fails. Hubs expose `GET /paglets/relay/diagnostics` and support
 `--relay-offline-after`, `--relay-delivery-timeout`, and `--relay-queue-limit`
 for corporate network tuning.
 
-On first start, `paglets-host` copies `~/.paglets/launch.toml` from the bundled
+On first start, `paglets host` copies `~/.paglets/launch.toml` from the bundled
 config. The default launch config declares built-in resident services for host
 inspection, mesh resource snapshots, compute-slot scheduling, and user
 notifications:
 
 ```bash
-uv run paglets-sysinfo df
-uv run paglets-sysinfo load
-uv run paglets-mesh-info summary
-uv run paglets-artifacts list
-uv run paglets-compute-slots status
-uv run paglets-compute-groups
-uv run paglets-analysis-jobs --tasks 3 --target-runtime 3
-uv run paglets-file-grabber push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets-pi-compute --digits 16
-uv run paglets-perf-test
-uv run paglets-mesh-benchmark --payload-size 64K
+uv run paglets sys df
+uv run paglets sys load
+uv run paglets mesh summary
+uv run paglets artifacts list
+uv run paglets jobs status
+uv run paglets jobs groups
+uv run paglets examples analysis --tasks 3 --target-runtime 3
+uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
+uv run paglets examples pi --digits 16
+uv run paglets examples perf
+uv run paglets examples mesh-benchmark --payload-size 64K
 ```
 
-`paglets-file-grabber` is the smallest natural file mobility example: the
+`paglets examples file` is the smallest natural file mobility example: the
 source paglet registers one file, dispatches to the destination host, and writes
 the arrived scratch copy to the requested path.
 
-`paglets-perf-test` is a pure mobile-agent example: the entry host creates a
+`paglets examples perf` is a pure mobile-agent example: the entry host creates a
 parent benchmark paglet, clones workers to online same-version mesh hosts, runs
 local CPU, memory, and bounded temporary disk I/O checks, and reports the
 summary centrally.
 
-`paglets-mesh-benchmark` measures mobile-agent movement itself. A starter
+`paglets examples mesh-benchmark` measures mobile-agent movement itself. A starter
 paglet remains on the entry host while a traveler visits every directed host
 pair, stores per-hop timings locally on arrival, then collects and prints a
 directional Markdown matrix plus clock-offset and message round-trip
@@ -161,8 +161,8 @@ uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
   behavior.
 - [Example Agents](examples/index.md): detailed explanations of packaged example
   agents, including `server-info`, `mesh-info`, Pi compute,
-  `paglets-file-grabber`, `paglets-perf-test`, and
-  `paglets-mesh-benchmark`.
+  `paglets examples file`, `paglets examples perf`, and
+  `paglets examples mesh-benchmark`.
 - [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,
   synchronize dependencies, broadcast commit hashes, and restart from updated
   code.
