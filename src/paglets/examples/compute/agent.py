@@ -512,6 +512,8 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 timeout=0.1,
             )
         with self.locked_state() as state:
+            if not state.pending_batches and not state.in_flight:
+                _clear_launch_retry_errors(state.errors)
             state.done = not state.pending_batches and not state.in_flight and not state.errors
         self.notify_all_state_changed()
 
@@ -753,6 +755,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
                 future.result()
 
     def _launch_worker_spec(self, spec: dict[str, Any]) -> None:
+        host_name = str(spec.get("host_name") or spec["host_url"])
         try:
             self._create_worker_paglet(
                 str(spec["host_url"]),
@@ -763,7 +766,7 @@ class PiComputeCoordinatorAgent(Paglet[PiComputeState]):
             with self.locked_state() as state:
                 state.in_flight.pop(str(spec["batch_id"]), None)
                 state.pending_batches.insert(0, dict(spec["batch_wire"]))
-                state.errors[str(spec.get("host_name") or spec["host_url"])] = str(exc)
+                state.errors[_launch_retry_error_key(host_name)] = str(exc)
             self.notify_all_state_changed()
 
     def _create_worker_paglet(self, host_url: str, worker_state: PiBatchWorkerState, worker_id: str) -> None:
@@ -1131,6 +1134,19 @@ def _is_mesh_info_transient_error(message: str) -> bool:
     if not message:
         return False
     return "timeout" in message or "timed out" in message or "connection" in message
+
+
+def _launch_retry_error_key(host_name: str) -> str:
+    return f"launch:{host_name}"
+
+
+def _is_launch_retry_error_key(key: str) -> bool:
+    return key.startswith("launch:")
+
+
+def _clear_launch_retry_errors(errors: dict[str, str]) -> None:
+    for key in [key for key in errors if _is_launch_retry_error_key(str(key))]:
+        errors.pop(key, None)
 
 
 class PiBatchWorkerAgent(Paglet[PiBatchWorkerState]):

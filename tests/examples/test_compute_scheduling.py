@@ -230,6 +230,88 @@ def test_pi_compute_max_in_flight_is_capped_by_host_capacity(monkeypatch):
     assert len(launches) == 8
 
 
+def test_pi_compute_clears_recovered_worker_launch_errors(monkeypatch):
+    request = PiComputeRequest(digits=1, batch_size=1, max_in_flight=1, max_load_per_cpu=1.0)
+    agent = PiComputeCoordinatorAgent(PiComputeState())
+    agent._context = SimpleNamespace(name="coordinator", address="http://127.0.0.1:8765")
+    agent._prepare_job(request)
+
+    targets = [
+        [
+            TargetCandidate(
+                snapshot=MeshHostSnapshot(
+                    host_name="uconsole",
+                    host_url="http://uconsole.local:8765",
+                    code_version="test",
+                    observed_at=time.time(),
+                    cpu_count_logical=1,
+                    cpu_percent=5.0,
+                    load_average=[0.0],
+                    load_per_cpu=0.0,
+                    memory_available_bytes=1024**3,
+                    work_free_bytes=1024**3,
+                ),
+                score=0.0,
+                reasons=["eligible"],
+            )
+        ],
+        [
+            TargetCandidate(
+                snapshot=MeshHostSnapshot(
+                    host_name="mac-studio",
+                    host_url="http://mac-studio.local:8765",
+                    code_version="test",
+                    observed_at=time.time(),
+                    cpu_count_logical=1,
+                    cpu_percent=5.0,
+                    load_average=[0.0],
+                    load_per_cpu=0.0,
+                    memory_available_bytes=1024**3,
+                    work_free_bytes=1024**3,
+                ),
+                score=0.0,
+                reasons=["eligible"],
+            )
+        ],
+    ]
+
+    def _select_targets(_request):
+        return targets.pop(0) if targets else []
+
+    def _fake_create(host_url: str, worker_state: PiBatchWorkerState, worker_id: str) -> None:
+        if "uconsole" in host_url:
+            raise ConnectionResetError("Connection reset by peer")
+        batch = PiBatchRequest("terms:0:1", 0, 1)
+        agent.record_batch_result(
+            dataclass_to_wire(
+                PiBatchResult(
+                    batch_id=batch.batch_id,
+                    term_start=batch.term_start,
+                    term_count=batch.term_count,
+                    host_name="mac-studio",
+                    host_url=host_url,
+                    status="ok",
+                    worker_agent_id=worker_id,
+                    p="1",
+                    q="1",
+                    t="1",
+                )
+            )
+        )
+        assert worker_state.parent_agent_id == agent.agent_id
+
+    monkeypatch.setattr(agent, "_select_targets", _select_targets)
+    monkeypatch.setattr(agent, "_create_worker_paglet", _fake_create)
+
+    agent._run_job(request)
+
+    with agent.locked_state() as state:
+        assert state.done is True
+        assert state.pending_batches == []
+        assert state.in_flight == {}
+        assert state.errors == {}
+
+
 def test_skipped_batch_results_are_requeued(tmp_path: Path):
     host = _host("alpha", tmp_path / "alpha")
     host.start_background()
