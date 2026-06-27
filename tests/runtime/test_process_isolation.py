@@ -70,6 +70,15 @@ class BlockingAgent(Paglet[IsolationState]):
         return self.not_handled()
 
 
+class HostInventoryAgent(Paglet[IsolationState]):
+    State = IsolationState
+
+    def handle_message(self, message: Message):
+        if message.kind == "list-agents":
+            return self.context.host.list_agents(active=True, inactive=True)
+        return self.not_handled()
+
+
 def test_normal_exception_returns_message_error_and_child_survives(tmp_path: Path):
     host = _host(tmp_path)
     host.start_background()
@@ -118,6 +127,19 @@ def test_os_exit_is_reported_as_crash_and_other_paglets_continue(tmp_path: Path)
         _wait_until(lambda: _crashed(exiting, exitcode=7))
         assert stable.send(Message("count")) == 1
         assert stable.send(Message("count")) == 2
+    finally:
+        host.stop()
+
+
+def test_child_context_host_can_list_agents(tmp_path: Path):
+    host = _host(tmp_path)
+    host.start_background()
+    try:
+        proxy = host.create(HostInventoryAgent, IsolationState())
+
+        agents = proxy.send(Message("list-agents"))
+
+        assert any(item["agent_id"] == proxy.agent_id and item["active"] is True for item in agents)
     finally:
         host.stop()
 

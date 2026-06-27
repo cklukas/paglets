@@ -34,3 +34,10 @@ def test_topic_module_imports_are_available() -> None:
     assert Message.__name__ == "Message"
     assert PagletsAdminClient.__name__ == "PagletsAdminClient"
     assert callable(dataclass_to_wire)
+
+
+def test_moved_mesh_info_example_import_path_remains_available() -> None:
+    from paglets.examples.mesh_info.agent import MeshInfoAgent
+    from paglets.system.mesh_info.agent import MeshInfoAgent as CurrentMeshInfoAgent
+
+    assert MeshInfoAgent is CurrentMeshInfoAgent

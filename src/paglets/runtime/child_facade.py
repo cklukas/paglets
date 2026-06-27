@@ -118,6 +118,19 @@ class _ChildHostFacade:
         payload = self._call("get_proxies", {"state": state})
         return [PagletProxy.from_wire(item, self.client) for item in payload.get("proxies", [])]
 
+    def list_agents(
+        self,
+        *,
+        active: bool = True,
+        inactive: bool = False,
+        include_state: bool = False,
+    ) -> list[dict[str, Any]]:
+        payload = self._call(
+            "list_agents",
+            {"active": active, "inactive": inactive, "include_state": include_state},
+        )
+        return [dict(item) for item in payload.get("agents", [])]
+
     def set_process_cpu_affinity(self, agent_id: str, cpu_core_ids: list[int]) -> dict[str, Any]:
         return dict(self._call("set_process_cpu_affinity", {"agent_id": agent_id, "cpu_core_ids": cpu_core_ids}))
 

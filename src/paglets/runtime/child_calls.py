@@ -49,6 +49,14 @@ class _ChildCallMixin:
         if op == "get_proxies":
             proxies = self.get_proxies(int(payload.get("state", ACTIVE)))
             return {"proxies": [proxy.to_wire() for proxy in proxies]}
+        if op == "list_agents":
+            return {
+                "agents": self.list_agents(
+                    active=bool(payload.get("active", True)),
+                    inactive=bool(payload.get("inactive", False)),
+                    include_state=bool(payload.get("include_state", False)),
+                )
+            }
         if op == "set_process_cpu_affinity":
             record = self._require_agent(str(payload["agent_id"]))
             pid = int(record.pid or 0)
