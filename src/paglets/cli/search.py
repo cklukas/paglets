@@ -6,42 +6,19 @@ from typing import Annotated
 
 import typer
 
-from paglets.config.env import DEFAULT_API_KEY_ENV
-from paglets.examples.search import cli as legacy_search
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
+from paglets.examples.search import cli as search_runtime
+from paglets.examples.search.models import SearchRequest
+from paglets.remote.admin import select_reachable_entry_server
+from paglets.remote.client import HostClient
+
+from .console import fail, print_json
 
 app = typer.Typer(help="Search files across a Paglets mesh.", no_args_is_help=True)
 
 
-def _global_args(
-    entry: str | None,
-    host: list[str] | None,
-    timeout: float,
-    poll_interval: float,
-    json_output: bool,
-    jsonl: bool,
-    no_stream: bool,
-    api_key_env: str | None,
-) -> list[str]:
-    argv: list[str] = []
-    if entry:
-        argv.extend(["--entry", entry])
-    for value in host or []:
-        argv.extend(["--host", value])
-    argv.extend(["--timeout", str(timeout), "--poll-interval", str(poll_interval), "--color", "auto"])
-    if json_output:
-        argv.append("--json")
-    if jsonl:
-        argv.append("--jsonl")
-    if no_stream:
-        argv.append("--no-stream")
-    if api_key_env:
-        argv.extend(["--api-key-env", api_key_env])
-    return argv
-
-
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command()
 def grep(
-    ctx: typer.Context,
     pattern: Annotated[str, typer.Argument(help="Pattern to search for.")],
     paths: Annotated[list[str] | None, typer.Argument(help="Paths to search on each target host.")] = None,
     ignore_case: Annotated[bool, typer.Option("-i", "--ignore-case", help="Case-insensitive search.")] = False,
@@ -82,28 +59,30 @@ def grep(
         typer.Option("--api-key-env", help=f"API key environment variable; defaults to {DEFAULT_API_KEY_ENV}."),
     ] = None,
 ) -> None:
-    argv = _global_args(entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
-    options = _common_search_args(
-        ignore_case, smart_case, fixed_strings, word_regexp, glob, type_name, hidden, no_ignore
+    request = _request(
+        "grep",
+        pattern,
+        paths,
+        ignore_case,
+        smart_case,
+        fixed_strings,
+        word_regexp,
+        glob,
+        type_name,
+        hidden,
+        no_ignore,
+        before_context=before_context,
+        after_context=after_context,
+        context=context,
+        line_number=line_number,
+        count=count,
+        files_with_matches=files_with_matches,
     )
-    if after_context:
-        options.extend(["--after-context", str(after_context)])
-    if before_context:
-        options.extend(["--before-context", str(before_context)])
-    if context is not None:
-        options.extend(["--context", str(context)])
-    options.append("--line-number" if line_number else "--no-line-number")
-    if count:
-        options.append("--count")
-    if files_with_matches:
-        options.append("--files-with-matches")
-    argv.extend(["grep", *options, pattern, *(paths or []), *ctx.args])
-    raise typer.Exit(legacy_search.main(argv))
+    _run(request, entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
 
 
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command()
 def find(
-    ctx: typer.Context,
     pattern: Annotated[str, typer.Argument(help="Name pattern; omit for every matching path.")] = "",
     paths: Annotated[list[str] | None, typer.Argument(help="Paths to search on each target host.")] = None,
     ignore_case: Annotated[bool, typer.Option("-i", "--ignore-case", help="Case-insensitive search.")] = False,
@@ -132,24 +111,29 @@ def find(
     no_stream: Annotated[bool, typer.Option("--no-stream", help="Buffer events and print after completion.")] = False,
     api_key_env: Annotated[str | None, typer.Option("--api-key-env", help="API key environment variable.")] = None,
 ) -> None:
-    argv = _global_args(entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
-    options = _common_search_args(
-        ignore_case, smart_case, fixed_strings, word_regexp, glob, type_name, hidden, no_ignore
+    request = _request(
+        "find",
+        pattern,
+        paths,
+        ignore_case,
+        smart_case,
+        fixed_strings,
+        word_regexp,
+        glob,
+        type_name,
+        hidden,
+        no_ignore,
+        full_path=full_path,
+        extensions=extension,
+        kind=kind,
     )
-    if full_path:
-        options.append("--full-path")
-    for value in extension or []:
-        options.extend(["--extension", value])
-    options.extend(["--kind", kind])
-    argv.extend(["find", *options])
-    if pattern:
-        argv.append(pattern)
-    argv.extend(paths or [])
-    argv.extend(ctx.args)
-    raise typer.Exit(legacy_search.main(argv))
+    _run(request, entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
 
 
-def _common_search_args(
+def _request(
+    mode: str,
+    pattern: str,
+    paths: list[str] | None,
     ignore_case: bool,
     smart_case: bool,
     fixed_strings: bool,
@@ -158,22 +142,102 @@ def _common_search_args(
     type_name: list[str] | None,
     hidden: bool,
     no_ignore: bool,
-) -> list[str]:
-    argv: list[str] = []
-    if ignore_case:
-        argv.append("--ignore-case")
-    if smart_case:
-        argv.append("--smart-case")
-    if fixed_strings:
-        argv.append("--fixed-strings")
-    if word_regexp:
-        argv.append("--word-regexp")
-    for value in glob or []:
-        argv.extend(["--glob", value])
-    for value in type_name or []:
-        argv.extend(["--type", value])
-    if hidden:
-        argv.append("--hidden")
-    if no_ignore:
-        argv.append("--no-ignore")
-    return argv
+    *,
+    before_context: int = 0,
+    after_context: int = 0,
+    context: int | None = None,
+    line_number: bool = True,
+    count: bool = False,
+    files_with_matches: bool = False,
+    full_path: bool = False,
+    extensions: list[str] | None = None,
+    kind: str = "any",
+) -> SearchRequest:
+    if context is not None:
+        before_context = context
+        after_context = context
+    return SearchRequest(
+        mode=mode,
+        pattern=pattern,
+        paths=list(paths or ["."]),
+        ignore_case=ignore_case,
+        smart_case=smart_case,
+        fixed_strings=fixed_strings,
+        word_regexp=word_regexp,
+        before_context=max(0, before_context),
+        after_context=max(0, after_context),
+        line_number=line_number,
+        count=count,
+        files_with_matches=files_with_matches,
+        globs=list(glob or []),
+        type_names=list(type_name or []),
+        hidden=hidden,
+        no_ignore=no_ignore,
+        full_path=full_path,
+        extensions=list(extensions or []),
+        kind=kind,
+    )
+
+
+def _run(
+    request: SearchRequest,
+    entry: str | None,
+    host: list[str] | None,
+    timeout: float,
+    poll_interval: float,
+    json_output: bool,
+    jsonl: bool,
+    no_stream: bool,
+    api_key_env: str | None,
+) -> None:
+    try:
+        client = HostClient(timeout=max(1.0, timeout + 5.0), api_key=resolve_api_key(api_key_env))
+        entry_ref = select_reachable_entry_server(entry_name=entry, client=client)
+        args = _SearchRunOptions(
+            host=list(host or []),
+            timeout=timeout,
+            poll_interval=poll_interval,
+            drain_limit=200,
+            json=json_output,
+            jsonl=jsonl,
+            no_stream=no_stream,
+            color="auto",
+        )
+        summary, events = search_runtime._run_search(entry_ref, request, args, client=client)
+        if json_output:
+            print_json(summary)
+        elif no_stream:
+            use_color = search_runtime._use_color(args)
+            for event in events:
+                search_runtime._print_event(event, use_color=use_color)
+            search_runtime._print_summary_notes(summary)
+        elif not jsonl:
+            search_runtime._print_summary_notes(summary)
+        raise typer.Exit(1 if search_runtime._has_failures(summary) else 0 if search_runtime._has_hits(summary) else 1)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        fail("paglets search", exc)
+
+
+class _SearchRunOptions:
+    def __init__(
+        self,
+        *,
+        host: list[str],
+        timeout: float,
+        poll_interval: float,
+        drain_limit: int,
+        json: bool,
+        jsonl: bool,
+        no_stream: bool,
+        color: str,
+    ) -> None:
+        self.host = host
+        self.timeout = timeout
+        self.poll_interval = poll_interval
+        self.drain_limit = drain_limit
+        self.json = json
+        self.jsonl = jsonl
+        self.no_stream = no_stream
+        self.color = color

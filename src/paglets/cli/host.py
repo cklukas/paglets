@@ -2,15 +2,31 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import os
+import signal
+import sys
+import threading
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from paglets.config.env import DEFAULT_API_KEY_ENV
-from paglets.config.startup import DEFAULT_LAUNCH_CONFIG_PATH
+import paglets.tooling.git_update as git_update
+from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
+from paglets.config.startup import (
+    DEFAULT_LAUNCH_CONFIG_PATH,
+    load_launch_config,
+)
+from paglets.config.startup import (
+    sync_launch_config as sync_launch_file,
+)
+from paglets.core.errors import PagletError
+from paglets.core.runtime_values import LaunchConfigSyncAction
 from paglets.persistence.storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES
-from paglets.tooling import cli as legacy_host
+from paglets.runtime.host import Host
+from paglets.tooling import cli as host_helpers
+
+from .console import console, err_console
 
 app = typer.Typer(help="Start a Paglets host.", invoke_without_command=True, no_args_is_help=True)
 
@@ -77,49 +93,145 @@ def run(
         typer.Option("--auto-update-from-git", help="Run git update on startup and accept trusted update requests."),
     ] = False,
 ) -> None:
-    argv = ["--name", name, "--host", host, "--port", str(port)]
-    for value in bind_public or []:
-        argv.extend(["--bind-public", value])
-    for value in peer or []:
-        argv.extend(["--peer", value])
-    argv.append("--mesh" if mesh else "--no-mesh")
-    if mesh_multicast is not None:
-        argv.append("--mesh-multicast" if mesh_multicast else "--no-mesh-multicast")
-    if mesh_lan_discovery is not None:
-        argv.append("--mesh-lan-discovery" if mesh_lan_discovery else "--no-mesh-lan-discovery")
-    _extend_optional(argv, "--public-url", public_url)
-    _extend_optional(argv, "--connect-to", connect_to)
-    argv.extend(["--relay-offline-after", str(relay_offline_after), "--relay-queue-limit", str(relay_queue_limit)])
-    _extend_optional(argv, "--relay-delivery-timeout", relay_delivery_timeout)
-    _extend_optional(argv, "--api-key-env", api_key_env)
-    _extend_optional(argv, "--mesh-version", mesh_version)
-    for value in tag or []:
-        argv.extend(["--tag", value])
-    for value in property or []:
-        argv.extend(["--property", value])
-    _extend_optional(argv, "--persistence-dir", persistence_dir)
-    argv.extend(
-        [
-            "--persistent-storage-quota",
-            persistent_storage_quota,
-            "--artifact-max-size",
-            artifact_max_size,
-            "--artifact-storage-quota",
-            artifact_storage_quota,
-            "--artifact-spool-ttl",
-            str(artifact_spool_ttl),
-            "--launch-config",
-            str(launch_config),
-        ]
-    )
-    argv.append("--sync-launch-config" if sync_launch_config else "--no-sync-launch-config")
-    if yes:
-        argv.append("--yes")
+    if connect_to and auto_update_from_git:
+        raise typer.BadParameter("--auto-update-from-git cannot be used with --connect-to")
+    try:
+        host_properties = host_helpers._parse_properties(list(property or []))
+        api_key = resolve_api_key(api_key_env)
+        persistent_quota = host_helpers._parse_size_or_none(persistent_storage_quota)
+        artifact_max = host_helpers._parse_size_or_none(artifact_max_size)
+        artifact_quota = host_helpers._parse_size_or_none(artifact_storage_quota)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if (connect_to or public_url) and not api_key:
+        raise typer.BadParameter(f"--public-url and --connect-to require an API key from {DEFAULT_API_KEY_ENV}")
+
+    reexec_args = list(sys.argv[1:])
+    restart_requested = threading.Event()
+    git_repo_root: Path | None = None
+    git_process_start_head = ""
+
     if auto_update_from_git:
-        argv.append("--auto-update-from-git")
-    raise typer.Exit(legacy_host.main(argv))
+        try:
+            git_repo_root = git_update.find_repo_root(Path.cwd())
+            git_process_start_head = git_update.current_head(git_repo_root)
+            update_result = git_update.update_checkout(
+                git_repo_root,
+                process_start_head=git_process_start_head,
+                sync_dependencies=not host_helpers._defer_uv_sync_until_reexec(),
+            )
+        except git_update.GitUpdateError as exc:
+            err_console.print(f"paglets host: git auto-update failed: {exc}")
+            raise typer.Exit(1) from exc
+        if not update_result.ok:
+            host_helpers._print_git_update_failure(update_result)
+            raise typer.Exit(1)
+        if update_result.restart_required:
+            err_console.print(
+                f"paglets host: git auto-update moved HEAD from "
+                f"{update_result.process_start_head} to {update_result.after_head}; restarting"
+            )
+            _reexec(reexec_args)
+
+    try:
+        sync_result = sync_launch_file(
+            launch_config,
+            enabled=sync_launch_config,
+            yes=yes,
+            interactive=sys.stdin.isatty(),
+            output=sys.stderr,
+        )
+        if sync_result.action in (LaunchConfigSyncAction.COPIED, LaunchConfigSyncAction.UPDATED):
+            err_console.print(f"paglets host: {sync_result.message}")
+            if sync_result.backup_path is not None:
+                err_console.print(f"paglets host: previous launch config moved to {sync_result.backup_path}")
+        launch = load_launch_config(launch_config)
+    except PagletError as exc:
+        err_console.print(f"paglets host: {exc}")
+        raise typer.Exit(1) from exc
+
+    _validate_bind_public_values(bind_public)
+    bind_host = bind_public if bind_public is not None else host
+    effective_multicast = mesh_multicast
+    effective_lan_discovery = mesh_lan_discovery
+    if connect_to:
+        effective_multicast = False if effective_multicast is None else effective_multicast
+        effective_lan_discovery = False if effective_lan_discovery is None else effective_lan_discovery
+    else:
+        effective_multicast = True if effective_multicast is None else effective_multicast
+        effective_lan_discovery = True if effective_lan_discovery is None else effective_lan_discovery
+
+    runtime_host = Host(
+        name=name,
+        host=bind_host,
+        port=port,
+        api_key=api_key,
+        public_url=public_url,
+        connect_to=connect_to,
+        mesh=mesh,
+        peers=list(peer or []),
+        mesh_multicast=effective_multicast,
+        mesh_lan_discovery=effective_lan_discovery,
+        mesh_version=mesh_version,
+        persistence_dir=persistence_dir,
+        persistent_storage_quota_bytes=persistent_quota,
+        artifact_max_bytes=artifact_max,
+        artifact_storage_quota_bytes=artifact_quota,
+        artifact_spool_ttl_seconds=artifact_spool_ttl,
+        launch_config=launch,
+        launch_config_sync_result=sync_result,
+        auto_update_from_git=auto_update_from_git,
+        git_repo_root=git_repo_root,
+        git_process_start_head=git_process_start_head,
+        auto_update_restart_callback=restart_requested.set,
+        auto_update_reporter=lambda message: err_console.print(f"paglets host auto-update: {message}"),
+        relay_offline_after=relay_offline_after,
+        relay_delivery_timeout=relay_delivery_timeout,
+        relay_queue_limit=relay_queue_limit,
+        tags=list(tag or []),
+        properties=host_properties,
+    )
+
+    def shutdown(_signum, _frame):
+        runtime_host.shutdown()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    runtime_host.start_background()
+    if runtime_host.mesh.version_warning:
+        err_console.print(f"paglets host warning: {runtime_host.mesh.version_warning}")
+    mode = "connected via" if connect_to else "listening at"
+    console.print(
+        f"paglets host {runtime_host.name!r} {mode} {connect_to or runtime_host.address} "
+        f"(mesh {'on' if mesh else 'off'}, version {runtime_host.mesh.code_version})"
+    )
+    if auto_update_from_git and not getattr(runtime_host, "relay_mode", False):
+        runtime_host.broadcast_git_update(
+            targets=host_helpers._auto_update_discovery_targets(runtime_host.port),
+            validate_targets=True,
+            report_unreachable=False,
+        )
+    runtime_host.serve_forever()
+    restart_scheduled = bool(getattr(runtime_host, "_auto_update_restart_scheduled", False))
+    if restart_scheduled and not restart_requested.is_set():
+        restart_requested.wait(timeout=5.0)
+    if restart_requested.is_set():
+        err_console.print("paglets host: git auto-update restart requested; restarting")
+        _reexec(reexec_args)
+    if restart_scheduled:
+        err_console.print("paglets host: git auto-update restart was scheduled but no restart callback ran")
+        raise typer.Exit(1)
 
 
-def _extend_optional(argv: list[str], option: str, value: object | None) -> None:
-    if value is not None:
-        argv.extend([option, str(value)])
+def _reexec(argv: list[str]) -> None:
+    executable = sys.executable
+    os.execvp(executable, [executable, "-m", "paglets.cli.app", *argv])
+
+
+def _validate_bind_public_values(values: list[str] | None) -> None:
+    for value in values or []:
+        if str(value).strip().startswith("-"):
+            raise typer.BadParameter(
+                f"--bind-public value {value!r} looks like an option; use '--bind-public auto' or pass a host/IP"
+            )

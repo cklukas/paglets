@@ -218,6 +218,7 @@ class _ChildCallMixin:
                 raise
             self._finalize_registered_file_departure(agent_id, staged, delete_moves=True)
             self._cleanup_agent_work_dir(agent_id)
+            record.set_terminal_proxy_wire(response["proxy"])
             self._emit("dispatch", agent_id=agent_id, class_name=record.agent_class_name, data={"target": target_info})
             return {"proxy": response["proxy"]}
         record.departing = True

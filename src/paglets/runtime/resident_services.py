@@ -22,7 +22,7 @@ from paglets.core.runtime_values import (
     ServiceScope,
     require_enum,
 )
-from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest
+from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord
 from paglets.remote.proxy import PagletProxy
 from paglets.remote.references import PagletProxyRef
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire, qualified_name
@@ -174,6 +174,10 @@ class _ResidentServicesMixin:
         )
         with self._lock:
             self._resident_services[resolved.agent_id] = managed
+            inactive = self._inactive.get(resolved.agent_id)
+            if inactive is not None and not _resident_inactive_record_matches_managed(inactive, managed):
+                self._inactive.pop(resolved.agent_id, None)
+                self._delete_inactive_record(resolved.agent_id)
         record = self._services.advertise(
             host_name=self.name,
             host_url=self.address,
@@ -418,3 +422,9 @@ class _ResidentServicesMixin:
                     service_name=managed.contract.name,
                     error=str(exc),
                 )
+
+
+def _resident_inactive_record_matches_managed(record: InactiveRecord, managed: _ManagedResidentService) -> bool:
+    return record.envelope.agent_class_name == qualified_name(
+        managed.agent_cls
+    ) and record.envelope.state_class_name == qualified_name(managed.state_class)

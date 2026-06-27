@@ -381,6 +381,12 @@ Commands:
 | `--max-in-flight COUNT` | Global in-flight batch cap; `0` uses free load slots. |
 | `--max-workers-per-host COUNT` | Per-host worker cap; `0` uses free load slots. |
 | `--timeout SECONDS` | Whole-job timeout; `0` disables it. |
+| `--stream-chunk-size COUNT` | Maximum newly available decimal digits per text-mode poll. |
+| `--request-timeout SECONDS` | HTTP request timeout for coordinator calls. |
+| `--max-load-per-cpu VALUE` | Maximum one-minute load divided by logical CPUs. |
+| `--max-cpu-percent VALUE` | Maximum sampled CPU percent. |
+| `--mem SIZE` | Minimum available RAM, such as `512M`. |
+| `--disk SIZE` | Minimum free work storage, such as `1G`. |
 | `--json` | Print JSON. |
 | `--api-key-env NAME` | API key environment variable. |
 
@@ -394,12 +400,13 @@ Commands:
 | `--rows COUNT` | Synthetic rows per job. |
 | `--features COUNT` | Synthetic features per job. |
 | `--trees COUNT` | Random forest tree count. |
+| `--target-runtime SECONDS` | Minimum compute duration per job. |
+| `--memory SIZE` | Requested RAM per job. |
+| `--cpu-cores COUNT` | Requested logical CPU cores per job. |
+| `--temp-storage SIZE` | Requested temp storage per job. |
+| `--db-lock-timeout SECONDS` | Seconds to wait for the SQLite write lock. |
 | `--wait SECONDS` | Seconds to wait for seeder completion. |
 | `--api-key-env NAME` | API key environment variable. |
-
-Additional analysis options accepted through the underlying example include
-`--target-runtime`, `--memory`, `--cpu-cores`, `--temp-storage`, and
-`--db-lock-timeout`.
 
 `perf` options:
 
@@ -407,13 +414,17 @@ Additional analysis options accepted through the underlying example include
 | --- | --- |
 | `--entry NAME` | Entry host name. |
 | `--timeout SECONDS` | Seconds to wait for replies. |
+| `--duration SECONDS` | Seconds per CPU/memory kernel. |
+| `--disk-size SIZE` | Temporary file size per tested volume. |
+| `--workers COUNT` | Multi-core worker count; `0` uses logical CPU count. |
+| `--path PATH` | Disk path to benchmark; repeatable. |
+| `--cpu` / `--no-cpu` | Run or skip CPU benchmarks. |
+| `--memory` / `--no-memory` | Run or skip memory benchmarks. |
+| `--disk` / `--no-disk` | Run or skip disk benchmarks. |
+| `--lock-timeout SECONDS` | Seconds to wait for the local benchmark lock. |
 | `--json` | Print JSON. |
 | `--verbose` | Print skipped disk targets and diagnostics. |
 | `--api-key-env NAME` | API key environment variable. |
-
-Additional performance options accepted through the underlying example include
-`--duration`, `--disk-size`, `--workers`, `--path`, `--no-cpu`, `--no-memory`,
-`--no-disk`, `--lock-timeout`, and `--debug`.
 
 `mesh-benchmark` options:
 
@@ -424,11 +435,10 @@ Additional performance options accepted through the underlying example include
 | `--repeats COUNT` | Repeat the directed mesh route this many times. |
 | `--payload-size SIZE` | Random ASCII payload size, such as `64K`. |
 | `--exclude-self` | Skip self-pair movements. |
+| `--digits COUNT` | Digits after the decimal point in text output. |
+| `--clock-probes COUNT` | Clock request/reply probes per arrival host. |
 | `--json` | Print JSON. |
 | `--api-key-env NAME` | API key environment variable. |
-
-Additional mesh benchmark options accepted through the underlying example
-include `--clock-probes` and `--digits`.
 
 `file push` and `file pull` options:
 
@@ -443,20 +453,3 @@ include `--clock-probes` and `--digits`.
 | `--overwrite` | Replace the destination if it already exists. |
 | `--json` | Print JSON. |
 | `--api-key-env NAME` | API key environment variable. |
-
-## Migration Map
-
-| Old command | New command |
-| --- | --- |
-| `paglets-host` | `paglets host` |
-| `paglets-sysinfo` | `paglets sys` |
-| `paglets-mesh-info` | `paglets mesh` |
-| `paglets-compute-slots` | `paglets jobs` |
-| `paglets-compute-groups` | `paglets jobs groups` |
-| `paglets-artifacts` | `paglets artifacts` |
-| `paglets-search` | `paglets search` |
-| `paglets-pi-compute` | `paglets examples pi` |
-| `paglets-analysis-jobs` | `paglets examples analysis` |
-| `paglets-file-grabber` | `paglets examples file` |
-| `paglets-perf-test` | `paglets examples perf` |
-| `paglets-mesh-benchmark` | `paglets examples mesh-benchmark` |

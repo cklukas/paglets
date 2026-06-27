@@ -7,6 +7,7 @@ import re
 from typer.testing import CliRunner
 
 from paglets.cli.app import app
+from paglets.cli.host import _validate_bind_public_values
 
 runner = CliRunner()
 
@@ -62,3 +63,19 @@ def test_examples_file_push_help_is_nested():
     output = _plain(result.output)
     assert "paglets examples file push" in output
     assert "--remote" in output
+
+
+def test_host_bind_public_requires_value():
+    result = runner.invoke(app, ["host", "--name", "alpha", "--bind-public", "--mesh-version", "dev"])
+
+    assert result.exit_code != 0
+    assert "No such command" in _plain(result.output)
+
+
+def test_host_bind_public_rejects_option_like_values():
+    try:
+        _validate_bind_public_values(["--mesh"])
+    except Exception as exc:
+        assert "--bind-public value" in str(exc)
+    else:
+        raise AssertionError("expected option-like bind-public value to be rejected")

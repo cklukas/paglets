@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -10,7 +11,9 @@ from pathlib import Path
 from paglets.config.startup import load_launch_config, sync_launch_config
 from paglets.core.agent import Paglet, PagletContext, PagletState
 from paglets.core.messages import Message
-from paglets.core.runtime_values import LaunchConfigSyncAction, ResidentLifecycle, ServiceScope
+from paglets.core.runtime_values import EnvelopeKind, LaunchConfigSyncAction, ResidentLifecycle, ServiceScope
+from paglets.persistence.persistency import DeactivationPolicy, DeactivationRequest, InactiveRecord
+from paglets.runtime.envelope import PagletEnvelope
 from paglets.runtime.host import Host
 from paglets.system.mesh_info import GET_SNAPSHOT, MESH_INFO
 from paglets.system.server_info import GET_SUMMARY, SERVER_INFO
@@ -336,6 +339,51 @@ def test_concurrent_first_calls_create_one_lazy_resident_service(tmp_path):
             if event.kind == "resident-service-create" and event.agent_id == "service.server-info"
         ]
         assert len(create_events) == 1
+    finally:
+        host.stop()
+
+
+def test_resident_service_replaces_stale_inactive_singleton_record(tmp_path):
+    path = _server_info_resident_config(tmp_path, lifecycle="lazy", idle_timeout=30.0)
+    persistence_dir = tmp_path / "alpha"
+    inactive_dir = persistence_dir / "inactive"
+    inactive_dir.mkdir(parents=True)
+    stale = InactiveRecord(
+        envelope=PagletEnvelope(
+            kind=EnvelopeKind.ACTIVATION,
+            agent_id="service.server-info",
+            agent_class_name="paglets.examples.system_info.agent:ServerInfoAgent",
+            state_class_name="paglets.examples.system_info.agent:ServerInfoState",
+            state={"service_scope": "mesh"},
+            source_host_name="alpha",
+            source_host_address="http://127.0.0.1:1",
+            target_host_name="alpha",
+            target_host_address="http://127.0.0.1:1",
+        ),
+        policy=DeactivationPolicy(),
+        request=DeactivationRequest(),
+    )
+    stale_path = inactive_dir / "service.server-info.json"
+    stale_path.write_text(json.dumps(stale.to_wire()), encoding="utf-8")
+    host = Host(
+        "alpha",
+        host="127.0.0.1",
+        port=free_port(),
+        mesh=False,
+        mesh_multicast=False,
+        persistence_dir=persistence_dir,
+        launch_config=load_launch_config(path),
+    )
+    host.start_background()
+    try:
+        handle = PagletContext(host).require_contract(SERVER_INFO, operation=GET_SUMMARY, scope=ServiceScope.MESH)
+        assert handle.call(GET_SUMMARY).service_agent_id == "service.server-info"
+        assert not stale_path.exists()
+        [agent] = [
+            item for item in host.list_agents(active=True, inactive=False) if item["agent_id"] == "service.server-info"
+        ]
+        assert agent["class_name"] == "paglets.system.server_info.agent:ServerInfoAgent"
+        assert agent["state_class_name"] == "paglets.system.server_info.agent:ServerInfoState"
     finally:
         host.stop()
 

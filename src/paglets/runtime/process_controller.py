@@ -62,6 +62,8 @@ class ChildProcessController:
         self._process_closed = False
         self._terminal_message_result: Any = None
         self._has_terminal_message_result = False
+        self._terminal_host_call_complete = threading.Event()
+        self._terminal_host_call_complete.set()
         self._run_complete = threading.Event()
         self._run_complete.set()
         context = mp.get_context("spawn")
@@ -136,6 +138,10 @@ class ChildProcessController:
                 return
             if self._run_complete.wait(min(0.05, remaining)):
                 return
+        if self.departing and not self._terminal_host_call_complete.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._terminal_host_call_complete.wait(remaining)
 
     def request_message(self, message: Message, *, oneway: bool = False) -> Any:
         reply = self.request("message", {"message": message.to_wire(), "oneway": oneway})
@@ -269,6 +275,9 @@ class ChildProcessController:
     def _handle_host_call(self, message: dict[str, Any]) -> None:
         request_id = str(message.get("id") or "")
         op = str(message.get("op") or "")
+        is_terminal_op = op in {"complete_dispatch", "complete_deactivate", "complete_dispose"}
+        if is_terminal_op:
+            self._terminal_host_call_complete.clear()
         try:
             raw_payload = dict(message.get("payload") or {})
             token = _state_stream_token(raw_payload)
@@ -276,13 +285,16 @@ class ChildProcessController:
             if token:
                 self._send({"type": "event", "event": "local_pickle_stream_received", "token": token})
             payload = self._host_call_handler(op, request_payload)
-            if op in {"complete_dispatch", "complete_deactivate", "complete_dispose"}:
+            if is_terminal_op:
                 self._has_terminal_message_result = True
                 self._terminal_message_result = payload.get("proxy") if isinstance(payload, dict) else None
         except Exception as exc:
             reply = {"type": "reply", "id": request_id, "ok": False, "error": _error_to_wire(exc)}
         else:
             reply = {"type": "reply", "id": request_id, "ok": True, "payload": payload}
+        finally:
+            if is_terminal_op:
+                self._terminal_host_call_complete.set()
         try:
             self._send(reply)
         except Exception:
