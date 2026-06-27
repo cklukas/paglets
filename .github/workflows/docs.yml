@@ -12,7 +12,6 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "pyproject.toml"
-      - "uv.lock"
       - "src/**"
   release:
     types: [published, edited]
