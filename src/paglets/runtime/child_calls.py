@@ -26,6 +26,15 @@ MESH_SERVICE_LOOKUP_TIMEOUT_SECONDS = 1.0
 
 
 class _ChildCallMixin:
+    def _handle_child_run_failure(self, record: ChildProcessController) -> None:
+        self._emit(
+            "paglet-crashed",
+            agent_id=record.agent_id,
+            class_name=record.agent_class_name,
+            data={"pid": record.pid, "exitcode": record.exitcode},
+            error=record.last_error,
+        )
+
     def _handle_child_crash(self, record: ChildProcessController) -> None:
         with self._lock:
             current = self._agents.get(record.agent_id)

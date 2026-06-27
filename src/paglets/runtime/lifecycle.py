@@ -81,7 +81,7 @@ class _LifecycleMixin:
             raise
         record.ready = True
         self._emit("create", agent_id=record.agent_id, class_name=record.agent_class_name)
-        return self._current_or_last_proxy(record)
+        return PagletProxy(self.address, record.agent_id, self.client)
 
     def create_remote(
         self,

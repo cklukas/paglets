@@ -70,6 +70,18 @@ class BlockingAgent(Paglet[IsolationState]):
         return self.not_handled()
 
 
+class RunFailureAgent(Paglet[IsolationState]):
+    State = IsolationState
+
+    def run(self) -> None:
+        raise RuntimeError("run boom")
+
+    def handle_message(self, message: Message):
+        if message.kind == "ping":
+            return "pong"
+        return self.not_handled()
+
+
 class HostInventoryAgent(Paglet[IsolationState]):
     State = IsolationState
 
@@ -127,6 +139,25 @@ def test_os_exit_is_reported_as_crash_and_other_paglets_continue(tmp_path: Path)
         _wait_until(lambda: _crashed(exiting, exitcode=7))
         assert stable.send(Message("count")) == 1
         assert stable.send(Message("count")) == 2
+    finally:
+        host.stop()
+
+
+def test_background_run_failure_marks_paglet_crashed(tmp_path: Path):
+    host = _host(tmp_path)
+    host.start_background()
+    try:
+        proxy = host.create(RunFailureAgent, IsolationState())
+
+        _wait_until(lambda: _crashed(proxy))
+        _wait_until(
+            lambda: any(
+                event.kind == "paglet-crashed" and event.agent_id == proxy.agent_id and "run boom" in str(event.error)
+                for event in host.list_events()
+            )
+        )
+        with pytest.raises(PagletCrashedError):
+            proxy.send(Message("ping"))
     finally:
         host.stop()
 
@@ -197,12 +228,14 @@ def _host(tmp_path: Path) -> Host:
     )
 
 
-def _crashed(proxy, *, exitcode: int) -> bool:
+def _crashed(proxy, *, exitcode: int | None = None) -> bool:
     try:
         info = proxy.info()
     except Exception:
         return False
-    return bool(info.get("crashed")) and info.get("exitcode") == exitcode
+    if not bool(info.get("crashed")):
+        return False
+    return exitcode is None or info.get("exitcode") == exitcode
 
 
 def _pid_alive(pid: int) -> bool:

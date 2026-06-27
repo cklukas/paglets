@@ -40,6 +40,7 @@ class ChildProcessController:
         *,
         host_call_handler: Callable[[str, dict[str, Any]], Any],
         crash_handler: Callable[[ChildProcessController], None],
+        run_failure_handler: Callable[[ChildProcessController], None] | None = None,
     ):
         self.config = config
         self.agent_id = config.agent_id
@@ -54,6 +55,7 @@ class ChildProcessController:
         self.departing = False
         self._host_call_handler = host_call_handler
         self._crash_handler = crash_handler
+        self._run_failure_handler = run_failure_handler
         self._pending: dict[str, Future[Any]] = {}
         self._pending_ops: dict[str, str] = {}
         self._pending_lock = threading.Lock()
@@ -217,7 +219,14 @@ class ChildProcessController:
                         daemon=True,
                     ).start()
                 elif kind == "event":
-                    if message.get("event") == "run_complete":
+                    event = message.get("event")
+                    if event == "run_failed":
+                        error = _error_from_wire(message.get("error") or {})
+                        was_crashed = self.crashed
+                        self._mark_crashed(str(error))
+                        if not was_crashed and self._run_failure_handler is not None:
+                            self._run_failure_handler(self)
+                    elif event == "run_complete":
                         self._run_complete.set()
                     _handle_local_pickle_stream_event(message)
                     continue

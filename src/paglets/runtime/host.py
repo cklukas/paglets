@@ -896,6 +896,10 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             agent = self._agents.get(agent_id)
             inactive = self._inactive.get(agent_id)
             is_resident_service = agent_id in self._resident_services
+        if agent is not None and agent.crashed:
+            error = PagletCrashedError(f"Paglet {agent_id!r} crashed: {agent.last_error}")
+            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
+            raise error
         if agent is None:
             if is_resident_service and activate_if_inactive:
                 self._ensure_resident_service_active(agent_id)
@@ -927,6 +931,10 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
             record = self._agents.get(agent_id)
         if record is None:
             error = InvalidAgentError(f"No active paglet {agent_id!r} on {self.name}")
+            self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
+            raise error
+        if record.crashed:
+            error = PagletCrashedError(f"Paglet {agent_id!r} crashed: {record.last_error}")
             self._emit("message-failed", agent_id=agent_id, message_id=message.message_id, error=str(error))
             raise error
         self._begin_resident_service_call(agent_id)
@@ -1026,6 +1034,7 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
                 child_id, op, payload
             ),
             crash_handler=self._handle_child_crash,
+            run_failure_handler=self._handle_child_run_failure,
         )
         mailbox = MessageMailbox(
             agent_id,

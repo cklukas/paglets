@@ -31,6 +31,14 @@ class BinaryTravelAgent(Paglet[BinaryTravelState]):
         return self.not_handled()
 
 
+class BlockingRunAgent(Paglet[TravelState]):
+    State = TravelState
+
+    def run(self) -> None:
+        while True:
+            time.sleep(1.0)
+
+
 class ExplodingArrivalAgent(Paglet[TravelState]):
     State = TravelState
 
@@ -169,6 +177,29 @@ def test_host_http_api_lists_agents_and_reports_health(tmp_path: Path):
     assert active_state["state"]["last_message"] == "hello"
     assert inactive_state["active"] is False
     assert inactive_state["state"]["last_message"] == "hello"
+
+
+def test_create_endpoint_returns_before_run_completes_and_keeps_api_responsive(tmp_path: Path):
+    host = Host(name="alpha", host="127.0.0.1", port=free_port(), persistence_dir=tmp_path / "alpha")
+    host.start_background()
+    try:
+        started = time.monotonic()
+        response = host.client.post_json(
+            f"{host.address}/agents",
+            {
+                "agent_class_name": "tests.runtime.test_http_api_basic:BlockingRunAgent",
+                "state_class_name": "tests.test_paglets_core:TravelState",
+                "state": {"events": [], "last_message": None},
+                "agent_id": None,
+            },
+            timeout=5.0,
+        )
+
+        assert time.monotonic() - started < 5.0
+        assert response["proxy"]["agent_id"]
+        assert host.client.get_json(f"{host.address}/health", timeout=1.0)["name"] == "alpha"
+    finally:
+        host.stop()
 
 
 def test_json_message_transport_preserves_binary_args_arg_and_replies(tmp_path: Path):

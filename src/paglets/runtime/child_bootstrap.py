@@ -27,10 +27,13 @@ from paglets.runtime.process_protocol import (
     ChildConfig,
     _agent_snapshot,
     _clone_event,
+    _error_to_wire,
     _mobility_event,
     _set_process_title,
 )
 from paglets.serialization.codec import dataclass_from_wire, resolve_qualified_name
+
+_RUN_AFTER_REPLY = "__paglets_run_after_reply__"
 
 
 def _child_main(config: ChildConfig, conn: Connection) -> None:
@@ -79,7 +82,10 @@ def _child_main(config: ChildConfig, conn: Connection) -> None:
             else:
                 if facade.terminal and op == "message" and isinstance(result, dict):
                     result = {"result": result.get("result"), "resources": result.get("resources", {})}
+                run_after_reply = bool(result.pop(_RUN_AFTER_REPLY, False)) if isinstance(result, dict) else False
                 endpoint.reply_ok(request_id, result)
+                if run_after_reply:
+                    _run_agent_async(agent, endpoint)
                 if facade.terminal:
                     break
     finally:
@@ -90,8 +96,11 @@ def _child_main(config: ChildConfig, conn: Connection) -> None:
 
 def _handle_child_request(agent: Paglet, facade: _ChildHostFacade, op: str, payload: dict[str, Any]) -> dict[str, Any]:
     if op == "lifecycle":
-        _run_lifecycle(agent, facade, str(payload["name"]), dict(payload.get("event") or {}))
-        return _agent_snapshot(agent)
+        run_after_reply = _run_lifecycle(agent, facade, str(payload["name"]), dict(payload.get("event") or {}))
+        snapshot = _agent_snapshot(agent)
+        if run_after_reply:
+            snapshot[_RUN_AFTER_REPLY] = True
+        return snapshot
     if op == "message":
         message = Message.from_wire(payload["message"])
         result = agent.handle_message(message)
@@ -142,7 +151,7 @@ def _handle_child_request(agent: Paglet, facade: _ChildHostFacade, op: str, payl
     raise HostError(f"Unknown child operation {op!r}")
 
 
-def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: dict[str, Any]) -> None:
+def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: dict[str, Any]) -> bool:
     if name == "creation":
         agent.on_creation(
             CreationEvent(
@@ -152,16 +161,13 @@ def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: 
                 init=payload.get("init"),
             )
         )
-        agent.run()
-        return
+        return True
     if name == "arrival":
         agent.on_arrival(_mobility_event(agent.agent_id, payload))
-        _run_agent_async(agent, facade._endpoint)
-        return
+        return True
     if name == "clone":
         agent.on_clone(_clone_event(agent.agent_id, payload))
-        agent.run()
-        return
+        return True
     if name == "activation":
         request = DeactivationRequest.from_wire(payload.get("request"))
         policy = DeactivationPolicy.from_wire(payload.get("policy"))
@@ -175,20 +181,19 @@ def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: 
                 policy=policy,
             )
         )
-        agent.run()
-        return
+        return True
     if name == "dispatching":
         agent.on_dispatching(_mobility_event(agent.agent_id, payload))
-        return
+        return False
     if name == "reverting":
         agent.on_reverting(_mobility_event(agent.agent_id, payload))
-        return
+        return False
     if name == "cloning":
         agent.on_cloning(_clone_event(agent.agent_id, payload))
-        return
+        return False
     if name == "cloned":
         agent.on_cloned(_clone_event(agent.agent_id, payload))
-        return
+        return False
     if name == "deactivating":
         request = DeactivationRequest.from_wire(payload.get("request"))
         policy = DeactivationPolicy.from_wire(payload.get("policy"))
@@ -202,7 +207,7 @@ def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: 
                 policy=policy,
             )
         )
-        return
+        return False
     if name == "disposing":
         agent.on_disposing(
             PersistencyEvent(
@@ -212,7 +217,7 @@ def _run_lifecycle(agent: Paglet, facade: _ChildHostFacade, name: str, payload: 
                 reason=str(payload.get("reason") or "dispose"),
             )
         )
-        return
+        return False
     raise HostError(f"Unknown lifecycle {name!r}")
 
 
@@ -220,6 +225,9 @@ def _run_agent_async(agent: Paglet, endpoint: _ChildEndpoint) -> None:
     def run() -> None:
         try:
             agent.run()
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                endpoint._send({"type": "event", "event": "run_failed", "error": _error_to_wire(exc)})
         finally:
             with contextlib.suppress(Exception):
                 endpoint._send({"type": "event", "event": "run_complete"})

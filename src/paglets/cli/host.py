@@ -20,6 +20,7 @@ from paglets.config.startup import (
 from paglets.config.startup import (
     sync_launch_config as sync_launch_file,
 )
+from paglets.core.context_events import ContextEvent
 from paglets.core.errors import PagletError
 from paglets.core.runtime_values import LaunchConfigSyncAction
 from paglets.persistence.storage import DEFAULT_PERSISTENT_STORAGE_QUOTA_BYTES
@@ -198,6 +199,7 @@ def run(
 
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+    runtime_host.add_listener(_print_host_error_event)
     runtime_host.start_background()
     if runtime_host.mesh.version_warning:
         err_console.print(f"paglets host warning: {runtime_host.mesh.version_warning}")
@@ -227,6 +229,47 @@ def run(
 def _reexec(argv: list[str]) -> None:
     executable = sys.executable
     os.execvp(executable, [executable, "-m", "paglets.cli.app", *argv])
+
+
+_ERROR_EVENT_KINDS = {
+    "event-listener-failed",
+    "message-failed",
+    "paglet-crashed",
+    "relay-client-error",
+    "relay-delivery-failed",
+    "relay-target-offline",
+    "resident-service-failed",
+    "startup-agent-failed",
+    "transfer-failed",
+}
+
+
+def _print_host_error_event(event: ContextEvent) -> None:
+    text = _host_error_event_text(event)
+    if text is not None:
+        err_console.print(text)
+
+
+def _host_error_event_text(event: ContextEvent) -> str | None:
+    error = event.error or str(event.data.get("error") or "")
+    if event.kind not in _ERROR_EVENT_KINDS and not error:
+        return None
+    details: list[str] = []
+    if event.agent_id:
+        details.append(f"agent={event.agent_id}")
+    if event.service_name:
+        details.append(f"service={event.service_name}")
+    if event.class_name:
+        details.append(f"class={event.class_name}")
+    if event.message_id:
+        details.append(f"message={event.message_id}")
+    if event.data.get("destination"):
+        details.append(f"destination={event.data['destination']}")
+    if event.data.get("stage"):
+        details.append(f"stage={event.data['stage']}")
+    suffix = f" ({', '.join(details)})" if details else ""
+    message = f": {error}" if error else ""
+    return f"paglets host {event.kind}{suffix}{message}"
 
 
 def _validate_bind_public_values(values: list[str] | None) -> None:

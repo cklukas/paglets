@@ -60,8 +60,12 @@ def run(self):
     self.state.visits.append(f"run:{self.context.name}")
 ```
 
-`run()` is invoked after creation, arrival, clone arrival, and activation. Do not
-expect call stacks, threads, sockets, or open files to move with the paglet.
+`run()` is invoked after creation, arrival, clone arrival, and activation. The
+host accepts the lifecycle hook first, returns the proxy, and then starts
+`run()` in the child process. Long-running work belongs in `run()` or in threads
+started by `run()`; it should not make `POST /agents` or other lifecycle API
+calls wait for the job to finish. Do not expect call stacks, threads, sockets,
+or open files to move with the paglet.
 
 ## Move Files Naturally
 
@@ -228,9 +232,10 @@ reply = proxy.send(Message("status"), no_delay=True)
 
 ## Protect Shared State
 
-A paglet child handles one lifecycle or message command at a time. `run()` may
-also start background threads. When two code paths read or write the dataclass
-state, protect that short critical section with the paglet lock:
+A paglet child handles one lifecycle or message command at a time. `run()` runs
+as background work after the lifecycle reply has been accepted, and it may also
+start its own background threads. When two code paths read or write the
+dataclass state, protect that short critical section with the paglet lock:
 
 ```python
 with self.locked_state() as state:

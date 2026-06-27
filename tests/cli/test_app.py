@@ -7,7 +7,8 @@ import re
 from typer.testing import CliRunner
 
 from paglets.cli.app import app
-from paglets.cli.host import _validate_bind_public_values
+from paglets.cli.host import _host_error_event_text, _validate_bind_public_values
+from paglets.core.context_events import ContextEvent
 
 runner = CliRunner()
 
@@ -79,3 +80,33 @@ def test_host_bind_public_rejects_option_like_values():
         assert "--bind-public value" in str(exc)
     else:
         raise AssertionError("expected option-like bind-public value to be rejected")
+
+
+def test_host_error_event_text_reports_resident_service_failures():
+    event = ContextEvent(
+        event_id=1,
+        kind="resident-service-failed",
+        host_name="uconsole",
+        host_address="http://127.0.0.1:8765",
+        agent_id="service.server-info",
+        service_name="server-info",
+        data={"error": "could not import state"},
+    )
+
+    text = _host_error_event_text(event)
+
+    assert text is not None
+    assert "resident-service-failed" in text
+    assert "service.server-info" in text
+    assert "could not import state" in text
+
+
+def test_host_error_event_text_ignores_normal_events():
+    event = ContextEvent(
+        event_id=1,
+        kind="message-delivered",
+        host_name="uconsole",
+        host_address="http://127.0.0.1:8765",
+    )
+
+    assert _host_error_event_text(event) is None
