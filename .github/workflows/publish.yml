@@ -80,13 +80,19 @@ jobs:
           assert importlib.metadata.version("paglets")
           assert paglets.__doc__
           PY
-          /tmp/paglets-wheel-smoke/bin/paglets-host --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-benchmark --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-info --help
-          /tmp/paglets-wheel-smoke/bin/paglets-perf-test --help
-          /tmp/paglets-wheel-smoke/bin/paglets-pi-compute --help
-          /tmp/paglets-wheel-smoke/bin/paglets-search --help
-          /tmp/paglets-wheel-smoke/bin/paglets-sysinfo --help
+          /tmp/paglets-wheel-smoke/bin/paglets --help
+          /tmp/paglets-wheel-smoke/bin/paglets host --help
+          /tmp/paglets-wheel-smoke/bin/paglets sys --help
+          /tmp/paglets-wheel-smoke/bin/paglets mesh --help
+          /tmp/paglets-wheel-smoke/bin/paglets jobs --help
+          /tmp/paglets-wheel-smoke/bin/paglets artifacts --help
+          /tmp/paglets-wheel-smoke/bin/paglets search --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples pi --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples perf --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples mesh-benchmark --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples file push --help
+          /tmp/paglets-wheel-smoke/bin/paglets examples file pull --help
 
       - name: Upload distribution artifact
         uses: actions/upload-artifact@v6
