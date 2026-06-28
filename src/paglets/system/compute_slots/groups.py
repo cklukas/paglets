@@ -11,10 +11,12 @@ from typing import Any
 
 from paglets.core.agent import Paglet, PagletContext, PagletState
 from paglets.core.messages import Message
+from paglets.core.runtime_values import ServiceScope
 from paglets.persistence.persistency import DeactivationPolicy
 from paglets.remote.proxy import PagletProxy
 from paglets.remote.references import PagletProxyRef
 from paglets.serialization.codec import dataclass_to_wire
+from paglets.system.user_info import NOTIFY_USER, USER_INFO, UserInfoRequest
 
 from .job import ComputeJobPaglet, ComputeJobState
 
@@ -93,8 +95,6 @@ class ResultCollectorPaglet(Paglet[ResultCollectorState]):
             return self.record_job_failure(dict(message.args))
         if message.kind == "summary":
             return self.summary()
-        if message.kind == "drain":
-            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "return_home":
             self._try_return_home()
             return self.summary()
@@ -120,10 +120,6 @@ class ResultCollectorPaglet(Paglet[ResultCollectorState]):
 
     def record_job_failure(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._record_report(payload, success=False)
-
-    def drain(self, *, wait_timeout: float = 0.5) -> dict[str, Any]:
-        self.wait_state(lambda state: self._is_complete_locked(state), timeout=max(0.0, wait_timeout))
-        return {"done": self._is_complete(), "summary": self.summary()}
 
     def summary(self) -> dict[str, Any]:
         with self.locked_state() as state:
@@ -181,6 +177,7 @@ class ResultCollectorPaglet(Paglet[ResultCollectorState]):
         self.notify_all_state_changed()
         if self._is_complete():
             self._on_group_complete()
+            self._notify_group_complete()
         return {"ok": True, "summary": self.summary()}
 
     def _on_group_complete(self) -> None:
@@ -188,7 +185,27 @@ class ResultCollectorPaglet(Paglet[ResultCollectorState]):
             if not state.return_home_when_complete:
                 state.status = GROUP_STATUS_COMPLETE
                 return
-        self._try_return_home()
+            self._try_return_home()
+
+    def _notify_group_complete(self) -> None:
+        summary = self.summary()
+        with contextlib.suppress(Exception):
+            service = self.require_contract(USER_INFO, operation=NOTIFY_USER, scope=ServiceScope.LOCAL)
+            service.send_oneway(
+                NOTIFY_USER,
+                UserInfoRequest(
+                    severity="info",
+                    title="compute-group.done",
+                    message=(
+                        f"Compute group {summary['group_id']} complete: "
+                        f"{summary['completed_count']} completed, {summary['failed_count']} failed"
+                    ),
+                    source_agent_id=self.agent_id,
+                    job_id=str(summary["group_id"]),
+                    timestamp=time.time(),
+                ),
+                no_delay=True,
+            )
 
     def _try_return_home(self) -> None:
         with self.locked_state() as state:

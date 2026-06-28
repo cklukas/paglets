@@ -5,11 +5,9 @@
 from .agent import (
     PERFORMANCE_CLEANUP,
     PERFORMANCE_COLLECT,
-    PERFORMANCE_DRAIN,
     PerformanceBenchmarkAgent,
     PerformanceBenchmarkState,
     PerformanceCollectRequest,
-    PerformanceDrainRequest,
 )
 from .kernels import HostBenchmarkLock, parse_size
 from .models import (
@@ -27,7 +25,6 @@ from .models import (
 __all__ = [
     "PERFORMANCE_CLEANUP",
     "PERFORMANCE_COLLECT",
-    "PERFORMANCE_DRAIN",
     "BenchmarkMetric",
     "BenchmarkRequest",
     "CpuBenchmarkResult",
@@ -41,6 +38,5 @@ __all__ = [
     "PerformanceBenchmarkAgent",
     "PerformanceBenchmarkState",
     "PerformanceCollectRequest",
-    "PerformanceDrainRequest",
     "parse_size",
 ]

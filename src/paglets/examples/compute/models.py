@@ -13,9 +13,7 @@ CHUDNOVSKY_C = 640320
 CHUDNOVSKY_C3_OVER_24 = CHUDNOVSKY_C**3 // 24
 DECIMAL_CHUNK_DIGITS = 9
 DECIMAL_CHUNK_BASE = 10**DECIMAL_CHUNK_DIGITS
-DEFAULT_STREAM_CHUNK_DIGITS = 8192
-DEFAULT_RESULT_DRAIN_BATCH_SIZE = 128
-POSTPROCESSOR_STREAM_CHUNK_DIGITS = 8192
+DEFAULT_OUTPUT_CHUNK_DIGITS = 8192
 MAX_PARALLEL_WORKER_LAUNCHES = 32
 TARGET_SELECTION_TIMEOUT_SECONDS = 1.0
 
@@ -32,6 +30,23 @@ class PiComputeRequest:
     max_cpu_percent: float = 90.0
     min_memory_available_bytes: int = 0
     min_work_free_bytes: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class PiJobStartRequest:
+    request: dict[str, Any] = field(default_factory=dict)
+    job_id: str = ""
+    output_path: str = ""
+    output_chunk_digits: int = DEFAULT_OUTPUT_CHUNK_DIGITS
+
+
+@dataclass(frozen=True, slots=True)
+class PiJobStartReply:
+    accepted: bool = True
+    job_id: str = ""
+    agent_id: str = ""
+    host_url: str = ""
+    output_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,27 +73,6 @@ class PiBatchResult:
 
 
 @dataclass(frozen=True, slots=True)
-class PiResultDrainRequest:
-    known_batch_ids: list[str] = field(default_factory=list)
-    wait_timeout: float = 0.5
-    max_results: int = DEFAULT_RESULT_DRAIN_BATCH_SIZE
-
-
-@dataclass(frozen=True, slots=True)
-class PiPostProcessStreamRequest:
-    after_digits: int = 0
-    max_digits: int = POSTPROCESSOR_STREAM_CHUNK_DIGITS
-
-
-@dataclass(frozen=True, slots=True)
-class PiPostProcessSummary:
-    request: dict[str, Any]
-    completed_terms: int
-    available_digits: int
-    done: bool
-
-
-@dataclass(frozen=True, slots=True)
 class PiComputeSummary:
     start: int
     digits: int
@@ -94,6 +88,8 @@ class PiComputeSummary:
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
     cleanup_errors: dict[str, str] = field(default_factory=dict)
+    job_id: str = ""
+    output_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)

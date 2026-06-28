@@ -18,16 +18,16 @@ uv run paglets examples mesh-benchmark --repeats 3
 uv run paglets examples mesh-benchmark --payload-size 64K
 uv run paglets examples mesh-benchmark --exclude-self
 uv run paglets examples mesh-benchmark --clock-probes 7 --digits 4
-uv run paglets examples mesh-benchmark --json
+uv run paglets examples mesh-benchmark --json --output mesh-benchmark.json
 ```
 
-The text output is Markdown that is also padded for plain terminal reading. It
-prints one timing unit before the matrix, then reports source hosts as rows and
-destination hosts as columns. Cell A/B contains only A->B samples; cell B/A
-contains only B->A samples. When self-visits are disabled, diagonal cells are
-shown as `-`. With `--repeats`, matrix cells are averages for that exact
-direction; the sum line below the matrix covers all repeated measured movement
-samples.
+The CLI submits the benchmark to the entry host, prints accepted run metadata,
+and exits. The coordinator writes the final JSON summary to `--output` on the
+entry host and sends a `user-info` completion message. Matrix cell A/B contains
+only A->B samples; cell B/A contains only B->A samples. When self-visits are
+disabled, diagonal cells are shown as `-`. With `--repeats`, matrix cells are
+averages for that exact direction; the sum line below the matrix covers all
+repeated measured movement samples.
 
 `--payload-size` adds random printable state to the mobile traveler. This uses
 the same binary paglet movement envelope as any other large paglet state, so the
@@ -64,10 +64,8 @@ traveler protocol internal to the example:
 
 ```python
 from paglets.examples.mesh_benchmark import (
-    MESH_BENCHMARK_DRAIN,
     MESH_BENCHMARK_START,
     MeshBenchmarkCoordinatorAgent,
-    MeshBenchmarkDrainRequest,
     MeshBenchmarkRequest,
     MeshBenchmarkStartRequest,
 )
@@ -78,9 +76,10 @@ coordinator = self.context.create_paglet(MeshBenchmarkCoordinatorAgent)
 client = OperationClient(coordinator)
 reply = client.call(
     MESH_BENCHMARK_START,
-    MeshBenchmarkStartRequest(request=dataclass_to_wire(MeshBenchmarkRequest(repeats=1))),
+    MeshBenchmarkStartRequest(
+        request=dataclass_to_wire(MeshBenchmarkRequest(repeats=1)),
+        output_path="/tmp/mesh-benchmark.json",
+    ),
 )
-
-while not reply.done:
-    reply = client.call(MESH_BENCHMARK_DRAIN, MeshBenchmarkDrainRequest(wait_timeout=0.5))
+output_path = reply.output_path
 ```

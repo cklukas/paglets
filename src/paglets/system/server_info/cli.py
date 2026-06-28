@@ -121,11 +121,12 @@ def _collect(
             )
         )
         summary: dict[str, Any] = {}
+        deadline = time.monotonic() + max(0.0, timeout)
         while True:
-            reply = proxy.send(Message("drain", {"wait_timeout": 0.5}))
-            summary = dict(reply.get("summary") or {})
-            if reply.get("done"):
+            summary = dict(proxy.send(Message("summary")) or {})
+            if not summary.get("pending_hosts") or time.monotonic() >= deadline:
                 return summary
+            time.sleep(0.1)
     finally:
         with contextlib.suppress(Exception):
             proxy.dispose()

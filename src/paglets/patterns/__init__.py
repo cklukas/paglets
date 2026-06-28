@@ -2,7 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 """Ergonomic paglet authoring patterns built on top of the core runtime."""
 
-from .coordination import ChildRoleState, CursorDrainMixin, MeshFanoutMixin, MeshFanoutState
+from .coordination import ChildRoleState, MeshFanoutMixin, MeshFanoutState
 from .file_mobility import (
     FileMobilityMixin,
     FileTransferArrival,
@@ -28,7 +28,6 @@ from .tasks import (
 
 __all__ = [
     "ChildRoleState",
-    "CursorDrainMixin",
     "FileMobilityMixin",
     "FileTransferArrival",
     "FileTransferEndpoint",

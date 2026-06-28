@@ -105,13 +105,6 @@ class MeshFanoutMixin:
             state.pending_hosts = []
         cast(Any, self).notify_all_state_changed()
 
-    def fanout_wait_for(self, ready, *, wait_timeout: float) -> None:
-        timeout = max(0.0, float(wait_timeout))
-        with cast(Any, self).locked_state() as state:
-            if state.deadline > 0:
-                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
-        cast(Any, self).wait_state(ready, timeout=timeout)
-
     def fanout_cleanup_children(self) -> None:
         with cast(Any, self).locked_state() as state:
             children = {host_name: dict(proxy) for host_name, proxy in state.child_proxies.items()}
@@ -122,30 +115,3 @@ class MeshFanoutMixin:
                 with cast(Any, self).locked_state() as state:
                     state.cleanup_errors[host_name] = str(exc)
         cast(Any, self).notify_all_state_changed()
-
-
-class CursorDrainMixin:
-    """Helpers for cursor-based event drains."""
-
-    def cursor_append_events(self, events: list[dict[str, Any]]) -> int:
-        with cast(Any, self).locked_state() as state:
-            last_cursor = int(state.next_cursor) - 1
-            for event in events:
-                item = dict(event)
-                item["cursor"] = int(state.next_cursor)
-                last_cursor = int(state.next_cursor)
-                state.next_cursor += 1
-                state.events.append(item)
-        cast(Any, self).notify_all_state_changed()
-        return last_cursor
-
-    def cursor_drain_events(self, *, after_cursor: int, limit: int) -> tuple[list[dict[str, Any]], int, bool]:
-        limit = max(1, int(limit))
-        with cast(Any, self).locked_state() as state:
-            matching = [event for event in state.events if int(event.get("cursor", 0)) > after_cursor]
-            events = matching[:limit]
-            cursor = after_cursor
-            if events:
-                cursor = max(int(event.get("cursor", 0)) for event in events)
-            more = len(matching) > len(events)
-        return events, cursor, more

@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -50,10 +51,11 @@ def grep(
     entry: Annotated[str | None, typer.Option("--entry", help="Discovered entry host name.")] = None,
     host: Annotated[list[str] | None, typer.Option("--host", help="Restrict search to a host name or URL.")] = None,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for mesh replies.")] = 60.0,
-    poll_interval: Annotated[float, typer.Option("--poll-interval", help="Seconds each drain call may wait.")] = 0.5,
-    json_output: Annotated[bool, typer.Option("--json", help="Print final summary JSON.")] = False,
-    jsonl: Annotated[bool, typer.Option("--jsonl", help="Stream event JSON lines.")] = False,
-    no_stream: Annotated[bool, typer.Option("--no-stream", help="Buffer events and print after completion.")] = False,
+    output: Annotated[Path, typer.Option("--output", help="Output JSONL file on the entry host.")] = Path(
+        "search.jsonl"
+    ),
+    json_output: Annotated[bool, typer.Option("--json", help="Print submission metadata as JSON.")] = False,
+    jsonl: Annotated[bool, typer.Option("--jsonl", help="Write event JSON lines to the output file.")] = False,
     api_key_env: Annotated[
         str | None,
         typer.Option("--api-key-env", help=f"API key environment variable; defaults to {DEFAULT_API_KEY_ENV}."),
@@ -78,7 +80,7 @@ def grep(
         count=count,
         files_with_matches=files_with_matches,
     )
-    _run(request, entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
+    _run(request, entry, host, timeout, output, json_output, jsonl, api_key_env)
 
 
 @app.command()
@@ -105,10 +107,11 @@ def find(
     entry: Annotated[str | None, typer.Option("--entry", help="Discovered entry host name.")] = None,
     host: Annotated[list[str] | None, typer.Option("--host", help="Restrict search to a host name or URL.")] = None,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for mesh replies.")] = 60.0,
-    poll_interval: Annotated[float, typer.Option("--poll-interval", help="Seconds each drain call may wait.")] = 0.5,
-    json_output: Annotated[bool, typer.Option("--json", help="Print final summary JSON.")] = False,
-    jsonl: Annotated[bool, typer.Option("--jsonl", help="Stream event JSON lines.")] = False,
-    no_stream: Annotated[bool, typer.Option("--no-stream", help="Buffer events and print after completion.")] = False,
+    output: Annotated[Path, typer.Option("--output", help="Output JSONL file on the entry host.")] = Path(
+        "search.jsonl"
+    ),
+    json_output: Annotated[bool, typer.Option("--json", help="Print submission metadata as JSON.")] = False,
+    jsonl: Annotated[bool, typer.Option("--jsonl", help="Write event JSON lines to the output file.")] = False,
     api_key_env: Annotated[str | None, typer.Option("--api-key-env", help="API key environment variable.")] = None,
 ) -> None:
     request = _request(
@@ -127,7 +130,7 @@ def find(
         extensions=extension,
         kind=kind,
     )
-    _run(request, entry, host, timeout, poll_interval, json_output, jsonl, no_stream, api_key_env)
+    _run(request, entry, host, timeout, output, json_output, jsonl, api_key_env)
 
 
 def _request(
@@ -184,10 +187,9 @@ def _run(
     entry: str | None,
     host: list[str] | None,
     timeout: float,
-    poll_interval: float,
+    output: Path,
     json_output: bool,
     jsonl: bool,
-    no_stream: bool,
     api_key_env: str | None,
 ) -> None:
     try:
@@ -196,24 +198,19 @@ def _run(
         args = _SearchRunOptions(
             host=list(host or []),
             timeout=timeout,
-            poll_interval=poll_interval,
-            drain_limit=200,
+            output=str(output),
             json=json_output,
             jsonl=jsonl,
-            no_stream=no_stream,
             color="auto",
         )
-        summary, events = search_runtime._run_search(entry_ref, request, args, client=client)
+        reply = search_runtime._submit_search(entry_ref, request, args, client=client)
         if json_output:
-            print_json(summary)
-        elif no_stream:
-            use_color = search_runtime._use_color(args)
-            for event in events:
-                search_runtime._print_event(event, use_color=use_color)
-            search_runtime._print_summary_notes(summary)
-        elif not jsonl:
-            search_runtime._print_summary_notes(summary)
-        raise typer.Exit(1 if search_runtime._has_failures(summary) else 0 if search_runtime._has_hits(summary) else 1)
+            print_json(reply)
+        else:
+            from .console import console
+
+            console.print(f"submitted {reply['job_id']} on {reply['host_url']} output={reply['output_path']}")
+        raise typer.Exit(0)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -226,18 +223,14 @@ class _SearchRunOptions:
         *,
         host: list[str],
         timeout: float,
-        poll_interval: float,
-        drain_limit: int,
+        output: str,
         json: bool,
         jsonl: bool,
-        no_stream: bool,
         color: str,
     ) -> None:
         self.host = host
         self.timeout = timeout
-        self.poll_interval = poll_interval
-        self.drain_limit = drain_limit
+        self.output = output
         self.json = json
         self.jsonl = jsonl
-        self.no_stream = no_stream
         self.color = color

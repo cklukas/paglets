@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sys
+import uuid
+from pathlib import Path
 from typing import Any
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
@@ -20,14 +21,10 @@ from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
 from .agent import (
-    SEARCH_CLEANUP,
-    SEARCH_DRAIN,
     SEARCH_START,
-    SearchDrainRequest,
     SearchStartRequest,
 )
 from .models import (
-    DEFAULT_DRAIN_WAIT_SECONDS,
     DEFAULT_SEARCH_TIMEOUT_SECONDS,
     SEARCH_TYPES,
     HostSearchSummary,
@@ -50,15 +47,12 @@ def main(argv: list[str] | None = None) -> int:
         client = HostClient(timeout=max(1.0, args.timeout + 5.0), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _search_request(args)
-        summary, events = _run_search(entry, request, args, client=client)
+        reply = _submit_search(entry, request, args, client=client)
         if args.json:
-            print(json.dumps(summary, indent=2, sort_keys=True))
-        elif args.no_stream:
-            use_color = _use_color(args)
-            for event in events:
-                _print_event(event, use_color=use_color)
-            _print_summary_notes(summary)
-        return 0 if _has_hits(summary) and not _has_failures(summary) else 1
+            print(json.dumps(reply, indent=2, sort_keys=True))
+        else:
+            print(f"paglets-search: submitted {reply['job_id']} on {reply['host_url']} output={reply['output_path']}")
+        return 0
     except Exception as exc:
         print(f"paglets-search: {exc}", file=sys.stderr)
         return 2
@@ -73,13 +67,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout", type=float, default=DEFAULT_SEARCH_TIMEOUT_SECONDS, help="Seconds to wait for mesh replies"
     )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=DEFAULT_DRAIN_WAIT_SECONDS,
-        help="Seconds each drain call may wait for new events",
-    )
-    parser.add_argument("--drain-limit", type=int, default=200, help=argparse.SUPPRESS)
+    parser.add_argument("--output", default="search.jsonl", help="Output JSONL file on the entry host")
     parser.add_argument("--type-list", action="store_true", help="List supported file type filters and exit")
     parser.add_argument(
         "--api-key-env",
@@ -87,9 +75,8 @@ def _parser() -> argparse.ArgumentParser:
         help=f"Environment variable to read the paglets bearer API key from; defaults to {DEFAULT_API_KEY_ENV}",
     )
     output = parser.add_mutually_exclusive_group()
-    output.add_argument("--json", action="store_true", help="Print final machine-readable summary JSON")
-    output.add_argument("--jsonl", action="store_true", help="Stream machine-readable event JSON lines")
-    parser.add_argument("--no-stream", action="store_true", help="Buffer events and print them after completion")
+    output.add_argument("--json", action="store_true", help="Print submission metadata as JSON")
+    output.add_argument("--jsonl", action="store_true", help="Write events as JSON lines to the output file")
     parser.add_argument("--color", choices=("auto", "always", "never"), default="auto", help="Highlight text matches")
 
     subparsers = parser.add_subparsers(dest="command")
@@ -219,13 +206,13 @@ def _select_entry_server(*, entry_name: str | None, client: HostClient) -> Serve
     )
 
 
-def _run_search(
+def _submit_search(
     entry: ServerRef,
     request: SearchRequest,
     args: argparse.Namespace,
     *,
     client: HostClient,
-) -> tuple[dict[str, Any], list[SearchEvent]]:
+) -> dict[str, Any]:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
@@ -235,42 +222,27 @@ def _run_search(
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
     operations = OperationClient(proxy)
-    events: list[SearchEvent] = []
     try:
-        operations.call(
+        reply = operations.call(
             SEARCH_START,
             SearchStartRequest(
                 request=dataclass_to_wire(request),
                 targets=list(args.host),
                 timeout=max(0.0, float(args.timeout)),
+                job_id=f"search-{uuid.uuid4().hex}",
+                output_path=str(_resolve_output_path(args.output)),
             ),
         )
-        cursor = 0
-        use_color = _use_color(args)
-        while True:
-            reply = operations.call(
-                SEARCH_DRAIN,
-                SearchDrainRequest(
-                    after_cursor=cursor,
-                    wait_timeout=max(0.0, float(args.poll_interval)),
-                    limit=max(1, int(args.drain_limit)),
-                ),
-            )
-            for event_wire in reply.events:
-                event = dataclass_from_wire(SearchEvent, event_wire)
-                events.append(event)
-                cursor = max(cursor, event.cursor)
-                if args.jsonl:
-                    print(json.dumps(dataclass_to_wire(event), sort_keys=True))
-                elif not args.json and not args.no_stream:
-                    _print_event(event, use_color=use_color)
-            if reply.done:
-                return dict(reply.summary), events
+        return dataclass_to_wire(reply)
     finally:
-        with contextlib.suppress(Exception):
-            operations.call(SEARCH_CLEANUP)
-        with contextlib.suppress(Exception):
-            proxy.dispose()
+        pass
+
+
+def _resolve_output_path(output: str | Path) -> Path:
+    path = Path(output).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
 
 
 def _print_event(event: SearchEvent, *, use_color: bool) -> None:

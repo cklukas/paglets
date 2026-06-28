@@ -15,7 +15,7 @@ It is a pure mobile agent, not a resident service. The CLI creates one parent
 `MeshSearchAgent` on the entry host. The parent clones child agents to target
 hosts, children search local paths, and search events travel back to the parent.
 The public parent protocol uses typed operations; `MeshFanoutMixin` handles the
-clone bookkeeping and `CursorDrainMixin` handles event cursors.
+clone bookkeeping while the search agent owns its event output explicitly.
 
 The command combines common `ripgrep` content search and `fd` filename search
 features:
@@ -82,26 +82,25 @@ The search agent uses message delivery rather than polling a remote filesystem:
 2. The parent discovers target hosts and clones child agents to them.
 3. Each child traverses local paths with Python APIs and sends hit batches back
    to the parent as paglet messages.
-4. The parent appends events to state and wakes any `drain` call waiting for new
-   events.
-5. The CLI long-polls `drain`, printing events as soon as they arrive.
+4. The parent appends events to its state, writes JSONL output, and streams
+   user-visible lines through the local user-info service.
+5. The CLI reports the accepted job and output file instead of long-polling a
+   generic cursor endpoint.
 
 Inside a host, incoming paglet messages already invoke `handle_message()`
 through the mailbox. There is no need for a paglet to busy-poll its mailbox.
-The search parent uses `wait_state()` so a `drain` request sleeps efficiently
-until a child message adds more events, all hosts finish, or the timeout elapses.
-This start/drain shape is important because active paglets process one message
-at a time in their child process. A parent message handler should not block
-waiting for child result messages that must be delivered to that same parent.
+The search parent returns from `start` quickly, then child paglets send
+`child_events` and `child_done` messages back to it. A parent message handler
+must not block waiting for child result messages that must be delivered to that
+same parent.
 
 The parent exposes these typed operations:
 
 | Operation | Purpose |
 | --- | --- |
 | `start` | Store the `SearchRequest`, resolve targets, clone children, and return target metadata. |
-| `child_events` | Append streamed hit events from a child and wake waiting drain calls. |
+| `child_events` | Append streamed hit events from a child and write/stream user-visible output. |
 | `child_done` | Record the child host summary or host error and mark the host complete. |
-| `drain` | Long-poll for events after a cursor, returning immediately when new events arrive. |
 | `summary` | Return current aggregate state. |
 | `cleanup` | Dispose child agents after the CLI has finished. |
 
@@ -127,10 +126,7 @@ sequenceDiagram
         Child->>FS: traverse and search local paths
         Child-->>Parent: child_events(SearchEvent batch)
     end
-    loop "until all hosts finish"
-        CLI->>Parent: drain(after_cursor, wait_timeout)
-        Parent-->>CLI: events, cursor, done, summary
-    end
+    Parent-->>CLI: accepted job metadata and output path
     Child-->>Parent: child_done(HostSearchSummary)
     CLI->>Parent: cleanup()
 ```
@@ -147,11 +143,10 @@ flowchart TD
     Clone -- "no" --> NoTargets["Record mesh error"]
     Children --> LocalSearch["Each child searches local paths"]
     LocalSearch --> EventBatch["Send child_events batches to parent"]
-    EventBatch --> Drain["CLI long-polls drain"]
-    Drain --> Print["Print streamed text or JSONL events"]
+    EventBatch --> Output["Parent writes JSONL output and streams user messages"]
     LocalSearch --> Done["Send child_done summary"]
     Done --> Complete{"All hosts complete?"}
-    Complete -- "no" --> Drain
+    Complete -- "no" --> Output
     Complete -- "yes" --> Summary["Return final summary"]
     NoTargets --> Summary
     Summary --> Cleanup["Dispose child agents and parent"]
@@ -191,15 +186,14 @@ clone of `ripgrep` or `fd`. Use `paglets search --help`,
 ### Programmatic Use
 
 Most users should use `paglets search`, but other paglets can create the search
-agent directly and drain streamed events:
+agent directly and read the output path returned by `start`:
 
 ```python
 from paglets.examples.search import (
     SEARCH_CLEANUP,
-    SEARCH_DRAIN,
     SEARCH_START,
+    SEARCH_SUMMARY,
     MeshSearchAgent,
-    SearchDrainRequest,
     SearchRequest,
     SearchStartRequest,
 )
@@ -208,24 +202,17 @@ from paglets.serialization.codec import dataclass_to_wire
 
 proxy = self.context.create_paglet(MeshSearchAgent)
 client = OperationClient(proxy)
-client.call(
+reply = client.call(
     SEARCH_START,
     SearchStartRequest(
         request=dataclass_to_wire(SearchRequest(mode="grep", pattern="TODO", paths=["."])),
         timeout=60.0,
+        output_path="/tmp/paglets-search.jsonl",
     )
 )
 
-cursor = 0
-while True:
-    reply = client.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=cursor, wait_timeout=0.5, limit=100))
-    for event in reply.events:
-        cursor = max(cursor, int(event["cursor"]))
-        # Render or forward the event here.
-    if reply.done:
-        break
-
-summary = reply.summary
+output_path = reply.output_path
+summary = client.call(SEARCH_SUMMARY).results
 client.call(SEARCH_CLEANUP)
 proxy.dispose()
 ```

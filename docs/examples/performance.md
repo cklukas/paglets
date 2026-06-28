@@ -12,11 +12,13 @@ from paglets.examples.performance import PerformanceBenchmarkAgent
 
 The CLI creates one parent benchmark agent on the entry host. The parent clones
 children to online same-version mesh hosts. Each child runs benchmarks locally
-and sends one result back to the parent. The CLI polls the parent with `drain`
-until all hosts have replied. Parent result bookkeeping uses the paglet state
-lock, but the actual benchmark work and remote calls happen outside that lock.
-The public parent protocol uses typed operations, while `MeshFanoutMixin`
-handles the repeated parent/child clone bookkeeping.
+and sends one result back to the parent. The CLI submits the job, prints accepted
+job metadata, and exits. The parent writes the final JSON summary to the
+entry-host output file and sends a `user-info` completion message. Parent result
+bookkeeping uses the paglet state lock, but the actual benchmark work and remote
+calls happen outside that lock. The public parent protocol uses typed
+operations, while `MeshFanoutMixin` handles the repeated parent/child clone
+bookkeeping.
 
 ### Benchmarks
 
@@ -59,7 +61,7 @@ uv run paglets examples perf
 Useful variations:
 
 ```bash
-uv run paglets examples perf --json
+uv run paglets examples perf --json --output perf-summary.json
 uv run paglets examples perf --duration 2 --disk-size 256M
 uv run paglets examples perf --path /data --path /scratch
 uv run paglets examples perf --no-disk
@@ -81,15 +83,8 @@ must listen on multiple specific interfaces.
 Then run the benchmark from the repository checkout:
 
 ```text
-klukas@mac-studio paglets % uv run paglets examples perf
-host                int/s    float/s        sha  multi-int/s   mem copy    disk wr    disk rd err
-alpha               17.2M      19.8M     2.1G/s       140.2M    30.6G/s     3.7G/s    16.0G/s   0
-beta                17.2M      20.0M     2.2G/s       147.6M    31.0G/s     3.4G/s    15.7G/s   0
-
-disks:
-host           path                                  size      write       read   metadata
-alpha          /Users/klukas/.paglets/benchmark    128.0M     3.7G/s    16.0G/s      9130/s
-beta           /Users/klukas/.paglets/benchmark    128.0M     3.4G/s    15.7G/s      9301/s
+klukas@mac-studio paglets % uv run paglets examples perf --output perf-summary.json
+paglets-perf-test: submitted perf-... on http://192.168.86.10:8765 output=/.../perf-summary.json
 ```
 
 Important options:
@@ -104,6 +99,7 @@ Important options:
 | `--no-memory` | Skip memory tests. |
 | `--no-disk` | Skip disk I/O tests. |
 | `--lock-timeout` | Seconds to wait for another local benchmark run to finish. |
+| `--output` | JSON summary file on the entry host. |
 | `--verbose` | Print skipped disk targets and cleanup diagnostics. |
 | `--debug` | Same diagnostic output as `--verbose`. |
 
@@ -121,9 +117,8 @@ on different hosts:
 6. A host-local benchmark lock prevents two benchmark children on the same
    server from running expensive tests at the same time.
 7. Each child reports `HostBenchmarkResult` or an error to the parent.
-8. The parent wakes any `drain` call waiting for completion.
-9. The CLI returns a summary with `results`, `errors`, and non-fatal
-   `cleanup_errors`.
+8. The parent writes a summary with `results`, `errors`, and non-fatal
+   `cleanup_errors` to the output file.
 
 The lock has two layers: a process-local `threading.Lock` for threads inside one
 benchmark child, and a best-effort OS file lock in the system temp directory.
@@ -147,15 +142,17 @@ from paglets.serialization.codec import dataclass_to_wire
 
 proxy = self.context.create_paglet(PerformanceBenchmarkAgent)
 client = OperationClient(proxy)
-summary = client.call(
+reply = client.call(
     PERFORMANCE_COLLECT,
     PerformanceCollectRequest(
         request=dataclass_to_wire(
             BenchmarkRequest(duration_seconds=0.5, disk_size_bytes=64 * 1024 * 1024)
         ),
         timeout=120.0,
+        output_path="/tmp/perf-summary.json",
     )
 )
+output_path = reply.output_path
 ```
 
 Most applications should use the `paglets examples perf` CLI unless they need to

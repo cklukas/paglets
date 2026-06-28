@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sys
-import time
+from pathlib import Path
 from typing import Any
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
@@ -14,12 +13,10 @@ from paglets.patterns.operations import OperationClient
 from paglets.remote.admin import PagletsAdminClient, ServerRef, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
-from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_to_wire
 
 from .agent import (
-    MESH_BENCHMARK_DRAIN,
     MESH_BENCHMARK_START,
-    MeshBenchmarkDrainRequest,
     MeshBenchmarkStartRequest,
 )
 from .analysis import normalize_request, parse_size
@@ -43,20 +40,15 @@ def main(argv: list[str] | None = None) -> int:
         client = HostClient(timeout=max(1.0, args.timeout + 10.0), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _benchmark_request(args)
-        result = _run(entry, request, client=client)
-        summary_payload = dict(result.get("summary") or {})
+        result = _submit(entry, request, output_path=_resolve_output_path(args.output), client=client)
         if args.json:
-            print(json.dumps(summary_payload, indent=2, sort_keys=True))
-        elif _is_summary_payload(summary_payload):
-            summary = dataclass_from_wire(MeshBenchmarkSummary, summary_payload)
-            print(_format_markdown(summary, digits=request.digits, include_self=request.include_self))
-        elif summary_payload.get("errors"):
-            _print_errors(dict(summary_payload["errors"]))
+            print(json.dumps(result, indent=2, sort_keys=True))
         else:
-            print("paglets-mesh-benchmark: no summary returned", file=sys.stderr)
-        errors = dict(result.get("errors") or {})
-        errors.update(dict(summary_payload.get("errors") or {}))
-        return 1 if errors else 0
+            print(
+                f"paglets-mesh-benchmark: submitted {result['run_id']} "
+                f"on {result['host_url']} output={result['output_path']}"
+            )
+        return 0
     except Exception as exc:
         print(f"paglets-mesh-benchmark: {exc}", file=sys.stderr)
         return 2
@@ -65,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Measure directed mobile-agent travel times across a paglets mesh")
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Seconds to wait for completion")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Benchmark timeout seconds")
+    parser.add_argument("--output", default="mesh-benchmark.json", help="Output JSON file on the entry host")
     parser.add_argument("--repeats", type=int, default=1, help="Repeat the directed mesh route this many times")
     parser.add_argument("--payload-size", default="0", help="Random ASCII payload size, e.g. 64K, 128K, 1M")
     parser.add_argument("--exclude-self", action="store_true", help="Skip self-pair movements such as A->A")
@@ -78,7 +71,7 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_CLOCK_PROBES,
         help="Clock request/reply probes per arrival host",
     )
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--json", action="store_true", help="Print submission metadata as JSON")
     parser.add_argument(
         "--api-key-env",
         default=None,
@@ -104,7 +97,9 @@ def _select_entry_server(*, entry_name: str | None, client: HostClient) -> Serve
     return select_reachable_entry_server(entry_name=entry_name, client=client)
 
 
-def _run(entry: ServerRef, request: MeshBenchmarkRequest, *, client: HostClient) -> dict[str, Any]:
+def _submit(
+    entry: ServerRef, request: MeshBenchmarkRequest, *, output_path: Path, client: HostClient
+) -> dict[str, Any]:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
@@ -114,18 +109,18 @@ def _run(entry: ServerRef, request: MeshBenchmarkRequest, *, client: HostClient)
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
     operations = OperationClient(proxy)
-    try:
-        operations.call(MESH_BENCHMARK_START, MeshBenchmarkStartRequest(dataclass_to_wire(request)))
-        latest: dict[str, Any] = {}
-        while True:
-            reply = operations.call(MESH_BENCHMARK_DRAIN, MeshBenchmarkDrainRequest(wait_timeout=0.0))
-            latest = dataclass_to_wire(reply)
-            if reply.done:
-                return latest
-            time.sleep(0.25)
-    finally:
-        with contextlib.suppress(Exception):
-            proxy.dispose()
+    reply = operations.call(
+        MESH_BENCHMARK_START,
+        MeshBenchmarkStartRequest(request=dataclass_to_wire(request), output_path=str(output_path)),
+    )
+    return dataclass_to_wire(reply)
+
+
+def _resolve_output_path(output: str | Path) -> Path:
+    path = Path(output).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
 
 
 def _format_markdown(summary: MeshBenchmarkSummary, *, digits: int, include_self: bool) -> str:

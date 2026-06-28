@@ -324,10 +324,9 @@ Shared search options:
 | `--entry NAME` | Entry host name. |
 | `--host NAME_OR_URL` | Restrict search to a mesh host name or URL; repeatable. |
 | `--timeout SECONDS` | Seconds to wait for mesh replies. |
-| `--poll-interval SECONDS` | Seconds each drain call may wait for new events. |
-| `--json` | Print final summary JSON. |
-| `--jsonl` | Stream event JSON lines. |
-| `--no-stream` | Buffer events and print them after completion. |
+| `--output PATH` | Output JSONL file on the entry host. |
+| `--json` | Print submission metadata as JSON. |
+| `--jsonl` | Write event JSON lines to the output file. |
 | `--api-key-env NAME` | API key environment variable. |
 | `-i`, `--ignore-case` | Case-insensitive search. |
 | `-S`, `--smart-case` | Case-insensitive unless the pattern has uppercase letters. |
@@ -380,14 +379,13 @@ Commands:
 | `--batch-size COUNT` | Chudnovsky terms per worker batch. |
 | `--max-in-flight COUNT` | Global in-flight batch cap; `0` uses free load slots. |
 | `--max-workers-per-host COUNT` | Per-host worker cap; `0` uses free load slots. |
-| `--timeout SECONDS` | Whole-job timeout; `0` disables it. |
-| `--stream-chunk-size COUNT` | Maximum newly available decimal digits per text-mode poll. |
-| `--request-timeout SECONDS` | HTTP request timeout for coordinator calls. |
+| `--timeout SECONDS` | Reserved whole-job timeout value; `0` disables it. |
 | `--max-load-per-cpu VALUE` | Maximum one-minute load divided by logical CPUs. |
 | `--max-cpu-percent VALUE` | Maximum sampled CPU percent. |
 | `--mem SIZE` | Minimum available RAM, such as `512M`. |
 | `--disk SIZE` | Minimum free work storage, such as `1G`. |
-| `--json` | Print JSON. |
+| `--output PATH` | Output file on the entry host; relative paths use the CLI start directory. |
+| `--json` | Print submission metadata as JSON. |
 | `--api-key-env NAME` | API key environment variable. |
 
 `analysis` options:

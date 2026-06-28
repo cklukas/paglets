@@ -8,12 +8,15 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from paglets.core.agent import Paglet, PagletState, state_locked
 from paglets.core.messages import Message
+from paglets.core.runtime_values import ServiceScope
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
-from paglets.services.contracts import ServiceOperation
+from paglets.services.contracts import EmptyPayload, ServiceOperation
+from paglets.system.user_info import NOTIFY_USER, USER_INFO, UserInfoRequest
 
 from .analysis import (
     _ordered_hosts,
@@ -42,6 +45,7 @@ from .models import (
 class MeshBenchmarkCoordinatorState(PagletState):
     request: dict[str, Any] = field(default_factory=dict)
     run_id: str = ""
+    output_path: str = ""
     started_at: float = 0.0
     deadline: float = 0.0
     done: bool = False
@@ -53,23 +57,23 @@ class MeshBenchmarkCoordinatorState(PagletState):
 @dataclass(frozen=True, slots=True)
 class MeshBenchmarkStartRequest:
     request: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class MeshBenchmarkDrainRequest:
-    wait_timeout: float = 0.5
+    output_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class MeshBenchmarkRunReply:
+    accepted: bool = True
     done: bool = False
     run_id: str = ""
+    agent_id: str = ""
+    host_url: str = ""
+    output_path: str = ""
     summary: dict[str, Any] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)
 
 
 MESH_BENCHMARK_START = ServiceOperation("start", MeshBenchmarkStartRequest, MeshBenchmarkRunReply)
-MESH_BENCHMARK_DRAIN = ServiceOperation("drain", MeshBenchmarkDrainRequest, MeshBenchmarkRunReply)
+MESH_BENCHMARK_SUMMARY = ServiceOperation("summary", EmptyPayload, MeshBenchmarkRunReply)
 
 
 @dataclass
@@ -104,8 +108,6 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
     def handle_message(self, message: Message):
         if message.kind == "start":
             return self.start(message.args)
-        if message.kind == "drain":
-            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "clock_probe":
             received_at = time.time()
             return {"received_at": received_at, "sent_at": time.time()}
@@ -120,6 +122,11 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
     def start(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = dataclass_from_wire(MeshBenchmarkRequest, dict(payload.get("request") or {}))
         request = normalize_request(request)
+        output_path = Path(str(payload.get("output_path") or "")).expanduser()
+        if not output_path.is_absolute():
+            raise ValueError("mesh benchmark output_path must be absolute")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("", encoding="utf-8")
         hosts = _ordered_hosts(
             self.context.available_hosts(online_only=True, include_self=True),
             entry_name=self.context.name,
@@ -143,6 +150,7 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
         with self.locked_state() as coordinator_state:
             coordinator_state.request = dataclass_to_wire(request)
             coordinator_state.run_id = run_id
+            coordinator_state.output_path = str(output_path)
             coordinator_state.started_at = started_at
             coordinator_state.deadline = time.monotonic() + max(0.0, request.timeout_seconds)
             coordinator_state.done = False
@@ -155,15 +163,13 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
         traveler.send_oneway(Message("continue"))
         return self.summary()
 
-    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
-        self._expire_if_needed()
-        return self.summary()
-
     @state_locked
     def record_summary(self, summary: dict[str, Any]) -> dict[str, Any]:
         self.state.summary = summary
         self.state.done = True
         self.notify_all_state_changed()
+        self._write_summary()
+        self._user_notify("info", "mesh-benchmark.done", f"Mesh benchmark complete; output: {self.state.output_path}")
         return {"ok": True}
 
     @state_locked
@@ -181,6 +187,9 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
         return {
             "done": self.state.done,
             "run_id": self.state.run_id,
+            "agent_id": self.agent_id,
+            "host_url": self.context.address,
+            "output_path": self.state.output_path,
             "summary": summary,
             "errors": dict(self.state.errors),
         }
@@ -204,6 +213,30 @@ class MeshBenchmarkCoordinatorAgent(Paglet[MeshBenchmarkCoordinatorState]):
                 proxy.dispose()
         except Exception:
             pass
+
+    def _write_summary(self) -> None:
+        if not self.state.output_path:
+            return
+        with Path(self.state.output_path).open("w", encoding="utf-8") as handle:
+            json.dump(self.summary(), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+
+    def _user_notify(self, severity: str, title: str, message: str) -> None:
+        with contextlib.suppress(Exception):
+            service = self.require_contract(USER_INFO, operation=NOTIFY_USER, scope=ServiceScope.LOCAL)
+            service.send_oneway(
+                NOTIFY_USER,
+                UserInfoRequest(
+                    severity=severity,
+                    title=title,
+                    message=message,
+                    source_agent_id=self.agent_id,
+                    job_id=self.state.run_id,
+                    timestamp=time.time(),
+                ),
+                no_delay=True,
+            )
 
 
 class MeshBenchmarkTravelerAgent(Paglet[MeshBenchmarkTravelerState]):

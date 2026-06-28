@@ -7,8 +7,8 @@ work continues elsewhere:
 2. The collector registers the expected job keys.
 3. Compute job paglets run on eligible hosts through `compute-slots`.
 4. Each job sends a success or failure report to the collector.
-5. The collector exposes `summary` and `drain` messages, and can optionally
-   return home after all expected jobs are finished.
+5. The collector exposes nonblocking `summary` and can optionally return home
+   after all expected jobs are finished.
 
 This is still a lightweight compute mesh pattern, not a full batch scheduler.
 Queues and leases remain local to `compute-slots`, resource estimates are
@@ -70,8 +70,6 @@ Collectors handle:
 
 - `summary`: returns counts, pending jobs, results, failures, duplicate reports,
   collector location, and return-home state.
-- `drain`: waits until all expected jobs have a result or failure, then returns
-  the same summary.
 - `register_jobs`: adds or updates expected job metadata.
 - `job_result` and `job_failure`: used by collecting jobs.
 - `return_home`: retries return-home behavior.

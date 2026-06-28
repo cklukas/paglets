@@ -3,69 +3,64 @@
 `paglets examples pi` demonstrates using `mesh-info` as lightweight placement
 input for a distributed compute job. It computes decimal digits of Pi by
 distributing Chudnovsky term batches and combining the integer partial sums on
-the coordinator.
+the entry-host job paglet.
 
 ```bash
 uv run paglets examples pi --digits 16 --batch-size 1
-uv run paglets examples pi --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --json
+uv run paglets examples pi --digits 32 --max-load-per-cpu 0.75 --max-workers-per-host 2 --output runs/pi.txt --json
 ```
 
-The coordinator stays on the dynamically discovered entry host, partitions the
-requested digit range into the required Chudnovsky terms, asks local
-`mesh-info` for eligible targets across the mesh, treats approximate free load
-slots as additional launch capacity, creates short-lived
-`PiBatchWorkerAgent` instances remotely, and receives `batch_result` messages.
-Worker creation requests are issued in parallel so process-spawn overhead does
-not keep free slots empty. The free-slot estimate is based on `cpu_count *
---max-load-per-cpu - load_1m`; existing in-flight workers are added back before
-new launches are capped by `--max-workers-per-host`. `--max-in-flight` caps the
-whole job. A dedicated `PiPostProcessAgent` runs on the entry host for each
-active job; it incrementally merges finalized term fragments and performs
-`drain`/`format` work so the coordinator can focus on scheduling and state
-tracking.
+The CLI creates one `PiJobPaglet` on the selected entry host, sends one
+`pi.start` message, prints a small acknowledgement, and exits. The job paglet
+then partitions the requested digit range into the required Chudnovsky terms,
+asks local `mesh-info` for eligible targets across the mesh, creates short-lived
+`PiBatchWorkerAgent` instances remotely, and receives `pi.batch_result` or
+`pi.batch_failed` messages. Worker creation requests are issued in parallel so
+process-spawn overhead does not keep free slots empty. The free-slot estimate is
+based on `cpu_count * --max-load-per-cpu - load_1m`; existing in-flight workers
+are added back before new launches are capped by `--max-workers-per-host`.
+`--max-in-flight` caps the whole job.
 
-In text mode the CLI starts the coordinator asynchronously, long-polls with
-`drain_stream`, and appends each returned decimal fragment to the terminal.
-`drain_stream` first refills worker slots, then returns compact progress counters
-and new text only; it does not return the full raw term history, keeping messages
-small while preserving `3.1415...` output. Increase
-`--stream-chunk-size` when larger terminal bursts are useful. Use `--json` for a
-final summary object instead of live output. The default job timeout is disabled
-so long calculations can run to completion; add `--timeout SECONDS` when a run
-should be bounded, and increase `--request-timeout` if an exceptionally large
-coordinator response needs longer than the default HTTP request window. Workers
-re-check local load before computing; if a host has become busy, the worker
-reports `skipped`, the coordinator requeues that batch, and the worker disposes
-itself. If all hosts are above the load/CPU thresholds and no batch is running,
-the coordinator sends one fallback worker anyway so a long job still makes
-minimum progress.
+Digits are produced on the entry host, not by the CLI. The job paglet emits raw
+digit chunks through the local `user-info` service and appends the exact same
+chunks to the output file. The default output is `pi.txt` in the directory where
+the CLI was started; use `--output PATH` to choose another file. Relative output
+paths are resolved before submission. If `--start 0`, the file and host-side
+console output begin with `3.` once; otherwise only the requested decimal range
+is written. Use `--json` to print submission metadata, including `job_id`,
+`host_url`, and `output_path`.
+
+Failures are explicit. A failed worker batch marks the job failed, sends a
+`pi.failed` user-info notification, and leaves the partial output file in place
+for inspection. Failed batches are not automatically retried or requeued.
 
 The worker result payloads encode large Chudnovsky partial integers in
-hexadecimal internally. The coordinator forwards only finalized `ok` term fragments
-to the post-processor for incremental merge; the post-processor formats digits
-on demand. This keeps scheduling messages compact and avoids expensive terminal-side
-recombination while still producing normal `3.1415...` output and avoiding Python
-integer string conversion limits for very large jobs.
+hexadecimal internally. The job paglet incrementally merges only contiguous
+`ok` term fragments and formats newly available digits. This keeps scheduling
+messages compact, avoids client-side recombination, and avoids Python integer
+string conversion limits for very large jobs.
 
 Programmatic use:
 
 ```python
 from paglets.examples.compute import (
-    PI_START_ASYNC,
-    PiComputeCoordinatorAgent,
     PiComputeRequest,
-    PiStartRequest,
+    PiJobPaglet,
+    PiJobStartRequest,
 )
-from paglets.patterns.operations import OperationClient
+from paglets.core.messages import Message
 from paglets.serialization.codec import dataclass_to_wire
 
-coordinator = self.context.create_paglet(PiComputeCoordinatorAgent)
-client = OperationClient(coordinator)
-reply = client.call(
-    PI_START_ASYNC,
-    PiStartRequest(
-        request=dataclass_to_wire(PiComputeRequest(start=0, digits=16, batch_size=1))
+job = self.context.create_paglet(PiJobPaglet)
+reply = job.send(
+    Message(
+        "pi.start",
+        dataclass_to_wire(
+            PiJobStartRequest(
+                request=dataclass_to_wire(PiComputeRequest(start=0, digits=16, batch_size=1)),
+                output_path="/tmp/pi.txt",
+            )
+        ),
     )
 )
-summary = reply.summary
 ```

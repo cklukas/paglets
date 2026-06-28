@@ -53,7 +53,7 @@ uv run paglets jobs groups
 uv run paglets examples analysis --tasks 3 --target-runtime 3
 uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
 uv run paglets search grep TODO .
-uv run paglets examples pi --digits 32
+uv run paglets examples pi --digits 32 --output pi.txt
 ```
 
 The built-in `compute-slots` service admits coarse jobs by explicit
@@ -83,10 +83,9 @@ one-file push and pull operations between an entry host and one remote host.
 Simple request/result paglets can use `TaskPaglet` and `TaskClient` from
 `paglets.patterns.tasks`. Paglets with several named operations can use
 `OperationPaglet` and `OperationClient`; clone fan-out examples can reuse
-`MeshFanoutMixin` and `CursorDrainMixin` for child bookkeeping and streaming
-drains. File-transfer paglets can subclass `SingleFileTransferPaglet` for the
-default workflow or use `FileMobilityMixin` to keep custom file-transfer code
-readable.
+`MeshFanoutMixin` for child bookkeeping. File-transfer paglets can subclass
+`SingleFileTransferPaglet` for the default workflow or use `FileMobilityMixin`
+to keep custom file-transfer code readable.
 
 Run a source-tree demo:
 

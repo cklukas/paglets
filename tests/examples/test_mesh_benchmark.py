@@ -340,6 +340,8 @@ def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path
                 "--timeout",
                 "20",
                 "--json",
+                "--output",
+                str(tmp_path / "mesh-benchmark.json"),
                 "--repeats",
                 "1",
                 "--payload-size",
@@ -351,6 +353,10 @@ def test_paglets_mesh_benchmark_json_collects_two_host_directional_mesh(tmp_path
 
         assert result == 0
         payload = json.loads(capsys.readouterr().out)
+        assert payload["accepted"] is True
+        assert payload["output_path"] == str(tmp_path / "mesh-benchmark.json")
+        _wait_for(lambda: (tmp_path / "mesh-benchmark.json").read_text(encoding="utf-8").strip())
+        payload = json.loads((tmp_path / "mesh-benchmark.json").read_text(encoding="utf-8"))["summary"]
         assert payload["movement_count"] == 2 * 2
         assert {host["name"] for host in payload["hosts"]} == {"alpha", "beta"}
         assert set(payload["matrix_seconds"]) == {"alpha", "beta"}
@@ -414,6 +420,8 @@ def test_paglets_mesh_benchmark_uses_relay_without_intermediate_arrival(tmp_path
                 "--timeout",
                 "30",
                 "--json",
+                "--output",
+                str(tmp_path / "mesh-benchmark-relay.json"),
                 "--repeats",
                 "1",
                 "--payload-size",
@@ -426,6 +434,10 @@ def test_paglets_mesh_benchmark_uses_relay_without_intermediate_arrival(tmp_path
 
         assert result == 0
         payload = json.loads(capsys.readouterr().out)
+        assert payload["accepted"] is True
+        assert payload["output_path"] == str(tmp_path / "mesh-benchmark-relay.json")
+        _wait_for(lambda: (tmp_path / "mesh-benchmark-relay.json").read_text(encoding="utf-8").strip())
+        payload = json.loads((tmp_path / "mesh-benchmark-relay.json").read_text(encoding="utf-8"))["summary"]
         records = payload["records"]
         assert payload["errors"] == {}
         assert payload["movement_count"] == 3 * (3 - 1)

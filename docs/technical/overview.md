@@ -21,8 +21,8 @@ the behavior you need; the root `paglets` package and topic package
 
 `paglets.patterns`
 : Additive typed helpers for common application paglets: request/result task
-  routing, multi-operation routing, mesh fan-out coordination, cursor drains,
-  non-fatal user-info notifications, and single-file mobility tasks.
+  routing, multi-operation routing, mesh fan-out coordination, non-fatal
+  user-info notifications, and single-file mobility tasks.
 
 `paglets.remote`
 : Remote communication: HTTP client, proxies, transfer tickets, transport

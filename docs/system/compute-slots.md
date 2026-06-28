@@ -104,8 +104,9 @@ from paglets.system.compute_slots import (
 `submit_compute_job_group(...)` creates a collector, registers expected job
 keys before workers start, creates the compute jobs, and records creation
 failures back into the collector. `ResultCollectorPaglet` accepts `job_result`
-and `job_failure` reports, exposes `summary` and `drain`, tracks duplicates,
-and can optionally return to the submitter/home host when the group completes.
+and `job_failure` reports, exposes nonblocking `summary`, tracks duplicates,
+sends a `user-info` completion message, and can optionally return to the
+submitter/home host when the group completes.
 
 The group layer is intentionally small. It tracks job completion and result
 reports; it does not add a durable global queue. Use

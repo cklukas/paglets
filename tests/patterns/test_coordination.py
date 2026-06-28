@@ -6,16 +6,14 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
-from paglets.patterns.coordination import CursorDrainMixin, MeshFanoutMixin, MeshFanoutState
+from paglets.patterns.coordination import MeshFanoutMixin, MeshFanoutState
 
 
 @dataclass
 class HelperState(MeshFanoutState):
-    events: list[dict[str, Any]] = field(default_factory=list)
-    next_cursor: int = 1
+    pass
 
 
 class _Client:
@@ -30,7 +28,7 @@ class _Context:
     host = _Host()
 
 
-class Helper(MeshFanoutMixin, CursorDrainMixin):
+class Helper(MeshFanoutMixin):
     def __init__(self):
         self.state = HelperState()
         self.context = _Context()
@@ -73,15 +71,3 @@ def test_mesh_fanout_cleanup_records_errors():
     helper.fanout_cleanup_children()
 
     assert "alpha" in helper.state.cleanup_errors
-
-
-def test_cursor_drain_limits_and_reports_more():
-    helper = Helper()
-    cursor = helper.cursor_append_events([{"value": "a"}, {"value": "b"}, {"value": "c"}])
-
-    events, last_cursor, more = helper.cursor_drain_events(after_cursor=0, limit=2)
-
-    assert cursor == 3
-    assert [event["value"] for event in events] == ["a", "b"]
-    assert last_cursor == 2
-    assert more is True

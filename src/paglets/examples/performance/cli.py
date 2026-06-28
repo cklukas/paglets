@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sys
+import uuid
+from pathlib import Path
 from typing import Any
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
@@ -20,11 +21,8 @@ from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 
 from .agent import (
-    PERFORMANCE_CLEANUP,
     PERFORMANCE_COLLECT,
-    PERFORMANCE_DRAIN,
     PerformanceCollectRequest,
-    PerformanceDrainRequest,
 )
 from .kernels import parse_size
 from .models import (
@@ -46,12 +44,21 @@ def main(argv: list[str] | None = None) -> int:
         client = HostClient(timeout=max(1.0, args.timeout + 10.0), api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = _benchmark_request(args)
-        summary = _collect(entry, request, timeout=args.timeout, client=client)
+        summary = _submit(
+            entry,
+            request,
+            timeout=args.timeout,
+            output_path=_resolve_output_path(args.output),
+            client=client,
+        )
         if args.json:
             print(json.dumps(summary, indent=2, sort_keys=True))
         else:
-            _print_text(summary, verbose=bool(args.verbose or args.debug))
-        return 1 if _has_failures(summary) else 0
+            print(
+                f"paglets-perf-test: submitted {summary['job_id']} "
+                f"on {summary['host_url']} output={summary['output_path']}"
+            )
+        return 0
     except Exception as exc:
         print(f"paglets-perf-test: {exc}", file=sys.stderr)
         return 2
@@ -61,7 +68,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run performance benchmarks across a paglets mesh")
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--timeout", type=float, default=120.0, help="Seconds to wait for mesh benchmark replies")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--output", default="perf-summary.json", help="Output JSON file on the entry host")
+    parser.add_argument("--json", action="store_true", help="Print submission metadata as JSON")
     parser.add_argument(
         "--api-key-env",
         default=None,
@@ -109,7 +117,9 @@ def _select_entry_server(*, entry_name: str | None, client: HostClient) -> Serve
     )
 
 
-def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, client: HostClient) -> dict[str, Any]:
+def _submit(
+    entry: ServerRef, request: BenchmarkRequest, *, timeout: float, output_path: Path, client: HostClient
+) -> dict[str, Any]:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
@@ -119,22 +129,23 @@ def _collect(entry: ServerRef, request: BenchmarkRequest, *, timeout: float, cli
     )
     proxy = PagletProxy.from_wire(proxy_wire, client)
     operations = OperationClient(proxy)
-    try:
-        operations.call(
-            PERFORMANCE_COLLECT,
-            PerformanceCollectRequest(request=dataclass_to_wire(request), timeout=timeout),
-        )
-        summary: dict[str, Any] = {}
-        while True:
-            reply = operations.call(PERFORMANCE_DRAIN, PerformanceDrainRequest(wait_timeout=0.5))
-            summary = dict(reply.summary)
-            if reply.done:
-                return summary
-    finally:
-        with contextlib.suppress(Exception):
-            operations.call(PERFORMANCE_CLEANUP)
-        with contextlib.suppress(Exception):
-            proxy.dispose()
+    reply = operations.call(
+        PERFORMANCE_COLLECT,
+        PerformanceCollectRequest(
+            request=dataclass_to_wire(request),
+            timeout=timeout,
+            job_id=f"perf-{uuid.uuid4().hex}",
+            output_path=str(output_path),
+        ),
+    )
+    return dataclass_to_wire(reply)
+
+
+def _resolve_output_path(output: str | Path) -> Path:
+    path = Path(output).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
 
 
 def _print_text(summary: dict[str, Any], *, verbose: bool = False) -> None:

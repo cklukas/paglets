@@ -2,29 +2,32 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import contextlib
 import threading
+import time
+import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from paglets.core.agent import state_locked
-from paglets.patterns.coordination import CursorDrainMixin, MeshFanoutMixin, MeshFanoutState
-from paglets.patterns.operations import OperationClient, OperationPaglet
+from paglets.core.runtime_values import ServiceScope
+from paglets.patterns.coordination import MeshFanoutMixin, MeshFanoutState
+from paglets.patterns.operations import OperationPaglet
 from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
 from paglets.services.contracts import EmptyPayload, ServiceOperation
+from paglets.system.user_info import NOTIFY_USER, STREAM_USER, USER_INFO, UserInfoRequest, UserInfoStreamRequest
 
 from .local_search import run_local_search
-from .models import (
-    DEFAULT_DRAIN_WAIT_SECONDS,
-    DEFAULT_SEARCH_TIMEOUT_SECONDS,
-    SearchEvent,
-    SearchRequest,
-)
+from .models import DEFAULT_SEARCH_TIMEOUT_SECONDS, SearchEvent, SearchRequest
 
 
 @dataclass
 class MeshSearchState(MeshFanoutState):
+    job_id: str = ""
     request: dict[str, Any] = field(default_factory=dict)
     timeout: float = DEFAULT_SEARCH_TIMEOUT_SECONDS
+    output_path: str = ""
     requested_targets: list[str] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     next_cursor: int = 1
@@ -37,6 +40,8 @@ class SearchStartRequest:
     request: dict[str, Any] = field(default_factory=dict)
     timeout: float = DEFAULT_SEARCH_TIMEOUT_SECONDS
     targets: list[str] = field(default_factory=list)
+    job_id: str = ""
+    output_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,22 +56,12 @@ class SearchSummaryReply:
 
 @dataclass(frozen=True, slots=True)
 class SearchStartReply:
+    accepted: bool = True
+    job_id: str = ""
+    agent_id: str = ""
+    host_url: str = ""
+    output_path: str = ""
     targets: list[dict[str, str]] = field(default_factory=list)
-    summary: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class SearchDrainRequest:
-    after_cursor: int = 0
-    wait_timeout: float = DEFAULT_DRAIN_WAIT_SECONDS
-    limit: int = 200
-
-
-@dataclass(frozen=True, slots=True)
-class SearchDrainReply:
-    events: list[dict[str, Any]] = field(default_factory=list)
-    cursor: int = 0
-    done: bool = False
     summary: dict[str, Any] = field(default_factory=dict)
 
 
@@ -92,23 +87,21 @@ class SearchChildDoneRequest:
 
 
 SEARCH_START = ServiceOperation("start", SearchStartRequest, SearchStartReply)
-SEARCH_DRAIN = ServiceOperation("drain", SearchDrainRequest, SearchDrainReply)
 SEARCH_CHILD_EVENTS = ServiceOperation("child_events", SearchChildEventsRequest, SearchChildEventsReply)
 SEARCH_CHILD_DONE = ServiceOperation("child_done", SearchChildDoneRequest, EmptyPayload)
 SEARCH_SUMMARY = ServiceOperation("summary", EmptyPayload, SearchSummaryReply)
 SEARCH_CLEANUP = ServiceOperation("cleanup", EmptyPayload, SearchSummaryReply)
 
 
-class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSearchState]):
+class MeshSearchAgent(MeshFanoutMixin, OperationPaglet[MeshSearchState]):
     """Clone across the mesh and stream local filesystem search hits."""
 
     State = MeshSearchState
-    Operations = (SEARCH_START, SEARCH_DRAIN, SEARCH_CHILD_EVENTS, SEARCH_CHILD_DONE, SEARCH_SUMMARY, SEARCH_CLEANUP)
+    Operations = (SEARCH_START, SEARCH_CHILD_EVENTS, SEARCH_CHILD_DONE, SEARCH_SUMMARY, SEARCH_CLEANUP)
 
     def operation_handlers(self):
         return {
             SEARCH_START: self.start,
-            SEARCH_DRAIN: self.drain,
             SEARCH_CHILD_EVENTS: self.record_child_events,
             SEARCH_CHILD_DONE: self.record_child_done,
             SEARCH_SUMMARY: self.summary,
@@ -128,9 +121,17 @@ class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSea
 
     def start(self, request: SearchStartRequest) -> SearchStartReply:
         self.fanout_reset(timeout=request.timeout)
+        job_id = request.job_id or f"search-{uuid.uuid4().hex}"
+        output_path = Path(request.output_path).expanduser()
+        if not output_path.is_absolute():
+            raise ValueError("search output_path must be absolute")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("", encoding="utf-8")
         with self.locked_state() as state:
+            state.job_id = job_id
             state.request = dict(request.request)
             state.timeout = float(request.timeout)
+            state.output_path = str(output_path)
             state.requested_targets = list(request.targets)
             state.events = []
             state.next_cursor = 1
@@ -153,29 +154,12 @@ class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSea
                 state.errors["mesh"] = "no online target hosts found"
             self.notify_all_state_changed()
         return SearchStartReply(
+            accepted=True,
+            job_id=job_id,
+            agent_id=self.agent_id,
+            host_url=self.context.address,
+            output_path=str(output_path),
             targets=[{"name": host.name, "url": host.url} for host in hosts],
-            summary=dataclass_to_wire(self.summary()),
-        )
-
-    def drain(self, request: SearchDrainRequest) -> SearchDrainReply:
-        self._expire_timed_out_hosts()
-
-        def ready(state: MeshSearchState) -> bool:
-            return state.next_cursor > request.after_cursor + 1 or not state.pending_hosts or bool(state.errors)
-
-        self.fanout_wait_for(ready, wait_timeout=request.wait_timeout)
-        self._expire_timed_out_hosts()
-
-        with self.locked_state() as state:
-            pending = bool(state.pending_hosts)
-        events, cursor, more_events = self.cursor_drain_events(
-            after_cursor=max(0, int(request.after_cursor)),
-            limit=max(1, int(request.limit)),
-        )
-        return SearchDrainReply(
-            events=events,
-            cursor=cursor,
-            done=not pending and not more_events,
             summary=dataclass_to_wire(self.summary()),
         )
 
@@ -212,7 +196,7 @@ class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSea
                 "events": list(buffer),
             }
             buffer.clear()
-            OperationClient(parent).call(SEARCH_CHILD_EVENTS, SearchChildEventsRequest(**payload))
+            parent.send_oneway(SEARCH_CHILD_EVENTS.to_message(SearchChildEventsRequest(**payload)), no_delay=True)
 
         try:
             request = dataclass_from_wire(SearchRequest, request_wire)
@@ -246,28 +230,81 @@ class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSea
                 "error": str(exc),
             }
         if parent is not None:
-            OperationClient(parent).call(SEARCH_CHILD_DONE, SearchChildDoneRequest(**payload))
+            parent.send_oneway(SEARCH_CHILD_DONE.to_message(SearchChildDoneRequest(**payload)), no_delay=True)
 
     def record_child_events(self, request: SearchChildEventsRequest) -> SearchChildEventsReply:
-        cursor = self.cursor_append_events([dict(event) for event in request.events])
+        records = [dict(event) for event in request.events]
+        with self.locked_state() as state:
+            for event in records:
+                event["cursor"] = state.next_cursor
+                state.next_cursor += 1
+                state.events.append(event)
+            cursor = state.next_cursor - 1
+            output_path = state.output_path
+        self._append_events(output_path, records)
+        for event in records:
+            self._user_output(_format_event_line(event))
+        self.notify_all_state_changed()
         return SearchChildEventsReply(ok=True, cursor=cursor)
 
-    @state_locked
     def record_child_done(self, request: SearchChildDoneRequest) -> EmptyPayload:
-        host_name = str(request.host_name or "")
-        if host_name:
-            self.state.pending_hosts = [name for name in self.state.pending_hosts if name != host_name]
-            if host_name not in self.state.done_hosts:
-                self.state.done_hosts.append(host_name)
-        if request.error:
-            self.state.errors[host_name or "unknown"] = request.error
-        elif request.summary:
-            self.state.summaries[host_name] = dict(request.summary)
+        with self.locked_state() as state:
+            host_name = str(request.host_name or "")
+            if host_name:
+                state.pending_hosts = [name for name in state.pending_hosts if name != host_name]
+                if host_name not in state.done_hosts:
+                    state.done_hosts.append(host_name)
+            if request.error:
+                state.errors[host_name or "unknown"] = request.error
+            elif request.summary:
+                state.summaries[host_name] = dict(request.summary)
+            done = not state.pending_hosts
+            output_path = state.output_path
         self.notify_all_state_changed()
+        if done:
+            self._user_notify("info", "search.done", f"Search job complete; output: {output_path}")
         return EmptyPayload()
 
     def _expire_timed_out_hosts(self) -> None:
         self.fanout_expire_pending("timed out waiting for search result")
+
+    def _append_events(self, output_path: str, events: list[dict[str, Any]]) -> None:
+        if not output_path or not events:
+            return
+        import json
+
+        with Path(output_path).open("a", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event, sort_keys=True))
+                handle.write("\n")
+            handle.flush()
+
+    def _user_output(self, text: str) -> None:
+        if not text:
+            return
+        with contextlib.suppress(Exception):
+            service = self.require_contract(USER_INFO, operation=STREAM_USER, scope=ServiceScope.LOCAL)
+            service.send_oneway(
+                STREAM_USER,
+                UserInfoStreamRequest(stream_id=self.state.job_id, text=f"{text}\n", target="stdout"),
+                no_delay=True,
+            )
+
+    def _user_notify(self, severity: str, title: str, message: str) -> None:
+        with contextlib.suppress(Exception):
+            service = self.require_contract(USER_INFO, operation=NOTIFY_USER, scope=ServiceScope.LOCAL)
+            service.send_oneway(
+                NOTIFY_USER,
+                UserInfoRequest(
+                    severity=severity,
+                    title=title,
+                    message=message,
+                    source_agent_id=self.agent_id,
+                    job_id=self.state.job_id,
+                    timestamp=time.time(),
+                ),
+                no_delay=True,
+            )
 
     @staticmethod
     def _summary_from_state(state: MeshSearchState) -> SearchSummaryReply:
@@ -279,3 +316,24 @@ class MeshSearchAgent(CursorDrainMixin, MeshFanoutMixin, OperationPaglet[MeshSea
             done_hosts=list(state.done_hosts),
             event_count=len(state.events),
         )
+
+
+def _format_event_line(event: dict[str, Any]) -> str:
+    kind = str(event.get("event") or "")
+    host_name = str(event.get("host_name") or "")
+    path = str(event.get("path") or "")
+    if kind == "file":
+        return f"{host_name}:{path}"
+    if kind == "count":
+        return f"{host_name}:{path}:{event.get('count', 0)}"
+    if kind == "error":
+        return f"{host_name}: error: {event.get('message', '')}"
+    if kind not in {"match", "context"}:
+        return ""
+    sep = "-" if kind == "context" else ":"
+    parts = [host_name, path]
+    if event.get("line_number"):
+        parts.append(str(event["line_number"]))
+    if event.get("column"):
+        parts.append(str(event["column"]))
+    return sep.join(parts) + sep + str(event.get("text") or "")

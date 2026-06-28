@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -27,7 +28,7 @@ from paglets.examples.analysis_jobs.agent import (
     default_result_db,
 )
 from paglets.examples.compute import cli as pi_backend
-from paglets.examples.compute.models import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
+from paglets.examples.compute.models import PiComputeRequest
 from paglets.examples.file_grabber import cli as file_backend
 from paglets.examples.mesh_benchmark import cli as mesh_backend
 from paglets.examples.mesh_benchmark.analysis import normalize_request
@@ -37,7 +38,6 @@ from paglets.examples.mesh_benchmark.models import (
     DEFAULT_DIGITS,
     DEFAULT_TIMEOUT_SECONDS,
     MeshBenchmarkRequest,
-    MeshBenchmarkSummary,
 )
 from paglets.examples.performance import cli as perf_backend
 from paglets.examples.performance.kernels import parse_size
@@ -52,7 +52,7 @@ from paglets.patterns.tasks import TaskStatus
 from paglets.remote.admin import PagletsAdminClient, select_reachable_entry_server
 from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
-from paglets.serialization.codec import dataclass_from_wire, dataclass_to_wire
+from paglets.serialization.codec import dataclass_to_wire
 
 from .console import console, fail, print_json
 
@@ -69,25 +69,22 @@ def pi(
     batch_size: Annotated[int, typer.Option("--batch-size", help="Chudnovsky terms per worker batch.")] = 1,
     max_in_flight: Annotated[int, typer.Option("--max-in-flight", help="Global in-flight batch cap.")] = 0,
     max_workers_per_host: Annotated[int, typer.Option("--max-workers-per-host", help="Per-host worker cap.")] = 0,
-    timeout: Annotated[float, typer.Option("--timeout", help="Whole-job timeout in seconds; 0 disables it.")] = 0.0,
-    stream_chunk_size: Annotated[
-        int, typer.Option("--stream-chunk-size", help="Maximum newly available decimal digits per text poll.")
-    ] = DEFAULT_STREAM_CHUNK_DIGITS,
-    request_timeout: Annotated[
-        float, typer.Option("--request-timeout", help="HTTP request timeout for coordinator calls.")
-    ] = 300.0,
+    timeout: Annotated[float, typer.Option("--timeout", help="Reserved job timeout value; 0 disables it.")] = 0.0,
     max_load_per_cpu: Annotated[float, typer.Option("--max-load-per-cpu", help="Maximum 1-minute load per CPU.")] = 1.0,
     max_cpu_percent: Annotated[float, typer.Option("--max-cpu-percent", help="Maximum sampled CPU percent.")] = 100.0,
     mem: Annotated[str, typer.Option("--mem", help="Minimum available RAM, e.g. 512M.")] = "0",
     disk: Annotated[str, typer.Option("--disk", help="Minimum free work storage, e.g. 1G.")] = "0",
-    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+    output: Annotated[
+        Path, typer.Option("--output", help="Output file on the entry host; relative paths use this shell.")
+    ] = Path("pi.txt"),
+    json_output: Annotated[bool, typer.Option("--json", help="Print submission metadata as JSON.")] = False,
     api_key_env: Annotated[
         str | None,
         typer.Option("--api-key-env", help=f"API key environment variable; defaults to {DEFAULT_API_KEY_ENV}."),
     ] = None,
 ) -> None:
     try:
-        client = HostClient(timeout=max(1.0, request_timeout), api_key=resolve_api_key(api_key_env))
+        client = HostClient(api_key=resolve_api_key(api_key_env))
         entry_ref = select_reachable_entry_server(entry_name=entry, client=client)
         request = PiComputeRequest(
             start=max(0, start),
@@ -101,14 +98,14 @@ def pi(
             min_memory_available_bytes=max(0, pi_backend._parse_size(mem)),
             min_work_free_bytes=max(0, pi_backend._parse_size(disk)),
         )
-        summary = (
-            pi_backend._run(entry_ref, request, client=client)
-            if json_output
-            else pi_backend._run_stream(entry_ref, request, client=client, stream_chunk_size=max(0, stream_chunk_size))
+        reply = pi_backend._submit(
+            entry_ref, request, output_path=pi_backend._resolve_output_path(output), client=client
         )
         if json_output:
-            print_json(summary)
-        raise typer.Exit(0 if summary.get("done") and not summary.get("errors") else 1)
+            print_json(reply)
+        else:
+            console.print(f"submitted {reply['job_id']} on {reply['host_url']} output={reply['output_path']}")
+        raise typer.Exit(0)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -180,7 +177,10 @@ def analysis(
 @app.command()
 def perf(
     entry: Annotated[str | None, typer.Option("--entry", help="Discovered entry host name.")] = None,
-    timeout: Annotated[float, typer.Option("--timeout", help="Seconds to wait for replies.")] = 120.0,
+    timeout: Annotated[float, typer.Option("--timeout", help="Benchmark timeout seconds.")] = 120.0,
+    output: Annotated[Path, typer.Option("--output", help="Output JSON file on the entry host.")] = Path(
+        "perf-summary.json"
+    ),
     duration: Annotated[
         float, typer.Option("--duration", help="Seconds per CPU/memory kernel.")
     ] = DEFAULT_BENCHMARK_DURATION_SECONDS,
@@ -196,7 +196,7 @@ def perf(
         float, typer.Option("--lock-timeout", help="Seconds to wait for local benchmark lock.")
     ] = DEFAULT_LOCK_TIMEOUT_SECONDS,
     verbose: Annotated[bool, typer.Option("--verbose", help="Print skipped disk targets and diagnostics.")] = False,
-    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print submission metadata as JSON.")] = False,
     api_key_env: Annotated[str | None, typer.Option("--api-key-env", help="API key environment variable.")] = None,
 ) -> None:
     try:
@@ -212,12 +212,14 @@ def perf(
             paths=list(path or []),
             lock_timeout_seconds=max(0.0, lock_timeout),
         )
-        summary = perf_backend._collect(entry_ref, request, timeout=timeout, client=client)
+        summary = perf_backend._submit(
+            entry_ref, request, timeout=timeout, output_path=perf_backend._resolve_output_path(output), client=client
+        )
         if json_output:
             print_json(summary)
         else:
-            perf_backend._print_text(summary, verbose=verbose)
-        raise typer.Exit(1 if perf_backend._has_failures(summary) else 0)
+            console.print(f"submitted {summary['job_id']} on {summary['host_url']} output={summary['output_path']}")
+        raise typer.Exit(0)
     except typer.Exit:
         raise
     except Exception as exc:
@@ -227,9 +229,10 @@ def perf(
 @app.command("mesh-benchmark")
 def mesh_benchmark(
     entry: Annotated[str | None, typer.Option("--entry", help="Discovered entry host name.")] = None,
-    timeout: Annotated[
-        float, typer.Option("--timeout", help="Seconds to wait for completion.")
-    ] = DEFAULT_TIMEOUT_SECONDS,
+    timeout: Annotated[float, typer.Option("--timeout", help="Benchmark timeout seconds.")] = DEFAULT_TIMEOUT_SECONDS,
+    output: Annotated[Path, typer.Option("--output", help="Output JSON file on the entry host.")] = Path(
+        "mesh-benchmark.json"
+    ),
     repeats: Annotated[int, typer.Option("--repeats", help="Repeat the directed mesh route this many times.")] = 1,
     payload_size: Annotated[str, typer.Option("--payload-size", help="Random ASCII payload size, e.g. 64K.")] = "0",
     exclude_self: Annotated[bool, typer.Option("--exclude-self", help="Skip self-pair movements.")] = False,
@@ -239,7 +242,7 @@ def mesh_benchmark(
     clock_probes: Annotated[
         int, typer.Option("--clock-probes", help="Clock request/reply probes per arrival host.")
     ] = DEFAULT_CLOCK_PROBES,
-    json_output: Annotated[bool, typer.Option("--json", help="Print JSON output.")] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Print submission metadata as JSON.")] = False,
     api_key_env: Annotated[str | None, typer.Option("--api-key-env", help="API key environment variable.")] = None,
 ) -> None:
     try:
@@ -255,22 +258,14 @@ def mesh_benchmark(
                 clock_probes=clock_probes,
             )
         )
-        result = mesh_backend._run(entry_ref, request, client=client)
-        summary_payload = dict(result.get("summary") or {})
+        result = mesh_backend._submit(
+            entry_ref, request, output_path=mesh_backend._resolve_output_path(output), client=client
+        )
         if json_output:
-            print_json(summary_payload)
-        elif mesh_backend._is_summary_payload(summary_payload):
-            summary = dataclass_from_wire(MeshBenchmarkSummary, summary_payload)
-            console.print(
-                mesh_backend._format_markdown(summary, digits=request.digits, include_self=request.include_self)
-            )
-        elif summary_payload.get("errors"):
-            mesh_backend._print_errors(dict(summary_payload["errors"]))
+            print_json(result)
         else:
-            fail("paglets examples mesh-benchmark", RuntimeError("no summary returned"), code=1)
-        errors = dict(result.get("errors") or {})
-        errors.update(dict(summary_payload.get("errors") or {}))
-        raise typer.Exit(1 if errors else 0)
+            console.print(f"submitted {result['run_id']} on {result['host_url']} output={result['output_path']}")
+        raise typer.Exit(0)
     except typer.Exit:
         raise
     except Exception as exc:

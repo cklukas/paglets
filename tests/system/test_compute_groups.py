@@ -2,8 +2,6 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
-import threading
-import time
 from pathlib import Path
 
 from paglets.artifacts import ArtifactRef
@@ -187,23 +185,15 @@ def test_result_collector_records_duplicate_reports_without_overwriting_original
     assert summary["duplicate_reports"] == [{"job_key": "a", "result": {"value": 2}, "success": True}]
 
 
-def test_result_collector_drain_waits_for_completion():
+def test_result_collector_summary_reports_completion_without_drain():
     collector = _collector()
     collector.handle_message(Message("register_jobs", {"jobs": [{"job_key": "a"}]}))
+    collector.handle_message(Message("job_result", {"job_key": "a", "result": {"value": 1}}))
 
-    def report() -> None:
-        time.sleep(0.05)
-        collector.handle_message(Message("job_result", {"job_key": "a", "result": {"value": 1}}))
+    summary = collector.handle_message(Message("summary"))
 
-    thread = threading.Thread(target=report)
-    thread.start()
-    try:
-        reply = collector.handle_message(Message("drain", {"wait_timeout": 1.0}))
-    finally:
-        thread.join()
-
-    assert reply["done"] is True
-    assert reply["summary"]["completed_count"] == 1
+    assert summary["completed_count"] == 1
+    assert summary["pending_count"] == 0
 
 
 def test_result_collector_return_home_waits_when_home_is_offline():

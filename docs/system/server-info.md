@@ -11,8 +11,9 @@ demonstrates the resident-service pattern:
 5. Requests are ordinary paglet messages, but payloads and replies are typed
    dataclasses.
 6. The `paglets sys` CLI creates a short-lived collector paglet that clones
-   to mesh hosts, calls each host's local `server-info` service, polls `drain`,
-   and prints an aggregate result.
+   to mesh hosts, calls each host's local `server-info` service, reads
+   nonblocking `summary` snapshots until the existing deadline, and prints an
+   aggregate result.
 7. After the idle timeout, the provider deactivates while the service remains
    discoverable for later calls.
 

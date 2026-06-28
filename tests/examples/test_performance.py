@@ -264,6 +264,8 @@ def test_paglets_perf_test_json_collects_mesh_with_dynamic_entry(tmp_path, capsy
                 "--timeout",
                 "10",
                 "--json",
+                "--output",
+                str(tmp_path / "perf-summary.json"),
                 "--duration",
                 "0.01",
                 "--disk-size",
@@ -279,6 +281,10 @@ def test_paglets_perf_test_json_collects_mesh_with_dynamic_entry(tmp_path, capsy
 
         assert result == 0
         payload = json.loads(capsys.readouterr().out)
+        assert payload["accepted"] is True
+        assert payload["output_path"] == str(tmp_path / "perf-summary.json")
+        _wait_until(lambda: (tmp_path / "perf-summary.json").read_text(encoding="utf-8").strip())
+        payload = json.loads((tmp_path / "perf-summary.json").read_text(encoding="utf-8"))
         assert set(payload["results"]) == {"alpha", "beta"}
         assert payload["errors"] == {}
         for item in payload["results"].values():
@@ -288,6 +294,15 @@ def test_paglets_perf_test_json_collects_mesh_with_dynamic_entry(tmp_path, capsy
     finally:
         beta.stop()
         alpha.stop()
+
+
+def _wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    assert predicate()
 
 
 def test_benchmark_child_failure_records_error_for_one_host(tmp_path):

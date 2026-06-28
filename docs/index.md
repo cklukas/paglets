@@ -128,7 +128,7 @@ uv run paglets jobs status
 uv run paglets jobs groups
 uv run paglets examples analysis --tasks 3 --target-runtime 3
 uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets examples pi --digits 16
+uv run paglets examples pi --digits 16 --output pi.txt
 uv run paglets examples perf
 uv run paglets examples mesh-benchmark --payload-size 64K
 ```

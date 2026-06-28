@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import sys
+import uuid
+from pathlib import Path
 
 from paglets.config.env import DEFAULT_API_KEY_ENV, resolve_api_key
-from paglets.patterns.operations import OperationClient
+from paglets.core.messages import Message
 from paglets.remote.admin import (
     PagletsAdminClient,
     ServerRef,
@@ -18,18 +19,7 @@ from paglets.remote.client import HostClient
 from paglets.remote.proxy import PagletProxy
 from paglets.serialization.codec import dataclass_to_wire
 
-from .agent import (
-    PI_CLEANUP,
-    PI_DRAIN,
-    PI_DRAIN_STREAM,
-    PI_START_ASYNC,
-    PiDrainRequest,
-    PiDrainStreamRequest,
-    PiStartRequest,
-)
-from .models import DEFAULT_STREAM_CHUNK_DIGITS, PiComputeRequest
-
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 300.0
+from .models import DEFAULT_OUTPUT_CHUNK_DIGITS, PiComputeRequest, PiJobStartRequest
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         api_key = resolve_api_key(args.api_key_env)
-        client = HostClient(timeout=max(1.0, float(args.request_timeout)), api_key=api_key)
+        client = HostClient(api_key=api_key)
         entry = _select_entry_server(entry_name=args.entry, client=client)
         request = PiComputeRequest(
             start=max(0, args.start),
@@ -51,24 +41,22 @@ def main(argv: list[str] | None = None) -> int:
             min_memory_available_bytes=max(0, int(args.min_memory)),
             min_work_free_bytes=max(0, int(args.min_work_free)),
         )
+        output_path = _resolve_output_path(args.output)
+        reply = _submit(entry, request, output_path=output_path, client=client)
         if args.json:
-            summary = _run(entry, request, client=client)
-            print(json.dumps(summary, indent=2, sort_keys=True))
+            print(json.dumps(reply, indent=2, sort_keys=True))
         else:
-            summary = _run_stream(
-                entry,
-                request,
-                client=client,
-                stream_chunk_size=max(0, int(args.stream_chunk_size)),
+            print(
+                f"paglets-pi-compute: submitted {reply['job_id']} on {reply['host_url']} output={reply['output_path']}"
             )
-        return 0 if summary.get("done") and not summary.get("errors") else 1
+        return 0
     except Exception as exc:
         print(f"paglets-pi-compute: {exc}", file=sys.stderr)
         return 2
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Compute decimal Pi digits across a paglets mesh")
+    parser = argparse.ArgumentParser(description="Submit a message-driven Pi compute job to a paglets host")
     parser.add_argument("--entry", default=None, help="Discovered entry host name")
     parser.add_argument("--start", type=int, default=0, help="Zero-based decimal digit position after the point")
     parser.add_argument("--digits", type=int, default=16, help="Number of decimal digits to compute")
@@ -79,26 +67,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-workers-per-host", type=int, default=0, help="Per-host worker cap; 0 uses free load slots"
     )
-    parser.add_argument("--timeout", type=float, default=0.0, help="Whole-job timeout in seconds; 0 disables it")
-    parser.add_argument(
-        "--stream-chunk-size",
-        type=int,
-        default=DEFAULT_STREAM_CHUNK_DIGITS,
-        help="Maximum newly available decimal digits to return per text-mode poll; 0 disables the cap",
-    )
-    parser.add_argument(
-        "--request-timeout",
-        type=float,
-        default=DEFAULT_REQUEST_TIMEOUT_SECONDS,
-        help="HTTP request timeout in seconds for coordinator calls",
-    )
+    parser.add_argument("--timeout", type=float, default=0.0, help="Reserved job timeout value; 0 disables it")
     parser.add_argument("--max-load-per-cpu", type=float, default=1.0, help="Maximum 1-minute load divided by CPUs")
     parser.add_argument(
-        "--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent (unused for scheduling)"
+        "--max-cpu-percent", type=float, default=100.0, help="Maximum sampled CPU percent for placement"
     )
     parser.add_argument("--min-memory", type=_parse_size, default=0, help="Minimum available RAM, e.g. 512M")
     parser.add_argument("--min-work-free", type=_parse_size, default=0, help="Minimum free work storage, e.g. 1G")
-    parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
+    parser.add_argument("--output", default="pi.txt", help="Output file on the entry host; relative to this shell")
+    parser.add_argument("--json", action="store_true", help="Print submission metadata as JSON")
     parser.add_argument(
         "--api-key-env",
         default=None,
@@ -108,143 +85,37 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _select_entry_server(*, entry_name: str | None, client: HostClient) -> ServerRef:
-    return select_reachable_entry_server(
-        entry_name=entry_name,
-        client=client,
+    return select_reachable_entry_server(entry_name=entry_name, client=client)
+
+
+def _resolve_output_path(output: str | Path) -> Path:
+    path = Path(output).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def _submit(entry: ServerRef, request: PiComputeRequest, *, output_path: Path, client: HostClient) -> dict:
+    proxy = _create_job(entry, client=client)
+    start = PiJobStartRequest(
+        request=dataclass_to_wire(request),
+        job_id=f"pi-{uuid.uuid4().hex}",
+        output_path=str(output_path),
+        output_chunk_digits=DEFAULT_OUTPUT_CHUNK_DIGITS,
     )
+    reply = proxy.send(Message("pi.start", dataclass_to_wire(start)))
+    return dict(reply)
 
 
-def _run(entry: ServerRef, request: PiComputeRequest, *, client: HostClient) -> dict:
-    proxy = _create_coordinator(entry, client=client)
-    operations = OperationClient(proxy)
-    try:
-        operations.call(PI_START_ASYNC, PiStartRequest(dataclass_to_wire(request)))
-        summary: dict = {}
-        while True:
-            reply = operations.call(PI_DRAIN, PiDrainRequest(after_digits=0, wait_timeout=0.5))
-            summary = dict(reply.summary)
-            if reply.done:
-                return summary
-    finally:
-        _cleanup_coordinator(proxy, operations=operations)
-
-
-def _run_stream(
-    entry: ServerRef,
-    request: PiComputeRequest,
-    *,
-    client: HostClient,
-    stream_chunk_size: int = DEFAULT_STREAM_CHUNK_DIGITS,
-) -> dict:
-    proxy = _create_coordinator(entry, client=client)
-    operations = OperationClient(proxy)
-    summary: dict = {}
-    cursor = 0
-    printed_digits = 0
-    stream_chunk_size = max(0, int(stream_chunk_size))
-    try:
-        operations.call(PI_START_ASYNC, PiStartRequest(dataclass_to_wire(request)))
-        _print_stream_header(request)
-        while True:
-            reply = operations.call(
-                PI_DRAIN_STREAM,
-                PiDrainStreamRequest(
-                    after_digits=cursor,
-                    wait_timeout=0.5,
-                    max_digits=stream_chunk_size,
-                ),
-            )
-            summary = dict(reply.summary)
-            new_decimal_digits = reply.new_decimal_digits
-            if new_decimal_digits:
-                _write_stream_digits(new_decimal_digits, stream_chunk_size=stream_chunk_size)
-                cursor = max(cursor, int(reply.cursor or 0))
-                printed_digits += len(new_decimal_digits)
-            if reply.done:
-                break
-        sys.stdout.write("\n")
-        _print_status(summary)
-        _print_run_diagnostics(summary, printed_digits)
-        return summary
-    finally:
-        _cleanup_coordinator(proxy, operations=operations)
-
-
-def _create_coordinator(entry: ServerRef, *, client: HostClient) -> PagletProxy:
+def _create_job(entry: ServerRef, *, client: HostClient) -> PagletProxy:
     admin = PagletsAdminClient([entry], client=client)
     proxy_wire = admin.create_agent(
         entry,
-        "paglets.examples.compute.agent:PiComputeCoordinatorAgent",
-        "paglets.examples.compute.agent:PiComputeState",
+        "paglets.examples.compute.agent:PiJobPaglet",
+        "paglets.examples.compute.agent:PiJobState",
         {},
     )
     return PagletProxy.from_wire(proxy_wire, client)
-
-
-def _cleanup_coordinator(proxy: PagletProxy, *, operations: OperationClient | None = None) -> None:
-    operations = operations or OperationClient(proxy)
-    with contextlib.suppress(Exception):
-        operations.call(PI_CLEANUP)
-    with contextlib.suppress(Exception):
-        proxy.dispose()
-
-
-def _print_stream_header(request: PiComputeRequest) -> None:
-    if request.start == 0:
-        sys.stdout.write("3.")
-    else:
-        sys.stdout.write(f"pi decimal digits [{request.start}:{request.start + request.digits}]\n")
-    sys.stdout.flush()
-
-
-def _write_stream_digits(digits: str, *, stream_chunk_size: int) -> None:
-    if stream_chunk_size <= 0:
-        sys.stdout.write(digits)
-        sys.stdout.flush()
-        return
-    for index in range(0, len(digits), stream_chunk_size):
-        sys.stdout.write(digits[index : index + stream_chunk_size])
-        sys.stdout.flush()
-
-
-def _print_summary(summary: dict) -> None:
-    start = int(summary.get("start", 0))
-    digits = int(summary.get("digits", 0))
-    if start == 0:
-        print(summary.get("pi", ""))
-    else:
-        print(f"pi decimal digits [{start}:{start + digits}]")
-        print(summary.get("decimal_digits", ""))
-        if summary.get("pi"):
-            print(f"prefix: {summary['pi']}")
-    _print_status(summary)
-
-
-def _print_status(summary: dict) -> None:
-    if summary.get("skipped_count"):
-        print(f"skipped batches requeued: {summary['skipped_count']}")
-    if summary.get("errors"):
-        print("\nerrors:")
-        for key, error in sorted(summary["errors"].items()):
-            print(f"  - {key}: {error}")
-    if summary.get("cleanup_errors"):
-        print("\ncleanup errors:")
-        for key, error in sorted(summary["cleanup_errors"].items()):
-            print(f"  - {key}: {error}")
-
-
-def _print_run_diagnostics(summary: dict, printed_digits: int) -> None:
-    if summary.get("errors"):
-        return
-    terms = int(summary.get("terms", 0))
-    completed_terms = int(summary.get("completed_terms", 0))
-    pending = int(summary.get("pending", 0))
-    in_flight = int(summary.get("in_flight", 0))
-    done = bool(summary.get("done"))
-
-    if done and pending == 0 and in_flight == 0 and completed_terms >= terms:
-        print("pi compute diagnostic: all batches received", file=sys.stderr)
-    print(f"pi compute diagnostic: digits printed={printed_digits}", file=sys.stderr)
 
 
 def _parse_size(value: str) -> int:
@@ -261,11 +132,11 @@ def _parse_size(value: str) -> int:
     try:
         amount = float(number)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid size {value!r}") from exc
+        raise argparse.ArgumentTypeError(f"invalid size: {value!r}") from exc
     if amount < 0:
         raise argparse.ArgumentTypeError("size must be non-negative")
     return int(amount * multiplier)
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())

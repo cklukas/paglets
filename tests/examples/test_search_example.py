@@ -8,9 +8,8 @@ import time
 from paglets.examples.search import HostSearchSummary, MeshSearchAgent, SearchEvent, SearchRequest, run_local_search
 from paglets.examples.search.agent import (
     SEARCH_CLEANUP,
-    SEARCH_DRAIN,
     SEARCH_START,
-    SearchDrainRequest,
+    SEARCH_SUMMARY,
     SearchStartRequest,
 )
 from paglets.examples.search.cli import main as search_main
@@ -116,7 +115,7 @@ def test_local_find_supports_name_extension_and_kind_filters(tmp_path):
     ]
 
 
-def test_mesh_search_drain_streams_events_before_completion(tmp_path):
+def test_mesh_search_writes_events_without_cli_polling(tmp_path):
     (tmp_path / "haystack.txt").write_text("needle\n", encoding="utf-8")
     proxy = None
     alpha = Host(
@@ -144,28 +143,21 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path):
         alpha.mesh.gossip_once()
         proxy = alpha.create(MeshSearchAgent)
         operations = OperationClient(proxy)
-        operations.call(
+        output_path = tmp_path / "search.jsonl"
+        reply = operations.call(
             SEARCH_START,
             SearchStartRequest(
                 request=dataclass_to_wire(
                     SearchRequest(mode="grep", pattern="needle", paths=[str(tmp_path)], batch_size=1)
                 ),
                 timeout=3.0,
+                output_path=str(output_path),
             ),
         )
 
-        first = operations.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=0, wait_timeout=1.0, limit=10))
-        assert first.events
-
-        cursor = first.cursor
-        final = first
-        deadline = time.monotonic() + 3.0
-        while not final.done and time.monotonic() < deadline:
-            final = operations.call(SEARCH_DRAIN, SearchDrainRequest(after_cursor=cursor, wait_timeout=1.0, limit=10))
-            cursor = max(cursor, final.cursor)
-
-        assert final.done is True
-        assert set(final.summary["results"]) == {"alpha", "beta"}
+        assert reply.accepted is True
+        _wait_until(lambda: bool(output_path.read_text(encoding="utf-8").strip()))
+        _wait_until(lambda: set(operations.call(SEARCH_SUMMARY).results) == {"alpha", "beta"})
     finally:
         if proxy is not None:
             try:
@@ -177,7 +169,7 @@ def test_mesh_search_drain_streams_events_before_completion(tmp_path):
         alpha.stop()
 
 
-def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys, monkeypatch):
+def test_paglets_search_cli_jsonl_submits_mesh_job(tmp_path, capsys, monkeypatch):
     (tmp_path / "haystack.txt").write_text("needle\n", encoding="utf-8")
     alpha = Host(
         "alpha",
@@ -210,9 +202,9 @@ def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys, monkeypatch):
             [
                 "--timeout",
                 "5",
-                "--poll-interval",
-                "0.2",
                 "--jsonl",
+                "--output",
+                str(tmp_path / "search.jsonl"),
                 "grep",
                 "needle",
                 str(tmp_path / "haystack.txt"),
@@ -220,8 +212,33 @@ def test_paglets_search_cli_jsonl_collects_mesh(tmp_path, capsys, monkeypatch):
         )
 
         assert result == 0
-        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        output = capsys.readouterr().out
+        assert "paglets-search: submitted" in output
+        output_path = tmp_path / "search.jsonl"
+        _wait_until(lambda: _match_hosts(output_path) == {"alpha", "beta"})
+        events = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
         assert {event["host_name"] for event in events if event["event"] == "match"} == {"alpha", "beta"}
     finally:
         beta.stop()
         alpha.stop()
+
+
+def _wait_until(predicate, *, timeout: float = 3.0, interval: float = 0.02) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(interval)
+    assert predicate()
+
+
+def _match_hosts(path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {
+        event["host_name"]
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+        for event in [json.loads(line)]
+        if event.get("event") == "match"
+    }

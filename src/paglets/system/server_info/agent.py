@@ -308,8 +308,6 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
                 state.request = dict(message.args.get("request") or {})
                 state.timeout = float(message.args.get("timeout", 5.0))
             return self.collect()
-        if message.kind == "drain":
-            return self.drain(wait_timeout=float(message.args.get("wait_timeout", 0.5)))
         if message.kind == "child_result":
             return self.record_child_result(message.args)
         if message.kind == "summary":
@@ -348,21 +346,6 @@ class SystemInfoCollectorAgent(Paglet[SystemInfoCollectorState]):
                     state.target_host_url = ""
 
         return self.summary()
-
-    def drain(self, *, wait_timeout: float) -> dict[str, Any]:
-        self._expire_timed_out_hosts()
-
-        def ready(state: SystemInfoCollectorState) -> bool:
-            return not state.pending_hosts
-
-        timeout = max(0.0, wait_timeout)
-        with self.locked_state() as state:
-            if state.deadline > 0:
-                timeout = min(timeout, max(0.0, state.deadline - time.monotonic()))
-        self.wait_state(ready, timeout=timeout)
-        self._expire_timed_out_hosts()
-        summary = self.summary()
-        return {"done": not summary["pending_hosts"], "summary": summary}
 
     def _run_child(self) -> None:
         with self.locked_state() as state:

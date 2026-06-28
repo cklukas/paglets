@@ -79,7 +79,7 @@ uv run paglets jobs status --entry alpha
 uv run paglets jobs groups --entry alpha
 uv run paglets examples analysis --entry alpha --tasks 20
 uv run paglets examples file push --entry alpha ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets examples pi --entry alpha --digits 16
+uv run paglets examples pi --entry alpha --digits 16 --output pi.txt
 uv run paglets examples perf --entry alpha
 uv run paglets search grep --entry alpha TODO .
 ```

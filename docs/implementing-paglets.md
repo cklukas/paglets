@@ -141,10 +141,9 @@ For file-moving paglets, choose the smallest helper layer that fits:
 
 - `TaskPaglet` for typed request/result workflows with no raw message protocol.
 - `OperationPaglet` and `OperationClient` for paglets with several named typed
-  operations, such as `start`, `drain`, `summary`, and `cleanup`.
+  operations, such as `start`, `events`, `summary`, and `cleanup`.
 - `MeshFanoutMixin` for parent paglets that clone children across visible mesh
   hosts and collect child replies.
-- `CursorDrainMixin` for streaming event drains where clients poll by cursor.
 - `FileMobilityMixin` for readable custom workflows that still share source
   stat, destination planning, registered-file, result, notification, and atomic
   write helpers.
@@ -506,9 +505,10 @@ targets = mesh_info.call(SELECT_TARGETS, TargetSelectionRequest(limit=2, max_loa
 For distributed compute, keep the coordinator's accumulated job state on one
 host and create short-lived worker paglets remotely. Workers should report
 results by message and dispose themselves after sending the result. The
-coordinator should return from its launch message quickly and use `drain` or
-`summary` for progress, because it cannot handle worker result messages while a
-previous message handler is still running. For
+coordinator should return from its launch message quickly and expose progress
+through explicit status/update/result messages or `user-info`, because it
+cannot handle worker result messages while a previous message handler is still
+running. For
 CPU-style batch work, treat a selected host as several placement slots instead
 of only one target: estimate slots from `cpu_count * target_load_per_cpu -
 load_1m`, subtract already in-flight workers on that host, and optionally cap
