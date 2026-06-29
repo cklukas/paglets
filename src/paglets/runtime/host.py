@@ -268,13 +268,17 @@ class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRe
         try:
             while True:
                 with self._server_lock:
-                    if self._server is None:
+                    relay_thread = self._relay_client_thread
+                    if self._server is None and relay_thread is None:
                         return
                     threads = list(self._threads)
-                if not threads:
+                if threads:
+                    for thread in threads:
+                        thread.join(timeout=0.5)
+                elif relay_thread is not None:
+                    relay_thread.join(timeout=0.5)
+                else:
                     return
-                for thread in threads:
-                    thread.join(timeout=0.5)
         except KeyboardInterrupt:  # pragma: no cover - CLI convenience
             self.shutdown()
 

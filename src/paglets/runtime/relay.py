@@ -464,7 +464,12 @@ class RelayMixin:
                 )
                 delivery = response.get("delivery") if isinstance(response, dict) else None
                 if isinstance(delivery, dict):
-                    self._handle_relay_delivery(delivery)
+                    threading.Thread(
+                        target=self._handle_relay_delivery,
+                        args=(delivery,),
+                        name=f"paglets-relay-delivery-{delivery.get('delivery_id', '')}",
+                        daemon=True,
+                    ).start()
             except Exception as exc:
                 self._emit("relay-client-error", error=str(exc))
                 self._relay_stop.wait(1.0)

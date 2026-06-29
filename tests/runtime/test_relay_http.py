@@ -2,6 +2,7 @@
 # Licensed under the MIT License. See LICENSE for details.
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -188,6 +189,100 @@ def test_relay_connect_mode_dispatch_and_bidirectional_messages(tmp_path: Path):
         assert beta.get_proxy(created.agent_id) is None
     finally:
         laptop.stop()
+        beta.stop()
+        hub.stop()
+
+
+def test_connect_mode_serve_forever_waits_for_relay_thread(tmp_path: Path, monkeypatch):
+    host = Host(
+        name="B",
+        api_key="secret",
+        connect_to="http://127.0.0.1:9/paglets",
+        persistence_dir=tmp_path / "B",
+        mesh_multicast=False,
+        mesh_lan_discovery=False,
+    )
+    relay_started = threading.Event()
+    relay_stop = threading.Event()
+
+    def relay_loop() -> None:
+        relay_started.set()
+        relay_stop.wait()
+
+    def start_connect_background() -> None:
+        if host._relay_client_thread is not None:
+            return
+        host._relay_client_thread = threading.Thread(target=relay_loop, daemon=True)
+        host._relay_client_thread.start()
+
+    monkeypatch.setattr(host, "_start_connect_background", start_connect_background)
+    serve_thread = threading.Thread(target=host.serve_forever, daemon=True)
+    serve_thread.start()
+    try:
+        assert relay_started.wait(timeout=1.0)
+        time.sleep(0.1)
+        assert serve_thread.is_alive()
+    finally:
+        relay_stop.set()
+        with host._server_lock:
+            host._relay_client_thread = None
+        serve_thread.join(timeout=1.0)
+        host.stop()
+
+
+def test_relay_client_keeps_polling_while_delivery_is_handled(tmp_path: Path, monkeypatch):
+    hub, beta, _laptop, public_url = _relay_hosts(tmp_path)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    second_seen = threading.Event()
+    handler_calls = 0
+
+    def handle_relay_delivery(delivery: dict) -> None:
+        nonlocal handler_calls
+        handler_calls += 1
+        if handler_calls == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        elif handler_calls == 2:
+            second_seen.set()
+        beta.client.post_json(
+            f"{public_url}/relay/ack/{delivery['delivery_id']}",
+            {"ok": True, "result": {"handled": handler_calls}},
+            timeout=5.0,
+        )
+
+    monkeypatch.setattr(beta, "_handle_relay_delivery", handle_relay_delivery)
+    hub.start_background()
+    beta.start_background()
+
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def call_relay(path: str) -> None:
+        try:
+            results.append(hub.relay_api("B", "GET", path, {}, timeout=2.0))
+        except BaseException as exc:  # pragma: no cover - assertion aid
+            errors.append(exc)
+
+    try:
+        _wait_for(lambda: "B" in hub._relay_nodes)
+        first_call = threading.Thread(target=call_relay, args=("/first",), daemon=True)
+        first_call.start()
+        assert first_started.wait(timeout=1.0)
+
+        second_call = threading.Thread(target=call_relay, args=("/second",), daemon=True)
+        second_call.start()
+        assert second_seen.wait(timeout=1.0)
+
+        release_first.set()
+        first_call.join(timeout=2.0)
+        second_call.join(timeout=2.0)
+        assert not first_call.is_alive()
+        assert not second_call.is_alive()
+        assert not errors
+        assert len(results) == 2
+    finally:
+        release_first.set()
         beta.stop()
         hub.stop()
 
