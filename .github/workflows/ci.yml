@@ -67,13 +67,10 @@ jobs:
         run: |
           python -m venv /tmp/paglets-wheel-smoke
           /tmp/paglets-wheel-smoke/bin/python -m pip install dist/*.whl
-          /tmp/paglets-wheel-smoke/bin/paglets-host --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-benchmark --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-info --help
-          /tmp/paglets-wheel-smoke/bin/paglets-perf-test --help
-          /tmp/paglets-wheel-smoke/bin/paglets-pi-compute --help
-          /tmp/paglets-wheel-smoke/bin/paglets-search --help
-          /tmp/paglets-wheel-smoke/bin/paglets-sysinfo --help
+          /tmp/paglets-wheel-smoke/bin/paglets --help
+          for command in host sys mesh jobs artifacts search examples; do
+            /tmp/paglets-wheel-smoke/bin/paglets "$command" --help
+          done
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v6
