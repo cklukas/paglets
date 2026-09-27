@@ -49,6 +49,7 @@ struct PagletRecord {
     std::uint64_t next_timer = 1;
     std::vector<std::pair<std::int32_t, Cap>> caps;
     std::vector<std::uint64_t> pending_requests;
+    std::int64_t checkpoint_ms = -1;  // per-paglet checkpoint interval; -1: host default
 };
 
 using Warn = std::function<void(const std::string&)>;
@@ -56,6 +57,8 @@ using Warn = std::function<void(const std::string&)>;
 // State directory layout:
 //   modules/<hash>.wasm    paglet modules by SHA-256
 //   paglets/<id>.paglet    record and last memory image, replaced atomically
+//   storage/<id>/          durable storage of a paglet (see Runtime::storage_dir)
+//   work/<id>/             scratch space, cleared when the host starts
 class Store {
 public:
     explicit Store(std::filesystem::path root);
@@ -67,6 +70,8 @@ public:
     std::vector<PagletRecord> load_paglets(const Warn& warn) const;
     std::expected<wasm::Snapshot, std::string> load_image(const std::string& id) const;
     void remove_paglet(const std::string& id);
+
+    const std::filesystem::path& root() const { return root_; }
 
 private:
     std::filesystem::path paglet_file(const std::string& id) const;

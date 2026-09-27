@@ -140,7 +140,8 @@ struct PagletRec {
     SteadyClock::time_point call_deadline{};  // of the guest call in progress
     std::uint64_t handled = 0;
     SteadyClock::time_point last_checkpoint{};
-    bool checkpoint_due = false;  // no stored image yet
+    std::optional<std::chrono::milliseconds> checkpoint_interval;  // per paglet; default from the config
+    bool checkpoint_due = false;                                   // no stored image yet
     std::unique_ptr<wasm::HostImports> imports;
 
     abi::SenderRecord sender(const std::string& host) const {
@@ -190,6 +191,15 @@ struct Runtime::Impl {
     std::uint64_t next_external = 1;
 
     std::optional<Store> store;
+    std::filesystem::path storage_root;  // empty without a state directory
+    std::filesystem::path work_root;
+    bool own_work_root = false;  // a temporary root, removed at shutdown
+
+    void remove_directories(const PagletId& id) {
+        std::error_code ec;
+        if (!storage_root.empty()) std::filesystem::remove_all(storage_root / id, ec);
+        std::filesystem::remove_all(work_root / id, ec);
+    }
     std::thread clock;
 
     // -- helpers (mu held) --------------------------------------------------
@@ -392,6 +402,7 @@ struct Runtime::Impl {
         }
         rec.clones.clear();
         if (store) store->remove_paglet(rec.id);
+        remove_directories(rec.id);
         retire(rec);
         release_lane(rec);
         endings[rec.id] = Ending{rec.id, failed, std::move(reason)};
@@ -412,6 +423,7 @@ struct Runtime::Impl {
         r.next_timer = rec.next_timer;
         r.caps.assign(rec.caps.begin(), rec.caps.end());
         r.pending_requests.assign(rec.pending_requests.begin(), rec.pending_requests.end());
+        r.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         if (auto ok = store->save_paglet(r, snap); !ok) {
             log(3, rec.id, "persisting the paglet failed: " + ok.error());
         } else {
@@ -659,6 +671,7 @@ public:
         const PagletId id = new_paglet_id();
         PagletRec& child = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
         child.lane_hint = rec_.lane;
+        child.checkpoint_interval = rec_.checkpoint_interval;
         rt_.enqueue_start(child, abi::EventKind::created, std::move(spec.args), std::move(*caps), std::nullopt);
         return rt_.add_cap(rec_, rt_.endpoint_to(id));
     }
@@ -694,6 +707,7 @@ public:
                     id, rec_.module, rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust, rec_.owner);
                 clone.awaiting_image = true;
                 clone.lane_hint = rec_.lane;
+                clone.checkpoint_interval = rec_.checkpoint_interval;
                 rec_.clones.push_back(PendingClone{id, std::move(arg.args), std::move(*caps)});
                 return rt_.add_cap(rec_, rt_.endpoint_to(id));
             }
@@ -959,7 +973,8 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
             schedule(SteadyClock::now() + std::chrono::milliseconds(*wake), Deadline{Deadline::Type::wake, rec.id, 0});
         }
     } else if (store && rec.instance &&
-               (rec.checkpoint_due || SteadyClock::now() - rec.last_checkpoint >= config.checkpoint_interval)) {
+               (rec.checkpoint_due || SteadyClock::now() - rec.last_checkpoint >=
+                                          rec.checkpoint_interval.value_or(config.checkpoint_interval))) {
         lock.unlock();
         auto snap = snapshot(rec);
         lock.lock();
@@ -1093,6 +1108,7 @@ void Runtime::Impl::recover() {
         rec.next_handle = r.next_handle;
         rec.next_correlation = r.next_correlation;
         rec.next_timer = r.next_timer;
+        if (r.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(r.checkpoint_ms);
         rec.caps.clear();
         for (auto& [h, cap] : r.caps) {
             if (cap.kind == Cap::Kind::timer) {
@@ -1117,6 +1133,20 @@ void Runtime::Impl::recover() {
 
 Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {
     wasm::ensure_runtime();
+    // Scratch space starts empty: with a state directory under it, else in a
+    // temporary directory of this runtime.
+    std::error_code ec;
+    if (!impl_->config.state_dir.empty()) {
+        impl_->storage_root = impl_->config.state_dir / "storage";
+        impl_->work_root = impl_->config.state_dir / "work";
+        std::filesystem::remove_all(impl_->work_root, ec);
+    } else {
+        std::array<std::uint8_t, 8> suffix{};
+        wasm::fill_random(suffix);
+        impl_->work_root = std::filesystem::temp_directory_path(ec) /
+                           ("paglets-work-" + to_hex(std::span<const std::uint8_t>(suffix)));
+        impl_->own_work_root = true;
+    }
     if (!impl_->config.state_dir.empty()) {
         impl_->store.emplace(impl_->config.state_dir);
         std::lock_guard lock(impl_->mu);
@@ -1185,6 +1215,10 @@ void Runtime::shutdown(bool save_state) {
     instances.clear();  // before the records and executors they refer to
     std::lock_guard lock(impl_->mu);
     impl_->retired.clear();
+    if (impl_->own_work_root) {
+        std::error_code ec;
+        std::filesystem::remove_all(impl_->work_root, ec);
+    }
 }
 
 const Config& Runtime::config() const {
@@ -1225,6 +1259,7 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
     if (auto ok = check_paglet_module(it->second->info(), options.trust); !ok) return std::unexpected(ok.error());
     const PagletId id = new_paglet_id();
     PagletRec& rec = impl_->new_paglet(id, it->second, options.trust, std::move(options.owner));
+    rec.checkpoint_interval = options.checkpoint_interval;
     impl_->enqueue_start(rec, abi::EventKind::created, std::move(options.args), {}, std::nullopt);
     return id;
 }
@@ -1342,6 +1377,30 @@ std::optional<Ending> Runtime::ending(const PagletId& id) const {
     auto it = impl_->endings.find(id);
     if (it == impl_->endings.end()) return std::nullopt;
     return it->second;
+}
+
+namespace {
+
+std::expected<std::filesystem::path, std::int32_t> ensure_directory(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    if (ec) return std::unexpected(abi::internal);
+    return path;
+}
+
+}  // namespace
+
+std::expected<std::filesystem::path, std::int32_t> Runtime::storage_dir(const PagletId& id) {
+    std::lock_guard lock(impl_->mu);
+    if (impl_->find(id) == nullptr) return std::unexpected(abi::not_found);
+    if (impl_->storage_root.empty()) return std::unexpected(abi::unsupported);
+    return ensure_directory(impl_->storage_root / id);
+}
+
+std::expected<std::filesystem::path, std::int32_t> Runtime::scratch_dir(const PagletId& id) {
+    std::lock_guard lock(impl_->mu);
+    if (impl_->find(id) == nullptr) return std::unexpected(abi::not_found);
+    return ensure_directory(impl_->work_root / id);
 }
 
 std::vector<int> Runtime::worker_processes() const {

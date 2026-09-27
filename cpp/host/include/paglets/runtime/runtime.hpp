@@ -70,6 +70,9 @@ struct CreateOptions {
     Bytes args;
     TrustClass trust = TrustClass::roaming;
     std::string owner = "local";
+    // Checkpoint policy of this paglet (default: Config::checkpoint_interval);
+    // children and clones inherit it.
+    std::optional<std::chrono::milliseconds> checkpoint_interval;
 };
 
 struct Reply {
@@ -128,6 +131,13 @@ public:
     std::optional<PagletInfo> info(const PagletId& id) const;
     std::vector<PagletInfo> list() const;
     std::optional<Ending> ending(const PagletId& id) const;
+
+    // Host directories of a paglet, created on first use and removed when
+    // the paglet ends: durable storage (needs a state directory; survives
+    // restarts) and scratch space (the whole scratch root is cleared when
+    // the host starts). Paglets reach them through system paglets.
+    std::expected<std::filesystem::path, std::int32_t> storage_dir(const PagletId& id);
+    std::expected<std::filesystem::path, std::int32_t> scratch_dir(const PagletId& id);
 
     // Process IDs of the running worker processes (none in-process).
     std::vector<int> worker_processes() const;

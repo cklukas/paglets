@@ -58,7 +58,7 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
 }
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
-    w.write_map_header(10);
+    w.write_map_header(11);
     put(w, "id", p.id);
     put(w, "module", p.module);
     put(w, "trust", p.trust);
@@ -75,6 +75,7 @@ void encode_record(msgpack::Writer& w, const PagletRecord& p) {
         encode_cap(w, cap);
     }
     put(w, "pending_requests", p.pending_requests);
+    put(w, "checkpoint_ms", p.checkpoint_ms);
 }
 
 bool decode_record(msgpack::Reader& r, PagletRecord& p) {
@@ -102,6 +103,7 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
             return true;
         }
         if (k == "pending_requests") return msgpack::read_value(r, p.pending_requests);
+        if (k == "checkpoint_ms") return msgpack::read_value(r, p.checkpoint_ms);
         return r.skip();
     });
 }

@@ -9,6 +9,7 @@
 #include <functional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace paglets::test {
@@ -27,6 +28,18 @@ std::string guest_path(const std::string& file);  // empty if the guest is unava
 struct Registrar {
     Registrar(const char* name, std::function<void()> body) { registry().push_back({name, std::move(body)}); }
 };
+
+// Text of an std::expected error: strings as they are, error codes as numbers.
+template <class E>
+std::string describe_error(const E& error) {
+    if constexpr (std::is_convertible_v<const E&, std::string>) {
+        return std::string(error);
+    } else {
+        std::ostringstream os;
+        os << "error code " << error;
+        return os.str();
+    }
+}
 
 struct RequireFailed {};
 struct Skipped {
@@ -56,12 +69,14 @@ struct Skipped {
     } while (0)
 
 // For std::expected results: fails with the contained error message.
-#define REQUIRE_OK(result)                                                                                            \
-    do {                                                                                                              \
-        if (!(result)) {                                                                                              \
-            ::paglets::test::record_failure(__FILE__, __LINE__, std::string(#result " failed: ") + (result).error()); \
-            throw ::paglets::test::RequireFailed{};                                                                   \
-        }                                                                                                             \
+#define REQUIRE_OK(result)                                                                             \
+    do {                                                                                               \
+        if (!(result)) {                                                                               \
+            ::paglets::test::record_failure(                                                           \
+                __FILE__, __LINE__,                                                                    \
+                std::string(#result " failed: ") + ::paglets::test::describe_error((result).error())); \
+            throw ::paglets::test::RequireFailed{};                                                    \
+        }                                                                                              \
     } while (0)
 
 #define CHECK_EQ(a, b)                                                      \

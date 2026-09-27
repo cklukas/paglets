@@ -648,6 +648,93 @@ PAGLETS_TEST("runtime: without a checkpoint, a crash loses the changes since the
     std::filesystem::remove_all(dir);
 }
 
+PAGLETS_TEST("runtime: storage survives restarts, scratch space does not; both end with the paglet") {
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    rt::PagletId id;
+    std::filesystem::path storage;
+    std::filesystem::path scratch;
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        Fixture f(std::move(c));
+        id = f.create("conformance.wasm");
+        f.runtime->wait_idle();
+        auto s1 = f.runtime->storage_dir(id);
+        auto s2 = f.runtime->scratch_dir(id);
+        REQUIRE_OK(s1);
+        REQUIRE_OK(s2);
+        storage = *s1;
+        scratch = *s2;
+        CHECK(storage != scratch);
+        REQUIRE(paglets::wasm::write_file((storage / "kept").string(), text("durable")).has_value());
+        REQUIRE(paglets::wasm::write_file((scratch / "temp").string(), text("scratch")).has_value());
+        CHECK_EQ(f.runtime->storage_dir("no-such-paglet").error(), static_cast<std::int32_t>(abi::not_found));
+    }
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        Fixture f(std::move(c));
+        REQUIRE(f.runtime->info(id).has_value());
+        CHECK(std::filesystem::exists(storage / "kept"));
+        CHECK(!std::filesystem::exists(scratch / "temp"));
+        REQUIRE(f.runtime->dispose(id).has_value());
+        f.runtime->wait_idle();
+        CHECK(!std::filesystem::exists(storage));
+    }
+    // Without a state directory there is scratch space but no storage.
+    {
+        Fixture f;
+        auto other = f.create("conformance.wasm");
+        f.runtime->wait_idle();
+        CHECK_EQ(f.runtime->storage_dir(other).error(), static_cast<std::int32_t>(abi::unsupported));
+        auto s = f.runtime->scratch_dir(other);
+        REQUIRE_OK(s);
+        scratch = *s;
+        CHECK(std::filesystem::is_directory(scratch));
+    }
+    CHECK(!std::filesystem::exists(scratch));  // the temporary scratch root is gone with the runtime
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: checkpoint policy per paglet") {
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    rt::PagletId eager;
+    rt::PagletId lazy;
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        c.checkpoint_interval = std::chrono::hours(1);
+        Fixture f(std::move(c));
+        auto hash = f.module("conformance.wasm");
+        eager = *f.runtime->create(hash, rt::CreateOptions{.checkpoint_interval = 0ms});
+        lazy = *f.runtime->create(hash);
+        f.runtime->wait_idle();
+        for (int i = 0; i < 3; ++i) {
+            f.call(eager, "count");
+            f.call(lazy, "count");
+        }
+        // The eager paglet's children inherit its policy.
+        const auto kid = f.target_of(eager, static_cast<std::int32_t>(f.code(eager, "child", Cmd{})));
+        f.call(kid, "count");
+        f.call(kid, "count");
+        f.runtime->wait_idle();
+        f.runtime->shutdown(false);  // as after a crash
+        {
+            rt::Config c2;
+            c2.state_dir = dir;
+            Fixture g(std::move(c2));
+            CHECK_EQ(dec<std::int64_t>(g.call(eager, "count").payload), 4);
+            CHECK_EQ(dec<std::int64_t>(g.call(lazy, "count").payload), 1);
+            CHECK_EQ(dec<std::int64_t>(g.call(kid, "count").payload), 3);
+        }
+    }
+    std::filesystem::remove_all(dir);
+}
+
 PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
     const auto dir =
         std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
