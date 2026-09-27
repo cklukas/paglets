@@ -10,6 +10,8 @@
 
 #include <paglets/paglet.hpp>
 
+#include <cstdio>
+
 #include <string>
 #include <vector>
 
@@ -149,6 +151,13 @@ public:
             const std::int64_t until = paglets::now_ns(abi::Clock::monotonic) + c.ms * 1'000'000;
             while (paglets::now_ns(abi::Clock::monotonic) < until) {
             }
+            m.reply();
+        });
+        // WASI stdout and stderr go to the host log.
+        r.on<Cmd>("print", [](const Cmd& c, Message& m) {
+            std::fwrite(c.payload.data(), 1, c.payload.size(), stdout);
+            std::fflush(stdout);
+            std::fputs(c.name.c_str(), stderr);  // unbuffered, without newline
             m.reply();
         });
         r.on("malformed_send", [](Message& m) {

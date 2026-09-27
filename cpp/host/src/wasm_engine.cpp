@@ -177,6 +177,43 @@ static_assert(std::size(paglets_natives_template) == std::size(abi::import_names
 // WAMR sorts the array in place when registering it.
 NativeSymbol paglets_natives[std::size(paglets_natives_template)];
 
+// WASI fd_write for stdout and stderr, taking precedence over WAMR's libc-wasi
+// (natives registered later are found first). No file descriptors are open
+// besides the standard ones, so other descriptors are EBADF.
+constexpr std::int32_t wasi_ebadf = 8;
+constexpr std::int32_t wasi_efault = 21;
+
+std::int32_t native_fd_write(wasm_exec_env_t env, std::int32_t fd, std::uint32_t iovs, std::uint32_t iovs_len,
+                             std::uint32_t nwritten_ptr) {
+    wasm_module_inst_t inst = wasm_runtime_get_module_inst(env);
+    Instance* self = instance_of(env);
+    if (fd != 1 && fd != 2) return wasi_ebadf;
+    const std::uint64_t table = std::uint64_t{iovs_len} * 8;
+    if (table > std::numeric_limits<std::uint32_t>::max() || !wasm_runtime_validate_app_addr(inst, iovs, table) ||
+        !wasm_runtime_validate_app_addr(inst, nwritten_ptr, 4)) {
+        return wasi_efault;
+    }
+    const auto* vec = static_cast<const std::uint8_t*>(wasm_runtime_addr_app_to_native(inst, iovs));
+    std::uint32_t total = 0;
+    for (std::uint32_t i = 0; i < iovs_len; ++i) {
+        std::uint32_t buf = 0;
+        std::uint32_t len = 0;
+        std::memcpy(&buf, vec + 8 * i, 4);
+        std::memcpy(&len, vec + 8 * i + 4, 4);
+        if (len == 0) continue;
+        if (!wasm_runtime_validate_app_addr(inst, buf, len)) return wasi_efault;
+        const auto* data = static_cast<const char*>(wasm_runtime_addr_app_to_native(inst, buf));
+        if (self != nullptr) self->write_output(fd, std::string_view(data, len));
+        total += len;
+    }
+    std::memcpy(wasm_runtime_addr_app_to_native(inst, nwritten_ptr), &total, 4);
+    return 0;
+}
+
+NativeSymbol wasi_natives[] = {
+    {"fd_write", reinterpret_cast<void*>(native_fd_write), "(iiii)i", nullptr},
+};
+
 std::string error_text(const char* buf) {
     return std::string(buf[0] ? buf : "unknown error");
 }
@@ -255,6 +292,10 @@ void ensure_runtime() {
         if (!wasm_runtime_register_natives("paglets", paglets_natives,
                                            sizeof paglets_natives / sizeof paglets_natives[0])) {
             std::cerr << "paglets: registering host functions failed\n";
+            std::abort();
+        }
+        if (!wasm_runtime_register_natives("wasi_snapshot_preview1", wasi_natives, std::size(wasi_natives))) {
+            std::cerr << "paglets: registering WASI output functions failed\n";
             std::abort();
         }
     });
@@ -406,8 +447,10 @@ std::expected<std::uint64_t, std::string> Instance::call(std::string_view name, 
         std::array<char, exception_buffer_size> ex{};
         std::string message = wasm_runtime_copy_exception(inst_, ex.data()) ? std::string(ex.data()) : "unknown trap";
         wasm_runtime_clear_exception(inst_);
+        flush_output();
         return std::unexpected(message);
     }
+    flush_output();
     switch (result_cells) {
         case 0: return 0;
         case 1: return argv[0];
@@ -501,6 +544,31 @@ std::expected<void, std::string> Instance::set_global_bits(std::string_view name
     const std::size_t width = (g.kind == WASM_I64 || g.kind == WASM_F64) ? 8 : 4;
     std::memcpy(g.global_data, &bits, width);
     return {};
+}
+
+void Instance::write_output(int fd, std::string_view bytes) {
+    constexpr std::size_t max_line = 4096;
+    std::string& pending = output_[fd == 2 ? 1 : 0];
+    for (char c : bytes) {
+        if (c == '\n' || pending.size() >= max_line) {
+            const std::string line = std::move(pending);
+            pending.clear();
+            const auto level = fd == 2 ? abi::LogLevel::warning : abi::LogLevel::info;
+            if (imports_ != nullptr) {
+                imports_->log(static_cast<std::int32_t>(level), line);
+            } else {
+                log(line);
+            }
+            if (c == '\n') continue;
+        }
+        pending.push_back(c);
+    }
+}
+
+void Instance::flush_output() {
+    for (int fd : {1, 2}) {
+        if (!output_[fd - 1].empty()) write_output(fd, "\n");
+    }
 }
 
 void Instance::set_imports(HostImports* imports) {

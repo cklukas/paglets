@@ -203,8 +203,10 @@ one is passed in `caps`.
 `wasi_snapshot_preview1` functions available to every paglet: `args_get`,
 `args_sizes_get`, `environ_get`, `environ_sizes_get` (always empty),
 `clock_res_get`, `clock_time_get`, `random_get`, `sched_yield`, `proc_exit`
-(fails the paglet), `fd_write` (stdout and stderr; they go to the host's
-stdout and stderr until the log redirection of WP5 is done), `fd_close`,
+(fails the paglet), `fd_write` (stdout and stderr go to the host log line by
+line, stdout at level info and stderr at level warning; a partial line is
+logged when the call that wrote it returns; other descriptors are `EBADF`),
+`fd_close`,
 `fd_seek`, `fd_fdstat_get`, `fd_prestat_get`, `fd_prestat_dir_name` (no
 directories are preopened). File access inside mounted `dir` capabilities is
 added with the files system paglet (WP10).

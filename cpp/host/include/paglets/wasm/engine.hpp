@@ -156,6 +156,13 @@ public:
     void set_log_sink(LogSink sink) { log_sink_ = std::move(sink); }
     void log(std::string_view text) const;
 
+    // Guest stdout (fd 1) and stderr (fd 2), written through WASI fd_write:
+    // collected into lines that go to the log import (stdout at level info,
+    // stderr at level warning). A partial line is emitted when the call that
+    // wrote it returns.
+    void write_output(int fd, std::string_view bytes);
+    void flush_output();
+
     // Attaches the host side of the paglet imports; nullptr detaches. The
     // object must outlive every call into the instance.
     void set_imports(HostImports* imports);
@@ -172,6 +179,7 @@ private:
     std::unordered_map<std::string, void*, StringHash, std::equal_to<>> functions_;  // export lookup cache
     LogSink log_sink_;
     HostImports* imports_ = nullptr;
+    std::string output_[2];  // pending partial lines of stdout and stderr
 };
 
 std::expected<std::vector<std::uint8_t>, std::string> read_file(const std::string& path);

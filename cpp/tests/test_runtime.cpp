@@ -108,6 +108,11 @@ struct Fixture {
         return info.target.substr(std::string("paglet:").size());
     }
 
+    bool logged_exactly(std::string_view line) {
+        std::lock_guard lock(log_mu);
+        return std::ranges::find(log, line) != log.end();
+    }
+
     bool logged(std::string_view needle) {
         std::lock_guard lock(log_mu);
         return std::ranges::any_of(log, [&](const std::string& l) { return l.find(needle) != std::string::npos; });
@@ -549,6 +554,17 @@ PAGLETS_TEST("abi C30: reserved message names are refused") {
 
 // ---------------------------------------------------------------------------
 // Samples and persistence
+
+PAGLETS_TEST("runtime: guest stdout and stderr go to the log") {
+    Fixture f;
+    auto id = f.create("conformance.wasm");
+    CHECK_EQ(f.cmd(id, "print", Cmd{.name = "partial on stderr", .payload = text("first line\nsecond line\n")}).status,
+             0);
+    f.runtime->wait_idle();
+    CHECK(f.logged_exactly("first line"));
+    CHECK(f.logged_exactly("second line"));
+    CHECK(f.logged_exactly("partial on stderr"));  // emitted when the call returned
+}
 
 PAGLETS_TEST("runtime: hello sample") {
     Fixture f;
