@@ -17,64 +17,51 @@ delivery, transfer envelopes, and runtime resource cleanup.
 
 ## Main Modules
 
-`paglets.runtime.host`
-: The orchestration center. `Host` is the public runtime facade and owns active
+- **`paglets.runtime.host`**: The orchestration center. `Host` is the public runtime facade and owns active
   child controllers, inactive records, service records, storage roots, mesh
   state, authentication, placement, and lifecycle operations.
 
-`paglets.runtime.lifecycle`
-: Contains the `Host` movement and lifecycle flows: create, dispatch, clone,
+- **`paglets.runtime.lifecycle`**: Contains the `Host` movement and lifecycle flows: create, dispatch, clone,
   retract, deactivate, activate, dispose, transfer tickets, and movement
   envelope handling.
 
-`paglets.runtime.resident_services`
-: Contains resident service declaration, activation, service leasing, registry
+- **`paglets.runtime.resident_services`**: Contains resident service declaration, activation, service leasing, registry
   lookup, and idle shutdown behavior.
 
-`paglets.runtime.child_calls`
-: Routes host calls arriving from child processes and completes child-initiated
+- **`paglets.runtime.child_calls`**: Routes host calls arriving from child processes and completes child-initiated
   dispatch, clone, deactivate, dispose, service, storage, and messaging
   operations.
 
-`paglets.runtime.inactive_records`
-: Loads and writes inactive records, schedules activation, drains queued
+- **`paglets.runtime.inactive_records`**: Loads and writes inactive records, schedules activation, drains queued
   messages, and deactivates active paglets during shutdown.
 
-`paglets.runtime.http_api`
-: Contains the host HTTP server and request handler. It maps endpoint shape,
+- **`paglets.runtime.http_api`**: Contains the host HTTP server and request handler. It maps endpoint shape,
   authentication, JSON control payloads, binary movement payloads, admin calls,
   and relay HTTP endpoints onto `Host` methods without owning host state.
 
-`paglets.runtime.relay`
-: Contains relay/connect-mode state, relay delivery queues, polling,
+- **`paglets.runtime.relay`**: Contains relay/connect-mode state, relay delivery queues, polling,
   acknowledgements, local relay URL submission, and client registration loops.
   `Host` mixes this behavior in while keeping the public facade at
   `paglets.runtime.host.Host`.
 
-`paglets.runtime.binding`
-: Resolves bind hosts, public host names, auto LAN addresses, and
+- **`paglets.runtime.binding`**: Resolves bind hosts, public host names, auto LAN addresses, and
   `--bind-public` behavior for the host CLI/runtime boundary.
 
-`paglets.runtime.process_runtime`
-: Compatibility facade for the split process runtime modules.
+- **`paglets.runtime.process_runtime`**: Compatibility facade for the split process runtime modules.
 
 `paglets.runtime.process_controller`, `paglets.runtime.child_endpoint`,
 `paglets.runtime.child_facade`, `paglets.runtime.child_bootstrap`, and
-`paglets.runtime.process_protocol`
-: Implement parent-side child process control, child pipe protocol handling,
+- **`paglets.runtime.process_protocol`**: Implement parent-side child process control, child pipe protocol handling,
   child-visible host/storage facades, process bootstrap, and shared protocol
   values.
 
-`paglets.runtime.mailbox`
-: Implements queued delivery, priority ordering, mailbox status, and wait/notify
+- **`paglets.runtime.mailbox`**: Implements queued delivery, priority ordering, mailbox status, and wait/notify
   behavior for message handlers.
 
-`paglets.runtime.envelope`
-: Defines the transfer envelope used for create, dispatch, clone, retract, and
+- **`paglets.runtime.envelope`**: Defines the transfer envelope used for create, dispatch, clone, retract, and
   activation flows.
 
-`paglets.runtime.resources`
-: Tracks resource cleanup callbacks and reports cleanup failures as lifecycle
+- **`paglets.runtime.resources`**: Tracks resource cleanup callbacks and reports cleanup failures as lifecycle
   errors.
 
 ## Implementation Notes
@@ -98,40 +85,123 @@ scripts are not valid paglet classes.
 
 ## API Reference
 
-::: paglets.runtime.host
+<!-- api: paglets.runtime.host -->
+### `paglets.runtime.host`
 
-::: paglets.runtime.lifecycle
+#### `Host`
 
-::: paglets.runtime.resident_services
+```python
+class Host(_LifecycleMixin, _ResidentServicesMixin, _ChildCallMixin, _InactiveRecordsMixin, RelayMixin)
+```
 
-::: paglets.runtime.child_calls
+A paglet host/context served over a small JSON HTTP API.
 
-::: paglets.runtime.inactive_records
+One process can run one host. For development, one Python process can also
+start multiple hosts on different ports. Migration always uses the same
+envelope model: class path + dataclass state + lifecycle metadata.
+<!-- /api -->
+<!-- api: paglets.runtime.lifecycle -->
+### `paglets.runtime.lifecycle`
+<!-- /api -->
+<!-- api: paglets.runtime.resident_services -->
+### `paglets.runtime.resident_services`
+<!-- /api -->
+<!-- api: paglets.runtime.child_calls -->
+### `paglets.runtime.child_calls`
+<!-- /api -->
+<!-- api: paglets.runtime.inactive_records -->
+### `paglets.runtime.inactive_records`
+<!-- /api -->
+<!-- api: paglets.runtime.http_api -->
+### `paglets.runtime.http_api`
+<!-- /api -->
+<!-- api: paglets.runtime.relay -->
+### `paglets.runtime.relay`
+<!-- /api -->
+<!-- api: paglets.runtime.binding -->
+### `paglets.runtime.binding`
+<!-- /api -->
+<!-- api: paglets.runtime.process_runtime -->
+### `paglets.runtime.process_runtime`
+<!-- /api -->
+<!-- api: paglets.runtime.process_controller -->
+### `paglets.runtime.process_controller`
 
-::: paglets.runtime.http_api
+#### `ChildProcessController`
 
-::: paglets.runtime.relay
+```python
+class ChildProcessController
+```
 
-::: paglets.runtime.binding
+Parent-side controller for one isolated paglet child process.
+<!-- /api -->
+<!-- api: paglets.runtime.child_endpoint -->
+### `paglets.runtime.child_endpoint`
+<!-- /api -->
+<!-- api: paglets.runtime.child_facade -->
+### `paglets.runtime.child_facade`
+<!-- /api -->
+<!-- api: paglets.runtime.child_bootstrap -->
+### `paglets.runtime.child_bootstrap`
+<!-- /api -->
+<!-- api: paglets.runtime.process_protocol -->
+### `paglets.runtime.process_protocol`
+<!-- /api -->
+<!-- api: paglets.runtime.mailbox -->
+### `paglets.runtime.mailbox`
 
-::: paglets.runtime.process_runtime
+#### `MessageMailbox`
 
-::: paglets.runtime.process_controller
+```python
+class MessageMailbox
+```
 
-::: paglets.runtime.child_endpoint
+Priority mailbox for one paglet.
+<!-- /api -->
+<!-- api: paglets.runtime.envelope -->
+### `paglets.runtime.envelope`
 
-::: paglets.runtime.child_facade
+#### `PagletEnvelope`
 
-::: paglets.runtime.child_bootstrap
+```python
+class PagletEnvelope
+```
 
-::: paglets.runtime.process_protocol
+Serialized mobile-object envelope transferred between hosts.
 
-::: paglets.runtime.mailbox
+| Field | Type | Default |
+|---|---|---|
+| `kind` | `EnvelopeKind` | required |
+| `agent_id` | `str` | required |
+| `agent_class_name` | `str` | required |
+| `state_class_name` | `str` | required |
+| `state` | `dict[str, Any]` | required |
+| `source_host_name` | `str` | required |
+| `source_host_address` | `str` | required |
+| `target_host_name` | `str` | required |
+| `target_host_address` | `str` | required |
+| `clone_of` | `str | None` | `None` |
+| `metadata` | `dict[str, Any]` | `dict()` |
+<!-- /api -->
+<!-- api: paglets.runtime.resources -->
+### `paglets.runtime.resources`
 
-::: paglets.runtime.envelope
+#### `ResourceCleanupError`
 
-::: paglets.runtime.resources
+```python
+class ResourceCleanupError(LifecycleError)
+```
 
+Raised when lifecycle-managed resource cleanup fails.
+
+#### `ResourceRegistry`
+
+```python
+class ResourceRegistry
+```
+
+Lifecycle-managed cleanup callbacks owned by one paglet.
+<!-- /api -->
 ## Related Pages
 
 - [Core](core.md) covers the paglet programming model.

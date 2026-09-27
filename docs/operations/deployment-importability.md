@@ -27,7 +27,7 @@ classes reliably.
 For local multi-host development from one checkout:
 
 ```bash
-uv sync --dev --extra docs
+uv sync --dev
 uv run paglets host --name alpha --port 8765 --mesh-version dev
 uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
 ```

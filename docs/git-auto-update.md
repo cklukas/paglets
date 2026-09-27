@@ -8,10 +8,11 @@ logging into each machine.
 The feature is host-side only. Client commands such as `paglets examples pi`,
 `paglets sys`, and `paglets search` do not need extra flags.
 
-!!! warning "Trusted networks only"
-    The update endpoint runs `git fetch`, `git pull`, and `uv sync`. Use it only
-    on trusted direct local or lab meshes. Relay/connect mode rejects
-    auto-update and does not accept update requests.
+> [!WARNING]
+> **Trusted networks only.**
+> The update endpoint runs `git fetch`, `git pull`, and `uv sync`. Use it only
+> on trusted direct local or lab meshes. Relay/connect mode rejects
+> auto-update and does not accept update requests.
 
 ## Quick Start
 
@@ -57,25 +58,15 @@ On startup, a host records the commit hash that the current Python process
 started from. It then serializes git and dependency operations through a lock
 inside the checkout.
 
-```mermaid
-flowchart TD
-    Start["paglets host starts with --auto-update-from-git"] --> Repo["Find git checkout"]
-    Repo --> Head["Record process_start_head"]
-    Head --> Lock["Acquire .git/paglets-auto-update.lock"]
-    Lock --> Status["git status --porcelain"]
-    Status --> Dirty{"Clean checkout?"}
-    Dirty -- "no" --> Cancel["Print message and cancel startup"]
-    Dirty -- "yes" --> Fetch["git fetch"]
-    Fetch --> Pull["git pull"]
-    Pull --> Compare{"HEAD changed from process_start_head?"}
-    Compare -- "no" --> Unlock["Release lock"]
-    Compare -- "yes" --> Sync["uv sync"]
-    Sync --> SyncOk{"uv sync ok?"}
-    SyncOk -- "no" --> Fail["Report failure; do not restart"]
-    SyncOk -- "yes" --> Reexec["Re-exec same host command"]
-    Reexec --> Unlock
-    Unlock --> Serve["Host starts serving"]
-```
+1. `paglets host` starts with `--auto-update-from-git`.
+2. It finds the git checkout and records `process_start_head`.
+3. It acquires `.git/paglets-auto-update.lock` and runs `git status --porcelain`.
+4. If the checkout is not clean, it prints a message and cancels startup.
+5. Otherwise it runs `git fetch` and `git pull`.
+6. If `HEAD` changed from `process_start_head`, it runs `uv sync`:
+   - if `uv sync` fails, it reports the failure and does not restart;
+   - if `uv sync` succeeds, it re-executes the same host command.
+7. It releases the lock and the host starts serving.
 
 The lock path is `.git/paglets-auto-update.lock`. It prevents multiple paglets
 host processes that share one checkout from running `git pull` or `uv sync`
@@ -93,30 +84,21 @@ configured `--peer` URLs and known mesh host URLs. Normal mesh membership still
 uses the existing code-version gate, so mismatched peers are not selected for
 dispatch or clone. The update request is separate from normal mesh membership.
 
-```mermaid
-sequenceDiagram
-    participant Dev as Developer Machine
-    participant Local as Local Host
-    participant Remote as Remote Host
-    participant Git as Git Remote
-
-    Dev->>Git: git push
-    Dev->>Local: start/restart paglets host --auto-update-from-git
-    Local->>Local: git fetch + git pull + uv sync if needed
-    Local->>Remote: POST /admin/git-update { target_hash }
-    Remote->>Git: git fetch
-    Remote->>Remote: verify target_hash exists
-    alt target hash exists
-        Remote->>Remote: git pull
-        Remote->>Remote: uv sync if process-start HEAD is stale
-        Remote-->>Local: update ok, restart scheduled if needed
-        Remote->>Remote: graceful shutdown
-        Remote->>Remote: CLI main thread re-execs through uv
-    else target hash missing
-        Remote-->>Local: target-missing error
-        Local->>Dev: print "commit may not have been pushed"
-    end
-```
+1. **Developer Machine → Git Remote**: git push
+2. **Developer Machine → Local Host**: start/restart paglets host --auto-update-from-git
+3. **Local Host**: git fetch + git pull + uv sync if needed
+4. **Local Host → Remote Host**: POST /admin/git-update { target_hash }
+5. **Remote Host → Git Remote**: git fetch
+6. **Remote Host**: verify target_hash exists
+7. If target hash exists:
+   1. **Remote Host**: git pull
+   2. **Remote Host**: uv sync if process-start HEAD is stale
+   3. **Remote Host → Local Host** (reply): update ok, restart scheduled if needed
+   4. **Remote Host**: graceful shutdown
+   5. **Remote Host**: CLI main thread re-execs through uv
+8. If target hash missing:
+   1. **Remote Host → Local Host** (reply): target-missing error
+   2. **Local Host → Developer Machine**: print "commit may not have been pushed"
 
 If a remote host reports that the requested commit is missing after `git fetch`,
 the requesting host prints the error. In practice this usually means the local
@@ -128,26 +110,18 @@ host to broadcast the commit again.
 Multiple hosts may run from the same project folder, for example several local
 host processes on different ports. They all share one checkout lock.
 
-```mermaid
-sequenceDiagram
-    participant A as Host alpha
-    participant B as Host beta
-    participant L as .git/paglets-auto-update.lock
-    participant R as Shared checkout
-
-    A->>L: acquire lock
-    B->>L: wait
-    A->>R: git fetch + git pull
-    A->>R: uv sync if HEAD differs from alpha start hash
-    A->>L: release lock
-    B->>L: acquire lock
-    B->>R: read current HEAD
-    B->>R: git fetch + git pull
-    B->>R: uv sync if HEAD differs from beta start hash
-    B->>L: release lock
-    A->>A: restart if checkout changed
-    B->>B: restart if checkout changed
-```
+1. **Host alpha → .git/paglets-auto-update.lock**: acquire lock
+2. **Host beta → .git/paglets-auto-update.lock**: wait
+3. **Host alpha → Shared checkout**: git fetch + git pull
+4. **Host alpha → Shared checkout**: uv sync if HEAD differs from alpha start hash
+5. **Host alpha → .git/paglets-auto-update.lock**: release lock
+6. **Host beta → .git/paglets-auto-update.lock**: acquire lock
+7. **Host beta → Shared checkout**: read current HEAD
+8. **Host beta → Shared checkout**: git fetch + git pull
+9. **Host beta → Shared checkout**: uv sync if HEAD differs from beta start hash
+10. **Host beta → .git/paglets-auto-update.lock**: release lock
+11. **Host alpha**: restart if checkout changed
+12. **Host beta**: restart if checkout changed
 
 The second host still restarts when the shared checkout already moved before it
 got the lock. Restart decisions compare the current checkout `HEAD` with each

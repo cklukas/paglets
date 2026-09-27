@@ -19,8 +19,18 @@ virtual environments, caches, build outputs, or other ignored artifacts.
 
 ## Documentation
 
-When adding or changing user-visible features, update the MkDocs documentation
-under `docs/`.
+When adding or changing user-visible features, update the documentation under
+`docs/`. The site is built with ckdocs (from ck-git-hosting, configured in
+`ckdocs.yml`). Keep pages within the ckdocs Markdown subset: no raw HTML,
+footnotes, definition lists, math, or Mermaid; use `> [!NOTE]`-style alerts,
+tables, and lists instead.
+
+API reference sections (`<!-- api: module -->`) and code snippets
+(`<!-- snippet: path:section -->`, with `--8<-- [start:section]` markers in the
+source) are generated into the Markdown by `tools/docs_sync.py`. Run
+`uv run python tools/docs_sync.py` after changing docstrings, signatures, or
+marked source sections, and commit the result; never edit generated sections by
+hand.
 
 Also update root-level `README.md` when the change affects installation,
 quick-start usage, command-line entry points, major examples, public APIs, or
@@ -71,7 +81,7 @@ committed and pushed.
 4. Update release metadata:
    - bump `project.version` in `pyproject.toml`;
    - update `uv.lock` if dependency metadata changes require it;
-   - update README or MkDocs pages if installation, CLI commands, public APIs,
+   - update README or documentation pages if installation, CLI commands, public APIs,
      or release behavior changed.
 
 5. Run the release verification gates from the repository root:
@@ -81,7 +91,8 @@ committed and pushed.
    uv run ruff format --check .
    uv run pyright
    uv run pytest
-   uv run --extra docs mkdocs build --strict
+   uv run python tools/docs_sync.py --check
+   ckdocs check --root .
    uv build
    uvx twine check --strict dist/*
    ```

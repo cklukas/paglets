@@ -1,4 +1,4 @@
-<img src="repository-open-graph-1280x640.png" alt="paglets social preview" width="640">
+![paglets social preview](repository-open-graph-1280x640.png)
 
 # paglets - mobile python agents
 
@@ -177,12 +177,18 @@ uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
 
 ## Build The Docs Locally
 
+The site is built with [ckdocs](https://github.com/cklukas/ck-git-hosting).
+API reference sections and code snippets are generated into the Markdown
+files first:
+
 ```bash
-uv run --extra docs mkdocs serve
+uv run python tools/docs_sync.py
+ckdocs serve --root .
 ```
 
 For a production build:
 
 ```bash
-uv run --extra docs mkdocs build --strict
+uv run python tools/docs_sync.py --check
+ckdocs build --root . --out public --strict
 ```

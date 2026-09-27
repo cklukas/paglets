@@ -42,9 +42,6 @@ Documentation = "https://cklukas.github.io/paglets/"
 Repository = "https://github.com/cklukas/paglets"
 Issues = "https://github.com/cklukas/paglets/issues"
 
-[project.optional-dependencies]
-docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5,<10", "mkdocstrings[python]>=0.28,<1"]
-
 [dependency-groups]
 dev = ["pre-commit>=4", "pytest>=8", "pytest-cov>=7", "ruff>=0.12", "pyright>=1.1"]
 

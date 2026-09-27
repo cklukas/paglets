@@ -135,19 +135,21 @@ The full documentation is published at <https://cklukas.github.io/paglets/>.
 
 Useful entry points:
 
-- [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets/)
+- [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets.html)
 - [Examples](https://cklukas.github.io/paglets/examples/)
 - [Operations](https://cklukas.github.io/paglets/operations/)
-- [Detached Compute With A Collector](https://cklukas.github.io/paglets/examples/detached-compute-collector/)
-- [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts/)
-- [Technical Reference](https://cklukas.github.io/paglets/technical/overview/)
-- [Status And Limitations](https://cklukas.github.io/paglets/project/status/)
+- [Detached Compute With A Collector](https://cklukas.github.io/paglets/examples/detached-compute-collector.html)
+- [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts.html)
+- [Technical Reference](https://cklukas.github.io/paglets/technical/overview.html)
+- [Status And Limitations](https://cklukas.github.io/paglets/project/status.html)
 
-Build docs locally:
+Build docs locally with [ckdocs](https://github.com/cklukas/ck-git-hosting)
+(regenerate the API reference and snippets first when the code changed):
 
 ```bash
-uv run --extra docs mkdocs build --strict
-uv run --extra docs mkdocs serve
+uv run python tools/docs_sync.py
+ckdocs check --root .
+ckdocs serve --root .
 ```
 
 ## Project Layout

@@ -1,0 +1,76 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+#
+# Documentation site configuration for ckdocs (from ck-git-hosting). Build and
+# check from the repository root:
+#
+#   ckdocs check --root .
+#   ckdocs build --root . --out public
+#
+# API reference and code snippets inside docs/ are generated into the Markdown
+# by tools/docs_sync.py; run it before building when the code changed.
+version: 1
+site:
+  title: paglets
+  description: Python Aglets-inspired mobile object runtime.
+  footer: "© 2026 C. Klukas · MIT License"
+  links:
+    - title: GitHub
+      url: https://github.com/cklukas/paglets
+    - title: PyPI
+      url: https://pypi.org/project/paglets/
+source: docs
+search: true
+nav:
+  - title: Home
+    page: docs/index.md
+  - title: Getting Started
+    pages:
+      - docs/implementing-paglets.md
+      - docs/usage-ideas.md
+  - title: Operations
+    pages:
+      - docs/operations/index.md
+      - docs/operations/cli.md
+      - docs/operations/host-cli.md
+      - docs/operations/configuration.md
+      - docs/operations/local-multi-host.md
+      - docs/operations/deployment-importability.md
+      - docs/operations/package-releases.md
+      - docs/git-auto-update.md
+  - title: System Services
+    pages:
+      - docs/system/index.md
+      - docs/system/server-info.md
+      - docs/system/mesh-info.md
+      - docs/system/user-info.md
+      - docs/system/compute-slots.md
+      - docs/system/artifacts.md
+  - title: Examples
+    pages:
+      - docs/examples/index.md
+      - docs/examples/compute.md
+      - docs/examples/file-grabber.md
+      - docs/examples/search.md
+      - docs/examples/detached-compute-collector.md
+      - docs/examples/analysis-jobs.md
+      - docs/examples/performance.md
+      - docs/examples/mesh-benchmark.md
+      - docs/examples/source-tree-demos.md
+  - title: Technical Reference
+    pages:
+      - docs/technical/overview.md
+      - docs/technical/core.md
+      - docs/technical/runtime.md
+      - docs/technical/artifacts.md
+      - docs/technical/patterns.md
+      - docs/technical/remote.md
+      - docs/technical/persistence.md
+      - docs/technical/services.md
+      - docs/technical/serialization.md
+      - docs/technical/configuration.md
+      - docs/technical/tooling.md
+  - title: Project
+    pages:
+      - docs/project/status.md
+      - docs/glossary.md

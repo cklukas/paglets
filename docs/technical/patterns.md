@@ -18,16 +18,81 @@ custom protocols.
 
 ## API Reference
 
-::: paglets.patterns.tasks
+<!-- api: paglets.patterns.tasks -->
+### `paglets.patterns.tasks`
 
-::: paglets.patterns.operations
+#### `TaskPaglet`
 
-::: paglets.patterns.coordination
+```python
+class TaskPaglet(Paglet, Generic)
+```
 
-::: paglets.patterns.notifications
+Base class for simple typed paglets with start/status/wait operations.
+<!-- /api -->
+<!-- api: paglets.patterns.operations -->
+### `paglets.patterns.operations`
 
-::: paglets.patterns.file_mobility
+#### `OperationPaglet`
 
+```python
+class OperationPaglet(Paglet, Generic)
+```
+
+Paglet base class for typed multi-operation protocols.
+
+#### `OperationClient`
+
+```python
+class OperationClient
+```
+
+Small proxy wrapper for typed operation calls.
+
+| Field | Type | Default |
+|---|---|---|
+| `proxy` | `PagletProxy` | required |
+<!-- /api -->
+<!-- api: paglets.patterns.coordination -->
+### `paglets.patterns.coordination`
+
+#### `MeshFanoutMixin`
+
+```python
+class MeshFanoutMixin
+```
+
+Common parent/child clone fanout helpers.
+<!-- /api -->
+<!-- api: paglets.patterns.notifications -->
+### `paglets.patterns.notifications`
+
+#### `NotificationMixin`
+
+```python
+class NotificationMixin
+```
+
+Non-fatal user-info notifications for paglets.
+<!-- /api -->
+<!-- api: paglets.patterns.file_mobility -->
+### `paglets.patterns.file_mobility`
+
+#### `FileMobilityMixin`
+
+```python
+class FileMobilityMixin(NotificationMixin)
+```
+
+Reusable helpers for paglets that move one registered file naturally.
+
+#### `SingleFileTransferPaglet`
+
+```python
+class SingleFileTransferPaglet(FileMobilityMixin, TaskPaglet)
+```
+
+Convenience task paglet that moves one registered file to a destination host.
+<!-- /api -->
 ## Related Pages
 
 - [Implementing Paglets](../implementing-paglets.md) introduces the pattern

@@ -120,11 +120,21 @@ artifact APIs.
 
 Each host runs one eager `ComputeSlotsAgent`:
 
-<div class="paglets-code-source">Source: <a href="https://github.com/cklukas/paglets/blob/main/src/paglets/config/defaults/launch.toml">compute-slots service in launch.toml</a></div>
+<!-- snippet: src/paglets/config/defaults/launch.toml:compute-slots-service | compute-slots service in launch.toml -->
+Source: [compute-slots service in launch.toml](https://github.com/cklukas/paglets/blob/main/src/paglets/config/defaults/launch.toml)
 
 ```toml
---8<-- "src/paglets/config/defaults/launch.toml:compute-slots-service"
+[[resident_services]]
+class = "paglets.system.compute_slots.agent:ComputeSlotsAgent"
+enabled = true
+agent_id = "service.compute-slots"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
+state = { service_scope = "mesh" }
 ```
+<!-- /snippet -->
 
 Each scheduler owns only local admission decisions. A job paglet first asks for
 candidate hosts while it is still at home. After it chooses a suitable host, the
@@ -136,24 +146,14 @@ Schedulers also exchange peer status with other schedulers. That status
 exchange is between scheduler services; it is not the same thing as the job
 paglet's local slot request after movement.
 
-```mermaid
-flowchart LR
-    Job["compute job paglet"]
-    Slots["compute-slots\nresident scheduler"]
-    Server["server-info\nlocal resources"]
-    Info["user-info\noperator messages"]
-    Work["job code\napplication-specific"]
-    Results["result collection\napplication-specific"]
-
-    Job -->|"candidate_hosts"| Slots
-    Job -->|"request_slot / automatic release_slot"| Slots
-    Slots -->|"sample CPU/RAM/storage"| Server
-    Slots -->|"run_now / sleep / redirect"| Job
-    Slots -->|"compute_slot_granted\ncompute_slot_redirect"| Job
-    Job -->|"notify failures/status"| Info
-    Job -->|"run only after grant"| Work
-    Job -->|"save/return results"| Results
-```
+| From | To | Interaction |
+|---|---|---|
+| compute job paglet | compute-slots (resident scheduler) | `candidate_hosts`; `request_slot` / automatic `release_slot` |
+| compute-slots | server-info (local resources) | sample CPU, RAM and storage |
+| compute-slots | compute job paglet | `run_now` / `sleep` / `redirect`; later `compute_slot_granted` or `compute_slot_redirect` |
+| compute job paglet | user-info (operator messages) | notify failures and status |
+| compute job paglet | job code (application-specific) | run only after a grant |
+| compute job paglet | result collection (application-specific) | save or return results |
 
 The scheduler does not run analysis code, store result frames, dispatch sleeping
 paglets directly, or own application retry policy. It admits work, queues work,
@@ -164,23 +164,22 @@ result storage, and final result collection.
 
 This is the expected lifecycle for any paglet that uses the service:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Preflight
-    Preflight --> NoHost: no host can ever satisfy request
-    Preflight --> MoveToCandidate: selected candidate
-    MoveToCandidate --> RequestLocalSlot: arrives on compute host
-    RequestLocalSlot --> Running: run_now
-    RequestLocalSlot --> Waiting: sleep
-    RequestLocalSlot --> MoveToCandidate: redirect
-    RequestLocalSlot --> Failed: rejected
-    Waiting --> Running: compute_slot_granted
-    Waiting --> MoveToCandidate: compute_slot_redirect
-    Running --> ReturningOrCommitting: automatic release_slot
-    NoHost --> [*]
-    Failed --> [*]
-    ReturningOrCommitting --> [*]
-```
+| From | To | When |
+|---|---|---|
+| (start) | `Preflight` |  |
+| `Preflight` | `NoHost` | no host can ever satisfy request |
+| `Preflight` | `MoveToCandidate` | selected candidate |
+| `MoveToCandidate` | `RequestLocalSlot` | arrives on compute host |
+| `RequestLocalSlot` | `Running` | run_now |
+| `RequestLocalSlot` | `Waiting` | sleep |
+| `RequestLocalSlot` | `MoveToCandidate` | redirect |
+| `RequestLocalSlot` | `Failed` | rejected |
+| `Waiting` | `Running` | compute_slot_granted |
+| `Waiting` | `MoveToCandidate` | compute_slot_redirect |
+| `Running` | `ReturningOrCommitting` | automatic release_slot |
+| `NoHost` | (end) |  |
+| `Failed` | (end) |  |
+| `ReturningOrCommitting` | (end) |  |
 
 `request_slot` is always local to the host where the paglet currently lives. A
 redirect is only a recommendation plus an activation message. The paglet must
@@ -315,25 +314,16 @@ Paglets-owned work directory.
 
 Initial placement is a reusable scheduler decision plus a paglet-owned movement:
 
-```mermaid
-sequenceDiagram
-    participant Job as "job paglet on home"
-    participant Entry as "entry compute-slots"
-    participant A as "compute-slots A"
-    participant B as "compute-slots B"
-    participant C as "compute-slots C"
-
-    Job->>Entry: candidate_hosts(resource wishes)
-    Entry->>A: scheduler_status
-    Entry->>B: scheduler_status
-    Entry->>C: scheduler_status
-    A-->>Entry: limits, queue, free resources
-    B-->>Entry: limits, queue, free resources
-    C-->>Entry: limits, queue, free resources
-    Entry-->>Job: ranked candidates + selected candidate
-    Job->>Job: persist selected target
-    Job->>A: dispatch self to selected host
-```
+1. **job paglet on home → entry compute-slots**: candidate_hosts(resource wishes)
+2. **entry compute-slots → compute-slots A**: scheduler_status
+3. **entry compute-slots → compute-slots B**: scheduler_status
+4. **entry compute-slots → compute-slots C**: scheduler_status
+5. **compute-slots A → entry compute-slots** (reply): limits, queue, free resources
+6. **compute-slots B → entry compute-slots** (reply): limits, queue, free resources
+7. **compute-slots C → entry compute-slots** (reply): limits, queue, free resources
+8. **entry compute-slots → job paglet on home** (reply): ranked candidates + selected candidate
+9. **job paglet on home**: persist selected target
+10. **job paglet on home → compute-slots A**: dispatch self to selected host
 
 `candidate_hosts` first filters durable capability mismatches, such as missing
 GPU support or too little total RAM. It also skips hosts with current status
@@ -346,16 +336,12 @@ candidates. The paglet still performs the dispatch itself.
 
 Each scheduler pass is local-first:
 
-```mermaid
-flowchart TD
-    Tick["scheduler tick"] --> Expire["expire stale leases"]
-    Expire --> Sync["peer status sync"]
-    Sync --> Grant["grant local oldest-fit jobs"]
-    Grant --> MoreLocal{"another local job fits?"}
-    MoreLocal -->|"yes, within burst limits"| Grant
-    MoreLocal -->|"no"| Spill["bounded peer spillover"]
-    Spill --> Done["wait for next tick"]
-```
+1. A scheduler tick expires stale leases.
+2. It syncs peer status.
+3. It grants the oldest local job that fits, and repeats while another local
+   job fits within the burst limits.
+4. When no further local job fits, it runs the bounded peer spillover.
+5. It waits for the next tick.
 
 Local grants reserve CPU cores, RAM, and temp storage immediately. That
 reservation happens before the operating system load average has time to rise.
@@ -365,27 +351,17 @@ reservation happens before the operating system load average has time to rise.
 When Host A has a blocked queue and Host B or Host C has free capacity, Host A
 may redirect more than one waiting paglet. It does not empty its whole queue.
 
-```mermaid
-sequenceDiagram
-    participant AQueue as "Host A waiting queue"
-    participant ASlots as "compute-slots A"
-    participant BSlots as "compute-slots B"
-    participant CSlots as "compute-slots C"
-    participant Job1 as "waiting job 1"
-    participant Job2 as "waiting job 2"
-
-    BSlots-->>ASlots: peer status: empty queue, 2 slots free
-    CSlots-->>ASlots: peer status: empty queue, 1 slot free
-    ASlots->>ASlots: local-first grant pass
-    ASlots->>ASlots: compute redirect budget and keep local anchor
-    ASlots->>ASlots: project B/C capacity with shadow reservations
-    ASlots-->>Job1: compute_slot_redirect(target B)
-    ASlots->>AQueue: remove job 1 after delivery
-    Job1->>BSlots: dispatch self, then request_slot
-    ASlots-->>Job2: compute_slot_redirect(target C)
-    ASlots->>AQueue: remove job 2 after delivery
-    Job2->>CSlots: dispatch self, then request_slot
-```
+1. **compute-slots B → compute-slots A** (reply): peer status: empty queue, 2 slots free
+2. **compute-slots C → compute-slots A** (reply): peer status: empty queue, 1 slot free
+3. **compute-slots A**: local-first grant pass
+4. **compute-slots A**: compute redirect budget and keep local anchor
+5. **compute-slots A**: project B/C capacity with shadow reservations
+6. **compute-slots A → waiting job 1** (reply): compute_slot_redirect(target B)
+7. **compute-slots A → Host A waiting queue**: remove job 1 after delivery
+8. **waiting job 1 → compute-slots B**: dispatch self, then request_slot
+9. **compute-slots A → waiting job 2** (reply): compute_slot_redirect(target C)
+10. **compute-slots A → Host A waiting queue**: remove job 2 after delivery
+11. **waiting job 2 → compute-slots C**: dispatch self, then request_slot
 
 Scenario behavior:
 

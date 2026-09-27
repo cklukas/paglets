@@ -31,12 +31,13 @@ For tag runs, the workflow verifies that the tag version matches the
 The build job runs:
 
 ```bash
-uv sync --dev --extra docs
+uv sync --dev
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
 uv run pytest
-uv run --extra docs mkdocs build --strict
+uv run python tools/docs_sync.py --check
+ckdocs check --root .
 uv build
 uvx twine check --strict dist/*
 ```

@@ -10,7 +10,8 @@ on:
     paths:
       - ".github/workflows/docs.yml"
       - "docs/**"
-      - "mkdocs.yml"
+      - "ckdocs.yml"
+      - "tools/docs_sync.py"
       - "pyproject.toml"
       - "src/**"
   release:
@@ -25,6 +26,10 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: false
+
+env:
+  # ckdocs is built from ck-git-hosting at this commit (documentation site generator).
+  CKDOCS_REF: 7d693f09c830e8b1272e444d238d8c130d153afa
 
 jobs:
   build:
@@ -47,8 +52,15 @@ jobs:
         with:
           cache-suffix: docs
 
-      - name: Install documentation dependencies
-        run: uv sync --extra docs
+      - name: Install project
+        run: uv sync
+
+      - name: Build ckdocs
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/cklukas/ck-git-hosting.git "$RUNNER_TEMP/ck-git-hosting"
+          git -C "$RUNNER_TEMP/ck-git-hosting" checkout --quiet "$CKDOCS_REF"
+          make -C "$RUNNER_TEMP/ck-git-hosting" BUILD_ROOT="$RUNNER_TEMP" BUILD_DIR="$RUNNER_TEMP/ckdocs" client
+          echo "$RUNNER_TEMP/ckdocs/bin" >> "$GITHUB_PATH"
 
       - name: Add application note PDF
         env:
@@ -160,7 +172,11 @@ jobs:
           PY
 
       - name: Build documentation
-        run: uv run --extra docs mkdocs build --strict
+        run: |
+          uv run python tools/docs_sync.py --check
+          ckdocs build --root . --out site --strict
+          # Published at a stable URL although no page links it.
+          cp "docs/$PAPER_ASSET_NAME" site/
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6

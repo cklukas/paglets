@@ -12,8 +12,7 @@ resolution.
 
 ## Main Modules
 
-`paglets.serialization.codec`
-: Implements `qualified_name`, `resolve_qualified_name`,
+- **`paglets.serialization.codec`**: Implements `qualified_name`, `resolve_qualified_name`,
   `dataclass_to_wire`, and `dataclass_from_wire`.
 
 ## Implementation Notes
@@ -27,8 +26,44 @@ inspection and service messages use dataclass wire conversion.
 
 ## API Reference
 
-::: paglets.serialization.codec
+<!-- api: paglets.serialization.codec -->
+### `paglets.serialization.codec`
 
+#### `qualified_name`
+
+```python
+def qualified_name(obj: type | object) -> str
+```
+
+Return an importable ``module:qualname`` for a class or object.
+
+#### `resolve_qualified_name`
+
+```python
+def resolve_qualified_name(name: str) -> Any
+```
+
+Resolve a ``module:qualname`` produced by :func:`qualified_name`.
+
+#### `dataclass_to_wire`
+
+```python
+def dataclass_to_wire(instance: Any) -> WirePayload
+```
+
+Serialize a dataclass instance to explicit movement/control values.
+
+This is intentionally one approach: paglet state is explicit dataclass state.
+Runtime fields on the paglet object itself are transient and never move.
+
+#### `dataclass_from_wire`
+
+```python
+def dataclass_from_wire(cls: type, payload: WirePayload) -> Any
+```
+
+Restore a dataclass instance from a wire dict.
+<!-- /api -->
 ## Related Pages
 
 - [Core](core.md) covers state requirements.

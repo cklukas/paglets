@@ -15,8 +15,17 @@ binary artifact transport and registered paglet file mobility.
 
 ## API Reference
 
-::: paglets.artifacts
+<!-- api: paglets.artifacts -->
+### `paglets.artifacts`
 
+#### `ArtifactStore`
+
+```python
+class ArtifactStore
+```
+
+Host-owned binary artifact storage with atomic temp-file cleanup.
+<!-- /api -->
 ## Related Pages
 
 - [Artifact Transport](../system/artifacts.md) covers user-facing file mobility
