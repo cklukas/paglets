@@ -20,6 +20,12 @@
 #include <random>
 #include <thread>
 
+#ifndef _WIN32
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 namespace rt = paglets::runtime;
 namespace pw = paglets::wasm;
 namespace abi = paglets::abi;
@@ -54,6 +60,10 @@ struct Fixture {
             log.push_back(r.text);
         };
         if (config.threads == 2) config.threads = 3;
+        // The whole suite also runs with worker processes (CTest unit_workers).
+        if (const char* worker = std::getenv("PAGLETS_TEST_WORKER"); worker != nullptr && *worker != '\0') {
+            config.worker_executable = worker;
+        }
         runtime = std::make_unique<rt::Runtime>(std::move(config));
     }
 
@@ -619,3 +629,76 @@ PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
     }
     std::filesystem::remove_all(dir);
 }
+
+#ifndef _WIN32
+namespace {
+
+// Kills a worker process and waits until it is gone (it is a child of this
+// test process, which hosts the runtime).
+void kill_and_reap(int pid) {
+    ::kill(pid, SIGKILL);
+    for (int i = 0; i < 500; ++i) {
+        int status = 0;
+        if (::waitpid(pid, &status, WNOHANG) == pid) return;
+        std::this_thread::sleep_for(10ms);
+    }
+}
+
+}  // namespace
+
+PAGLETS_TEST("runtime: a killed worker process only affects its paglets") {
+    if (std::getenv("PAGLETS_TEST_WORKER") == nullptr) paglets::test::skip("runs with worker processes only");
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        c.checkpoint_interval = 0ms;
+        c.threads = 1;  // one worker holds every paglet
+        Fixture f(std::move(c));
+        auto id = f.create("conformance.wasm");
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 2);
+        f.runtime->wait_idle();  // the checkpoint after the last call is written
+        const auto workers = f.runtime->worker_processes();
+        REQUIRE(workers.size() == 1);
+        CHECK(workers[0] != ::getpid());
+        kill_and_reap(workers[0]);
+        // The next delivery notices the lost worker and resumes the paglet
+        // from its last checkpoint in a new worker process.
+        auto r = f.call(id, "count");
+        CHECK_EQ(r.status, 0);
+        CHECK_EQ(dec<std::int64_t>(r.payload), 3);
+        const auto again = f.runtime->worker_processes();
+        REQUIRE(again.size() == 1);
+        CHECK(again[0] != workers[0]);
+    }
+    {
+        rt::Config c;  // no state directory: nothing to resume from
+        c.threads = 1;
+        Fixture f(std::move(c));
+        auto id = f.create("conformance.wasm");
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
+        f.runtime->wait_idle();
+        kill_and_reap(f.runtime->worker_processes().at(0));
+        CHECK_EQ(f.call(id, "count").status, static_cast<std::int32_t>(abi::failed));
+        auto end = f.runtime->ending(id);
+        REQUIRE(end.has_value());
+        CHECK(end->failed);
+        CHECK(end->reason.find("lost with its worker") != std::string::npos);
+        // New paglets work in the restarted worker.
+        auto fresh = f.create("conformance.wasm");
+        CHECK_EQ(dec<std::int64_t>(f.call(fresh, "count").payload), 1);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: paglets run in worker processes when configured") {
+    if (std::getenv("PAGLETS_TEST_WORKER") == nullptr) paglets::test::skip("runs with worker processes only");
+    Fixture f;
+    auto id = f.create("conformance.wasm");
+    CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
+    CHECK(!f.runtime->worker_processes().empty());
+}
+#endif

@@ -3,6 +3,7 @@
 
 #include <paglets/runtime/runtime.hpp>
 
+#include "runtime_exec.hpp"
 #include "runtime_store.hpp"
 
 #include <paglets/abi.hpp>
@@ -109,7 +110,7 @@ struct PagletRec {
     TrustClass trust = TrustClass::roaming;
     std::string owner;
 
-    std::unique_ptr<wasm::Instance> instance;
+    std::unique_ptr<Placed> instance;     // in this process or in the lane's worker
     std::optional<wasm::Snapshot> image;  // memory-only images and clone seeds
     bool image_on_disk = false;
     bool started = false;         // `created` / `cloned` delivered
@@ -122,6 +123,7 @@ struct PagletRec {
     std::uint64_t next_seq = 0;
     bool running = false;
     bool queued = false;
+    int lane = -1;  // scheduler lane while placed (active or about to be activated)
 
     std::set<std::uint64_t> pending_requests;
     std::uint64_t next_correlation = 1;
@@ -159,7 +161,6 @@ struct Runtime::Impl {
 
     Config config;
     mutable std::mutex mu;
-    std::condition_variable work_cv;
     std::condition_variable idle_cv;
     std::condition_variable clock_cv;
     bool stopping = false;
@@ -167,7 +168,18 @@ struct Runtime::Impl {
     std::map<std::string, std::shared_ptr<wasm::Module>> modules;  // by hex hash
     std::map<PagletId, std::unique_ptr<PagletRec>> paglets;
     std::map<PagletId, Ending> endings;
-    std::deque<PagletId> ready;
+    // A lane is one scheduler thread with its own ready queue. A paglet stays
+    // on the lane it was activated on until its instance is released, so its
+    // WAMR execution environment never changes threads.
+    struct Lane {
+        std::deque<PagletId> ready;
+        std::condition_variable cv;
+        std::size_t placed = 0;
+        std::unique_ptr<Executor> executor;
+        std::thread thread;
+    };
+    bool uses_workers = false;
+    std::vector<std::unique_ptr<Lane>> lanes;
     std::size_t running_count = 0;
 
     std::multimap<SteadyClock::time_point, Deadline> deadlines;
@@ -177,7 +189,6 @@ struct Runtime::Impl {
     std::uint64_t next_external = 1;
 
     std::optional<Store> store;
-    std::vector<std::thread> workers;
     std::thread clock;
 
     // -- helpers (mu held) --------------------------------------------------
@@ -206,9 +217,34 @@ struct Runtime::Impl {
 
     void make_ready(PagletRec& rec) {
         if (rec.running || rec.queued || rec.awaiting_image || rec.mailbox.empty()) return;
+        if (rec.lane < 0) {
+            // Place on the lane with the fewest placed paglets.
+            std::size_t best = 0;
+            for (std::size_t i = 1; i < lanes.size(); ++i) {
+                if (lanes[i]->placed < lanes[best]->placed) best = i;
+            }
+            rec.lane = static_cast<int>(best);
+            ++lanes[best]->placed;
+        }
         rec.queued = true;
-        ready.push_back(rec.id);
-        work_cv.notify_one();
+        Lane& lane = *lanes[static_cast<std::size_t>(rec.lane)];
+        lane.ready.push_back(rec.id);
+        lane.cv.notify_one();
+    }
+
+    // Instances end outside the runtime lock (a worker instance talks to its
+    // worker process, whose calls take the runtime lock for imports).
+    std::vector<std::unique_ptr<Placed>> retired;
+    void retire(PagletRec& rec) {
+        if (rec.instance) retired.push_back(std::move(rec.instance));
+    }
+
+    // Releases the lane of a paglet whose instance is gone.
+    void release_lane(PagletRec& rec) {
+        if (rec.lane >= 0 && !rec.instance) {
+            --lanes[static_cast<std::size_t>(rec.lane)]->placed;
+            rec.lane = -1;
+        }
     }
 
     void enqueue(PagletRec& rec, Envelope env, std::int32_t priority) {
@@ -348,6 +384,8 @@ struct Runtime::Impl {
         }
         rec.clones.clear();
         if (store) store->remove_paglet(rec.id);
+        retire(rec);
+        release_lane(rec);
         endings[rec.id] = Ending{rec.id, failed, std::move(reason)};
         if (failed) log(3, rec.id, "paglet failed: " + endings[rec.id].reason);
         paglets.erase(rec.id);  // rec is destroyed here
@@ -399,15 +437,15 @@ struct Runtime::Impl {
     std::expected<std::int32_t, std::string> call_event(PagletRec& rec, abi::EventKind kind, const Bytes& doc) {
         return guest_call(rec, [&] {
             const std::array<std::uint32_t, 1> lead{static_cast<std::uint32_t>(kind)};
-            return rec.instance->call_with_data("paglets_on_event", lead, doc);
+            return rec.instance->call("paglets_on_event", lead, doc);
         });
     }
 
     std::expected<void, std::string> activate(PagletRec& rec, bool deliver_activated);
-    std::expected<wasm::Snapshot, std::string> snapshot(PagletRec& rec) { return wasm::capture(*rec.instance); }
+    std::expected<wasm::Snapshot, std::string> snapshot(PagletRec& rec) { return rec.instance->capture(); }
     void process(PagletRec& rec, Envelope env, bool& remove);
     void finish_call(PagletRec& rec, bool& remove, std::unique_lock<std::mutex>& lock);
-    void worker_loop();
+    void lane_loop(std::size_t index);
     void clock_loop();
     void fire(Deadline d);
     void recover();
@@ -700,29 +738,33 @@ private:
 
 std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool deliver_activated) {
     std::optional<wasm::Snapshot> image;
+    Executor* executor = nullptr;
     {
         std::lock_guard lock(mu);
         if (rec.image) {
-            image = std::move(rec.image);
-            rec.image.reset();
+            // With workers, the in-memory image stays as the fallback in case
+            // the worker process ends; in-process it is no longer needed.
+            if (uses_workers) {
+                image = *rec.image;
+            } else {
+                image = std::move(rec.image);
+                rec.image.reset();
+            }
         }
+        executor = lanes[static_cast<std::size_t>(rec.lane)]->executor.get();
     }
     if (!image && rec.image_on_disk && store) {
         auto loaded = store->load_image(rec.id);
         if (!loaded) return std::unexpected(loaded.error());
         image = std::move(*loaded);
     }
-    if (image) {
-        auto inst = wasm::restore(rec.module, *image, config.limits);
-        if (!inst) return std::unexpected(inst.error());
-        rec.instance = std::move(*inst);
-    } else {
-        auto inst = wasm::Instance::create(rec.module, config.limits);
-        if (!inst) return std::unexpected(inst.error());
-        rec.instance = std::move(*inst);
+    if (!image && rec.started) {
+        return std::unexpected(std::string("the paglet's state was lost with its worker process (no image)"));
     }
     rec.imports = std::make_unique<Imports>(*this, rec);
-    rec.instance->set_imports(rec.imports.get());
+    auto placed = executor->place(rec.id, rec.module, config.limits, image ? &*image : nullptr, *rec.imports);
+    if (!placed) return std::unexpected(placed.error());
+    rec.instance = std::move(*placed);
     // A paglet without a stored image is checkpointed after its first handler.
     rec.last_checkpoint = SteadyClock::now();
     rec.checkpoint_due = !rec.image_on_disk;
@@ -739,6 +781,11 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
         end_paglet(rec, false, "disposed");
         remove = true;
         return;
+    }
+    if (rec.instance && rec.instance->lost()) {
+        // Its worker process ended: continue from the last image.
+        log(2, rec.id, "instance lost with its worker process; resuming from the last image");
+        rec.instance.reset();
     }
     if (env.type == Envelope::Type::deactivate && !rec.instance) return;  // already inactive
 
@@ -782,9 +829,8 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
                 }
             }
             const Bytes doc = abi::encode(d);
-            result = guest_call(rec, [&] {
-                return rec.instance->call_with_data("paglets_on_message", std::span<const std::uint32_t>{}, doc);
-            });
+            result = guest_call(
+                rec, [&] { return rec.instance->call("paglets_on_message", std::span<const std::uint32_t>{}, doc); });
             break;
         }
         case Envelope::Type::wake: break;
@@ -803,7 +849,7 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
     std::lock_guard lock(mu);
     ++rec.handled;
     if (!result) {
-        rec.instance.reset();
+        retire(rec);
         end_paglet(rec, true, result.error());
         remove = true;
         return;
@@ -868,7 +914,7 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
             lock.lock();
             if (!r) log(2, rec.id, "disposing handler failed: " + r.error());
         }
-        rec.instance.reset();
+        retire(rec);
         end_paglet(rec, false, "disposed");
         remove = true;
     } else if (end == abi::LifecycleOp::deactivate && rec.instance) {
@@ -880,7 +926,7 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
         if (r) snap = snapshot(rec);
         lock.lock();
         if (!snap) {
-            rec.instance.reset();
+            retire(rec);
             end_paglet(rec, true, r ? snap.error() : r.error());
             remove = true;
             return;
@@ -891,7 +937,7 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
             rec.image = std::move(*snap);
         }
         if (store && !rec.image_on_disk) rec.image = std::move(*snap);
-        rec.instance.reset();
+        retire(rec);
         rec.imports.reset();
         if (wake) {
             schedule(SteadyClock::now() + std::chrono::milliseconds(*wake), Deadline{Deadline::Type::wake, rec.id, 0});
@@ -909,18 +955,22 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
     }
 }
 
-void Runtime::Impl::worker_loop() {
+void Runtime::Impl::lane_loop(std::size_t index) {
     wasm::init_thread();
+    Lane& lane = *lanes[index];
     std::unique_lock lock(mu);
     while (true) {
-        work_cv.wait(lock, [&] { return stopping || !ready.empty(); });
+        lane.cv.wait(lock, [&] { return stopping || !lane.ready.empty(); });
         if (stopping) break;
-        const PagletId id = std::move(ready.front());
-        ready.pop_front();
+        const PagletId id = std::move(lane.ready.front());
+        lane.ready.pop_front();
         PagletRec* rec = find(id);
         if (rec == nullptr) continue;
         rec->queued = false;
-        if (rec->mailbox.empty() || rec->running || rec->awaiting_image) continue;
+        if (rec->mailbox.empty() || rec->running || rec->awaiting_image) {
+            release_lane(*rec);
+            continue;
+        }
         auto node = rec->mailbox.extract(rec->mailbox.begin());
         rec->running = true;
         ++running_count;
@@ -934,9 +984,17 @@ void Runtime::Impl::worker_loop() {
         }
         if (!remove) {
             rec->running = false;
+            release_lane(*rec);
             make_ready(*rec);
         }
         --running_count;
+        if (!retired.empty()) {
+            auto dead = std::move(retired);
+            retired.clear();
+            lock.unlock();
+            dead.clear();
+            lock.lock();
+        }
         idle_cv.notify_all();
     }
     lock.unlock();
@@ -1049,7 +1107,26 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
         impl_->recover();
     }
     const unsigned n = std::max(1u, impl_->config.threads);
-    for (unsigned i = 0; i < n; ++i) impl_->workers.emplace_back([this] { impl_->worker_loop(); });
+    for (unsigned i = 0; i < n; ++i) {
+        auto lane = std::make_unique<Impl::Lane>();
+        if (!impl_->config.worker_executable.empty()) {
+            auto worker = make_worker_executor(impl_->config.worker_executable, [this](const std::string& text) {
+                std::lock_guard lock(impl_->mu);
+                impl_->log(2, "", text);
+            });
+            if (worker) {
+                lane->executor = std::move(*worker);
+                impl_->uses_workers = true;
+            } else if (i == 0) {
+                impl_->log(2, "", worker.error() + "; paglets run in the host process");
+            }
+        }
+        if (!lane->executor) lane->executor = make_in_process_executor();
+        impl_->lanes.push_back(std::move(lane));
+    }
+    for (unsigned i = 0; i < n; ++i) {
+        impl_->lanes[i]->thread = std::thread([this, i] { impl_->lane_loop(i); });
+    }
     impl_->clock = std::thread([this] { impl_->clock_loop(); });
 }
 
@@ -1063,21 +1140,33 @@ void Runtime::shutdown(bool save_state) {
         if (impl_->stopping) return;
         impl_->stopping = true;
     }
-    impl_->work_cv.notify_all();
+    for (auto& lane : impl_->lanes) lane->cv.notify_all();
     impl_->clock_cv.notify_all();
-    for (auto& t : impl_->workers) t.join();
+    for (auto& lane : impl_->lanes) lane->thread.join();
     if (impl_->clock.joinable()) impl_->clock.join();
-    std::lock_guard lock(impl_->mu);
-    for (auto& [c, p] : impl_->external) p.set_value(Reply{abi::gone, {}});
-    impl_->external.clear();
+
+    std::vector<PagletRec*> recs;
+    {
+        std::lock_guard lock(impl_->mu);
+        for (auto& [c, p] : impl_->external) p.set_value(Reply{abi::gone, {}});
+        impl_->external.clear();
+        for (auto& [id, rec] : impl_->paglets) recs.push_back(rec.get());
+    }
     // No handler runs any more: a graceful stop stores the latest state of
     // every active paglet (after a crash, the last checkpoint counts).
-    for (auto& [id, rec] : impl_->paglets) {
+    std::vector<std::unique_ptr<Placed>> instances;
+    for (PagletRec* rec : recs) {
         if (save_state && impl_->store && rec->instance && rec->started) {
-            if (auto snap = wasm::capture(*rec->instance)) impl_->persist(*rec, *snap);
+            if (auto snap = rec->instance->capture()) {
+                std::lock_guard lock(impl_->mu);
+                impl_->persist(*rec, *snap);
+            }
         }
-        rec->instance.reset();  // instances hold pointers into their records
+        if (rec->instance) instances.push_back(std::move(rec->instance));
     }
+    instances.clear();  // before the records and executors they refer to
+    std::lock_guard lock(impl_->mu);
+    impl_->retired.clear();
 }
 
 const Config& Runtime::config() const {
@@ -1236,10 +1325,22 @@ std::optional<Ending> Runtime::ending(const PagletId& id) const {
     return it->second;
 }
 
+std::vector<int> Runtime::worker_processes() const {
+    std::lock_guard lock(impl_->mu);
+    std::vector<int> pids;
+    for (const auto& lane : impl_->lanes) {
+        if (auto pid = lane->executor->process_id()) pids.push_back(*pid);
+    }
+    return pids;
+}
+
 bool Runtime::wait_idle(std::chrono::milliseconds timeout) {
     std::unique_lock lock(impl_->mu);
     return impl_->idle_cv.wait_for(lock, timeout, [&] {
-        if (impl_->running_count > 0 || !impl_->ready.empty()) return false;
+        if (impl_->running_count > 0) return false;
+        for (const auto& lane : impl_->lanes) {
+            if (!lane->ready.empty()) return false;
+        }
         return std::ranges::all_of(impl_->paglets,
                                    [](const auto& e) { return e.second->mailbox.empty() || e.second->awaiting_image; });
     });

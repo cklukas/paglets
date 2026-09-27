@@ -5,25 +5,33 @@
 //
 //   paglets-host --version | --info
 //   paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...
-//                    [--state-dir DIR] [--threads N] [--keep]
+//                    [--state-dir DIR] [--threads N] [--keep] [--in-process]
 //   paglets-host list --state-dir DIR
 //   paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]
 //
 // Message bodies and arguments are given as JSON and passed to the paglet as
 // MessagePack; replies are printed as JSON. With a state directory, paglets
 // survive the host process: `run --keep` leaves them there, `list` and
-// `call` resume them from their last memory image.
+// `call` resume them from their last memory image. Paglets run in worker
+// processes (paglets-worker next to this binary) unless --in-process is given
+// or no worker executable is found.
 
 #include <paglets/abi.hpp>
 #include <paglets/runtime/runtime.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/json_msgpack.hpp>
 
+#include <filesystem>
 #include <iostream>
+#include <system_error>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 namespace rt = paglets::runtime;
 namespace abi = paglets::abi;
@@ -66,7 +74,7 @@ std::string_view architecture() {
 int usage() {
     std::cerr << "usage: paglets-host --version | --info\n"
                  "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
-                 "                        [--state-dir DIR] [--threads N] [--keep]\n"
+                 "                        [--state-dir DIR] [--threads N] [--keep] [--in-process]\n"
                  "       paglets-host list --state-dir DIR\n"
                  "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n";
     return 2;
@@ -107,6 +115,7 @@ struct Options {
     std::optional<std::string> expect;
     unsigned threads = 2;
     bool keep = false;
+    bool in_process = false;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -135,6 +144,8 @@ std::optional<Options> parse(int argc, char** argv) {
             o.threads = static_cast<unsigned>(std::stoul(*v));
         } else if (a == "--keep") {
             o.keep = true;
+        } else if (a == "--in-process") {
+            o.in_process = true;
         } else if (a.starts_with("--")) {
             return std::nullopt;
         } else {
@@ -158,10 +169,38 @@ std::string show(const rt::Reply& reply) {
     return json ? json->dump() : "(" + std::to_string(reply.payload.size()) + " bytes, not MessagePack)";
 }
 
+std::filesystem::path self_path;
+
+// The running executable, to find paglets-worker next to it.
+std::filesystem::path executable_path(const char* argv0) {
+    std::error_code ec;
+#if defined(__linux__)
+    if (auto exe = std::filesystem::read_symlink("/proc/self/exe", ec); !ec) return exe;
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::string buf(size, '\0');
+    if (_NSGetExecutablePath(buf.data(), &size) == 0) {
+        auto exe = std::filesystem::weakly_canonical(std::filesystem::path(buf.c_str()), ec);
+        if (!ec) return exe;
+    }
+#endif
+    auto p = std::filesystem::weakly_canonical(std::filesystem::path(argv0), ec);
+    return ec ? std::filesystem::path() : p;
+}
+
 rt::Config config_of(const Options& o) {
     rt::Config c;
     c.threads = o.threads;
     if (o.state_dir) c.state_dir = *o.state_dir;
+    if (!o.in_process && !self_path.empty()) {
+        auto worker = self_path.parent_path() / "paglets-worker";
+#ifdef _WIN32
+        worker += ".exe";
+#endif
+        std::error_code ec;
+        if (std::filesystem::exists(worker, ec)) c.worker_executable = worker;
+    }
     c.log = [](const rt::LogRecord& r) {
         std::cerr << "[" << (r.paglet.empty() ? std::string("host") : r.paglet.substr(0, 8)) << "] " << r.text << "\n";
     };
@@ -236,6 +275,7 @@ int cmd_call(const Options& o) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    self_path = executable_path(argv[0]);
     const std::string_view cmd = argc > 1 ? argv[1] : "--info";
     if (cmd == "--version") {
         std::cout << "paglets-host " << PAGLETS_VERSION << "\n";

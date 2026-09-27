@@ -35,6 +35,12 @@ foreach(guest counter hello ping_pong conformance testbed forbidden)
 endforeach()
 
 add_test(NAME unit COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
+add_dependencies(paglets_tests paglets-worker)
+if(NOT WIN32)
+    # The same tests with paglet instances in worker processes.
+    add_test(NAME unit_workers COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
+    set_tests_properties(unit_workers PROPERTIES ENVIRONMENT "PAGLETS_TEST_WORKER=$<TARGET_FILE:paglets-worker>")
+endif()
 
 # Memory image moves between processes: saved by one, resumed by another.
 if(PAGLETS_TEST_GUEST_DIR)

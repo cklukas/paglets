@@ -64,12 +64,15 @@ public:
     const Digest& hash() const { return hash_; }
     std::string hash_hex() const { return to_hex(hash_); }
     std::size_t size() const { return bytes_.size(); }
+    // The module as loaded (WAMR rewrites its own buffer while loading).
+    std::span<const std::uint8_t> bytes() const { return original_; }
     WASMModuleCommon* handle() const { return module_; }
 
 private:
     Module() = default;
 
-    std::vector<std::uint8_t> bytes_;  // WAMR keeps pointers into this buffer
+    std::vector<std::uint8_t> bytes_;     // WAMR keeps pointers into this buffer and modifies it
+    std::vector<std::uint8_t> original_;  // unmodified copy, for worker processes and stores
     ModuleInfo info_;
     Digest hash_{};
     WASMModuleCommon* module_ = nullptr;

@@ -9,15 +9,15 @@ Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
 runtime) is in progress ([progress](../planning/cpp-m1-results.md)): the
 paglet ABI v1 ([specification](../planning/cpp-abi-v1.md)), the guest SDK,
-capabilities and messaging, and persistence with crash recovery work; paglets
-still run inside the host process instead of worker processes.
+capabilities and messaging, persistence with crash recovery, and worker
+processes (Linux and macOS; Windows runs paglets in the host process) work.
 
 ## Layout
 
 ```text
 common/include/paglets/   MessagePack primitives and the paglet ABI v1 documents (host and guests)
 host/                     host library: Wasm engine, memory images, runtime, wire codecs;
-                          paglets-host and paglets-spike
+                          paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> plain C++)
 examples/                 sample paglets: hello, counter, ping_pong
@@ -112,7 +112,9 @@ build/macos-arm64/host/paglets-host run build/macos-arm64/guests/ping_pong.wasm 
 ```
 
 Message bodies and arguments are JSON, passed to the paglet as MessagePack;
-replies are printed as JSON. With a state directory, paglets outlive the host
+replies are printed as JSON. Paglets run in worker processes
+(`paglets-worker`, found next to `paglets-host`; one per scheduler lane, set
+with `--threads`); `--in-process` runs them in the host process instead. With a state directory, paglets outlive the host
 process and resume from their last memory image:
 
 ```bash
@@ -128,7 +130,8 @@ experiments:
 ```bash
 build/macos-arm64/host/paglets-spike info build/macos-arm64/guests/counter.wasm
 build/macos-arm64/host/paglets-spike bench build/macos-arm64/guests/testbed.wasm build/macos-arm64/guests/counter.wasm
-build/macos-arm64/host/paglets-spike runtime build/macos-arm64/guests/counter.wasm build/macos-arm64/guests/ping_pong.wasm
+build/macos-arm64/host/paglets-spike runtime build/macos-arm64/guests/counter.wasm build/macos-arm64/guests/ping_pong.wasm \
+    --worker build/macos-arm64/host/paglets-worker
 build/macos-arm64/host/paglets-spike call-bench build/macos-arm64/guests/counter.wasm status
 ```
 

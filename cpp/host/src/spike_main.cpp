@@ -7,7 +7,7 @@
 //   paglets-spike image-save <counter.wasm> <image> [--increments N] [--bloat KB]
 //   paglets-spike image-resume <counter.wasm> <image> [--increments N] [--expect VALUE]
 //   paglets-spike bench <testbed.wasm> <counter.wasm> [--instances N]
-//   paglets-spike runtime <counter.wasm> <ping_pong.wasm> [--threads N]
+//   paglets-spike runtime <counter.wasm> <ping_pong.wasm> [--threads N] [--worker PATH]
 //   paglets-spike call-bench <module.wasm> <message> [--count N]
 //
 // image-save and image-resume run in different processes (and, for the
@@ -367,16 +367,20 @@ int cmd_bench(const Args& a) {
 // host and paglets and between paglets, lifecycle operations.
 int cmd_runtime(const Args& a) {
     namespace rt = paglets::runtime;
-    if (a.positional.size() != 2) return fail("usage: runtime <counter.wasm> <ping_pong.wasm> [--threads N]");
+    if (a.positional.size() != 2)
+        return fail("usage: runtime <counter.wasm> <ping_pong.wasm> [--threads N] [--worker PATH]");
     std::cout << std::fixed << std::setprecision(2);
     rt::Config config;
     config.threads = static_cast<unsigned>(a.number("threads", 4));
+    if (a.has("worker")) config.worker_executable = a.options.at("worker");
     rt::Runtime runtime(config);
     auto counter = runtime.add_module_file(a.positional[0]);
     auto ping_pong = runtime.add_module_file(a.positional[1]);
     if (!counter) return fail(counter.error());
     if (!ping_pong) return fail(ping_pong.error());
-    std::cout << "runtime: " << config.threads << " scheduler threads, " << PAGLETS_WAMR_MODE << "\n";
+    std::cout << "runtime: " << config.threads << " scheduler lanes, "
+              << (config.worker_executable.empty() ? "in-process" : "worker processes") << ", " << PAGLETS_WAMR_MODE
+              << "\n";
 
     const auto status = simple_request("status");
     auto t0 = Clock::now();

@@ -301,6 +301,7 @@ std::expected<std::shared_ptr<Module>, std::string> Module::load(std::vector<std
     std::shared_ptr<Module> m(new Module());
     m->hash_ = sha256(bytes);
     m->info_ = std::move(*info);
+    m->original_ = bytes;
     m->bytes_ = std::move(bytes);
 
     char error[256] = {};

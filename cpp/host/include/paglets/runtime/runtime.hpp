@@ -5,8 +5,9 @@
 // priority mailboxes with serial handling per paglet, a scheduler thread
 // pool, capability tables, request/reply with one-shot reply capabilities,
 // timers, handler time budgets, and memory images for deactivation, clones
-// and checkpoints, with recovery after a restart. Paglets run in-process;
-// worker processes follow (plan, section 3.4).
+// and checkpoints, with recovery after a restart. Paglets run in worker
+// processes (one per scheduler lane) or, without a worker executable, in the
+// host process (plan, section 3.4).
 
 #pragma once
 
@@ -45,9 +46,12 @@ using LogFunction = std::function<void(const LogRecord&)>;
 
 struct Config {
     std::string host_name = "local";
-    unsigned threads = 2;
+    unsigned threads = 2;  // scheduler lanes; a paglet stays on one lane while active
     // Durable state (modules, images, paglet records). Empty: in memory only.
     std::filesystem::path state_dir;
+    // Worker process executable (paglets-worker): one worker per lane runs
+    // the paglet instances. Empty: paglets run in the host process.
+    std::filesystem::path worker_executable;
     wasm::Limits limits{};
     std::chrono::milliseconds handler_budget{5000};
     // With a state directory: checkpoint an active paglet after a handler
@@ -121,6 +125,9 @@ public:
     std::optional<PagletInfo> info(const PagletId& id) const;
     std::vector<PagletInfo> list() const;
     std::optional<Ending> ending(const PagletId& id) const;
+
+    // Process IDs of the running worker processes (none in-process).
+    std::vector<int> worker_processes() const;
 
     // Waits until no paglet has pending deliveries or is running (timers
     // that have not fired yet do not count). Returns false on timeout.
