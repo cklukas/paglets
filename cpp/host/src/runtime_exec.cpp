@@ -4,6 +4,7 @@
 #include "runtime_exec.hpp"
 
 #include "ipc.hpp"
+#include "shm_ring.hpp"
 #include "sandbox.hpp"
 
 #include <paglets/abi.hpp>
@@ -20,6 +21,7 @@
 
 #ifndef _WIN32
 #include <csignal>
+#include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -247,6 +249,10 @@ public:
                 if (auto s = main_.send(answer); !s) return fail(s.error());
                 continue;
             }
+            if (tag == ipc::notify_marker) {
+                (void)serve_import(imports, r);  // no answer
+                continue;
+            }
             if (tag == 1) {
                 std::string error;
                 msgpack::read_value(r, error);
@@ -313,6 +319,9 @@ public:
 private:
     std::expected<void, std::string> ensure_started() {
         if (alive_) return {};
+        const std::size_t capacity = ipc::default_ring_capacity;
+        auto memory = ipc::SharedMemory::create(ipc::ring_region_size(capacity));
+        if (!memory) return std::unexpected(memory.error());
         auto main_pair = ipc::socket_pair();
         if (!main_pair) return std::unexpected(main_pair.error());
         auto control_pair = ipc::socket_pair();
@@ -321,28 +330,53 @@ private:
             ::close(main_pair->second);
             return std::unexpected(control_pair.error());
         }
+        const int shm_fd = static_cast<int>(memory->handle());
+        // The rings' control blocks exist before the worker attaches.
+        ipc::RingChannel channel(std::move(*memory), capacity, ipc::Doorbell{main_pair->first, main_pair->first}, true);
+        // The child's descriptors 3, 4 and 5 are filled from copies above
+        // them, so no source is overwritten by an earlier dup2.
+        const int src_main = ::fcntl(main_pair->second, F_DUPFD_CLOEXEC, 64);
+        const int src_control = ::fcntl(control_pair->second, F_DUPFD_CLOEXEC, 64);
+        const int src_shm = ::fcntl(shm_fd, F_DUPFD_CLOEXEC, 64);
+        ::close(main_pair->second);
+        ::close(control_pair->second);
+        if (src_main < 0 || src_control < 0 || src_shm < 0) {
+            for (int fd : {src_main, src_control, src_shm}) {
+                if (fd >= 0) ::close(fd);
+            }
+            ::close(control_pair->first);
+            return std::unexpected(std::string("cannot start worker: ") + std::strerror(errno));
+        }
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
-        posix_spawn_file_actions_adddup2(&actions, main_pair->second, 3);
-        posix_spawn_file_actions_adddup2(&actions, control_pair->second, 4);
+        posix_spawn_file_actions_adddup2(&actions, src_main, 3);
+        posix_spawn_file_actions_adddup2(&actions, src_control, 4);
+        posix_spawn_file_actions_adddup2(&actions, src_shm, 5);
         const std::string exe = executable_.string();
         std::string fd_main = "3";
         std::string fd_control = "4";
+        std::string fd_shm = "5";
+        std::string ring_capacity = std::to_string(capacity);
         std::string no_sandbox = "--no-sandbox";
-        char* argv[] = {const_cast<char*>(exe.c_str()), fd_main.data(), fd_control.data(),
-                        sandbox_ ? nullptr : no_sandbox.data(), nullptr};
+        char* argv[] = {const_cast<char*>(exe.c_str()),
+                        fd_main.data(),
+                        fd_control.data(),
+                        fd_shm.data(),
+                        ring_capacity.data(),
+                        sandbox_ ? nullptr : no_sandbox.data(),
+                        nullptr};
         pid_t pid = -1;
         const int rc = ::posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv, environ);
         posix_spawn_file_actions_destroy(&actions);
-        ::close(main_pair->second);
-        ::close(control_pair->second);
+        ::close(src_main);
+        ::close(src_control);
+        ::close(src_shm);
         if (rc != 0) {
-            ::close(main_pair->first);
             ::close(control_pair->first);
             return std::unexpected("cannot start worker " + exe + ": " + std::strerror(rc));
         }
         pid_ = pid;
-        main_ = ipc::Channel(main_pair->first);
+        main_ = std::move(channel);
         {
             std::lock_guard lock(control_mu_);
             control_ = ipc::Channel(control_pair->first);
@@ -395,8 +429,8 @@ private:
     std::function<void(const std::string&)> warn_;
     std::mutex mu_;          // main channel and process state
     std::mutex control_mu_;  // control channel (terminate from the watchdog)
-    ipc::Channel main_;
-    ipc::Channel control_;
+    ipc::RingChannel main_;  // calls and imports
+    ipc::Channel control_;   // terminations
     std::atomic<int> pid_{-1};
     bool alive_ = false;
     std::atomic<std::uint64_t> generation_{0};
@@ -436,10 +470,18 @@ bool WorkerPlaced::lost() {
 // process over the main channel, which is inside a call at that moment.
 class ForwardedImports final : public wasm::HostImports {
 public:
-    explicit ForwardedImports(ipc::Channel& channel) : channel_(channel) {}
+    explicit ForwardedImports(ipc::RingChannel& channel) : channel_(channel) {}
 
+    // No result: sent without waiting for an answer.
     void log(std::int32_t level, std::string_view text) override {
-        (void)forward("log", level, 0, {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()});
+        msgpack::Writer w;
+        w.write_array_header(5);
+        w.write_int(ipc::notify_marker);
+        w.write_str("log");
+        w.write_int(level);
+        w.write_int(0);
+        w.write_bin({reinterpret_cast<const std::uint8_t*>(text.data()), text.size()});
+        if (!channel_.send(w.bytes())) std::_Exit(3);  // the host is gone
     }
     Document self_info() override { return document("self_info", 0, 0, {}); }
     std::int32_t send(std::int32_t endpoint, std::span<const std::uint8_t> msg) override {
@@ -504,7 +546,7 @@ private:
         return r->second ? std::move(*r->second) : Bytes{};
     }
 
-    ipc::Channel& channel_;
+    ipc::RingChannel& channel_;
 };
 
 struct WorkerInstance {
@@ -530,9 +572,14 @@ std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(
     return std::make_unique<WorkerExecutor>(std::move(executable), sandbox, std::move(warn));
 }
 
-int run_worker(int main_fd, int control_fd, bool sandbox) {
+int run_worker(int main_fd, int control_fd, std::intptr_t shm_handle, std::size_t ring_capacity, bool sandbox) {
     ::signal(SIGPIPE, SIG_IGN);
     wasm::ensure_runtime();
+    auto memory = ipc::SharedMemory::attach(shm_handle, ipc::ring_region_size(ring_capacity));
+    if (!memory) {
+        std::cerr << "paglets-worker: " << memory.error() << "\n";
+        return 2;
+    }
     if (sandbox) {
         // Everything that opens files lazily is initialized first.
         std::uint8_t warm[8];
@@ -541,7 +588,7 @@ int run_worker(int main_fd, int control_fd, bool sandbox) {
             std::cerr << "paglets-worker: running without OS sandbox: " << ok.error() << "\n";
         }
     }
-    ipc::Channel main(main_fd);
+    ipc::RingChannel main(std::move(*memory), ring_capacity, ipc::Doorbell{main_fd, main_fd}, false);
     ipc::Channel control(control_fd);
     std::mutex mu;
     std::map<std::string, WorkerInstance> instances;
@@ -708,7 +755,7 @@ std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(std::
     return std::unexpected(std::string("worker processes are not supported on Windows yet"));
 }
 
-int run_worker(int, int, bool) {
+int run_worker(int, int, std::intptr_t, std::size_t, bool) {
     return 2;
 }
 

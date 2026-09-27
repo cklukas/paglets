@@ -5,7 +5,7 @@
 // started by the host with two connected sockets (calls and terminations)
 // and ends when the host closes them. On Linux it runs in a seccomp sandbox.
 //
-//   paglets-worker <main-fd> <control-fd> [--no-sandbox]
+//   paglets-worker <doorbell-fd> <control-fd> <ring-memory> <ring-capacity> [--no-sandbox]
 //   paglets-worker --check-sandbox      verify the sandbox (exit code 0: denials work)
 
 #include "runtime_exec.hpp"
@@ -30,10 +30,11 @@ int main(int argc, char** argv) {
         // sandbox refuses; workers leave the same way.
         std::_Exit(0);
     }
-    const bool sandbox = !(argc == 4 && std::strcmp(argv[3], "--no-sandbox") == 0);
-    if (argc != 3 && !(argc == 4 && !sandbox)) {
+    const bool sandbox = !(argc == 6 && std::strcmp(argv[5], "--no-sandbox") == 0);
+    if (argc != 5 && !(argc == 6 && !sandbox)) {
         std::cerr << "paglets-worker is started by paglets-host\n";
         return 2;
     }
-    return paglets::runtime::run_worker(std::atoi(argv[1]), std::atoi(argv[2]), sandbox);
+    return paglets::runtime::run_worker(std::atoi(argv[1]), std::atoi(argv[2]), std::atoll(argv[3]),
+                                        static_cast<std::size_t>(std::atoll(argv[4])), sandbox);
 }

@@ -19,7 +19,8 @@ set(test_sources
     test_wasm_binary.cpp
     test_engine.cpp
     test_snapshot.cpp
-    test_runtime.cpp)
+    test_runtime.cpp
+    test_ipc.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp)
 endif()

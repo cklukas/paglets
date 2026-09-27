@@ -1,9 +1,10 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
-// Framed messages over a stream socket between the host control process and
-// its worker processes: a 32-bit little-endian length followed by a
-// MessagePack document. POSIX only; Windows runs paglets in-process for now.
+// Framed messages between the host control process and its worker
+// processes: a 32-bit little-endian length followed by a MessagePack
+// document. Calls travel through shared-memory rings (shm_ring.hpp);
+// Channel carries the same frames over a stream socket (terminations).
 
 #pragma once
 
@@ -28,8 +29,10 @@ enum class Op : std::int32_t {
 };
 
 // A frame from the worker during a call: [import_marker, name, a, b, data]
-// answered by [result, document?].
+// answered by [result, document?]. Imports without a result (log) use
+// notify_marker and get no answer.
 inline constexpr std::int32_t import_marker = 100;
+inline constexpr std::int32_t notify_marker = 101;
 
 class Channel {
 public:
