@@ -1,8 +1,9 @@
 # paglets/cpp: paglet ABI v1
 
-Status: specification for WP3 (milestone M1), implemented by the guest SDK
-(`cpp/sdk`) and the host runtime (`cpp/host`); every conformance test of
-section 11 runs in CI (`cpp/tests/test_runtime.cpp`). Companion to
+Status: **final for ABI v1** (WP3 closed; review in section 12). Implemented
+by the guest SDK (`cpp/sdk`) and the host runtime (`cpp/host`); every
+conformance test of section 11 runs in CI (`cpp/tests/test_runtime.cpp`),
+in-process and with worker processes. Companion to
 [cpp-edition-plan.md](cpp-edition-plan.md) and
 [cpp-security-and-communication.md](cpp-security-and-communication.md).
 
@@ -23,7 +24,7 @@ A paglet module for ABI v1:
 - exports every mutable global it defines, so memory images can capture them
   (C/C++ guests: `-Wl,--export=__stack_pointer`);
 - does not mutate its tables at runtime (function pointers stay valid across
-  memory images; C and C++ guests satisfy this);
+  memory images; C and C++ guests satisfy this; the host cannot verify it);
 - exports the version marker `paglets_abi_v1` (section 2);
 - imports only functions from the import set of its trust class (section 5):
   the host rejects the module at load time otherwise.
@@ -55,9 +56,12 @@ none. Within a major version, additions are compatible:
 | `paglets_free` | `(ptr: i32) -> ()` | yes | Release a block from `paglets_alloc` |
 | `paglets_on_event` | `(kind: i32, ptr: i32, len: i32) -> i32` | yes | Lifecycle events (section 6) |
 | `paglets_on_message` | `(ptr: i32, len: i32) -> i32` | yes | Message delivery (section 7) |
-| `paglets_state_export` | `() -> i64` | no | State migration: returns `(ptr << 32) \| len` of a state document |
-| `paglets_state_import` | `(ptr: i32, len: i32) -> i32` | no | State migration: installs a state document |
+| `paglets_state_export` | `() -> i64` | no | State migration (reserved): returns `(ptr << 32) \| len` of a state document |
+| `paglets_state_import` | `(ptr: i32, len: i32) -> i32` | no | State migration (reserved): installs a state document |
 | `_initialize` | `() -> ()` | no | Reactor initializer (C/C++ static constructors) |
+
+The state migration exports are reserved for code upgrades (plan, section
+3.2); ABI v1 hosts accept but do not call them yet.
 
 ### 3.1 Handler results
 
@@ -75,9 +79,12 @@ without having replied, the host replies to the requester with status
 
 A trap (unreachable, out-of-bounds access, stack exhaustion, exceeded time
 budget, `proc_exit`) fails the paglet: the host discards the instance, answers
-every pending request of the paglet with status `failed`, and marks the paglet
-`failed`. With a checkpoint (WP7) the paglet resumes from the checkpoint
-instead.
+every pending request of the paglet and every reply capability it holds with
+status `failed`, and ends the paglet. A trap is the paglet's own fault, so it
+does not resume from a checkpoint. When the worker process running a paglet
+ends instead (plan, section 3.4), the paglet in the call fails and the
+others on that worker resume from their last image; without an image they
+fail as well.
 
 ## 4. Memory ownership
 
@@ -142,7 +149,9 @@ Lifecycle operations (`op`):
 
 At most one of `dispose`, `deactivate` and `dispatch` can be pending per
 handler call (`bad_state` otherwise). They take effect at the next quiescent
-point, after any clones of the same call.
+point, after any clones of the same call. Children and clones are roaming
+paglets of the creator's owner (clones of a system paglet as well) and count
+against the per-call limit of section 10 (`quota` beyond it).
 
 A clone starts with a copy of the original's memory image. Its capability
 table holds its own endpoint (handle 1), copies of the original's
@@ -163,7 +172,7 @@ absent optional keys take the stated defaults.
 | `payload` | bin | empty | Application payload, usually MessagePack |
 | `caps` | [int] | none | Handles to transfer; each must be transferable and is moved to the receiver on success |
 | `priority` | int | 3 | 0 (lowest) to 7 (highest) |
-| `timeout_ms` | int | 30000 | `request` only: after this time the requester gets a reply with status `timeout` |
+| `timeout_ms` | int | 30000 | `request` only, positive: after this time the requester gets a reply with status `timeout` |
 
 **Delivered message** (argument of `paglets_on_message`):
 
@@ -174,7 +183,7 @@ absent optional keys take the stated defaults.
 | `payload` | bin | Payload |
 | `caps` | [int] | Transferred capabilities, already in the receiver's table |
 | `priority` | int | Priority |
-| `sender` | map | Host-stamped sender record: `id`, `owner`, `trust`, `module`, `host` (absent for timers) |
+| `sender` | map | Host-stamped sender record: `id`, `owner`, `trust`, `module`, `host` (absent for timers and replies; a reply belongs to the request named by `correlation`) |
 | `badge` | str | Badge of the endpoint the sender used, if any |
 | `reply` | int | Requests: the one-shot reply capability |
 | `correlation` | int | Replies: the correlation ID returned by `request` |
@@ -232,9 +241,12 @@ service capabilities. A roaming or resident module that imports anything from
 | 6 | `dispatching` | `destination` (str) | Before a move (M3) |
 | 7 | `disposing` | none | Before disposal |
 
-Events are delivered through the mailbox, in order with messages, so a
-paglet never sees two calls at the same time. Results other than 0 and 1 are
-logged; they do not stop the lifecycle transition.
+`created` and `cloned` are the paglet's first delivery, ahead of any message
+already queued. The other events are delivered at the transition itself:
+`activated` right before the delivery that activated the paglet,
+`deactivating` and `disposing` after the handler call that requested them.
+A paglet never sees two calls at the same time. Negative results are logged;
+they do not stop the transition.
 
 ## 7. Messages
 
@@ -246,7 +258,8 @@ logged; they do not stop the lifecycle transition.
 - A message to an endpoint is only accepted if the endpoint's operations
   contain the message name or `*`, the endpoint has not expired and has uses
   left; the host checks this in `send`/`request` and returns `denied`,
-  `expired` or `quota` otherwise.
+  `expired` or `quota` otherwise, `not_found` for an ended target and `quota`
+  for a full mailbox.
 
 ### 7.2 Request and reply
 
@@ -256,8 +269,8 @@ logged; they do not stop the lifecycle transition.
   handler (the reply capability survives deactivation and memory images).
   A reply capability can be transferred like any other capability, so a
   paglet can delegate the answer.
-- The requester gets exactly one reply message (`kind` 2) with the
-  correlation ID and a status: 0 for a real reply, or `timeout`,
+- The requester gets exactly one reply message (`kind` 2, priority 7) with
+  the correlation ID and a status: 0 for a real reply, or `timeout`,
   `unknown_message`, `failed` (the receiver trapped), `gone` (the receiver was
   disposed or dropped the reply capability) or the error code the handler
   returned.
@@ -266,7 +279,7 @@ logged; they do not stop the lifecycle transition.
 ### 7.3 Timers
 
 `timer_set(delay_ms, msg)` delivers `msg` to the paglet itself (`kind` 3)
-after the delay. The result is a timer handle; `cap_drop` cancels the timer.
+after the delay (not negative; `invalid_argument` otherwise). The result is a timer handle; `cap_drop` cancels the timer.
 Timers survive deactivation: a deactivated paglet is activated when its timer
 fires.
 
@@ -276,7 +289,8 @@ fires.
   capability table; 0 is never valid. The guest cannot forge them: every use
   is checked against the table.
 - Handle 1 is always the paglet's endpoint to itself (`*` operations,
-  transferable).
+  transferable). It cannot be dropped (`denied`); transferring it passes a
+  copy.
 - Kinds in ABI v1: `endpoint`, `reply`, `timer`. Further kinds (`dir`,
   `file`, `artifact`, `topic`, `pin`) arrive with the milestones that need
   them.
@@ -356,3 +370,25 @@ Each test is run against the host runtime with the conformance guest
 | C28 | Documents larger than the limit return `too_large`; malformed documents return `malformed` |
 | C29 | Output buffers that are too small return the required length and are not written |
 | C30 | Reserved message names (`paglets.*`) are refused in `send` with `invalid_argument` |
+
+## 12. Review
+
+Reviewed against the implementation after milestone M1's runtime, worker
+processes and conformance tests were complete. Changes from the review:
+
+- Traps never resume from a checkpoint (the plan's rule, section 3.4); only
+  paglets of an ended worker process do. The earlier text said otherwise.
+- The delivery of events was described as going through the mailbox; only
+  `created` and `cloned` do, the others belong to their transition.
+- Negative results of every event are now logged by the host, as the
+  section says (`activated`, `deactivating` and `disposing` were not).
+- Rules the implementation had without the text saying so: handle 1 cannot
+  be dropped and is copied on transfer; replies carry no sender record and
+  arrive at priority 7; request timeouts must be positive and timer delays
+  not negative; children and clones are roaming; the send errors for ended
+  targets and full mailboxes.
+- The state migration exports are reserved until code upgrades exist.
+
+Open for later ABI versions (compatible additions): capability kinds for
+files, artifacts, topics and pins (WP9, WP10, M3), `dispatch` (M3), and the
+privileged `paglets_sys` module (WP10).

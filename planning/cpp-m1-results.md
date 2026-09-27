@@ -1,8 +1,7 @@
 # paglets/cpp: milestone M1 progress
 
-Status: in progress. WP3, WP4, WP6 and WP7 are done. WP5 is done except
-worker processes and their sandbox on Windows and macOS, and log
-redirection. Companion to
+Status: **closed**. WP3 to WP7 are done. The capability revocation tree
+(WP6) moves to WP9, which introduces the grants it hangs from. Companion to
 [cpp-edition-plan.md](cpp-edition-plan.md); M0 is closed in
 [cpp-m0-results.md](cpp-m0-results.md).
 
@@ -10,11 +9,11 @@ redirection. Companion to
 
 | Work package | Exit criterion | State |
 |---|---|---|
-| WP3 Paglet ABI v1 | Written spec, reviewed; conformance test list | **Done**: [cpp-abi-v1.md](cpp-abi-v1.md), conformance tests C01–C30 all automated. Review by the owner pending |
+| WP3 Paglet ABI v1 | Written spec, reviewed; conformance test list | **Done**: [cpp-abi-v1.md](cpp-abi-v1.md), conformance tests C01–C30 all automated. Reviewed; the changes are listed in section 12 of the spec |
 | WP4 Guest SDK | Samples build and pass ABI conformance tests | **Done**: `cpp/sdk` (`paglets/paglet.hpp`), `paglets_add_module(...)`, samples hello, counter, ping-pong, plus the conformance guest |
-| WP5 Host core and workers | Create, message, deactivate, activate, dispose locally; killing a worker only affects its paglets | **Met** on Linux and macOS: registry, trust classes, lifecycle, priority mailboxes, scheduler lanes, time budgets, memory limits, trap handling, import validation per trust class; worker processes (`paglets-worker`, one per lane) with restart, and paglets of a killed worker resume from their last image (test "a killed worker process only affects its paglets"). Workers on Linux run in a seccomp sandbox (`paglets-worker --check-sandbox`, a CTest case). Open: sandbox on macOS and Windows, workers on Windows (in-process there), stdout/stderr to the log, shared-memory rings |
-| WP6 Capabilities and messaging | Paglets can only message what they hold capabilities for; revoked and expired capabilities fail; conformance tests for every operation | **Done** for ABI v1: endpoint rights, badges, expiry, use limits, derive, transfer, drop, inspect, one-shot reply capabilities with timeouts, host-stamped sender records, mailbox quota. Open: revocation tree (needs grants from WP9), per-sender rate quotas |
-| WP7 Image store and persistence | kill -9 the host; on restart, paglets resume from their last image | **Done**: state directory with modules and paglet files (record + image, replaced atomically), checkpoints after handlers (policy by interval), recovery of paglets, capabilities and timers; requests in flight at the crash are answered `timeout`. Open: per-paglet storage and scratch directories |
+| WP5 Host core and workers | Create, message, deactivate, activate, dispose locally; killing a worker only affects its paglets | **Met** on Linux and macOS: registry, trust classes, lifecycle, priority mailboxes, scheduler lanes, time budgets, memory limits, trap handling, import validation per trust class; worker processes (`paglets-worker`, one per lane) with restart, and paglets of a killed worker resume from their last image (test "a killed worker process only affects its paglets"). Worker processes on Linux, macOS and Windows, each in an operating-system sandbox (`paglets-worker --check-sandbox`, a CTest case on every platform); calls travel through shared-memory rings, `send` and `reply` return without a round trip; placement keeps paglets that talk to each other on one lane; guest stdout/stderr goes to the host log |
+| WP6 Capabilities and messaging | Paglets can only message what they hold capabilities for; revoked and expired capabilities fail; conformance tests for every operation | **Done** for ABI v1: endpoint rights, badges, expiry, use limits, derive, transfer, drop, inspect, one-shot reply capabilities with timeouts, host-stamped sender records, mailbox quota. Moved to WP9: revocation tree (needs grants). Open: per-sender rate quotas |
+| WP7 Image store and persistence | kill -9 the host; on restart, paglets resume from their last image | **Done**: state directory with modules and paglet files (record + image, replaced atomically), checkpoints after handlers (policy by interval), recovery of paglets, capabilities and timers; requests in flight at the crash are answered `timeout`; checkpoint policy per paglet; per-paglet storage directory (kept with the paglet, removed on disposal) and scratch directory (cleared at host start) |
 
 ## What was built
 
@@ -39,28 +38,48 @@ redirection. Companion to
   handler time budgets, failure handling (pending requests answered
   `failed`), the state directory, checkpoints and recovery.
 - **Worker processes** (`paglets-worker`): each scheduler lane owns one
-  worker process running the lane's instances; calls, host imports and
-  memory images travel as MessagePack frames over a socket pair, terminations
-  over a second one. A paglet stays on its lane while active, so its WAMR
+  worker process running the lane's instances. Calls, host imports and
+  memory images travel as MessagePack frames through two single-producer
+  single-consumer rings in shared memory (spin briefly, then sleep on a
+  doorbell stream); terminations use a second stream. `send`, `reply` and
+  `log` are one-way frames: the worker checks their arguments itself and
+  does not wait for the host. A paglet stays on its lane while active, so its WAMR
   execution environment never changes threads. When a worker ends, the
   paglet in the call fails, the others resume from their last image (or fail
   without one), and the worker is started again. `paglets-host` uses workers
   when `paglets-worker` is next to it (`--in-process` turns them off).
-- **Worker sandbox** (Linux): after startup a worker sets `no_new_privs` and
-  a seccomp filter: file opening and creation, sockets, `execve`, process
-  creation (`clone` without `CLONE_THREAD`, `fork`), `ptrace`, `mount`, BPF,
-  key and module system calls return `EPERM`; other architectures' system
-  call numbers kill the process. `paglets-worker --check-sandbox` verifies
-  the denials (CTest `worker_sandbox`).
+- **Worker sandbox**. Linux: after startup a worker sets `no_new_privs`
+  and a seccomp filter: file opening and creation, sockets, `execve`,
+  process creation (`clone` without `CLONE_THREAD`, `fork`), `ptrace`,
+  `mount`, BPF, key and module system calls return `EPERM`; other
+  architectures' system call numbers kill the process. macOS: a sandbox
+  profile (`sandbox_init`) that denies process creation and execution,
+  network access, file writes and reading file contents. Windows: workers
+  start inside a job object (one active process, no UI access, ended with
+  the host) and drop to a restricted token (all privileges removed,
+  integrity level Low); network access is not restricted there yet.
+  `paglets-worker --check-sandbox` verifies the denials on every platform
+  (CTest `worker_sandbox`).
+- **Guest output**: `wasi_snapshot_preview1.fd_write` to stdout and stderr
+  is collected per line and logged under the paglet's ID (stdout at level
+  info, stderr at warning); a partial line is flushed after each call.
+- **Placement**: a paglet created or activated by another paglet goes to its
+  creator's lane unless that lane has clearly more paglets than the least
+  loaded one (slack `1 + min/4`); `CreateOptions::lane` pins a lane. Replies
+  and messages between paglets on one lane need no thread wake-up.
+- **Per-paglet directories**: `Runtime::storage_dir(id)` (persistent, next
+  to the paglet's record) and `Runtime::scratch_dir(id)` (under the work
+  root, cleared at host start); both are removed when the paglet is
+  disposed. System paglets (WP10) use them to back file capabilities.
 - **`paglets-host`** (M1 command line): `run` a module with JSON messages,
   `list` and `call` paglets resumed from a state directory. CTest runs a
   paglet across two host processes.
-- **Tests**: 73 unit tests (conformance C01–C30, samples, restart and crash
+- **Tests**: more than 80 unit tests (conformance C01–C30, samples, restart and crash
   recovery, a killed worker, concurrency), run twice by CTest: in-process and
   with worker processes; clean under ASan + UBSan and ThreadSanitizer (new CI
   job). The runtime also builds and passes all tests without C++26
   reflection (`linux-host-only`). CI is green on Linux x86-64 and arm64,
-  macOS arm64 and, for the first time, Windows (MinGW-w64, in-process).
+  macOS arm64 and Windows (MinGW-w64, with worker processes).
 
 ## Measurements
 
@@ -70,11 +89,17 @@ call-bench` and `paglets-spike runtime [--worker ...]`.
 
 | Measurement | 1 lane, in-process | 4 lanes, in-process | 1 lane, workers | 4 lanes, workers |
 |---|---|---|---|---|
-| Host request/reply, sequential | 57 µs | 54 µs | 136 µs | 143 µs |
-| Host requests spread over 200 paglets | 22,700/s | 54,900/s | 7,100/s | 19,800/s |
-| Paglet-to-paglet request/reply (ping-pong round trip) | 42 µs | 89 µs | 258 µs | 191 µs |
-| Create a paglet and answer its first request | 150 µs | 255 µs | 384 µs | 586 µs |
-| Deactivate and activate by message (image in memory) | 0.8 ms | 0.8 ms | 2.9 ms | 2.7 ms |
+| Host request/reply, sequential | 58 µs | 57 µs | 49 µs | 49 µs |
+| Host requests spread over 200 paglets | 23,000/s | 56,500/s | 28,200/s | 40,300/s |
+| Paglet-to-paglet request/reply (ping-pong round trip) | 40 µs | 42 µs | 47 µs | 49 µs |
+| Create a paglet and answer its first request | 164 µs | 255 µs | 282 µs | 588 µs |
+| Deactivate and activate by message (image in memory) | 0.8 ms | 0.8 ms | 2.7 ms | 2.5 ms |
+
+Before the shared-memory rings, one-way imports and placement, the worker
+columns read 136/143 µs (sequential), 7,100/19,800 requests/s and 258/191 µs
+(ping-pong); the ping-pong across 4 in-process lanes took 89 µs. With
+workers, sequential host requests are now faster than in-process ones: the
+worker runs the guest while the host thread prepares the next delivery.
 
 Without the runtime, a request through the ABI (counter `status`) takes
 16 µs; a message the paglet does not handle 8 µs (M0 ABI v0 on the same
@@ -112,11 +137,12 @@ machine: 8 µs).
    progress every 5 ms instead, which also halved the ping-pong latency.
 7. **Guest module size** with the SDK is 80–136 KB (C++ standard library
    containers, `std::function`); `wasm-opt` and `-Oz` are options for WP20.
-8. **Worker IPC costs about 20–60 µs per crossing here.** Every host import
-   (`send`, `request`, `reply`, ...) is a synchronous round trip to the control
-   process, so a ping-pong round trip grows from 42 µs to 258 µs with one
-   lane. Next steps: the shared-memory rings of the plan, and returning
-   `send`/`reply` results asynchronously (batched at the end of the call).
+8. **Socket IPC cost about 20–60 µs per crossing.** With every host import
+   a synchronous round trip over a socket pair, a ping-pong round trip grew
+   from 42 µs to 258 µs. Shared-memory rings (a crossing costs a few
+   microseconds while the other side spins) and one-way `send`/`reply`
+   (checked in the worker, applied by the host in order) brought it to
+   47 µs.
 9. **WAMR modifies the module buffer while loading**, so the host keeps an
    unmodified copy to send to workers (and to stores).
 10. **A killed process closes its sockets long before it becomes a
@@ -131,17 +157,29 @@ machine: 8 µs).
 13. **Every write of a paglet's instance pointer happens under the runtime
     lock**, since `info()` and the watchdog read it (ThreadSanitizer, found
     through a test that polls `info()`).
+14. **Memory fences are invisible to ThreadSanitizer**, so the rings' sleep
+    handshake uses sequentially consistent atomic operations instead of
+    `atomic_thread_fence`.
+15. **Descriptor numbering when spawning**: moving inherited descriptors to
+    3, 4, ... with `dup2` can overwrite a source that has not been moved
+    yet; the spawn code first copies every source to a descriptor of 64 or higher.
+16. **Windows inheritance**: handles are passed through
+    `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` and the process starts suspended
+    inside its job, so a worker never runs outside the job and never
+    inherits foreign handles.
+17. **GCC 16's AddressSanitizer detects use-after-return by default**, which
+    moves locals to a fake stack; WAMR's native stack check then reports an
+    overflow on every call. The WAMR library is built with
+    `--param=asan-use-after-return=0`.
 
 ## Next steps
 
-1. WP5 remainder: worker sandbox on macOS (sandbox profile) and Windows
-   (job object, restricted token), worker processes on Windows, stdout/stderr
-   of guests to the log, shared-memory rings and asynchronous imports
-   (finding 8), placement that keeps communicating paglets on one lane. The
-   seccomp denylist should become an allowlist once the set of system calls
-   a worker needs is known on every supported libc (review in WP21).
-2. The allocation work of finding 1.
-3. Windows (MinGW-w64): the CI job is green; decide whether it leaves
-   experimental.
-4. Review of the ABI v1 spec by the owner, then start M2 (WP8 ledger and
-   identity).
+1. M2: WP8 (keys, ledger, gossip, enrollment, passports), WP9 (policy,
+   grants, manifests, audit; the revocation tree from WP6), WP10 (system
+   paglets).
+2. The seccomp denylist should become an allowlist once the set of system
+   calls a worker needs is known on every supported libc; Windows workers
+   need network restrictions (AppContainer or WFP); review in WP21.
+3. The allocation work of finding 1.
+4. Windows (MinGW-w64): the CI job is green with workers; decide whether it
+   leaves experimental.

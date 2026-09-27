@@ -7,10 +7,11 @@ packages are in [`../planning/`](../planning/cpp-edition-plan.md).
 
 Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
-runtime) is in progress ([progress](../planning/cpp-m1-results.md)): the
-paglet ABI v1 ([specification](../planning/cpp-abi-v1.md)), the guest SDK,
-capabilities and messaging, persistence with crash recovery, and worker
-processes (Linux and macOS; Windows runs paglets in the host process) work.
+runtime) is closed ([results](../planning/cpp-m1-results.md)): the paglet
+ABI v1 ([specification](../planning/cpp-abi-v1.md)), the guest SDK,
+capabilities and messaging, persistence with crash recovery, and sandboxed
+worker processes on Linux, macOS and Windows. Milestone M2 (mesh identity,
+policy and system paglets) is in progress.
 
 ## Layout
 
@@ -114,9 +115,12 @@ build/macos-arm64/host/paglets-host run build/macos-arm64/guests/ping_pong.wasm 
 Message bodies and arguments are JSON, passed to the paglet as MessagePack;
 replies are printed as JSON. Paglets run in worker processes
 (`paglets-worker`, found next to `paglets-host`; one per scheduler lane, set
-with `--threads`); `--in-process` runs them in the host process instead. On
-Linux the workers run in a seccomp sandbox (`--no-sandbox` for debugging;
-`paglets-worker --check-sandbox` verifies it). With a state directory, paglets outlive the host
+with `--threads`); `--in-process` runs them in the host process instead. The
+workers run in an operating-system sandbox (Linux: seccomp; macOS: a sandbox
+profile; Windows: a job object and a restricted token) and cannot open
+files, create sockets or start programs (`--no-sandbox` for debugging;
+`paglets-worker --check-sandbox` verifies it). Output a paglet writes to
+stdout or stderr goes to the host log. With a state directory, paglets outlive the host
 process and resume from their last memory image:
 
 ```bash

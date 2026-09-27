@@ -454,11 +454,20 @@ struct Runtime::Impl {
         return result;
     }
 
+    // Delivers a lifecycle event. Error results are logged; they do not stop
+    // the transition (ABI v1, section 6).
     std::expected<std::int32_t, std::string> call_event(PagletRec& rec, abi::EventKind kind, const Bytes& doc) {
-        return guest_call(rec, [&] {
+        auto r = guest_call(rec, [&] {
             const std::array<std::uint32_t, 1> lead{static_cast<std::uint32_t>(kind)};
             return rec.instance->call("paglets_on_event", lead, doc);
         });
+        if (r && *r < 0) {
+            std::lock_guard lock(mu);
+            log(2, rec.id,
+                "event " + std::to_string(static_cast<int>(kind)) + " handler returned " +
+                    std::string(abi::error_name(*r)));
+        }
+        return r;
     }
 
     std::expected<void, std::string> activate(PagletRec& rec, bool deliver_activated);
@@ -895,7 +904,7 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
                           {});
         }
     }
-    if (*result < 0 && !reply_slot) {
+    if (*result < 0 && !reply_slot && env.type == Envelope::Type::message) {
         log(2, rec.id, "handler returned " + std::string(abi::error_name(*result)));
     }
 }

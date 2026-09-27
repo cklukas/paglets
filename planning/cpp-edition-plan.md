@@ -1,10 +1,9 @@
 # Plan: paglets/cpp (Wasm + WAMR + C++26 reflection)
 
 Status: milestone M0 (WP0–WP2) done, results in
-[cpp-m0-results.md](cpp-m0-results.md). Milestone M1 in progress: WP3 (ABI
-v1, [cpp-abi-v1.md](cpp-abi-v1.md)), WP4, WP6 and WP7 done, WP5 done except
-the worker sandbox on macOS and Windows and Windows workers; see
-[cpp-m1-results.md](cpp-m1-results.md).
+[cpp-m0-results.md](cpp-m0-results.md). Milestone M1 (WP3–WP7) closed, results in
+[cpp-m1-results.md](cpp-m1-results.md); the ABI v1 spec is
+[cpp-abi-v1.md](cpp-abi-v1.md). Milestone M2 (WP8–WP10) in progress.
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.
 It keeps the concepts that proved useful in the Python edition (hosts, mobile
