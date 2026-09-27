@@ -3,6 +3,7 @@
 
 paglets_add_guest(testbed LANGUAGE C NO_SDK SOURCES guests/testbed.c)
 paglets_add_guest(forbidden LANGUAGE C NO_SDK SOURCES guests/forbidden.c)
+paglets_add_module(conformance SOURCES guests/conformance.cpp)
 
 if(PAGLETS_GUESTS_AVAILABLE)
     set(PAGLETS_TEST_GUEST_DIR "${PAGLETS_GUEST_OUTPUT_DIR}")
@@ -17,16 +18,17 @@ set(test_sources
     test_json.cpp
     test_wasm_binary.cpp
     test_engine.cpp
-    test_snapshot.cpp)
+    test_snapshot.cpp
+    test_runtime.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
 target_link_libraries(paglets_tests PRIVATE paglets_host)
-target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter)
+target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter testbed forbidden)
+foreach(guest counter hello ping_pong conformance testbed forbidden)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()
@@ -44,4 +46,23 @@ if(PAGLETS_TEST_GUEST_DIR)
                      --increments 2 --expect 18)
     set_tests_properties(image_save PROPERTIES FIXTURES_SETUP counter_image)
     set_tests_properties(image_resume PROPERTIES FIXTURES_REQUIRED counter_image)
+endif()
+
+# paglets-host: a paglet survives its host process in the state directory.
+if(PAGLETS_TEST_GUEST_DIR)
+    set(state "${CMAKE_CURRENT_BINARY_DIR}/host-state")
+    add_test(NAME host_run_hello
+             COMMAND paglets-host run "${PAGLETS_TEST_GUEST_DIR}/hello.wasm" --call greet "\"world\"")
+    set_tests_properties(host_run_hello PROPERTIES PASS_REGULAR_EXPRESSION "hello, world")
+    add_test(NAME host_state_clean COMMAND ${CMAKE_COMMAND} -E rm -rf "${state}")
+    add_test(NAME host_state_save
+             COMMAND paglets-host run "${PAGLETS_TEST_GUEST_DIR}/counter.wasm" --state-dir "${state}" --keep
+                     --call increment "{\"by\": 5, \"note\": \"a\"}"
+                     --call increment "{\"by\": 2, \"note\": \"b\"}")
+    add_test(NAME host_state_resume
+             COMMAND paglets-host call --state-dir "${state}" all increment "{\"by\": 1, \"note\": \"c\"}"
+                     --expect "\"value\":8")
+    set_tests_properties(host_state_clean PROPERTIES FIXTURES_SETUP host_state_clean)
+    set_tests_properties(host_state_save PROPERTIES FIXTURES_REQUIRED host_state_clean FIXTURES_SETUP host_state)
+    set_tests_properties(host_state_resume PROPERTIES FIXTURES_REQUIRED host_state)
 endif()

@@ -2,8 +2,10 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 // Thin C++ layer over the embedded WAMR runtime: modules, instances, limits,
-// asynchronous termination and the paglet message ABI of the M0 spike
-// (abi v0: paglets_alloc / paglets_handle / paglets_free, import paglets.log).
+// asynchronous termination, and the host side of the paglet ABI v1 imports
+// (planning/cpp-abi-v1.md): WAMR validates every (pointer, length) argument
+// against linear memory, then the call is forwarded to the HostImports object
+// attached to the instance.
 
 #pragma once
 
@@ -18,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -34,9 +37,14 @@ inline constexpr std::uint32_t page_size = 65536;
 // functions; safe to call from any thread.
 void ensure_runtime();
 
-// Must be called once on every thread (other than the first) that executes
-// Wasm code, before the first call.
+// Must be called on every thread (other than the first) that executes Wasm
+// code, before the first call; deinit_thread releases the thread's runtime
+// state before the thread ends.
 void init_thread();
+void deinit_thread();
+
+// Secure random bytes (the `random` import).
+void fill_random(std::span<std::uint8_t> out);
 
 struct Limits {
     std::uint32_t stack_size = 64 * 1024;  // Wasm operand/call stack of the interpreter
@@ -69,6 +77,33 @@ private:
 
 using LogSink = std::function<void(std::string_view)>;
 
+// Host side of the `paglets` import module. The defaults answer
+// `unsupported` (log goes to the instance's log sink), so an embedder only
+// overrides what it provides. Documents are MessagePack (abi.hpp); spans
+// point into guest memory and are only valid during the call.
+class HostImports {
+public:
+    virtual ~HostImports() = default;
+
+    using Document = std::expected<std::vector<std::uint8_t>, std::int32_t>;
+
+    virtual void log(std::int32_t level, std::string_view text);
+    virtual Document self_info();
+    virtual std::int32_t send(std::int32_t endpoint, std::span<const std::uint8_t> msg);
+    virtual std::int64_t request(std::int32_t endpoint, std::span<const std::uint8_t> msg);
+    virtual std::int32_t reply(std::int32_t reply, std::span<const std::uint8_t> msg);
+    virtual std::int32_t cap_derive(std::int32_t handle, std::span<const std::uint8_t> spec);
+    virtual std::int32_t cap_drop(std::int32_t handle);
+    virtual Document cap_inspect(std::int32_t handle);
+    virtual Document cap_list();
+    virtual std::int32_t create_child(std::span<const std::uint8_t> spec);
+    virtual std::int32_t lifecycle(std::int32_t op, std::span<const std::uint8_t> arg);
+    virtual std::int32_t timer_set(std::int64_t delay_ms, std::span<const std::uint8_t> msg);
+
+    // Set by Instance::set_imports; the log default writes to its sink.
+    class Instance* instance = nullptr;
+};
+
 // Transparent string hash for lookups by std::string_view.
 struct StringHash {
     using is_transparent = void;
@@ -96,9 +131,12 @@ public:
                                                       std::initializer_list<std::uint32_t> args = {});
     std::expected<void, std::string> call_void(std::string_view name, std::initializer_list<std::uint32_t> args = {});
 
-    // ABI v0: copies the request into guest memory, calls paglets_handle and
-    // returns a copy of the reply.
-    std::expected<std::vector<std::uint8_t>, std::string> send(std::span<const std::uint8_t> request);
+    // Copies data into guest memory (paglets_alloc), calls the export with
+    // the leading i32 arguments followed by (ptr, len), frees the buffer
+    // (paglets_free) and returns the export's i32 result.
+    std::expected<std::int32_t, std::string> call_with_data(std::string_view name,
+                                                            std::span<const std::uint32_t> leading,
+                                                            std::span<const std::uint8_t> data);
 
     // Makes a running call fail with "terminated"; callable from any thread.
     void terminate();
@@ -115,6 +153,11 @@ public:
     void set_log_sink(LogSink sink) { log_sink_ = std::move(sink); }
     void log(std::string_view text) const;
 
+    // Attaches the host side of the paglet imports; nullptr detaches. The
+    // object must outlive every call into the instance.
+    void set_imports(HostImports* imports);
+    HostImports* imports() const { return imports_; }
+
 private:
     Instance() = default;
 
@@ -122,8 +165,10 @@ private:
     Limits limits_;
     WASMModuleInstanceCommon* inst_ = nullptr;
     WASMExecEnv* exec_env_ = nullptr;
+    std::thread::id exec_thread_;  // WAMR binds an execution environment to the thread that first uses it
     std::unordered_map<std::string, void*, StringHash, std::equal_to<>> functions_;  // export lookup cache
     LogSink log_sink_;
+    HostImports* imports_ = nullptr;
 };
 
 std::expected<std::vector<std::uint8_t>, std::string> read_file(const std::string& path);

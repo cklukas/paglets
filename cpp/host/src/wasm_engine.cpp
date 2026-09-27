@@ -3,39 +3,236 @@
 
 #include <paglets/wasm/engine.hpp>
 
+#include <paglets/abi.hpp>
+
 #include <wasm_export.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
+#include <random>
+
+// Not in wasm_export.h: copies the exception under the instance's exception
+// lock (wasm_runtime_get_exception reads it without the lock, which races with
+// wasm_runtime_terminate from another thread). The buffer holds 128 bytes.
+extern "C" bool wasm_runtime_copy_exception(WASMModuleInstanceCommon* module_inst, char* exception_buf);
 
 namespace paglets::wasm {
 
 namespace {
+constexpr std::size_t exception_buffer_size = 128;  // EXCEPTION_BUF_LEN
+}  // namespace
 
-// paglets.log(ptr, len): WAMR validates the (pointer, length) pair ("*~")
-// against the instance memory before the call.
-void native_log(wasm_exec_env_t env, const char* text, std::uint32_t len) {
-    wasm_module_inst_t inst = wasm_runtime_get_module_inst(env);
-    auto* self = static_cast<Instance*>(wasm_runtime_get_custom_data(inst));
-    if (self != nullptr) {
+namespace {
+
+// Every native receives validated pointers: WAMR checks each "*~" pair
+// (pointer, length) against the instance memory before the call and traps
+// the guest otherwise.
+
+Instance* instance_of(wasm_exec_env_t env) {
+    return static_cast<Instance*>(wasm_runtime_get_custom_data(wasm_runtime_get_module_inst(env)));
+}
+
+HostImports* imports_of(wasm_exec_env_t env) {
+    Instance* self = instance_of(env);
+    return self != nullptr ? self->imports() : nullptr;
+}
+
+std::span<const std::uint8_t> bytes_of(const void* ptr, std::uint32_t len) {
+    return {static_cast<const std::uint8_t*>(ptr), len};
+}
+
+bool document_too_large(std::uint32_t len) {
+    return len > abi::max_document_size;
+}
+
+// Writes a document result into (out, cap) following the ABI's buffer
+// protocol: the result is the document length; nothing is written if it
+// does not fit.
+std::int32_t write_document(const HostImports::Document& doc, void* out, std::uint32_t cap) {
+    if (!doc) return doc.error();
+    if (doc->size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max())) return abi::too_large;
+    if (doc->size() <= cap && !doc->empty()) std::memcpy(out, doc->data(), doc->size());
+    return static_cast<std::int32_t>(doc->size());
+}
+
+void native_log(wasm_exec_env_t env, std::int32_t level, const char* text, std::uint32_t len) {
+    if (HostImports* h = imports_of(env)) {
+        h->log(level, std::string_view(text, len));
+    } else if (Instance* self = instance_of(env)) {
         self->log(std::string_view(text, len));
     }
 }
 
-NativeSymbol paglets_natives[] = {
-    {"log", reinterpret_cast<void*>(native_log), "(*~)", nullptr},
+std::int32_t native_self_info(wasm_exec_env_t env, void* out, std::uint32_t cap) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? write_document(h->self_info(), out, cap) : abi::unsupported;
+}
+
+std::int32_t native_send(wasm_exec_env_t env, std::int32_t endpoint, const void* msg, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->send(endpoint, bytes_of(msg, len));
+}
+
+std::int64_t native_request(wasm_exec_env_t env, std::int32_t endpoint, const void* msg, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->request(endpoint, bytes_of(msg, len));
+}
+
+std::int32_t native_reply(wasm_exec_env_t env, std::int32_t reply, const void* msg, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->reply(reply, bytes_of(msg, len));
+}
+
+std::int32_t native_cap_derive(wasm_exec_env_t env, std::int32_t handle, const void* spec, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->cap_derive(handle, bytes_of(spec, len));
+}
+
+std::int32_t native_cap_drop(wasm_exec_env_t env, std::int32_t handle) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? h->cap_drop(handle) : abi::unsupported;
+}
+
+std::int32_t native_cap_inspect(wasm_exec_env_t env, std::int32_t handle, void* out, std::uint32_t cap) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? write_document(h->cap_inspect(handle), out, cap) : abi::unsupported;
+}
+
+std::int32_t native_cap_list(wasm_exec_env_t env, void* out, std::uint32_t cap) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? write_document(h->cap_list(), out, cap) : abi::unsupported;
+}
+
+std::int32_t native_create_child(wasm_exec_env_t env, const void* spec, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->create_child(bytes_of(spec, len));
+}
+
+std::int32_t native_lifecycle(wasm_exec_env_t env, std::int32_t op, const void* arg, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->lifecycle(op, bytes_of(arg, len));
+}
+
+std::int32_t native_timer_set(wasm_exec_env_t env, std::int64_t delay_ms, const void* msg, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->timer_set(delay_ms, bytes_of(msg, len));
+}
+
+std::int64_t native_now(wasm_exec_env_t, std::int32_t clock) {
+    using namespace std::chrono;
+    if (clock == static_cast<std::int32_t>(abi::Clock::wall)) {
+        return duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+    }
+    if (clock == static_cast<std::int32_t>(abi::Clock::monotonic)) {
+        return duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+    }
+    return abi::invalid_argument;
+}
+
+std::int32_t native_random(wasm_exec_env_t, void* out, std::uint32_t len) {
+    fill_random(std::span<std::uint8_t>(static_cast<std::uint8_t*>(out), len));
+    return abi::ok;
+}
+
+const NativeSymbol paglets_natives_template[] = {
+    {"log", reinterpret_cast<void*>(native_log), "(i*~)", nullptr},
+    {"self_info", reinterpret_cast<void*>(native_self_info), "(*~)i", nullptr},
+    {"send", reinterpret_cast<void*>(native_send), "(i*~)i", nullptr},
+    {"request", reinterpret_cast<void*>(native_request), "(i*~)I", nullptr},
+    {"reply", reinterpret_cast<void*>(native_reply), "(i*~)i", nullptr},
+    {"cap_derive", reinterpret_cast<void*>(native_cap_derive), "(i*~)i", nullptr},
+    {"cap_drop", reinterpret_cast<void*>(native_cap_drop), "(i)i", nullptr},
+    {"cap_inspect", reinterpret_cast<void*>(native_cap_inspect), "(i*~)i", nullptr},
+    {"cap_list", reinterpret_cast<void*>(native_cap_list), "(*~)i", nullptr},
+    {"create_child", reinterpret_cast<void*>(native_create_child), "(*~)i", nullptr},
+    {"lifecycle", reinterpret_cast<void*>(native_lifecycle), "(i*~)i", nullptr},
+    {"timer_set", reinterpret_cast<void*>(native_timer_set), "(I*~)i", nullptr},
+    {"now", reinterpret_cast<void*>(native_now), "(i)I", nullptr},
+    {"random", reinterpret_cast<void*>(native_random), "(*~)i", nullptr},
 };
+static_assert(std::size(paglets_natives_template) == std::size(abi::import_names),
+              "every import of abi::import_names needs a native");
+
+// WAMR sorts the array in place when registering it.
+NativeSymbol paglets_natives[std::size(paglets_natives_template)];
 
 std::string error_text(const char* buf) {
     return std::string(buf[0] ? buf : "unknown error");
 }
 
 }  // namespace
+
+void fill_random(std::span<std::uint8_t> out) {
+    static thread_local std::random_device device;
+    std::size_t i = 0;
+    while (i < out.size()) {
+        const auto word = device();
+        for (std::size_t b = 0; b < sizeof word && i < out.size(); ++b, ++i) {
+            out[i] = static_cast<std::uint8_t>(word >> (8 * b));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HostImports defaults
+
+void HostImports::log(std::int32_t, std::string_view text) {
+    if (instance != nullptr) instance->log(text);
+}
+HostImports::Document HostImports::self_info() {
+    return std::unexpected(abi::unsupported);
+}
+std::int32_t HostImports::send(std::int32_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int64_t HostImports::request(std::int32_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::reply(std::int32_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::cap_derive(std::int32_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::cap_drop(std::int32_t) {
+    return abi::unsupported;
+}
+HostImports::Document HostImports::cap_inspect(std::int32_t) {
+    return std::unexpected(abi::unsupported);
+}
+HostImports::Document HostImports::cap_list() {
+    return std::unexpected(abi::unsupported);
+}
+std::int32_t HostImports::create_child(std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::lifecycle(std::int32_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::timer_set(std::int64_t, std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
 
 void ensure_runtime() {
     static std::once_flag once;
@@ -48,6 +245,13 @@ void ensure_runtime() {
             std::abort();
         }
         wasm_runtime_set_log_level(WASM_LOG_LEVEL_ERROR);
+        std::copy(std::begin(paglets_natives_template), std::end(paglets_natives_template), paglets_natives);
+        for (std::size_t i = 0; i < std::size(paglets_natives); ++i) {
+            if (paglets_natives[i].symbol != abi::import_names[i]) {
+                std::cerr << "paglets: native table does not match abi::import_names\n";
+                std::abort();
+            }
+        }
         if (!wasm_runtime_register_natives("paglets", paglets_natives,
                                            sizeof paglets_natives / sizeof paglets_natives[0])) {
             std::cerr << "paglets: registering host functions failed\n";
@@ -56,10 +260,27 @@ void ensure_runtime() {
     });
 }
 
+namespace {
+// wasm_runtime_thread_env_inited() only looks at the signal handler state in
+// AOT builds, so the per-thread initialization is tracked here.
+thread_local bool thread_env_ready = false;
+}  // namespace
+
 void init_thread() {
     ensure_runtime();
-    if (!wasm_runtime_thread_env_inited()) {
-        wasm_runtime_init_thread_env();
+    if (!thread_env_ready) {
+        if (!wasm_runtime_init_thread_env()) {
+            std::cerr << "paglets: WAMR thread environment initialization failed\n";
+            std::abort();
+        }
+        thread_env_ready = true;
+    }
+}
+
+void deinit_thread() {
+    if (thread_env_ready) {
+        wasm_runtime_destroy_thread_env();
+        thread_env_ready = false;
     }
 }
 
@@ -124,6 +345,7 @@ std::expected<std::unique_ptr<Instance>, std::string> Instance::create(std::shar
     if (self->exec_env_ == nullptr) {
         return std::unexpected("creating execution environment failed");
     }
+    self->exec_thread_ = std::this_thread::get_id();
 
     // WAMR itself runs _initialize during instantiation for modules that
     // import WASI (a second call traps in wasi-libc). Only modules without
@@ -168,10 +390,20 @@ std::expected<std::uint64_t, std::string> Instance::call(std::string_view name, 
     }
     std::copy(args.begin(), args.end(), argv.begin());
 
-    wasm_runtime_clear_exception(inst_);
+    // An execution environment records the native stack of the thread that
+    // first runs it; a paglet moved to another scheduler thread gets a new one.
+    if (exec_thread_ != std::this_thread::get_id()) {
+        wasm_runtime_destroy_exec_env(exec_env_);
+        exec_env_ = wasm_runtime_create_exec_env(inst_, limits_.stack_size);
+        if (exec_env_ == nullptr) return std::unexpected("creating execution environment failed");
+        exec_thread_ = std::this_thread::get_id();
+    }
+    // Clearing searches every cluster of the thread manager; only do it
+    // when there is something to clear.
+    if (wasm_runtime_copy_exception(inst_, nullptr)) wasm_runtime_clear_exception(inst_);
     if (!wasm_runtime_call_wasm(exec_env_, fn, static_cast<std::uint32_t>(args.size()), argv.data())) {
-        const char* ex = wasm_runtime_get_exception(inst_);
-        std::string message = ex != nullptr ? ex : "unknown trap";
+        std::array<char, exception_buffer_size> ex{};
+        std::string message = wasm_runtime_copy_exception(inst_, ex.data()) ? std::string(ex.data()) : "unknown trap";
         wasm_runtime_clear_exception(inst_);
         return std::unexpected(message);
     }
@@ -195,27 +427,31 @@ std::expected<void, std::string> Instance::call_void(std::string_view name, std:
     return {};
 }
 
-std::expected<std::vector<std::uint8_t>, std::string> Instance::send(std::span<const std::uint8_t> request) {
-    const auto len = static_cast<std::uint32_t>(request.size());
-    auto ptr = call_i32("paglets_alloc", {len});
-    if (!ptr) return std::unexpected(ptr.error());
-    if (*ptr == 0 && len > 0) return std::unexpected("guest allocation failed");
-    const auto guest_ptr = static_cast<std::uint32_t>(*ptr);
-
-    auto mem = memory();
-    if (std::uint64_t{guest_ptr} + len > mem.size()) return std::unexpected("guest returned invalid buffer");
-    std::memcpy(mem.data() + guest_ptr, request.data(), len);
-
-    const std::array<std::uint32_t, 2> args{guest_ptr, len};
-    auto packed = call("paglets_handle", args, 2);
-    if (!packed) return std::unexpected(packed.error());
-    if (auto f = call_void("paglets_free", {guest_ptr}); !f) return std::unexpected(f.error());
-
-    const auto reply_ptr = static_cast<std::uint32_t>(*packed >> 32);
-    const auto reply_len = static_cast<std::uint32_t>(*packed & 0xffffffffu);
-    mem = memory();  // the handler may have grown memory
-    if (std::uint64_t{reply_ptr} + reply_len > mem.size()) return std::unexpected("guest returned invalid reply");
-    return std::vector<std::uint8_t>(mem.begin() + reply_ptr, mem.begin() + reply_ptr + reply_len);
+std::expected<std::int32_t, std::string> Instance::call_with_data(std::string_view name,
+                                                                  std::span<const std::uint32_t> leading,
+                                                                  std::span<const std::uint8_t> data) {
+    const auto len = static_cast<std::uint32_t>(data.size());
+    std::uint32_t guest_ptr = 0;
+    if (len > 0) {
+        auto ptr = call_i32("paglets_alloc", {len});
+        if (!ptr) return std::unexpected(ptr.error());
+        if (*ptr == 0) return std::unexpected("guest allocation failed");
+        guest_ptr = static_cast<std::uint32_t>(*ptr);
+        auto mem = memory();
+        if (std::uint64_t{guest_ptr} + len > mem.size()) return std::unexpected("guest returned invalid buffer");
+        std::memcpy(mem.data() + guest_ptr, data.data(), len);
+    }
+    std::array<std::uint32_t, 16> args{};
+    if (leading.size() + 2 > args.size()) return std::unexpected("too many arguments");
+    std::copy(leading.begin(), leading.end(), args.begin());
+    args[leading.size()] = guest_ptr;
+    args[leading.size() + 1] = len;
+    auto result = call(name, std::span(args.data(), leading.size() + 2), 1);
+    if (!result) return std::unexpected(result.error());
+    if (len > 0) {
+        if (auto f = call_void("paglets_free", {guest_ptr}); !f) return std::unexpected(f.error());
+    }
+    return static_cast<std::int32_t>(static_cast<std::uint32_t>(*result));
 }
 
 void Instance::terminate() {
@@ -264,6 +500,11 @@ std::expected<void, std::string> Instance::set_global_bits(std::string_view name
     const std::size_t width = (g.kind == WASM_I64 || g.kind == WASM_F64) ? 8 : 4;
     std::memcpy(g.global_data, &bits, width);
     return {};
+}
+
+void Instance::set_imports(HostImports* imports) {
+    imports_ = imports;
+    if (imports_ != nullptr) imports_->instance = this;
 }
 
 void Instance::log(std::string_view text) const {

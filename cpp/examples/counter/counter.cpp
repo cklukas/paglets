@@ -6,82 +6,59 @@
 
 #include "counter.schema.gen.hpp"
 
-#include <paglets/guest.hpp>
+#include <paglets/paglet.hpp>
 
 #include <string>
 #include <vector>
 
 namespace {
 
-std::int64_t value = 0;
-std::vector<counter_msgs::Increment> history;
-std::vector<std::vector<std::uint8_t>> ballast;
+using namespace counter_msgs;
 
-std::uint32_t memory_pages() {
-    return static_cast<std::uint32_t>(__builtin_wasm_memory_size(0));
-}
-
-counter_msgs::Status status() {
-    counter_msgs::Status s;
-    s.value = value;
-    s.history_size = static_cast<std::uint32_t>(history.size());
-    const std::size_t first = history.size() > 3 ? history.size() - 3 : 0;
-    for (std::size_t i = first; i < history.size(); ++i) {
-        s.recent_notes.push_back(history[i].note);
+class Counter : public paglets::Paglet {
+public:
+    Counter() {
+        router().on<Increment>("increment", [this](const Increment& inc, paglets::Message& m) {
+            value_ = inc.mode == Mode::add ? value_ + inc.by : value_ * inc.by;
+            history_.push_back(inc);
+            m.reply(status());
+        });
+        router().on("status", [this](paglets::Message& m) { m.reply(status()); });
+        router().on<Echo>("echo", [](const Echo& echo, paglets::Message& m) { m.reply(echo); });
+        router().on<Bloat>("bloat", [this](const Bloat& bloat, paglets::Message& m) {
+            ballast_.emplace_back(std::size_t{bloat.kilobytes} * 1024, bloat.fill);
+            m.reply(status());
+        });
+        router().on("schema", [](paglets::Message& m) { m.reply(std::string(paglets_schema_json)); });
+        router().on<std::string>("log", [this](const std::string& text, paglets::Message& m) {
+            paglets::log(text);
+            m.reply(status());
+        });
     }
-    if (!history.empty()) {
-        double sum = 0;
-        for (const auto& h : history) sum += static_cast<double>(h.by);
-        s.average_step = sum / static_cast<double>(history.size());
-    }
-    s.memory_pages = memory_pages();
-    return s;
-}
 
-template <class T>
-bool read_body(paglets::msgpack::Reader& r, T& body) {
-    return paglets::msgpack::read_value(r, body) && r.ok();
-}
+private:
+    Status status() const {
+        Status s;
+        s.value = value_;
+        s.history_size = static_cast<std::uint32_t>(history_.size());
+        const std::size_t first = history_.size() > 3 ? history_.size() - 3 : 0;
+        for (std::size_t i = first; i < history_.size(); ++i) {
+            s.recent_notes.push_back(history_[i].note);
+        }
+        if (!history_.empty()) {
+            double sum = 0;
+            for (const auto& h : history_) sum += static_cast<double>(h.by);
+            s.average_step = sum / static_cast<double>(history_.size());
+        }
+        s.memory_pages = static_cast<std::uint32_t>(__builtin_wasm_memory_size(0));
+        return s;
+    }
+
+    std::int64_t value_ = 0;
+    std::vector<Increment> history_;
+    std::vector<std::vector<std::uint8_t>> ballast_;
+};
 
 }  // namespace
 
-std::vector<std::uint8_t> paglets::guest::handle_message(std::span<const std::uint8_t> request) {
-    paglets::msgpack::Reader r(request);
-    std::uint32_t parts = 0;
-    std::string_view name;
-    if (!r.read_array_header(parts) || parts != 2 || !r.read_str(name)) {
-        return reply_error("malformed request");
-    }
-
-    if (name == "increment") {
-        counter_msgs::Increment inc;
-        if (!read_body(r, inc)) return reply_error("malformed increment");
-        value = inc.mode == counter_msgs::Mode::add ? value + inc.by : value * inc.by;
-        history.push_back(std::move(inc));
-        return reply_ok(status());
-    }
-    if (name == "status") {
-        return reply_ok(status());
-    }
-    if (name == "echo") {
-        counter_msgs::Echo echo;
-        if (!read_body(r, echo)) return reply_error("malformed echo");
-        return reply_ok(echo);
-    }
-    if (name == "bloat") {
-        counter_msgs::Bloat bloat;
-        if (!read_body(r, bloat)) return reply_error("malformed bloat");
-        ballast.emplace_back(std::size_t{bloat.kilobytes} * 1024, bloat.fill);
-        return reply_ok(status());
-    }
-    if (name == "schema") {
-        return reply_ok(std::string(counter_msgs::paglets_schema_json));
-    }
-    if (name == "log") {
-        std::string text;
-        if (!read_body(r, text)) return reply_error("malformed log");
-        paglets::guest::log(text);
-        return reply_ok(status());
-    }
-    return reply_error("unknown message: " + std::string(name));
-}
+PAGLETS_PAGLET(Counter)

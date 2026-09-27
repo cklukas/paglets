@@ -4,6 +4,7 @@
 #include "test.hpp"
 
 #include <paglets/msgpack.hpp>
+#include <paglets/wasm/direct.hpp>
 #include <paglets/wasm/engine.hpp>
 
 #include <chrono>
@@ -113,11 +114,12 @@ PAGLETS_TEST("engine: guest log reaches the host sink") {
     REQUIRE_OK(inst);
     std::string logged;
     (*inst)->set_log_sink([&](std::string_view text) { logged = text; });
+    pw::DirectHarness harness(**inst);
+    REQUIRE_OK(harness.start());
     paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str("log");
     w.write_str("hello from the guest");
-    auto reply = (*inst)->send(w.bytes());
+    auto reply = harness.call("log", w.bytes());
     REQUIRE_OK(reply);
+    CHECK_EQ(reply->status, 0);
     CHECK_EQ(logged, std::string("hello from the guest"));
 }

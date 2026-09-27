@@ -64,7 +64,15 @@ jobs:
           path: cpp/build/linux-gcc16/guests/*.wasm
 
   sanitizers:
-    name: Linux x86_64 (GCC 16, ASan + UBSan)
+    name: Linux x86_64 (GCC 16, ${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ASan + UBSan
+            preset: linux-gcc16-asan
+          - name: TSan
+            preset: linux-gcc16-tsan
     runs-on: ubuntu-24.04
     container: gcc:16
     steps:
@@ -80,9 +88,9 @@ jobs:
       - name: Configure, build and test
         working-directory: cpp
         run: |
-          cmake --preset linux-gcc16-asan -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
-          cmake --build --preset linux-gcc16-asan
-          ctest --preset linux-gcc16-asan
+          cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          cmake --build --preset ${{ matrix.preset }}
+          ctest --preset ${{ matrix.preset }}
 
   macos:
     name: macOS arm64 (Homebrew GCC 16)

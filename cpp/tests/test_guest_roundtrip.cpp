@@ -8,6 +8,7 @@
 #include "test.hpp"
 
 #include <messages.hpp>
+#include <paglets/wasm/direct.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/reflect.hpp>
 
@@ -17,7 +18,19 @@ namespace wire = paglets::wire;
 
 namespace {
 
-std::unique_ptr<pw::Instance> counter_instance() {
+struct Counter {
+    std::unique_ptr<pw::Instance> instance;
+    std::unique_ptr<pw::DirectHarness> harness;
+
+    template <class Reply>
+    bool call(std::string_view name, const std::vector<std::uint8_t>& payload, Reply& out) {
+        auto r = harness->call(name, payload);
+        if (!r || r->status != 0) return false;
+        return wire::from_msgpack(r->payload, out);
+    }
+};
+
+Counter counter_instance() {
     const auto path = paglets::test::guest_path("counter.wasm");
     if (path.empty()) paglets::test::skip("counter.wasm not available");
     auto bytes = pw::read_file(path);
@@ -26,25 +39,10 @@ std::unique_ptr<pw::Instance> counter_instance() {
     if (!module) throw std::runtime_error(module.error());
     auto inst = pw::Instance::create(*module);
     if (!inst) throw std::runtime_error(inst.error());
-    return std::move(*inst);
-}
-
-template <class Body>
-std::vector<std::uint8_t> request(std::string_view name, const Body& body) {
-    paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str(name);
-    wire::encode(w, body);
-    return w.take();
-}
-
-template <class Reply>
-bool decode_reply(const std::vector<std::uint8_t>& bytes, Reply& out) {
-    paglets::msgpack::Reader r(bytes);
-    std::uint32_t parts = 0;
-    std::string_view status;
-    return r.read_array_header(parts) && parts == 2 && r.read_str(status) && status == "ok" && wire::decode(r, out) &&
-           r.ok() && r.at_end();
+    Counter c{std::move(*inst), nullptr};
+    c.harness = std::make_unique<pw::DirectHarness>(*c.instance);
+    if (auto r = c.harness->start(); !r) throw std::runtime_error(r.error());
+    return c;
 }
 
 }  // namespace
@@ -65,11 +63,8 @@ PAGLETS_TEST("roundtrip: host reflection -> guest generated code -> host") {
     in.nested = Status{7, 1, {"n"}, std::nullopt, 3};
     in.mode = Mode::multiply;
 
-    const auto req = request("echo", in);
-    auto reply = inst->send(req);
-    REQUIRE_OK(reply);
     Echo out;
-    REQUIRE(decode_reply(*reply, out));
+    REQUIRE(inst.call("echo", wire::to_msgpack(in), out));
 
     // Byte-identical: the guest's generated encoder matches the host's
     // reflection encoder.
@@ -83,31 +78,21 @@ PAGLETS_TEST("roundtrip: typed increments and status") {
     auto inst = counter_instance();
     Status status;
     for (int i = 1; i <= 4; ++i) {
-        auto reply = inst->send(request("increment", Increment{i, "step" + std::to_string(i), Mode::add}));
-        REQUIRE_OK(reply);
-        REQUIRE(decode_reply(*reply, status));
+        REQUIRE(inst.call("increment", wire::to_msgpack(Increment{i, "step" + std::to_string(i), Mode::add}), status));
     }
     CHECK_EQ(status.value, 10);
     CHECK_EQ(status.history_size, 4u);
     CHECK(status.recent_notes == std::vector<std::string>({"step2", "step3", "step4"}));
     CHECK(status.average_step.has_value() && *status.average_step == 2.5);
 
-    auto reply = inst->send(request("increment", Increment{3, "triple", Mode::multiply}));
-    REQUIRE_OK(reply);
-    REQUIRE(decode_reply(*reply, status));
+    REQUIRE(inst.call("increment", wire::to_msgpack(Increment{3, "triple", Mode::multiply}), status));
     CHECK_EQ(status.value, 30);
 }
 
 PAGLETS_TEST("roundtrip: guest publishes the generated schema descriptor") {
     auto inst = counter_instance();
-    paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str("schema");
-    w.write_nil();
-    auto reply = inst->send(w.bytes());
-    REQUIRE_OK(reply);
     std::string schema;
-    REQUIRE(decode_reply(*reply, schema));
+    REQUIRE(inst.call("schema", {}, schema));
     auto json = wire::Json::parse(schema);
     REQUIRE(json.has_value());
     CHECK(schema.find(R"({"name":"items","type":"list<Increment>"})") != std::string::npos);

@@ -6,6 +6,7 @@
 #include <paglets/msgpack.hpp>
 
 #include <algorithm>
+#include <paglets/wasm/direct.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wasm/snapshot.hpp>
 
@@ -23,10 +24,30 @@ std::shared_ptr<pw::Module> load_guest(const std::string& file) {
     return *module;
 }
 
+struct Counter {
+    std::unique_ptr<pw::Instance> instance;
+    std::unique_ptr<pw::DirectHarness> harness;
+
+    std::vector<std::uint8_t> request(const std::string& name, const std::vector<std::uint8_t>& payload = {}) {
+        auto r = harness->call(name, payload);
+        if (!r) throw std::runtime_error(r.error());
+        if (r->status != 0) throw std::runtime_error("status " + std::to_string(r->status));
+        return r->payload;
+    }
+};
+
+Counter drive(std::expected<std::unique_ptr<pw::Instance>, std::string> inst, bool start = true) {
+    if (!inst) throw std::runtime_error(inst.error());
+    Counter c{std::move(*inst), nullptr};
+    c.harness = std::make_unique<pw::DirectHarness>(*c.instance);
+    if (start) {
+        if (auto r = c.harness->start(); !r) throw std::runtime_error(r.error());
+    }
+    return c;
+}
+
 std::vector<std::uint8_t> increment(std::int64_t by) {
     paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str("increment");
     w.write_map_header(2);
     w.write_str("by");
     w.write_int(by);
@@ -35,20 +56,10 @@ std::vector<std::uint8_t> increment(std::int64_t by) {
     return w.take();
 }
 
-std::vector<std::uint8_t> named(const std::string& name) {
-    paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str(name);
-    w.write_nil();
-    return w.take();
-}
-
 std::int64_t value_of(const std::vector<std::uint8_t>& reply) {
     paglets::msgpack::Reader r(reply);
-    std::uint32_t parts = 0;
-    std::string_view status;
     std::uint32_t n = 0;
-    if (!r.read_array_header(parts) || !r.read_str(status) || status != "ok" || !r.read_map_header(n)) return -1;
+    if (!r.read_map_header(n)) return -1;
     for (std::uint32_t i = 0; i < n; ++i) {
         std::string_view key;
         r.read_str(key);
@@ -66,11 +77,10 @@ std::int64_t value_of(const std::vector<std::uint8_t>& reply) {
 
 PAGLETS_TEST("snapshot: counter state survives capture, serialize and restore") {
     auto module = load_guest("counter.wasm");
-    auto inst = pw::Instance::create(module);
-    REQUIRE_OK(inst);
-    for (int i = 1; i <= 10; ++i) REQUIRE_OK((*inst)->send(increment(i)));
+    Counter c = drive(pw::Instance::create(module));
+    for (int i = 1; i <= 10; ++i) c.request("increment", increment(i));
 
-    auto snap = pw::capture(**inst);
+    auto snap = pw::capture(*c.instance);
     REQUIRE_OK(snap);
     CHECK_EQ(snap->globals.size(), std::size_t{1});  // __stack_pointer
 
@@ -78,40 +88,33 @@ PAGLETS_TEST("snapshot: counter state survives capture, serialize and restore") 
     auto loaded = pw::deserialize(bytes);
     REQUIRE_OK(loaded);
 
-    auto restored = pw::restore(module, *loaded);
-    REQUIRE_OK(restored);
-    auto status = (*restored)->send(named("status"));
-    REQUIRE_OK(status);
-    CHECK_EQ(value_of(*status), 55);
+    Counter restored = drive(pw::restore(module, *loaded), false);
+    CHECK_EQ(value_of(restored.request("status")), 55);
 
     // Both copies continue independently (clone semantics).
-    CHECK_EQ(value_of(*(*restored)->send(increment(100))), 155);
-    CHECK_EQ(value_of(*(*inst)->send(increment(1))), 56);
+    CHECK_EQ(value_of(restored.request("increment", increment(100))), 155);
+    CHECK_EQ(value_of(c.request("increment", increment(1))), 56);
 }
 
 PAGLETS_TEST("snapshot: heap growth is captured") {
     auto module = load_guest("counter.wasm");
-    auto inst = pw::Instance::create(module);
-    REQUIRE_OK(inst);
+    Counter c = drive(pw::Instance::create(module));
     paglets::msgpack::Writer w;
-    w.write_array_header(2);
-    w.write_str("bloat");
     w.write_map_header(2);
     w.write_str("kilobytes");
     w.write_uint(1024);
     w.write_str("fill");
     w.write_uint(7);
-    REQUIRE_OK((*inst)->send(w.bytes()));
-    REQUIRE_OK((*inst)->send(increment(3)));
+    c.request("bloat", w.bytes());
+    c.request("increment", increment(3));
 
-    auto snap = pw::capture(**inst);
+    auto snap = pw::capture(*c.instance);
     REQUIRE_OK(snap);
     CHECK(snap->page_count >= 16);
     CHECK(snap->data_pages() >= 16);
-    auto restored = pw::restore(module, *snap);
-    REQUIRE_OK(restored);
-    CHECK_EQ(value_of(*(*restored)->send(named("status"))), 3);
-    CHECK_EQ((*restored)->page_count(), snap->page_count);
+    Counter restored = drive(pw::restore(module, *snap), false);
+    CHECK_EQ(value_of(restored.request("status")), 3);
+    CHECK_EQ(restored.instance->page_count(), snap->page_count);
 }
 
 PAGLETS_TEST("snapshot: untouched pages are elided and restored as zero") {
@@ -150,10 +153,9 @@ PAGLETS_TEST("snapshot: image of another module is refused") {
 
 PAGLETS_TEST("snapshot: corrupted image is detected") {
     auto module = load_guest("counter.wasm");
-    auto inst = pw::Instance::create(module);
-    REQUIRE_OK(inst);
-    REQUIRE_OK((*inst)->send(increment(1)));
-    auto snap = pw::capture(**inst);
+    Counter c = drive(pw::Instance::create(module));
+    c.request("increment", increment(1));
+    auto snap = pw::capture(*c.instance);
     REQUIRE_OK(snap);
     auto bytes = pw::serialize(*snap);
     bytes[bytes.size() - 100] ^= 0x01;

@@ -37,7 +37,8 @@ PAGLETS_TEST("wasm binary: counter guest is memory-image ready") {
     REQUIRE_OK(bytes);
     auto info = pw::parse_module(*bytes);
     REQUIRE_OK(info);
-    CHECK(info->find_export("paglets_handle") != nullptr);
+    CHECK(info->find_export("paglets_on_message") != nullptr);
+    CHECK(info->find_export("paglets_abi_v1") != nullptr);
     CHECK(info->find_export("_initialize") != nullptr);
     CHECK(pw::ImportPolicy::standard().check(*info).has_value());
     CHECK(pw::check_snapshot_ready(*info).has_value());

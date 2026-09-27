@@ -24,6 +24,10 @@ namespace paglets::msgpack {
 
 class Writer {
 public:
+    // Documents are mostly small; one allocation up front avoids repeated
+    // regrowth, which is expensive inside the Wasm interpreter.
+    Writer() { buf_.reserve(256); }
+
     std::vector<std::uint8_t>& bytes() { return buf_; }
     const std::vector<std::uint8_t>& bytes() const { return buf_; }
     std::vector<std::uint8_t> take() { return std::move(buf_); }

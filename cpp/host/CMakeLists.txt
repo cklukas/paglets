@@ -3,8 +3,12 @@
 
 add_library(paglets_host STATIC
     src/json.cpp
+    src/json_msgpack.cpp
+    src/runtime.cpp
+    src/runtime_store.cpp
     src/sha256.cpp
     src/wasm_binary.cpp
+    src/wasm_direct.cpp
     src/wasm_engine.cpp
     src/wasm_snapshot.cpp)
 target_include_directories(paglets_host PUBLIC

@@ -77,9 +77,13 @@ public:
     ImportPolicy() = default;
     explicit ImportPolicy(std::vector<std::string> allowed) : allowed_(std::move(allowed)) {}
 
-    // Standard import set of roaming paglets in the M0 spike: the paglets
-    // host API plus a minimal WASI subset (no files, no sockets).
+    // Import set of roaming and resident paglets (ABI v1, section 5): the
+    // functions of the `paglets` module plus a minimal WASI subset (no
+    // files, no sockets).
     static ImportPolicy standard();
+
+    // Import set of trusted Wasm system paglets: standard plus `paglets_sys`.
+    static ImportPolicy system();
 
     bool allows(const Import& import) const;
 

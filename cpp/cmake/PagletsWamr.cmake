@@ -30,10 +30,19 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
     GIT_TAG ${PAGLETS_WAMR_TAG}
     GIT_SHALLOW TRUE
-    PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/patch-wamr.cmake
     # WAMR's own top-level project is not used; runtime_lib.cmake is included below.
     SOURCE_SUBDIR paglets-no-cmake-project)
 FetchContent_MakeAvailable(wamr)
+
+# Source fixes, applied (idempotently) on every configure so that existing
+# build directories pick up new ones too.
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/patch-wamr.cmake
+    WORKING_DIRECTORY ${wamr_SOURCE_DIR}
+    RESULT_VARIABLE _paglets_patch_result)
+if(NOT _paglets_patch_result EQUAL 0)
+    message(FATAL_ERROR "paglets: patching WAMR failed")
+endif()
 
 set(WAMR_ROOT_DIR ${wamr_SOURCE_DIR})
 
@@ -121,7 +130,7 @@ target_link_libraries(paglets_vmlib PUBLIC Threads::Threads)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(paglets_vmlib PUBLIC m dl)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    target_link_libraries(paglets_vmlib PUBLIC ws2_32 ntdll)
+    target_link_libraries(paglets_vmlib PUBLIC ws2_32 ntdll pathcch bcrypt)
 endif()
 
 if(PAGLETS_WAMR_FAST_INTERP)

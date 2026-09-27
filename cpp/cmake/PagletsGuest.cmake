@@ -7,14 +7,17 @@
 # llvm + lld + wasi-libc + wasi-runtimes). The host toolchain (GCC 16) is not
 # involved, so the guest compiler is invoked through custom commands.
 #
-# paglets_add_guest(<name>
+# paglets_add_module(<name>
 #     SOURCES <files...>
-#     [LANGUAGE C|CXX]                        (default CXX)
-#     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>]
-#     [NO_SDK])
+#     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>])
 #
-# Produces ${PAGLETS_GUEST_OUTPUT_DIR}/<name>.wasm and, with a schema, the
-# generated <name>.schema.gen.hpp and <name>.schema.json.
+# Builds a paglet module in C++ with the guest SDK (paglet ABI v1). Produces
+# ${PAGLETS_GUEST_OUTPUT_DIR}/<name>.wasm and, with a schema, the generated
+# <name>.schema.gen.hpp and <name>.schema.json.
+#
+# paglets_add_guest(<name> SOURCES <files...> [LANGUAGE C|CXX] [NO_SDK] ...)
+#
+# The general form, also for test modules that are not paglets (NO_SDK).
 
 set(PAGLETS_GUEST_OUTPUT_DIR "${PROJECT_BINARY_DIR}/guests" CACHE INTERNAL "")
 
@@ -100,10 +103,11 @@ function(paglets_add_guest name)
         set(compiler "${PAGLETS_WASI_CLANGXX}")
         set(lang_flags -std=c++23 -fno-exceptions -fno-rtti)
         if(NOT G_NO_SDK)
-            list(APPEND sources "${PROJECT_SOURCE_DIR}/sdk/src/guest.cpp")
+            list(APPEND sources "${PROJECT_SOURCE_DIR}/sdk/src/paglet.cpp")
             list(APPEND include_flags "-I${PROJECT_SOURCE_DIR}/sdk/include")
-            list(APPEND depends "${PROJECT_SOURCE_DIR}/sdk/src/guest.cpp"
-                 "${PROJECT_SOURCE_DIR}/sdk/include/paglets/guest.hpp")
+            list(APPEND depends "${PROJECT_SOURCE_DIR}/sdk/src/paglet.cpp"
+                 "${PROJECT_SOURCE_DIR}/sdk/include/paglets/paglet.hpp"
+                 "${PROJECT_SOURCE_DIR}/common/include/paglets/abi.hpp")
         endif()
     else()
         set(compiler "${PAGLETS_WASI_CLANG}")
@@ -144,4 +148,8 @@ function(paglets_add_guest name)
         COMMENT "Building guest paglet ${name}.wasm"
         VERBATIM)
     add_custom_target(${name}_wasm ALL DEPENDS "${out}")
+endfunction()
+
+function(paglets_add_module name)
+    paglets_add_guest(${name} LANGUAGE CXX ${ARGN})
 endfunction()

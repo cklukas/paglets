@@ -60,6 +60,12 @@
       "displayName": "Linux, GCC 16, ASan + UBSan",
       "inherits": "linux-gcc16",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "PAGLETS_SANITIZE": "ON" }
+    },
+    {
+      "name": "linux-gcc16-tsan",
+      "displayName": "Linux, GCC 16, ThreadSanitizer",
+      "inherits": "linux-gcc16",
+      "cacheVariables": { "PAGLETS_SANITIZE_THREAD": "ON" }
     }
   ],
   "buildPresets": [
@@ -68,7 +74,8 @@
     { "name": "linux-host-only", "configurePreset": "linux-host-only" },
     { "name": "windows-mingw-gcc16", "configurePreset": "windows-mingw-gcc16" },
     { "name": "macos-arm64-asan", "configurePreset": "macos-arm64-asan" },
-    { "name": "linux-gcc16-asan", "configurePreset": "linux-gcc16-asan" }
+    { "name": "linux-gcc16-asan", "configurePreset": "linux-gcc16-asan" },
+    { "name": "linux-gcc16-tsan", "configurePreset": "linux-gcc16-tsan" }
   ],
   "testPresets": [
     { "name": "macos-arm64", "configurePreset": "macos-arm64", "output": { "outputOnFailure": true } },
@@ -76,6 +83,12 @@
     { "name": "linux-host-only", "configurePreset": "linux-host-only", "output": { "outputOnFailure": true } },
     { "name": "windows-mingw-gcc16", "configurePreset": "windows-mingw-gcc16", "output": { "outputOnFailure": true } },
     { "name": "macos-arm64-asan", "configurePreset": "macos-arm64-asan", "output": { "outputOnFailure": true } },
-    { "name": "linux-gcc16-asan", "configurePreset": "linux-gcc16-asan", "output": { "outputOnFailure": true } }
+    { "name": "linux-gcc16-asan", "configurePreset": "linux-gcc16-asan", "output": { "outputOnFailure": true } },
+    {
+      "name": "linux-gcc16-tsan",
+      "configurePreset": "linux-gcc16-tsan",
+      "output": { "outputOnFailure": true },
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1" }
+    }
   ]
 }

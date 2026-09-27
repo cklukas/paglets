@@ -3,6 +3,8 @@
 
 #include <paglets/wasm/binary.hpp>
 
+#include <paglets/abi.hpp>
+
 #include <algorithm>
 #include <cstring>
 
@@ -294,8 +296,7 @@ std::expected<ModuleInfo, std::string> parse_module(std::span<const std::uint8_t
 }
 
 ImportPolicy ImportPolicy::standard() {
-    return ImportPolicy({
-        "paglets.*",
+    std::vector<std::string> allowed = {
         "wasi_snapshot_preview1.args_get",
         "wasi_snapshot_preview1.args_sizes_get",
         "wasi_snapshot_preview1.environ_get",
@@ -311,7 +312,17 @@ ImportPolicy ImportPolicy::standard() {
         "wasi_snapshot_preview1.fd_fdstat_get",
         "wasi_snapshot_preview1.fd_prestat_get",
         "wasi_snapshot_preview1.fd_prestat_dir_name",
-    });
+    };
+    for (const auto name : abi::import_names) {
+        allowed.push_back(std::string(abi::import_module) + "." + std::string(name));
+    }
+    return ImportPolicy(std::move(allowed));
+}
+
+ImportPolicy ImportPolicy::system() {
+    ImportPolicy policy = standard();
+    policy.allowed_.push_back(std::string(abi::system_import_module) + ".*");
+    return policy;
 }
 
 bool ImportPolicy::allows(const Import& import) const {

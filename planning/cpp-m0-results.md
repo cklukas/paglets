@@ -1,16 +1,19 @@
 # paglets/cpp: milestone M0 results
 
-Status: WP0, WP1 and WP2 implemented on branch `cpp` (code in `cpp/`).
-Recommendation: **go** for milestone M1. Companion to
+Status: **closed**. WP0, WP1 and WP2 are implemented on branch `cpp` (code
+in `cpp/`); the decision was **go** for milestone M1
+([cpp-m1-results.md](cpp-m1-results.md)). CI is green on Linux x86-64,
+Linux arm64, macOS arm64 and the sanitizer build; Windows (MinGW-w64) stays
+an experimental job and is followed up in M1. Companion to
 [cpp-edition-plan.md](cpp-edition-plan.md).
 
 ## Summary
 
 | Work package | Exit criterion | Result |
 |---|---|---|
-| WP0 Project setup | Empty host binary and guest module build on all targets | Met locally on macOS arm64 (GCC 16), macOS x86-64 (Apple clang, Rosetta 2) and Linux arm64 (Raspberry Pi 4, GCC 14). CI workflow for Linux x86-64/arm64, macOS and Windows written but not yet run (branch not pushed); Windows unverified |
+| WP0 Project setup | Empty host binary and guest module build on all targets | **Met** in CI on Linux x86-64, Linux arm64 and macOS arm64 (GCC 16) plus the ASan/UBSan build, and locally on macOS x86-64 (Apple clang, Rosetta 2) and the Raspberry Pi 4 (GCC 14). Windows (MinGW-w64): WAMR builds after two source fixes (findings 13), the full build is followed up in M1 |
 | WP1 WAMR spike | A counter paglet is snapshotted in one process and resumes with the correct count in another process, on two architectures | **Met**: images moved macOS arm64 → Linux arm64 → macOS x86-64 → Linux arm64, state intact each time |
-| WP2 Toolchain and reflection spike | One message struct round-trips host (reflection) → guest (generated) → host | **Met** on macOS arm64: byte-identical round trip of a struct covering every supported field type. Reflection on Linux arm64 pending the GCC 16 build on the Raspberry Pi |
+| WP2 Toolchain and reflection spike | One message struct round-trips host (reflection) → guest (generated) → host | **Met**: byte-identical round trip of a struct covering every supported field type, on macOS arm64 and in CI on Linux x86-64 and Linux arm64 (GCC 16 reflection confirmed there) |
 
 ## What was built
 
@@ -132,10 +135,11 @@ implementation); a faster hash is an easy later improvement.
 
 ## Open items carried into M1
 
-- Run the CI workflow (Linux x86-64/arm64, macOS, sanitizers) once the branch is
-  pushed; verify Windows (MinGW-w64 + WAMR's Windows platform layer).
-- Reflection and the schema generator on Linux arm64 with GCC 16 (build on
-  the Raspberry Pi in progress).
+- Done: the CI workflow runs (Linux x86-64/arm64, macOS, sanitizers);
+  reflection and the schema generator work with GCC 16 on Linux arm64 (CI;
+  the GCC 16 build on the Raspberry Pi is no longer needed for this).
+- Windows (MinGW-w64 + WAMR's Windows platform layer): WAMR compiles after
+  findings 13; linking and tests are followed up in M1.
 - AOT/JIT measurements, and a faster page hash for image capture.
 - Choose bound-check mode and instances per worker process per platform (WP5).
 - Documentation uses ckdocs (not MkDocs): add a `ckdocs.yml` and a
