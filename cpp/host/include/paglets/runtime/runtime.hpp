@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include <paglets/runtime/capability.hpp>
+#include <paglets/runtime/system.hpp>
 #include <paglets/wasm/engine.hpp>
 
 #include <chrono>
@@ -21,6 +23,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -141,6 +144,24 @@ public:
 
     // Process IDs of the running worker processes (none in-process).
     std::vector<int> worker_processes() const;
+
+    // Registers a native system paglet (system.hpp) under `system.<name>`.
+    // Paglets created afterwards receive its default endpoint, if it has
+    // one; register system paglets before creating paglets.
+    std::expected<PagletId, std::string> add_system_paglet(std::shared_ptr<SystemPaglet> paglet);
+    std::optional<PagletId> system_paglet(std::string_view name) const;
+
+    // Capabilities of a paglet (tests, tools and the host's grant handling).
+    std::vector<std::pair<std::int32_t, Cap>> capabilities(const PagletId& id) const;
+    // Adds a capability to a paglet's table and returns its handle.
+    std::expected<std::int32_t, std::int32_t> add_capability(const PagletId& id, Cap cap);
+
+    // Revocation (planning/cpp-security-and-communication.md, section 4.5).
+    // Revoking a capability ID invalidates it and everything derived from
+    // it, in every table (stored with the state directory). Grants are
+    // revoked in the ledger; the host passes the current set.
+    void revoke_capability(const std::string& id);
+    void set_revoked_grants(std::set<std::string, std::less<>> grants);
 
     // Waits until no paglet has pending deliveries or is running (timers
     // that have not fired yet do not count). Returns false on timeout.

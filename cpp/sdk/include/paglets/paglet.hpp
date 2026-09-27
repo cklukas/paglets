@@ -99,12 +99,14 @@ using ReplyHandler = std::function<void(Message& reply)>;
 struct SendOptions {
     std::int32_t priority = abi::default_priority;
     std::vector<Capability> caps;  // transferred: the handles become invalid on success
+    std::vector<Capability> lend;  // shown to a system paglet for this message; they stay valid
 };
 
 struct RequestOptions {
     std::int32_t priority = abi::default_priority;
     std::vector<Capability> caps;
     std::int64_t timeout_ms = abi::default_timeout_ms;
+    std::vector<Capability> lend;
 };
 
 // A capability to send messages to a paglet or service.
@@ -142,6 +144,10 @@ public:
 inline Endpoint self() {
     return Endpoint(abi::self_handle);
 }
+
+// The endpoint to a system service the host installed (for example
+// "directory" or "storage"); not_found if there is none.
+Result<Endpoint> service(std::string_view name);
 
 Result<abi::SelfInfo> self_info();
 Result<std::vector<Capability>> list_caps();

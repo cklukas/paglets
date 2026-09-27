@@ -7,6 +7,7 @@
 #include "runtime_store.hpp"
 
 #include <paglets/abi.hpp>
+#include <paglets/runtime/system.hpp>
 #include <paglets/sha256.hpp>
 #include <paglets/wasm/snapshot.hpp>
 
@@ -34,6 +35,32 @@ PagletId new_paglet_id() {
     std::array<std::uint8_t, 16> bytes{};
     wasm::fill_random(bytes);
     return to_hex(std::span<const std::uint8_t>(bytes));
+}
+
+// IDs of endpoint and resource capabilities (the revocation tree).
+std::string new_cap_id() {
+    std::array<std::uint8_t, 16> bytes{};
+    wasm::fill_random(bytes);
+    return to_hex(std::span<const std::uint8_t>(bytes));
+}
+
+// A relative path below a directory capability: segments separated by `/`,
+// none of them empty, `.`, `..` or containing `\` or `:`.
+std::optional<std::string> normalize_relative(std::string_view path) {
+    std::string out;
+    std::size_t start = 0;
+    while (start <= path.size()) {
+        const std::size_t end = std::min(path.find('/', start), path.size());
+        const std::string_view seg = path.substr(start, end - start);
+        if (seg.empty() || seg == "." || seg == ".." || seg.find_first_of("\\:") != std::string_view::npos ||
+            seg.find('\0') != std::string_view::npos) {
+            return std::nullopt;
+        }
+        if (!out.empty()) out += '/';
+        out += seg;
+        start = end + 1;
+    }
+    return out;
 }
 
 // Priority of lifecycle deliveries: above every message priority, so they
@@ -88,7 +115,8 @@ std::expected<void, std::string> check_paglet_module(const wasm::ModuleInfo& inf
 namespace {
 
 struct Envelope {
-    enum class Type { start, message, wake, deactivate, dispose };
+    // `ended` only goes to system paglets: a paglet (ended_id) ended.
+    enum class Type { start, message, wake, deactivate, dispose, ended };
     Type type = Type::message;
     abi::EventKind event = abi::EventKind::created;  // start
     Bytes args;                                      // start
@@ -96,6 +124,8 @@ struct Envelope {
     abi::Delivered delivered;                        // message; caps are installed on delivery
     std::vector<Cap> caps;                           // transferred capabilities
     std::optional<Cap> reply_cap;                    // requests
+    std::vector<Cap> lent;                           // system paglets: capabilities lent for this message
+    PagletId ended_id;                               // ended
 };
 
 struct PendingClone {
@@ -106,7 +136,9 @@ struct PendingClone {
 
 struct PagletRec {
     PagletId id;
-    std::shared_ptr<wasm::Module> module;
+    std::shared_ptr<wasm::Module> module;  // null for native system paglets
+    std::shared_ptr<SystemPaglet> native;
+    std::unique_ptr<SystemContext> context;
     TrustClass trust = TrustClass::roaming;
     std::string owner;
 
@@ -143,9 +175,11 @@ struct PagletRec {
     std::optional<std::chrono::milliseconds> checkpoint_interval;  // per paglet; default from the config
     bool checkpoint_due = false;                                   // no stored image yet
     std::unique_ptr<wasm::HostImports> imports;
+    std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints
 
+    std::string module_hash() const { return module ? module->hash_hex() : std::string(); }
     abi::SenderRecord sender(const std::string& host) const {
-        return {id, owner, std::string(to_string(trust)), module->hash_hex(), host};
+        return {id, owner, std::string(to_string(trust)), module_hash(), host};
     }
 };
 
@@ -190,6 +224,12 @@ struct Runtime::Impl {
     std::map<std::uint64_t, std::promise<Reply>> external;  // host requests by correlation
     std::uint64_t next_external = 1;
 
+    // Native system paglets by service name (IDs `system.<name>`).
+    std::map<std::string, PagletId, std::less<>> system_paglets;
+    // Revocation (capability IDs revoked here, grants revoked in the ledger).
+    std::set<std::string, std::less<>> revoked_ids;
+    std::set<std::string, std::less<>> revoked_grants;
+
     std::optional<Store> store;
     std::filesystem::path storage_root;  // empty without a state directory
     std::filesystem::path work_root;
@@ -219,6 +259,19 @@ struct Runtime::Impl {
     }
 
     abi::SenderRecord host_sender() const { return {"host", "local", "system", "", config.host_name}; }
+
+    bool revoked(const Cap& c) const {
+        if (c.grant && revoked_grants.contains(*c.grant)) return true;
+        if (!c.id.empty() && revoked_ids.contains(c.id)) return true;
+        return std::ranges::any_of(c.lineage, [&](const std::string& id) { return revoked_ids.contains(id); });
+    }
+
+    // abi::ok, revoked or expired.
+    std::int32_t usable(const Cap& c) const {
+        if (revoked(c)) return abi::revoked;
+        if (c.expires && wall_ms() >= *c.expires) return abi::expired;
+        return abi::ok;
+    }
 
     void schedule(SteadyClock::time_point at, Deadline d) {
         const bool earliest = deadlines.empty() || at < deadlines.begin()->first;
@@ -335,7 +388,7 @@ struct Runtime::Impl {
 
     std::int32_t check_endpoint(Cap& cap, std::string_view name) const {
         if (cap.kind != Cap::Kind::endpoint) return abi::bad_handle;
-        if (cap.expires && wall_ms() >= *cap.expires) return abi::expired;
+        if (auto u = usable(cap); u != abi::ok) return u;
         if (cap.uses_left && *cap.uses_left <= 0) return abi::quota;
         if (!op_allowed(cap.ops, name)) return abi::denied;
         return abi::ok;
@@ -359,6 +412,7 @@ struct Runtime::Impl {
         self.target = id;
         self.ops = {"*"};
         self.transferable = true;
+        self.id = new_cap_id();
         rec->caps.emplace(abi::self_handle, std::move(self));
         PagletRec& ref = *rec;
         paglets.emplace(id, std::move(rec));
@@ -371,7 +425,60 @@ struct Runtime::Impl {
         c.target = id;
         c.ops = {"*"};
         c.transferable = true;
+        c.id = new_cap_id();
         return c;
+    }
+
+    // The endpoints to system services every new paglet receives (plan of
+    // the security design, section 7.5); not transferable.
+    void install_services(PagletRec& rec) {
+        for (const auto& [name, id] : system_paglets) {
+            PagletRec* sys = find(id);
+            if (sys == nullptr || !sys->native) continue;
+            auto ops = sys->native->default_ops();
+            if (ops.empty()) continue;
+            Cap c = endpoint_to(id);
+            c.ops = std::move(ops);
+            c.transferable = false;
+            rec.services.emplace_back(name, add_cap(rec, std::move(c)));
+        }
+    }
+
+    // Copies of capabilities lent to a system paglet (validated, uses
+    // counted).
+    std::expected<std::vector<Cap>, std::int32_t> lend_caps(PagletRec& rec, const std::vector<std::int32_t>& handles,
+                                                            const PagletRec& target) {
+        if (handles.empty()) return std::vector<Cap>{};
+        if (!target.native) return std::unexpected(abi::invalid_argument);
+        std::set<std::int32_t> seen;
+        for (auto h : handles) {
+            auto it = rec.caps.find(h);
+            if (it == rec.caps.end()) return std::unexpected(abi::bad_handle);
+            const Cap& c = it->second;
+            if (c.kind != Cap::Kind::endpoint && c.kind != Cap::Kind::resource) return std::unexpected(abi::bad_handle);
+            if (auto u = usable(c); u != abi::ok) return std::unexpected(u);
+            if (c.uses_left && *c.uses_left <= 0) return std::unexpected(abi::quota);
+            if (!seen.insert(h).second) return std::unexpected(abi::invalid_argument);
+        }
+        std::vector<Cap> lent;
+        for (auto h : handles) {
+            Cap& c = rec.caps.at(h);
+            if (c.kind == Cap::Kind::resource && c.uses_left) --*c.uses_left;
+            lent.push_back(c);
+        }
+        return lent;
+    }
+
+    // Tells every system paglet that a paglet ended (in order with its messages).
+    void notify_ended(const PagletId& ended) {
+        for (const auto& [name, id] : system_paglets) {
+            PagletRec* sys = find(id);
+            if (sys == nullptr || sys->id == ended) continue;
+            Envelope env;
+            env.type = Envelope::Type::ended;
+            env.ended_id = ended;
+            enqueue(*sys, std::move(env), control_priority);
+        }
     }
 
     void enqueue_start(PagletRec& rec, abi::EventKind kind, Bytes args, std::vector<Cap> caps,
@@ -405,6 +512,7 @@ struct Runtime::Impl {
         remove_directories(rec.id);
         retire(rec);
         release_lane(rec);
+        notify_ended(rec.id);
         endings[rec.id] = Ending{rec.id, failed, std::move(reason)};
         if (failed) log(3, rec.id, "paglet failed: " + endings[rec.id].reason);
         paglets.erase(rec.id);  // rec is destroyed here
@@ -414,7 +522,7 @@ struct Runtime::Impl {
         if (!store) return;
         PagletRecord r;
         r.id = rec.id;
-        r.module = rec.module->hash_hex();
+        r.module = rec.module_hash();
         r.trust = std::string(to_string(rec.trust));
         r.owner = rec.owner;
         r.started = rec.started;
@@ -424,6 +532,7 @@ struct Runtime::Impl {
         r.caps.assign(rec.caps.begin(), rec.caps.end());
         r.pending_requests.assign(rec.pending_requests.begin(), rec.pending_requests.end());
         r.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
+        r.services = rec.services;
         if (auto ok = store->save_paglet(r, snap); !ok) {
             log(3, rec.id, "persisting the paglet failed: " + ok.error());
         } else {
@@ -471,6 +580,7 @@ struct Runtime::Impl {
     }
 
     std::expected<void, std::string> activate(PagletRec& rec, bool deliver_activated);
+    void process_native(PagletRec& rec, Envelope env);
     std::expected<wasm::Snapshot, std::string> snapshot(PagletRec& rec) { return rec.instance->capture(); }
     void process(PagletRec& rec, Envelope env, bool& remove);
     void finish_call(PagletRec& rec, bool& remove, std::unique_lock<std::mutex>& lock);
@@ -497,8 +607,8 @@ public:
     Document self_info() override {
         std::lock_guard lock(rt_.mu);
         abi::SelfInfo info{
-            rec_.id,     rec_.module->hash_hex(), rec_.owner, std::string(to_string(rec_.trust)), rt_.config.host_name,
-            abi::version};
+            rec_.id,      rec_.module_hash(), rec_.owner,   std::string(to_string(rec_.trust)), rt_.config.host_name,
+            abi::version, abi::minor_version, rec_.services};
         return abi::encode(info);
     }
 
@@ -510,10 +620,13 @@ public:
         PagletRec* target = nullptr;
         auto cap = checked_endpoint(endpoint, m.name, target);
         if (!cap) return cap.error();
+        auto lent = rt_.lend_caps(rec_, m.lend, *target);
+        if (!lent) return lent.error();
         auto caps = rt_.take_caps(rec_, m.caps);
         if (!caps) return caps.error();
         if ((*cap)->uses_left) --*(*cap)->uses_left;
         Envelope env;
+        env.lent = std::move(*lent);
         env.delivered.kind = abi::MessageKind::message;
         env.delivered.name = std::move(m.name);
         env.delivered.payload = std::move(m.payload);
@@ -535,6 +648,8 @@ public:
         PagletRec* target = nullptr;
         auto cap = checked_endpoint(endpoint, m.name, target);
         if (!cap) return cap.error();
+        auto lent = rt_.lend_caps(rec_, m.lend, *target);
+        if (!lent) return lent.error();
         auto caps = rt_.take_caps(rec_, m.caps);
         if (!caps) return caps.error();
         if ((*cap)->uses_left) --*(*cap)->uses_left;
@@ -553,6 +668,7 @@ public:
         env.delivered.sender = rec_.sender(rt_.config.host_name);
         env.delivered.badge = (*cap)->badge;
         env.caps = std::move(*caps);
+        env.lent = std::move(*lent);
         env.reply_cap = std::move(reply);
         if (target->lane < 0) target->lane_hint = rec_.lane;
         rt_.enqueue(*target, std::move(env), m.priority);
@@ -567,6 +683,7 @@ public:
         std::lock_guard lock(rt_.mu);
         auto it = rec_.caps.find(handle);
         if (it == rec_.caps.end() || it->second.kind != Cap::Kind::reply) return abi::bad_handle;
+        if (!m.lend.empty()) return abi::invalid_argument;
         auto caps = rt_.take_caps(rec_, m.caps);
         if (!caps) return caps.error();
         Cap reply = std::move(it->second);
@@ -580,9 +697,11 @@ public:
         if (!abi::decode(doc, spec)) return abi::malformed;
         std::lock_guard lock(rt_.mu);
         auto it = rec_.caps.find(handle);
-        if (it == rec_.caps.end() || it->second.kind != Cap::Kind::endpoint) return abi::bad_handle;
-        if (rec_.caps.size() >= rt_.config.cap_limit) return abi::quota;
+        if (it == rec_.caps.end()) return abi::bad_handle;
         const Cap& src = it->second;
+        if (src.kind != Cap::Kind::endpoint && src.kind != Cap::Kind::resource) return abi::bad_handle;
+        if (auto u = rt_.usable(src); u != abi::ok) return u;
+        if (rec_.caps.size() >= rt_.config.cap_limit) return abi::quota;
         Cap d = src;
         if (spec.ops) {
             for (const auto& op : *spec.ops) {
@@ -611,6 +730,15 @@ public:
             if (src.badge) return abi::denied;
             d.badge = *spec.badge;
         }
+        if (spec.path) {
+            if (src.kind != Cap::Kind::resource || src.resource_type != "dir") return abi::invalid_argument;
+            auto rel = normalize_relative(*spec.path);
+            if (!rel) return abi::invalid_argument;
+            d.resource = src.resource.ends_with('/') ? src.resource + *rel : src.resource + "/" + *rel;
+        }
+        // The derived capability is a child in the revocation tree.
+        d.lineage.push_back(src.id);
+        d.id = new_cap_id();
         return rt_.add_cap(rec_, std::move(d));
     }
 
@@ -644,7 +772,20 @@ public:
                 info.kind = "timer";
                 info.target = "timer:" + c.message.name;
                 break;
+            case Cap::Kind::resource: {
+                info.kind = c.resource_type;
+                PagletRec* provider = rt_.find(c.target);
+                const std::string service =
+                    provider != nullptr && provider->native ? std::string(provider->native->name()) : c.target;
+                info.target = service + ":" + c.resource;
+                break;
+            }
         }
+        if (c.kind == Cap::Kind::endpoint) {
+            PagletRec* target = rt_.find(c.target);
+            if (target != nullptr && target->native) info.target = "service:" + std::string(target->native->name());
+        }
+        info.revoked = rt_.revoked(c);
         info.ops = c.ops;
         info.transferable = c.transferable;
         info.badge = c.badge;
@@ -681,6 +822,7 @@ public:
         PagletRec& child = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
         child.lane_hint = rec_.lane;
         child.checkpoint_interval = rec_.checkpoint_interval;
+        rt_.install_services(child);
         rt_.enqueue_start(child, abi::EventKind::created, std::move(spec.args), std::move(*caps), std::nullopt);
         return rt_.add_cap(rec_, rt_.endpoint_to(id));
     }
@@ -769,6 +911,157 @@ private:
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// Native system paglets
+
+namespace {
+
+class NativeContext final : public SystemContext {
+public:
+    NativeContext(Runtime& runtime, Runtime::Impl& rt, PagletId id) : runtime_(runtime), rt_(rt), id_(std::move(id)) {}
+
+    Runtime& runtime() override { return runtime_; }
+    const PagletId& id() const override { return id_; }
+    std::string_view host_name() const override { return rt_.config.host_name; }
+
+    Cap resource(std::string type, std::string resource, std::vector<std::string> rights,
+                 std::optional<std::string> grant, std::optional<std::int64_t> expires) override {
+        Cap c;
+        c.kind = Cap::Kind::resource;
+        c.target = id_;
+        c.resource_type = std::move(type);
+        c.resource = std::move(resource);
+        c.ops = std::move(rights);
+        c.transferable = true;
+        c.id = new_cap_id();
+        c.grant = std::move(grant);
+        c.expires = expires;
+        return c;
+    }
+
+    Cap endpoint(const PagletId& target, std::vector<std::string> ops) override {
+        Cap c = rt_.endpoint_to(target);
+        c.ops = std::move(ops);
+        return c;
+    }
+
+    std::int32_t check(const Cap& cap, std::string_view type, std::string_view right) const override {
+        std::lock_guard lock(rt_.mu);
+        if (auto u = rt_.usable(cap); u != abi::ok) return u;
+        if (cap.kind != Cap::Kind::resource || cap.target != id_ || cap.resource_type != type) return abi::bad_handle;
+        if (!op_allowed(cap.ops, right)) return abi::denied;
+        return abi::ok;
+    }
+
+    std::expected<void, std::int32_t> send(const PagletId& to, std::string_view name, Bytes payload,
+                                           std::vector<Cap> caps, std::int32_t priority) override {
+        if (!abi::valid_message_name(name) || priority < 0 || priority > abi::max_priority) {
+            return std::unexpected(abi::invalid_argument);
+        }
+        std::lock_guard lock(rt_.mu);
+        PagletRec* target = rt_.find(to);
+        PagletRec* self = rt_.find(id_);
+        if (target == nullptr || self == nullptr) return std::unexpected(abi::not_found);
+        if (target->mailbox.size() >= rt_.config.mailbox_limit) return std::unexpected(abi::quota);
+        Envelope env;
+        env.delivered.kind = abi::MessageKind::message;
+        env.delivered.name = std::string(name);
+        env.delivered.payload = std::move(payload);
+        env.delivered.priority = priority;
+        env.delivered.sender = self->sender(rt_.config.host_name);
+        env.caps = std::move(caps);
+        rt_.enqueue(*target, std::move(env), priority);
+        return {};
+    }
+
+    std::expected<void, std::int32_t> reply(Cap reply, std::int32_t status, Bytes payload,
+                                            std::vector<Cap> caps) override {
+        if (reply.kind != Cap::Kind::reply) return std::unexpected(abi::bad_handle);
+        std::lock_guard lock(rt_.mu);
+        rt_.deliver_reply(reply.target, reply.correlation, status, std::move(payload), std::move(caps));
+        return {};
+    }
+
+    void log(abi::LogLevel level, std::string_view text) override {
+        std::lock_guard lock(rt_.mu);
+        rt_.log(static_cast<std::int32_t>(level), id_, std::string(text));
+    }
+
+private:
+    Runtime& runtime_;
+    Runtime::Impl& rt_;
+    PagletId id_;
+};
+
+class NativeCall final : public ServiceCall {
+public:
+    NativeCall(Runtime::Impl& rt, Envelope& env) : rt_(rt), env_(env) {}
+
+    abi::MessageKind kind() const override { return env_.delivered.kind; }
+    const std::string& name() const override { return env_.delivered.name; }
+    std::span<const std::uint8_t> payload() const override { return env_.delivered.payload; }
+    const std::optional<abi::SenderRecord>& sender() const override { return env_.delivered.sender; }
+    const std::optional<std::string>& badge() const override { return env_.delivered.badge; }
+    const std::vector<Cap>& lent() const override { return env_.lent; }
+    std::vector<Cap>& transferred() override { return env_.caps; }
+
+    std::expected<void, std::int32_t> reply(std::int32_t status, Bytes payload, std::vector<Cap> caps) override {
+        if (!env_.reply_cap) return std::unexpected(abi::bad_state);
+        Cap cap = std::move(*env_.reply_cap);
+        env_.reply_cap.reset();
+        replied_ = true;
+        std::lock_guard lock(rt_.mu);
+        rt_.deliver_reply(cap.target, cap.correlation, status, std::move(payload), std::move(caps));
+        return {};
+    }
+    bool replied() const override { return replied_; }
+
+    std::optional<Cap> defer() override {
+        if (!env_.reply_cap) return std::nullopt;
+        std::optional<Cap> cap = std::move(env_.reply_cap);
+        env_.reply_cap.reset();
+        return cap;
+    }
+
+private:
+    Runtime::Impl& rt_;
+    Envelope& env_;
+    bool replied_ = false;
+};
+
+}  // namespace
+
+void Runtime::Impl::process_native(PagletRec& rec, Envelope env) {
+    if (env.type == Envelope::Type::ended) {
+        try {
+            rec.native->paglet_ended(*rec.context, env.ended_id);
+        } catch (const std::exception& e) {
+            std::lock_guard lock(mu);
+            log(3, rec.id, std::string("paglet_ended failed: ") + e.what());
+        }
+    } else if (env.type == Envelope::Type::message) {
+        NativeCall call(*this, env);
+        try {
+            rec.native->handle(*rec.context, call);
+        } catch (const std::exception& e) {
+            std::lock_guard lock(mu);
+            log(3, rec.id, "handling " + env.delivered.name + " failed: " + e.what());
+        }
+        std::lock_guard lock(mu);
+        // A request the service neither answered nor deferred: `internal`.
+        if (env.reply_cap) {
+            log(3, rec.id, "request " + env.delivered.name + " was not answered");
+            deliver_reply(env.reply_cap->target, env.reply_cap->correlation, abi::internal, {}, {});
+            env.reply_cap.reset();
+        }
+        // Transferred capabilities the service did not take are released.
+        for (auto& c : env.caps) drop_cap(std::move(c), abi::gone);
+        env.caps.clear();
+    }
+    std::lock_guard lock(mu);
+    ++rec.handled;
+}
+
+// ---------------------------------------------------------------------------
 // Delivery
 
 std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool deliver_activated) {
@@ -814,6 +1107,10 @@ std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool de
 }
 
 void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
+    if (rec.native) {
+        process_native(rec, std::move(env));
+        return;
+    }
     if (env.type == Envelope::Type::dispose && !rec.instance && !rec.image && !rec.image_on_disk) {
         std::lock_guard lock(mu);
         end_paglet(rec, false, "disposed");
@@ -872,7 +1169,8 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
                 rec, [&] { return rec.instance->call("paglets_on_message", std::span<const std::uint32_t>{}, doc); });
             break;
         }
-        case Envelope::Type::wake: break;
+        case Envelope::Type::wake:
+        case Envelope::Type::ended: break;
         case Envelope::Type::deactivate: {
             std::lock_guard lock(mu);
             if (!rec.pending_end) rec.pending_end = abi::LifecycleOp::deactivate;
@@ -935,6 +1233,16 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
                 if (h != abi::self_handle && cap.kind == Cap::Kind::endpoint && cap.transferable) {
                     clone->caps.emplace(h, cap);
                 }
+            }
+            // Service endpoints keep their handles as well (fresh IDs: the
+            // clone's own entries).
+            for (const auto& [name, h] : rec.services) {
+                auto it = rec.caps.find(h);
+                if (it == rec.caps.end()) continue;
+                Cap c = it->second;
+                c.id = new_cap_id();
+                clone->caps.emplace(h, std::move(c));
+                clone->services.emplace_back(name, h);
             }
             clone->next_handle = rec.next_handle;
             clone->next_correlation = rec.next_correlation;
@@ -1100,6 +1408,7 @@ void Runtime::Impl::fire(Deadline d) {
 
 void Runtime::Impl::recover() {
     const Warn warn = [this](const std::string& text) { log(2, "", text); };
+    for (auto& id : store->load_revoked(warn)) revoked_ids.insert(std::move(id));
     for (auto& module : store->load_modules(warn)) {
         modules.emplace(module->hash_hex(), module);
     }
@@ -1118,6 +1427,7 @@ void Runtime::Impl::recover() {
         rec.next_correlation = r.next_correlation;
         rec.next_timer = r.next_timer;
         if (r.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(r.checkpoint_ms);
+        rec.services = r.services;
         rec.caps.clear();
         for (auto& [h, cap] : r.caps) {
             if (cap.kind == Cap::Kind::timer) {
@@ -1269,6 +1579,7 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
     const PagletId id = new_paglet_id();
     PagletRec& rec = impl_->new_paglet(id, it->second, options.trust, std::move(options.owner));
     rec.checkpoint_interval = options.checkpoint_interval;
+    impl_->install_services(rec);
     impl_->enqueue_start(rec, abi::EventKind::created, std::move(options.args), {}, std::nullopt);
     return id;
 }
@@ -1336,6 +1647,7 @@ std::expected<void, std::int32_t> Runtime::deactivate(const PagletId& id) {
     std::lock_guard lock(impl_->mu);
     PagletRec* rec = impl_->find(id);
     if (rec == nullptr) return std::unexpected(abi::not_found);
+    if (rec->native) return std::unexpected(abi::denied);
     Envelope env;
     env.type = Envelope::Type::deactivate;
     impl_->enqueue(*rec, std::move(env), control_priority);
@@ -1346,6 +1658,7 @@ std::expected<void, std::int32_t> Runtime::dispose(const PagletId& id) {
     std::lock_guard lock(impl_->mu);
     PagletRec* rec = impl_->find(id);
     if (rec == nullptr) return std::unexpected(abi::not_found);
+    if (rec->native) return std::unexpected(abi::denied);
     Envelope env;
     env.type = Envelope::Type::dispose;
     impl_->enqueue(*rec, std::move(env), control_priority);
@@ -1358,10 +1671,10 @@ std::optional<PagletInfo> Runtime::info(const PagletId& id) const {
     if (it == impl_->paglets.end()) return std::nullopt;
     const PagletRec& r = *it->second;
     return PagletInfo{r.id,
-                      r.module->hash_hex(),
+                      r.module_hash(),
                       r.trust,
                       r.owner,
-                      r.instance ? PagletState::active : PagletState::inactive,
+                      r.instance || r.native ? PagletState::active : PagletState::inactive,
                       r.mailbox.size(),
                       r.caps.size(),
                       r.handled,
@@ -1410,6 +1723,66 @@ std::expected<std::filesystem::path, std::int32_t> Runtime::scratch_dir(const Pa
     std::lock_guard lock(impl_->mu);
     if (impl_->find(id) == nullptr) return std::unexpected(abi::not_found);
     return ensure_directory(impl_->work_root / id);
+}
+
+std::expected<PagletId, std::string> Runtime::add_system_paglet(std::shared_ptr<SystemPaglet> paglet) {
+    if (!paglet) return std::unexpected(std::string("no system paglet"));
+    const std::string name(paglet->name());
+    if (name.empty() || !abi::valid_message_name(name)) return std::unexpected("invalid service name " + name);
+    const PagletId id = system_paglet_id(name);
+    SystemContext* context = nullptr;
+    {
+        std::lock_guard lock(impl_->mu);
+        if (impl_->system_paglets.contains(name) || impl_->find(id) != nullptr) {
+            return std::unexpected("system paglet " + name + " exists");
+        }
+        PagletRec& rec = impl_->new_paglet(id, nullptr, TrustClass::system, "host");
+        rec.native = paglet;
+        rec.context = std::make_unique<NativeContext>(*this, *impl_, id);
+        rec.started = true;
+        impl_->system_paglets.emplace(name, id);
+        context = rec.context.get();  // system paglets are never removed
+    }
+    // Outside the lock: start() may use the runtime. Nobody holds an
+    // endpoint to the new paglet yet, so no message reaches it before.
+    paglet->start(*context);
+    return id;
+}
+
+std::optional<PagletId> Runtime::system_paglet(std::string_view name) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->system_paglets.find(name);
+    if (it == impl_->system_paglets.end()) return std::nullopt;
+    return it->second;
+}
+
+std::vector<std::pair<std::int32_t, Cap>> Runtime::capabilities(const PagletId& id) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->paglets.find(id);
+    if (it == impl_->paglets.end()) return {};
+    return {it->second->caps.begin(), it->second->caps.end()};
+}
+
+std::expected<std::int32_t, std::int32_t> Runtime::add_capability(const PagletId& id, Cap cap) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    if (rec == nullptr) return std::unexpected(abi::not_found);
+    if (cap.kind == Cap::Kind::reply || cap.kind == Cap::Kind::timer) return std::unexpected(abi::invalid_argument);
+    if (rec->caps.size() >= impl_->config.cap_limit) return std::unexpected(abi::quota);
+    if (cap.id.empty()) cap.id = new_cap_id();
+    return impl_->add_cap(*rec, std::move(cap));
+}
+
+void Runtime::revoke_capability(const std::string& id) {
+    std::lock_guard lock(impl_->mu);
+    if (!impl_->revoked_ids.insert(id).second || !impl_->store) return;
+    std::vector<std::string> ids(impl_->revoked_ids.begin(), impl_->revoked_ids.end());
+    if (auto ok = impl_->store->save_revoked(ids); !ok) impl_->log(3, "", "storing revocations failed: " + ok.error());
+}
+
+void Runtime::set_revoked_grants(std::set<std::string, std::less<>> grants) {
+    std::lock_guard lock(impl_->mu);
+    impl_->revoked_grants = std::move(grants);
 }
 
 std::vector<int> Runtime::worker_processes() const {

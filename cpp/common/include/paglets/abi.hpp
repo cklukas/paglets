@@ -16,11 +16,16 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace paglets::abi {
 
 inline constexpr std::uint32_t version = 1;
+// Compatible additions within v1 (planning/cpp-abi-v1.md, section 13):
+// 1 adds lent capabilities, resource capabilities, `revoked`, the service
+// map of self_info and derive paths.
+inline constexpr std::uint32_t minor_version = 1;
 inline constexpr std::string_view version_marker = "paglets_abi_v1";
 
 // Error codes (section 9). Negative results of imports and handlers.
@@ -41,6 +46,7 @@ enum Error : std::int32_t {
     unknown_message = -13,
     failed = -14,
     gone = -15,
+    revoked = -16,  // v1.1
 };
 
 inline constexpr std::string_view error_name(std::int32_t code) {
@@ -61,6 +67,7 @@ inline constexpr std::string_view error_name(std::int32_t code) {
         case unknown_message: return "unknown_message";
         case failed: return "failed";
         case gone: return "gone";
+        case revoked: return "revoked";
         default: return "error";
     }
 }
@@ -125,6 +132,9 @@ struct OutMessage {
     std::vector<std::int32_t> caps;
     std::int32_t priority = default_priority;
     std::int64_t timeout_ms = default_timeout_ms;
+    // v1.1: capabilities shown to a system paglet for this message only;
+    // they stay with the sender.
+    std::vector<std::int32_t> lend;
 };
 
 struct SenderRecord {
@@ -156,6 +166,9 @@ struct SelfInfo {
     std::string trust;
     std::string host;
     std::uint32_t abi = version;
+    std::uint32_t minor = 0;  // v1.1: minor version of the host
+    // v1.1: endpoints to system services the host installed, by service name.
+    std::vector<std::pair<std::string, std::int32_t>> services;
 };
 
 struct DeriveSpec {
@@ -164,6 +177,8 @@ struct DeriveSpec {
     std::optional<std::int64_t> uses;
     std::optional<bool> transferable;
     std::optional<std::string> badge;
+    // v1.1: `dir` capabilities only: a relative path below the directory.
+    std::optional<std::string> path;
 };
 
 struct CapInfo {
@@ -174,6 +189,7 @@ struct CapInfo {
     std::optional<std::string> badge;
     std::optional<std::int64_t> expires;  // Unix milliseconds
     std::optional<std::int64_t> uses_left;
+    bool revoked = false;  // v1.1
 };
 
 struct ChildSpec {
@@ -251,12 +267,13 @@ bool read_map(msgpack::Reader& r, F&& field) {
 }  // namespace detail
 
 inline void paglets_encode(msgpack::Writer& w, const OutMessage& m) {
-    w.write_map_header(5);
+    w.write_map_header(5 + (m.lend.empty() ? 0 : 1));
     detail::put(w, "name", m.name);
     detail::put(w, "payload", m.payload);
     detail::put(w, "caps", m.caps);
     detail::put(w, "priority", m.priority);
     detail::put(w, "timeout_ms", m.timeout_ms);
+    if (!m.lend.empty()) detail::put(w, "lend", m.lend);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, OutMessage& m) {
@@ -266,6 +283,7 @@ inline bool paglets_decode(msgpack::Reader& r, OutMessage& m) {
         if (k == "caps") return msgpack::read_value(r, m.caps);
         if (k == "priority") return msgpack::read_value(r, m.priority);
         if (k == "timeout_ms") return msgpack::read_value(r, m.timeout_ms);
+        if (k == "lend") return msgpack::read_value(r, m.lend);
         return r.skip();
     });
 }
@@ -331,13 +349,20 @@ inline bool paglets_decode(msgpack::Reader& r, Delivered& d) {
 }
 
 inline void paglets_encode(msgpack::Writer& w, const SelfInfo& s) {
-    w.write_map_header(6);
+    w.write_map_header(8);
     detail::put(w, "id", s.id);
     detail::put(w, "module", s.module);
     detail::put(w, "owner", s.owner);
     detail::put(w, "trust", s.trust);
     detail::put(w, "host", s.host);
     detail::put(w, "abi", s.abi);
+    detail::put(w, "minor", s.minor);
+    w.write_str("services");
+    w.write_map_header(s.services.size());
+    for (const auto& [name, handle] : s.services) {
+        w.write_str(name);
+        w.write_int(handle);
+    }
 }
 
 inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
@@ -348,18 +373,32 @@ inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
         if (k == "trust") return msgpack::read_value(r, s.trust);
         if (k == "host") return msgpack::read_value(r, s.host);
         if (k == "abi") return msgpack::read_value(r, s.abi);
+        if (k == "minor") return msgpack::read_value(r, s.minor);
+        if (k == "services") {
+            std::uint32_t n = 0;
+            if (!r.read_map_header(n)) return false;
+            s.services.clear();
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::string name;
+                std::int32_t handle = 0;
+                if (!msgpack::read_value(r, name) || !msgpack::read_value(r, handle)) return false;
+                s.services.emplace_back(std::move(name), handle);
+            }
+            return true;
+        }
         return r.skip();
     });
 }
 
 inline void paglets_encode(msgpack::Writer& w, const DeriveSpec& s) {
     w.write_map_header(detail::present(s.ops) + detail::present(s.expires_ms) + detail::present(s.uses) +
-                       detail::present(s.transferable) + detail::present(s.badge));
+                       detail::present(s.transferable) + detail::present(s.badge) + detail::present(s.path));
     detail::put_opt(w, "ops", s.ops);
     detail::put_opt(w, "expires_ms", s.expires_ms);
     detail::put_opt(w, "uses", s.uses);
     detail::put_opt(w, "transferable", s.transferable);
     detail::put_opt(w, "badge", s.badge);
+    detail::put_opt(w, "path", s.path);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, DeriveSpec& s) {
@@ -369,12 +408,14 @@ inline bool paglets_decode(msgpack::Reader& r, DeriveSpec& s) {
         if (k == "uses") return msgpack::read_value(r, s.uses);
         if (k == "transferable") return msgpack::read_value(r, s.transferable);
         if (k == "badge") return msgpack::read_value(r, s.badge);
+        if (k == "path") return msgpack::read_value(r, s.path);
         return r.skip();
     });
 }
 
 inline void paglets_encode(msgpack::Writer& w, const CapInfo& c) {
-    w.write_map_header(4 + detail::present(c.badge) + detail::present(c.expires) + detail::present(c.uses_left));
+    w.write_map_header(4 + detail::present(c.badge) + detail::present(c.expires) + detail::present(c.uses_left) +
+                       (c.revoked ? 1 : 0));
     detail::put(w, "kind", c.kind);
     detail::put(w, "target", c.target);
     detail::put(w, "ops", c.ops);
@@ -382,6 +423,7 @@ inline void paglets_encode(msgpack::Writer& w, const CapInfo& c) {
     detail::put_opt(w, "badge", c.badge);
     detail::put_opt(w, "expires", c.expires);
     detail::put_opt(w, "uses_left", c.uses_left);
+    if (c.revoked) detail::put(w, "revoked", c.revoked);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, CapInfo& c) {
@@ -393,6 +435,7 @@ inline bool paglets_decode(msgpack::Reader& r, CapInfo& c) {
         if (k == "badge") return msgpack::read_value(r, c.badge);
         if (k == "expires") return msgpack::read_value(r, c.expires);
         if (k == "uses_left") return msgpack::read_value(r, c.uses_left);
+        if (k == "revoked") return msgpack::read_value(r, c.revoked);
         return r.skip();
     });
 }

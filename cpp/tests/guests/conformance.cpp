@@ -35,6 +35,12 @@ std::vector<Capability> caps_of(const Cmd& c) {
     return caps;
 }
 
+std::vector<Capability> lent_of(const Cmd& c) {
+    std::vector<Capability> caps;
+    for (auto h : c.lend) caps.emplace_back(h);
+    return caps;
+}
+
 std::int32_t code_of(const paglets::Result<void>& r) {
     return r ? 0 : r.error();
 }
@@ -98,17 +104,24 @@ public:
             paglets::SendOptions options;
             options.priority = c.priority;
             options.caps = caps_of(c);
+            options.lend = lent_of(c);
             m.reply(code_of(Endpoint(c.handle).send_raw(c.name, c.payload, std::move(options))));
         });
         r.on<Cmd>("request", [this](const Cmd& c, Message& m) {
             paglets::RequestOptions options;
             options.caps = caps_of(c);
+            options.lend = lent_of(c);
             if (c.ms > 0) options.timeout_ms = c.ms;
             auto id = Endpoint(c.handle).request_raw(
                 c.name, c.payload,
                 [this](Message& reply) {
-                    note("reply:" + std::string(abi::error_name(reply.status())) + ":" +
-                         std::string(reply.payload().begin(), reply.payload().end()));
+                    std::string entry = "reply:" + std::string(abi::error_name(reply.status())) + ":" +
+                                        std::string(reply.payload().begin(), reply.payload().end());
+                    // Capabilities that came with the reply stay in the table.
+                    for (std::size_t i = 0; i < reply.cap_count(); ++i) {
+                        entry += (i == 0 ? ":caps=" : ",") + std::to_string(reply.take_cap(i).handle());
+                    }
+                    note(std::move(entry));
                 },
                 std::move(options));
             m.reply(id ? static_cast<std::int64_t>(*id) : static_cast<std::int64_t>(id.error()));

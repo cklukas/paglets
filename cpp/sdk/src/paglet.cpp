@@ -117,6 +117,7 @@ Result<void> Endpoint::send_raw(std::string_view name, Bytes payload, SendOption
     m.name = std::string(name);
     m.payload = std::move(payload);
     m.caps = handles_of(options.caps);
+    m.lend = handles_of(options.lend);
     m.priority = options.priority;
     const Bytes doc = abi::encode(m);
     const std::int32_t r = paglets_send(handle(), doc.data(), static_cast<std::uint32_t>(doc.size()));
@@ -130,6 +131,7 @@ Result<std::uint64_t> Endpoint::request_raw(std::string_view name, Bytes payload
     m.name = std::string(name);
     m.payload = std::move(payload);
     m.caps = handles_of(options.caps);
+    m.lend = handles_of(options.lend);
     m.priority = options.priority;
     m.timeout_ms = options.timeout_ms;
     const Bytes doc = abi::encode(m);
@@ -147,6 +149,15 @@ Result<abi::SelfInfo> self_info() {
     abi::SelfInfo info;
     if (!abi::decode(*doc, info)) return std::unexpected(abi::malformed);
     return info;
+}
+
+Result<Endpoint> service(std::string_view name) {
+    auto info = self_info();
+    if (!info) return std::unexpected(info.error());
+    for (const auto& [service_name, handle] : info->services) {
+        if (service_name == name) return Endpoint(handle);
+    }
+    return std::unexpected(abi::not_found);
 }
 
 Result<std::vector<Capability>> list_caps() {

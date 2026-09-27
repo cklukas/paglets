@@ -19,11 +19,12 @@ struct Cmd {
     std::int64_t ms = 0;
     std::int32_t priority = paglets::abi::default_priority;
     std::vector<std::uint8_t> spec;  // an encoded abi document
+    std::vector<std::int32_t> lend;  // handles lent to a system paglet
 };
 
 inline void paglets_encode(paglets::msgpack::Writer& w, const Cmd& c) {
     using paglets::abi::detail::put;
-    w.write_map_header(8);
+    w.write_map_header(9);
     put(w, "handle", c.handle);
     put(w, "name", c.name);
     put(w, "payload", c.payload);
@@ -32,6 +33,7 @@ inline void paglets_encode(paglets::msgpack::Writer& w, const Cmd& c) {
     put(w, "ms", c.ms);
     put(w, "priority", c.priority);
     put(w, "spec", c.spec);
+    put(w, "lend", c.lend);
 }
 
 inline bool paglets_decode(paglets::msgpack::Reader& r, Cmd& c) {
@@ -45,6 +47,7 @@ inline bool paglets_decode(paglets::msgpack::Reader& r, Cmd& c) {
         if (k == "ms") return mp::read_value(r, c.ms);
         if (k == "priority") return mp::read_value(r, c.priority);
         if (k == "spec") return mp::read_value(r, c.spec);
+        if (k == "lend") return mp::read_value(r, c.lend);
         return r.skip();
     });
 }

@@ -7,6 +7,7 @@
 #pragma once
 
 #include <paglets/abi.hpp>
+#include <paglets/runtime/capability.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wasm/snapshot.hpp>
 
@@ -22,21 +23,6 @@
 
 namespace paglets::runtime {
 
-struct Cap {
-    enum class Kind : std::int32_t { endpoint = 0, reply = 1, timer = 2 };
-    Kind kind = Kind::endpoint;
-    std::string target;  // endpoint: paglet ID; reply: requester (empty: the host); timer: owner
-    std::vector<std::string> ops;
-    bool transferable = true;
-    std::optional<std::string> badge;
-    std::optional<std::int64_t> expires;  // Unix milliseconds
-    std::optional<std::int64_t> uses_left;
-    std::uint64_t correlation = 0;  // reply
-    std::uint64_t timer_id = 0;     // timer
-    std::int64_t fire_at = 0;       // timer, Unix milliseconds
-    abi::OutMessage message;        // timer: the message to deliver
-};
-
 // What survives a restart besides the memory image.
 struct PagletRecord {
     std::string id;
@@ -49,7 +35,8 @@ struct PagletRecord {
     std::uint64_t next_timer = 1;
     std::vector<std::pair<std::int32_t, Cap>> caps;
     std::vector<std::uint64_t> pending_requests;
-    std::int64_t checkpoint_ms = -1;  // per-paglet checkpoint interval; -1: host default
+    std::int64_t checkpoint_ms = -1;                             // per-paglet checkpoint interval; -1: host default
+    std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints: name, handle
 };
 
 using Warn = std::function<void(const std::string&)>;
@@ -70,6 +57,11 @@ public:
     std::vector<PagletRecord> load_paglets(const Warn& warn) const;
     std::expected<wasm::Snapshot, std::string> load_image(const std::string& id) const;
     void remove_paglet(const std::string& id);
+
+    // Capability IDs revoked on this host (grant revocations come from the
+    // ledger and are not stored here).
+    std::expected<void, std::string> save_revoked(const std::vector<std::string>& ids);
+    std::vector<std::string> load_revoked(const Warn& warn) const;
 
     const std::filesystem::path& root() const { return root_; }
 

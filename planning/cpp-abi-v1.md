@@ -45,7 +45,9 @@ none. Within a major version, additions are compatible:
 - new event kinds, message kinds and error codes: the guest treats unknown
   event kinds as no-ops and unknown error codes as generic errors.
 
-`self_info` (section 5.3) reports the ABI version in use.
+`self_info` (section 5.3) reports the ABI version in use and, since v1.1,
+the minor version of the host (`minor`), which counts the compatible
+additions of section 13.
 
 ## 3. Exports
 
@@ -291,9 +293,9 @@ fires.
 - Handle 1 is always the paglet's endpoint to itself (`*` operations,
   transferable). It cannot be dropped (`denied`); transferring it passes a
   copy.
-- Kinds in ABI v1: `endpoint`, `reply`, `timer`. Further kinds (`dir`,
-  `file`, `artifact`, `topic`, `pin`) arrive with the milestones that need
-  them.
+- Kinds in ABI v1: `endpoint`, `reply`, `timer`; v1.1 adds resource
+  capabilities provided by system paglets (`dir`, `file`, `artifact`,
+  `topic`; section 13). `pin` arrives with M3.
 - Transferring a capability moves it: the sender's handle becomes invalid and
   the receiver gets a new handle number.
 - The capability table is host state and travels with the paglet as part of
@@ -318,6 +320,7 @@ fires.
 | -13 | `unknown_message` | Reply status: the receiver did not handle the message |
 | -14 | `failed` | Reply status: the receiver trapped |
 | -15 | `gone` | Reply status: the receiver was disposed or dropped the reply capability |
+| -16 | `revoked` | v1.1: the capability, one it was derived from, or its grant was revoked |
 
 ## 10. Limits
 
@@ -370,6 +373,11 @@ Each test is run against the host runtime with the conformance guest
 | C28 | Documents larger than the limit return `too_large`; malformed documents return `malformed` |
 | C29 | Output buffers that are too small return the required length and are not written |
 | C30 | Reserved message names (`paglets.*`) are refused in `send` with `invalid_argument` |
+| C31 | v1.1: new paglets get the service endpoints of system paglets, listed in `self_info.services`; children too |
+| C32 | v1.1: lent capabilities reach the system paglet and stay with the sender; lending elsewhere fails; use limits count |
+| C33 | v1.1: derive paths narrow `dir` capabilities; invalid paths and paths on other kinds fail |
+| C34 | v1.1: revoking a capability or its grant revokes every descendant; parents and siblings stay valid |
+| C35 | v1.1: resource capabilities, service endpoints and revocations survive a restart |
 
 ## 12. Review
 
@@ -392,3 +400,35 @@ processes and conformance tests were complete. Changes from the review:
 Open for later ABI versions (compatible additions): capability kinds for
 files, artifacts, topics and pins (WP9, WP10, M3), `dispatch` (M3), and the
 privileged `paglets_sys` module (WP10).
+
+## 13. Additions in v1.1
+
+Compatible additions for system paglets (WP10) and grants (WP9); a v1.0
+guest keeps working, and `self_info.minor` is 1 on hosts that have them.
+
+- **Resource capabilities.** System paglets hand out capabilities of kinds
+  `dir`, `file`, `artifact` and `topic` (planning/cpp-system-paglets.md).
+  Their `ops` are rights (`read`, `write`, `create`, `delete`, `list`,
+  ...). `cap_inspect` reports the kind and the target `<service>:<resource>`,
+  for example `files:shared-data/projects`.
+- **Lending.** The outgoing message document takes `lend` (list of handles):
+  capabilities shown to the receiving system paglet for this one message.
+  The sender keeps them; each lend counts one use of a capability with a use
+  limit. Lending to a paglet that is not a system paglet, and lending in a
+  reply, fail with `invalid_argument`; a revoked, expired or used-up
+  capability fails with `revoked`, `expired` or `quota`.
+- **Derive paths.** `DeriveSpec.path` narrows a `dir` capability to a
+  relative path below it (segments separated by `/`, none empty, `.`, `..`,
+  or containing `\` or `:`); other kinds fail with `invalid_argument`.
+  Rights shrink as for endpoint operations.
+- **Service endpoints.** Every new paglet receives non-transferable
+  endpoints to the system services that offer one (section 7.5 of the
+  security design); `self_info.services` maps service names to their
+  handles. Clones keep the handles of their original.
+- **Revocation.** Every endpoint and resource capability has an ID in the
+  host; derived capabilities descend from theirs. Revoking a capability or
+  the grant it came from makes it and every descendant fail with `revoked`
+  wherever they are; `cap_inspect` reports `revoked: true`.
+- **Endpoint targets.** `cap_inspect` reports endpoints to system paglets as
+  `service:<name>`.
+

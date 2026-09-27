@@ -19,7 +19,7 @@ using abi::detail::put_opt;
 constexpr std::string_view file_magic = "PGPAGLET1";
 
 void encode_cap(msgpack::Writer& w, const Cap& c) {
-    w.write_map_header(12);
+    w.write_map_header(17);
     put(w, "kind", static_cast<std::int32_t>(c.kind));
     put(w, "target", c.target);
     put(w, "ops", c.ops);
@@ -33,13 +33,18 @@ void encode_cap(msgpack::Writer& w, const Cap& c) {
     w.write_str("message");
     abi::paglets_encode(w, c.message);
     put(w, "reserved", false);
+    put(w, "resource_type", c.resource_type);
+    put(w, "resource", c.resource);
+    put(w, "id", c.id);
+    put(w, "lineage", c.lineage);
+    put(w, "grant", c.grant);
 }
 
 bool decode_cap(msgpack::Reader& r, Cap& c) {
     return abi::detail::read_map(r, [&](std::string_view k) {
         if (k == "kind") {
             std::int32_t kind = 0;
-            if (!msgpack::read_value(r, kind) || kind < 0 || kind > 2) return false;
+            if (!msgpack::read_value(r, kind) || kind < 0 || kind > 3) return false;
             c.kind = static_cast<Cap::Kind>(kind);
             return true;
         }
@@ -53,12 +58,17 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
         if (k == "timer_id") return msgpack::read_value(r, c.timer_id);
         if (k == "fire_at") return msgpack::read_value(r, c.fire_at);
         if (k == "message") return abi::paglets_decode(r, c.message);
+        if (k == "resource_type") return msgpack::read_value(r, c.resource_type);
+        if (k == "resource") return msgpack::read_value(r, c.resource);
+        if (k == "id") return msgpack::read_value(r, c.id);
+        if (k == "lineage") return msgpack::read_value(r, c.lineage);
+        if (k == "grant") return msgpack::read_value(r, c.grant);
         return r.skip();
     });
 }
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
-    w.write_map_header(11);
+    w.write_map_header(12);
     put(w, "id", p.id);
     put(w, "module", p.module);
     put(w, "trust", p.trust);
@@ -76,6 +86,13 @@ void encode_record(msgpack::Writer& w, const PagletRecord& p) {
     }
     put(w, "pending_requests", p.pending_requests);
     put(w, "checkpoint_ms", p.checkpoint_ms);
+    w.write_str("services");
+    w.write_array_header(p.services.size());
+    for (const auto& [name, h] : p.services) {
+        w.write_array_header(2);
+        w.write_str(name);
+        w.write_int(h);
+    }
 }
 
 bool decode_record(msgpack::Reader& r, PagletRecord& p) {
@@ -104,6 +121,21 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
         }
         if (k == "pending_requests") return msgpack::read_value(r, p.pending_requests);
         if (k == "checkpoint_ms") return msgpack::read_value(r, p.checkpoint_ms);
+        if (k == "services") {
+            std::uint32_t n = 0;
+            if (!r.read_array_header(n)) return false;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::uint32_t pair = 0;
+                std::string name;
+                std::int32_t h = 0;
+                if (!r.read_array_header(pair) || pair != 2 || !msgpack::read_value(r, name) ||
+                    !msgpack::read_value(r, h)) {
+                    return false;
+                }
+                p.services.emplace_back(std::move(name), h);
+            }
+            return true;
+        }
         return r.skip();
     });
 }
@@ -210,6 +242,30 @@ std::expected<wasm::Snapshot, std::string> Store::load_image(const std::string& 
 void Store::remove_paglet(const std::string& id) {
     std::error_code ec;
     fs::remove(paglet_file(id), ec);
+}
+
+std::expected<void, std::string> Store::save_revoked(const std::vector<std::string>& ids) {
+    msgpack::Writer w;
+    msgpack::write_value(w, ids);
+    return write_atomically(root_ / "revoked", w.bytes());
+}
+
+std::vector<std::string> Store::load_revoked(const Warn& warn) const {
+    const fs::path path = root_ / "revoked";
+    std::error_code ec;
+    if (!fs::exists(path, ec)) return {};
+    auto bytes = wasm::read_file(path.string());
+    std::vector<std::string> ids;
+    if (!bytes) {
+        warn(bytes.error());
+        return ids;
+    }
+    msgpack::Reader r(*bytes);
+    if (!msgpack::read_value(r, ids) || !r.at_end()) {
+        warn("damaged file " + path.string());
+        ids.clear();
+    }
+    return ids;
 }
 
 }  // namespace paglets::runtime
