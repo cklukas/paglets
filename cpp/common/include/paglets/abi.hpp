@@ -135,6 +135,18 @@ struct OutMessage {
     // v1.1: capabilities shown to a system paglet for this message only;
     // they stay with the sender.
     std::vector<std::int32_t> lend;
+    // v1.1, send and reply only: return at once; a message that cannot be
+    // delivered is reported later as `paglets.undelivered` (Undelivered).
+    bool async = false;
+};
+
+// v1.1: payload of `paglets.undelivered`, the report of an asynchronous send
+// or reply that failed.
+inline constexpr std::string_view undelivered_message = "paglets.undelivered";
+struct Undelivered {
+    std::string name;         // of the message that was not delivered
+    std::int32_t handle = 0;  // endpoint (send) or reply capability (reply)
+    std::int32_t status = 0;  // the error send or reply would have returned
 };
 
 struct SenderRecord {
@@ -267,13 +279,30 @@ bool read_map(msgpack::Reader& r, F&& field) {
 }  // namespace detail
 
 inline void paglets_encode(msgpack::Writer& w, const OutMessage& m) {
-    w.write_map_header(5 + (m.lend.empty() ? 0 : 1));
+    w.write_map_header(5 + (m.lend.empty() ? 0 : 1) + (m.async ? 1 : 0));
     detail::put(w, "name", m.name);
     detail::put(w, "payload", m.payload);
     detail::put(w, "caps", m.caps);
     detail::put(w, "priority", m.priority);
     detail::put(w, "timeout_ms", m.timeout_ms);
     if (!m.lend.empty()) detail::put(w, "lend", m.lend);
+    if (m.async) detail::put(w, "async", m.async);
+}
+
+inline void paglets_encode(msgpack::Writer& w, const Undelivered& u) {
+    w.write_map_header(3);
+    detail::put(w, "name", u.name);
+    detail::put(w, "handle", u.handle);
+    detail::put(w, "status", u.status);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, Undelivered& u) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "name") return msgpack::read_value(r, u.name);
+        if (k == "handle") return msgpack::read_value(r, u.handle);
+        if (k == "status") return msgpack::read_value(r, u.status);
+        return r.skip();
+    });
 }
 
 inline bool paglets_decode(msgpack::Reader& r, OutMessage& m) {
@@ -284,6 +313,7 @@ inline bool paglets_decode(msgpack::Reader& r, OutMessage& m) {
         if (k == "priority") return msgpack::read_value(r, m.priority);
         if (k == "timeout_ms") return msgpack::read_value(r, m.timeout_ms);
         if (k == "lend") return msgpack::read_value(r, m.lend);
+        if (k == "async") return msgpack::read_value(r, m.async);
         return r.skip();
     });
 }

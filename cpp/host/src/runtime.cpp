@@ -612,9 +612,22 @@ public:
         return abi::encode(info);
     }
 
+    // Asynchronous sends and replies (ABI v1.1) return at once; a failure is
+    // reported to the paglet as `paglets.undelivered`. Worker processes send
+    // them as one-way frames, so both paths report the same way.
     std::int32_t send(std::int32_t endpoint, std::span<const std::uint8_t> doc) override {
         abi::OutMessage m;
         if (!abi::decode(doc, m)) return abi::malformed;
+        const bool async = m.async;
+        std::string name = m.name;
+        std::vector<std::int32_t> caps = m.caps;
+        const std::int32_t r = send_message(endpoint, std::move(m));
+        if (r == abi::ok || !async) return r;
+        undelivered(std::move(name), endpoint, r, caps, false);
+        return abi::ok;
+    }
+
+    std::int32_t send_message(std::int32_t endpoint, abi::OutMessage m) {
         if (auto v = Runtime::Impl::validate(m); v != abi::ok) return v;
         std::lock_guard lock(rt_.mu);
         PagletRec* target = nullptr;
@@ -643,7 +656,7 @@ public:
         abi::OutMessage m;
         if (!abi::decode(doc, m)) return abi::malformed;
         if (auto v = Runtime::Impl::validate(m); v != abi::ok) return v;
-        if (m.timeout_ms <= 0) return abi::invalid_argument;
+        if (m.timeout_ms <= 0 || m.async) return abi::invalid_argument;  // a request needs its correlation
         std::lock_guard lock(rt_.mu);
         PagletRec* target = nullptr;
         auto cap = checked_endpoint(endpoint, m.name, target);
@@ -680,6 +693,16 @@ public:
     std::int32_t reply(std::int32_t handle, std::span<const std::uint8_t> doc) override {
         abi::OutMessage m;
         if (!abi::decode(doc, m)) return abi::malformed;
+        const bool async = m.async;
+        std::string name = m.name;
+        std::vector<std::int32_t> caps = m.caps;
+        const std::int32_t r = reply_message(handle, std::move(m));
+        if (r == abi::ok || !async) return r;
+        undelivered(std::move(name), handle, r, caps, true);
+        return abi::ok;
+    }
+
+    std::int32_t reply_message(std::int32_t handle, abi::OutMessage m) {
         std::lock_guard lock(rt_.mu);
         auto it = rec_.caps.find(handle);
         if (it == rec_.caps.end() || it->second.kind != Cap::Kind::reply) return abi::bad_handle;
@@ -893,6 +916,35 @@ public:
     }
 
 private:
+    // Reports a failed asynchronous send or reply to the paglet itself. The
+    // guest considers the message sent, so what it gave up is released here:
+    // the capabilities it transferred and, for a reply, the reply capability
+    // (the requester is answered `gone`).
+    void undelivered(std::string name, std::int32_t handle, std::int32_t status, const std::vector<std::int32_t>& caps,
+                     bool reply) {
+        std::lock_guard lock(rt_.mu);
+        auto release = [&](std::int32_t h) {
+            if (h == abi::self_handle) return;
+            auto it = rec_.caps.find(h);
+            if (it == rec_.caps.end()) return;
+            Cap cap = std::move(it->second);
+            rec_.caps.erase(it);
+            rt_.drop_cap(std::move(cap), abi::gone);
+        };
+        for (auto h : caps) release(h);
+        if (reply) {
+            if (auto it = rec_.caps.find(handle); it != rec_.caps.end() && it->second.kind == Cap::Kind::reply) {
+                release(handle);
+            }
+        }
+        Envelope env;
+        env.delivered.kind = abi::MessageKind::message;
+        env.delivered.name = std::string(abi::undelivered_message);
+        env.delivered.payload = abi::encode(abi::Undelivered{std::move(name), handle, status});
+        env.delivered.priority = abi::max_priority;
+        rt_.enqueue(rec_, std::move(env), abi::max_priority);
+    }
+
     // Looks up an endpoint capability and its target (mu held).
     std::expected<Cap*, std::int32_t> checked_endpoint(std::int32_t handle, std::string_view name, PagletRec*& target) {
         auto it = rec_.caps.find(handle);

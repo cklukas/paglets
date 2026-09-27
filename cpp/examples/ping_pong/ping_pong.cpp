@@ -27,8 +27,9 @@ public:
             bounce(0);
             return paglets::abi::handled;
         });
-        // Child role.
-        router().on<std::uint32_t>("ping", [](std::uint32_t n, paglets::Message& m) { m.reply(n + 1); });
+        // Child role. The reply is asynchronous: in a worker process it does
+        // not wait for the host, and a failure would reach on_undelivered.
+        router().on<std::uint32_t>("ping", [](std::uint32_t n, paglets::Message& m) { m.reply_async(n + 1); });
         router().on("stop", [](paglets::Message&) { (void)paglets::dispose(); });
     }
 

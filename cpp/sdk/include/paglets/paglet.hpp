@@ -100,6 +100,9 @@ struct SendOptions {
     std::int32_t priority = abi::default_priority;
     std::vector<Capability> caps;  // transferred: the handles become invalid on success
     std::vector<Capability> lend;  // shown to a system paglet for this message; they stay valid
+    // Return at once; if the message cannot be delivered, Paglet::on_undelivered
+    // runs later with the error (ABI v1.1). Transferred handles are given up.
+    bool async = false;
 };
 
 struct RequestOptions {
@@ -182,12 +185,17 @@ public:
     std::size_t cap_count() const { return d_.caps.size(); }
     Capability take_cap(std::size_t index);
 
-    // Answers a request (once).
-    Result<void> reply_raw(Bytes payload, std::vector<Capability> caps = {});
+    // Answers a request (once). `async`: return at once; a failure reaches
+    // Paglet::on_undelivered later.
+    Result<void> reply_raw(Bytes payload, std::vector<Capability> caps = {}, bool async = false);
     Result<void> reply() { return reply_raw({}); }
     template <class T>
     Result<void> reply(const T& body, std::vector<Capability> caps = {}) {
         return reply_raw(encode(body), std::move(caps));
+    }
+    template <class T>
+    Result<void> reply_async(const T& body, std::vector<Capability> caps = {}) {
+        return reply_raw(encode(body), std::move(caps), true);
     }
     bool replied() const { return replied_; }
 
@@ -206,7 +214,7 @@ private:
 };
 
 // Answers a deferred request.
-Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> caps = {});
+Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> caps = {}, bool async = false);
 template <class T>
 Result<void> reply_to(Capability& reply, const T& body, std::vector<Capability> caps = {}) {
     return reply_to(reply, encode(body), std::move(caps));
@@ -291,6 +299,8 @@ public:
     virtual void on_arrived(const abi::ArrivedEvent&) {}
     virtual void on_dispatching(const abi::DispatchingEvent&) {}
     virtual void on_disposing() {}
+    // An asynchronous send or reply could not be delivered (default: logged).
+    virtual void on_undelivered(const abi::Undelivered& u);
 
     // Default: replies to own requests go to their continuation, everything
     // else to the router.

@@ -18,6 +18,8 @@
 extern "C" {
 __attribute__((import_module("paglets"), import_name("send"))) std::int32_t raw_send(std::int32_t, const void*,
                                                                                      std::uint32_t);
+__attribute__((import_module("paglets"), import_name("request"))) std::int64_t raw_request(std::int32_t, const void*,
+                                                                                           std::uint32_t);
 __attribute__((import_module("paglets"), import_name("self_info"))) std::int32_t raw_self_info(void*, std::uint32_t);
 }
 
@@ -105,7 +107,16 @@ public:
             options.priority = c.priority;
             options.caps = caps_of(c);
             options.lend = lent_of(c);
+            options.async = c.async;
             m.reply(code_of(Endpoint(c.handle).send_raw(c.name, c.payload, std::move(options))));
+        });
+        // Requests cannot be asynchronous; the SDK has no option for it.
+        r.on<Cmd>("async_request", [](const Cmd& c, Message& m) {
+            abi::OutMessage out;
+            out.name = c.name;
+            out.async = true;
+            const paglets::Bytes doc = abi::encode(out);
+            m.reply(raw_request(c.handle, doc.data(), static_cast<std::uint32_t>(doc.size())));
         });
         r.on<Cmd>("request", [this](const Cmd& c, Message& m) {
             paglets::RequestOptions options;
@@ -135,7 +146,7 @@ public:
             if (!deferred_.empty()) {
                 Capability reply = deferred_.front();
                 deferred_.erase(deferred_.begin());
-                auto r2 = paglets::reply_to(reply, c.payload);
+                auto r2 = paglets::reply_to(reply, c.payload, caps_of(c), c.async);
                 result = code_of(r2);
             }
             m.reply(result);
@@ -227,6 +238,9 @@ public:
     void on_activated() override { note("event:activated"); }
     void on_deactivating() override { note("event:deactivating"); }
     void on_disposing() override { paglets::log("conformance paglet disposing"); }
+    void on_undelivered(const abi::Undelivered& u) override {
+        note("undelivered:" + u.name + ":" + std::string(abi::error_name(u.status)));
+    }
 
     std::int32_t on_message(Message& m) override {
         if (m.kind() == abi::MessageKind::timer) {

@@ -447,6 +447,49 @@ PAGLETS_TEST("abi C30: reserved message names are refused") {
     CHECK_EQ(f.runtime->send(id, "paglets.spoof").error(), static_cast<std::int32_t>(abi::invalid_argument));
 }
 
+PAGLETS_TEST("abi C36: asynchronous send reports failures as paglets.undelivered") {
+    Fixture f;
+    auto a = f.create("conformance.wasm");
+    const auto child = static_cast<std::int32_t>(f.code(a, "child", Cmd{}));
+    const auto b = f.target_of(a, child);
+    const auto echo_only = static_cast<std::int32_t>(f.code(
+        a, "derive", Cmd{.handle = child, .spec = enc(abi::DeriveSpec{.ops = std::vector<std::string>{"echo"}})}));
+    const auto extra =
+        static_cast<std::int32_t>(f.code(a, "derive", Cmd{.handle = child, .spec = enc(abi::DeriveSpec{})}));
+    REQUIRE(echo_only > 0 && extra > 0);
+    // Delivered like a synchronous send.
+    CHECK_EQ(f.code(a, "send", Cmd{.handle = echo_only, .name = "echo", .async = true}), 0);
+    CHECK(journal_eventually(f, b, "msg:echo"));
+    // A failure returns 0 at once and arrives later; the transferred
+    // capability is gone, as after a successful send.
+    CHECK_EQ(f.code(a, "send", Cmd{.handle = echo_only, .name = "count", .caps = {extra}, .async = true}), 0);
+    CHECK(journal_eventually(f, a, "undelivered:count:denied"));
+    CHECK_EQ(f.code(a, "drop", Cmd{.handle = extra}), static_cast<std::int64_t>(abi::bad_handle));
+    // Reserved names are refused the same way.
+    CHECK_EQ(f.code(a, "send", Cmd{.handle = abi::self_handle, .name = "paglets.spoof", .async = true}), 0);
+    CHECK(journal_eventually(f, a, "undelivered:paglets.spoof:invalid_argument"));
+    // Requests cannot be asynchronous.
+    CHECK_EQ(f.code(a, "async_request", Cmd{.handle = child, .name = "echo"}),
+             static_cast<std::int64_t>(abi::invalid_argument));
+}
+
+PAGLETS_TEST("abi C36: asynchronous reply; a failed one answers the requester gone") {
+    Fixture f;
+    auto id = f.create("conformance.wasm");
+    auto pending = f.runtime->request(id, "defer");
+    f.runtime->wait_idle();
+    CHECK_EQ(f.code(id, "answer", Cmd{.payload = text("late"), .async = true}), 0);
+    auto r = pending.get();
+    CHECK_EQ(r.status, 0);
+    CHECK(r.payload == text("late"));
+
+    auto failing = f.runtime->request(id, "defer");
+    f.runtime->wait_idle();
+    CHECK_EQ(f.code(id, "answer", Cmd{.caps = {9999}, .async = true}), 0);
+    CHECK_EQ(failing.get().status, static_cast<std::int32_t>(abi::gone));
+    CHECK(journal_eventually(f, id, "undelivered:reply:bad_handle"));
+}
+
 // ---------------------------------------------------------------------------
 // Samples and persistence
 

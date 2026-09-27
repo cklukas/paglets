@@ -378,6 +378,7 @@ Each test is run against the host runtime with the conformance guest
 | C33 | v1.1: derive paths narrow `dir` capabilities; invalid paths and paths on other kinds fail |
 | C34 | v1.1: revoking a capability or its grant revokes every descendant; parents and siblings stay valid |
 | C35 | v1.1: resource capabilities, service endpoints and revocations survive a restart |
+| C36 | v1.1: asynchronous `send` and `reply` return 0 at once; failures arrive as `paglets.undelivered` with the error, transferred capabilities are released, a failed reply answers `gone`; `request` refuses `async` |
 
 ## 12. Review
 
@@ -431,4 +432,16 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   wherever they are; `cap_inspect` reports `revoked: true`.
 - **Endpoint targets.** `cap_inspect` reports endpoints to system paglets as
   `service:<name>`.
-
+- **Asynchronous send and reply.** The outgoing message document takes
+  `async` (bool, default false) in `send` and `reply`; `request` refuses it
+  with `invalid_argument`. An asynchronous call returns 0 once the document
+  is well-formed and does not wait for delivery, which lets a worker process
+  hand the message to the host without a round trip. If the message cannot
+  be delivered, the host sends the paglet itself a message
+  `paglets.undelivered` (kind 0, priority 7, no sender record) with the
+  payload `{name: str, handle: int, status: int}`: the name of the
+  undelivered message, the endpoint or reply capability it was sent with,
+  and the error the synchronous call would have returned. What the paglet
+  gave up is released as after a successful call: transferred capabilities
+  are dropped, and a failed reply consumes the reply capability, so the
+  requester is answered `gone`.

@@ -450,7 +450,10 @@ public:
         if (!channel_.send(w.bytes())) std::_Exit(3);  // the host is gone
     }
     Document self_info() override { return document("self_info", 0, 0, {}); }
+    // Asynchronous sends and replies go one way; the host reports failures
+    // to the paglet as messages.
     std::int32_t send(std::int32_t endpoint, std::span<const std::uint8_t> msg) override {
+        if (is_async(msg)) return one_way("send", endpoint, msg);
         return result32(forward("send", endpoint, 0, msg));
     }
     std::int64_t request(std::int32_t endpoint, std::span<const std::uint8_t> msg) override {
@@ -458,6 +461,7 @@ public:
         return r ? r->first : std::int64_t{abi::internal};
     }
     std::int32_t reply(std::int32_t handle, std::span<const std::uint8_t> msg) override {
+        if (is_async(msg)) return one_way("reply", handle, msg);
         return result32(forward("reply", handle, 0, msg));
     }
     std::int32_t cap_derive(std::int32_t handle, std::span<const std::uint8_t> spec) override {
@@ -478,6 +482,23 @@ public:
 
 private:
     using Answer = std::pair<std::int64_t, std::optional<Bytes>>;
+
+    static bool is_async(std::span<const std::uint8_t> msg) {
+        abi::OutMessage m;
+        return abi::decode(msg, m) && m.async;
+    }
+
+    std::int32_t one_way(std::string_view name, std::int64_t a, std::span<const std::uint8_t> data) {
+        msgpack::Writer w;
+        w.write_array_header(5);
+        w.write_int(ipc::notify_marker);
+        w.write_str(name);
+        w.write_int(a);
+        w.write_int(0);
+        w.write_bin(data);
+        if (!channel_.send(w.bytes())) std::_Exit(3);  // the host is gone
+        return abi::ok;
+    }
 
     std::optional<Answer> forward(std::string_view name, std::int64_t a, std::int64_t b,
                                   std::span<const std::uint8_t> data) {

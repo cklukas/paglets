@@ -119,6 +119,7 @@ Result<void> Endpoint::send_raw(std::string_view name, Bytes payload, SendOption
     m.caps = handles_of(options.caps);
     m.lend = handles_of(options.lend);
     m.priority = options.priority;
+    m.async = options.async;
     const Bytes doc = abi::encode(m);
     const std::int32_t r = paglets_send(handle(), doc.data(), static_cast<std::uint32_t>(doc.size()));
     if (r == 0) released(options.caps);
@@ -177,10 +178,10 @@ Capability Message::take_cap(std::size_t index) {
     return Capability(std::exchange(d_.caps[index], 0));
 }
 
-Result<void> Message::reply_raw(Bytes payload, std::vector<Capability> caps) {
+Result<void> Message::reply_raw(Bytes payload, std::vector<Capability> caps, bool async) {
     if (!is_request() || replied_ || deferred_) return std::unexpected(abi::bad_state);
     Capability reply(d_.reply);
-    auto r = reply_to(reply, std::move(payload), std::move(caps));
+    auto r = reply_to(reply, std::move(payload), std::move(caps), async);
     if (r) replied_ = true;
     return r;
 }
@@ -191,11 +192,12 @@ Capability Message::defer_reply() {
     return Capability(d_.reply);
 }
 
-Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> caps) {
+Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> caps, bool async) {
     abi::OutMessage m;
     m.name = "reply";
     m.payload = std::move(payload);
     m.caps = handles_of(caps);
+    m.async = async;
     const Bytes doc = abi::encode(m);
     const std::int32_t r = paglets_reply(reply.handle(), doc.data(), static_cast<std::uint32_t>(doc.size()));
     if (r == 0) {
@@ -203,6 +205,10 @@ Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> 
         released(caps);
     }
     return status(r);
+}
+
+void Paglet::on_undelivered(const abi::Undelivered& u) {
+    log(abi::LogLevel::warning, "undelivered " + u.name + ": " + std::string(abi::error_name(u.status)));
 }
 
 std::int32_t Router::dispatch(Message& m) const {
@@ -350,6 +356,14 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
             handler(m);
             return abi::handled;
         }
+    }
+
+    // Reports of asynchronous sends and replies come from the host (no sender).
+    if (m.kind() == abi::MessageKind::message && m.name() == abi::undelivered_message && !m.sender()) {
+        abi::Undelivered u;
+        if (!m.decode(u)) return abi::malformed;
+        paglets::detail::paglet().on_undelivered(u);
+        return abi::handled;
     }
 
     const std::int32_t result = paglets::detail::paglet().on_message(m);

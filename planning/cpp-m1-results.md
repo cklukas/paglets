@@ -41,9 +41,11 @@ Status: **closed**. WP3 to WP7 are done. The capability revocation tree
   worker process running the lane's instances. Calls, host imports and
   memory images travel as MessagePack frames through two single-producer
   single-consumer rings in shared memory (spin briefly, then sleep on a
-  doorbell stream); terminations use a second stream. `send`, `reply` and
-  `log` are one-way frames: the worker checks their arguments itself and
-  does not wait for the host. A paglet stays on its lane while active, so its WAMR
+  doorbell stream); terminations use a second stream. `log` and
+  asynchronous `send` and `reply` (ABI v1.1, section 13 of the ABI) are
+  one-way frames: the worker does not wait for the host, which applies them
+  in order and reports failures to the paglet as `paglets.undelivered`;
+  synchronous `send` and `reply` return the host's result. A paglet stays on its lane while active, so its WAMR
   execution environment never changes threads. When a worker ends, the
   paglet in the call fails, the others resume from their last image (or fail
   without one), and the worker is started again. `paglets-host` uses workers
@@ -95,7 +97,7 @@ call-bench` and `paglets-spike runtime [--worker ...]`.
 | Create a paglet and answer its first request | 164 µs | 255 µs | 282 µs | 588 µs |
 | Deactivate and activate by message (image in memory) | 0.8 ms | 0.8 ms | 2.7 ms | 2.5 ms |
 
-Before the shared-memory rings, one-way imports and placement, the worker
+Before the shared-memory rings, one-way log frames and placement, the worker
 columns read 136/143 µs (sequential), 7,100/19,800 requests/s and 258/191 µs
 (ping-pong); the ping-pong across 4 in-process lanes took 89 µs. With
 workers, sequential host requests are now faster than in-process ones: the
@@ -140,9 +142,13 @@ machine: 8 µs).
 8. **Socket IPC cost about 20–60 µs per crossing.** With every host import
    a synchronous round trip over a socket pair, a ping-pong round trip grew
    from 42 µs to 258 µs. Shared-memory rings (a crossing costs a few
-   microseconds while the other side spins) and one-way `send`/`reply`
-   (checked in the worker, applied by the host in order) brought it to
-   47 µs.
+   microseconds while the other side spins), one-way `log` frames and
+   placement brought it to 47 µs. `send` and `reply` stayed synchronous,
+   since their result reports delivery; ABI v1.1 added asynchronous ones
+   (one-way frames, failures reported as messages). The ping-pong sample
+   answers asynchronously; in a slower container that saved about 5 µs of
+   180 µs per round trip with workers, within the noise, so the crossing is
+   no longer the main cost.
 9. **WAMR modifies the module buffer while loading**, so the host keeps an
    unmodified copy to send to workers (and to stores).
 10. **A killed process closes its sockets long before it becomes a
