@@ -72,3 +72,30 @@ when its ID, an ancestor's ID, or its grant is revoked:
 Transferred copies keep their ID, so revocation reaches them in the
 receiver's table too. Revoked capabilities stay in the table (inspect shows
 `revoked`) until dropped.
+
+## 5. Service contracts
+
+A service is described once, as plain C++ declarations in a schema header
+that both the host (GCC with reflection) and guests (clang, through the
+schema generator) compile (`wire/schema.hpp`):
+
+- **Wire types**: enums and structs of the namespace, encoded as
+  MessagePack maps keyed by field name (as before).
+- **Contract**: a struct with `static constexpr std::string_view service`
+  and one member function declaration per operation, taking the request
+  type and returning the reply type. The operation name is the function
+  name and the message name.
+
+From the same declarations:
+
+| Side | Mechanism | What it gives |
+|---|---|---|
+| Host | `services::ContractPaglet<Contract, Impl>` (reflection) | a native system paglet: decodes the request, calls `Impl::<op>(request, Operation&)`, encodes the reply or answers the returned error; `describe` |
+| Guest | schema generator | codecs; `Client` with one typed method per operation (`on_reply(Result<Reply>, Message&)`); `serve(router, impl)` registering an implementation; `describe` |
+| Both | `wire::namespace_descriptor` | the JSON descriptor `{namespace, types, services}`, byte-identical on host and guest |
+
+Application services use the same mechanism: a guest that serves a
+contract calls the generated `serve`, and callers use the generated
+`Client`, whether the service is a guest or a native system paglet.
+System paglets and their contracts need C++26 reflection on the host; the
+host-only build without reflection leaves them out.

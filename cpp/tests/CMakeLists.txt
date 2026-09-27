@@ -4,6 +4,10 @@
 paglets_add_guest(testbed LANGUAGE C NO_SDK SOURCES guests/testbed.c)
 paglets_add_guest(forbidden LANGUAGE C NO_SDK SOURCES guests/forbidden.c)
 paglets_add_module(conformance SOURCES guests/conformance.cpp)
+paglets_add_module(calc_user
+    SOURCES guests/calc_user.cpp
+    SCHEMA_HEADER guests/calc_contract.hpp
+    SCHEMA_NAMESPACE calc)
 
 if(PAGLETS_GUESTS_AVAILABLE)
     set(PAGLETS_TEST_GUEST_DIR "${PAGLETS_GUEST_OUTPUT_DIR}")
@@ -24,14 +28,14 @@ set(test_sources
     test_mesh.cpp
     test_system.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh)
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter hello ping_pong conformance testbed forbidden)
+foreach(guest counter hello ping_pong conformance testbed forbidden calc_user)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()
