@@ -167,6 +167,8 @@ src/paglets/tooling/         CLI, discovery, git auto-update
 src/paglets/examples/        packaged example agents and CLIs
 demos/                       runnable source-tree demo scripts
 tests/                       behavior-oriented test suites by topic
+cpp/                         paglets/cpp, the C++/Wasm edition (branch cpp, milestone M0)
+planning/                    paglets/cpp planning documents
 ```
 
 ## Status

@@ -1,6 +1,7 @@
 # Plan: paglets/cpp (Wasm + WAMR + C++26 reflection)
 
-Status: draft plan, no implementation yet.
+Status: milestone M0 (WP0–WP2) implemented in `cpp/`; results in
+[cpp-m0-results.md](cpp-m0-results.md).
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.
 It keeps the concepts that proved useful in the Python edition (hosts, mobile
