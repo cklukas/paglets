@@ -34,7 +34,9 @@ std::optional<PublicKey> parse_key_id(std::string_view id);
 
 bool verify(const PublicKey& key, std::span<const std::uint8_t> message, const Signature& signature);
 
-enum class KeyRole { admin, owner, host };
+// Signer keys sign modules (module_trust.hpp); like admin and owner keys they
+// are always encrypted.
+enum class KeyRole { admin, owner, host, signer };
 std::string_view to_string(KeyRole role);
 std::optional<KeyRole> parse_key_role(std::string_view text);
 

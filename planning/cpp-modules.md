@@ -2,7 +2,9 @@
 
 Status: in progress. The module store, the cache of compiled modules and
 garbage collection are implemented in `cpp/host/src/runtime_modules.cpp`
-(`paglets::runtime::ModuleStore`) and tested in `cpp/tests/test_modules.cpp`.
+(`paglets::runtime::ModuleStore`) and tested in `cpp/tests/test_modules.cpp`;
+module trust in `cpp/host/src/mesh/module_trust.cpp`, tested in
+`cpp/tests/test_mesh.cpp` and `cpp/tests/test_policy.cpp`.
 Companion to the plan (section 3.5) and to
 [cpp-security-and-communication.md](cpp-security-and-communication.md)
 (sections 3 and 6).
@@ -59,3 +61,39 @@ the portable default (M0 results, finding 5).
   minutes) with `Config::module_gc_grace` (default 24 hours), and logs what
   it removed. Pinned modules (for example modules a host keeps for
   arrivals) are never collected.
+
+## 4. Module trust
+
+Module trust is a mesh decision in the ledger (records in
+[cpp-ledger.md](cpp-ledger.md), section 3):
+
+| Type | Signed by | Data |
+|---|---|---|
+| `module-sign` | the signer key it names | `module` (hash), `signer`, `name`, `version`? |
+| `module-trust` | admin quorum | `name`, `signers` [key]?, `modules` [hash]?, `classes` [roaming, resident, system] |
+| `module-policy` | admin quorum | `roaming`: `any` or `trusted` |
+| `revoke` | admin quorum | `module` (hash) besides `key` and `record` |
+
+- A **signer** is any key (`keys init --role signer`; like admin and owner
+  keys it is always encrypted). Signers are not enrolled; a signature has
+  effect only through a trust record that names the signer. Revoking the
+  signer's key or the signature record takes the signature back.
+- A module may run as a trust class if it is not revoked and a
+  `module-trust` record lists the class and either names its hash or one of
+  its signers. Roaming modules need no trust unless the latest
+  `module-policy` says `trusted`; resident and system modules always do.
+  Revocations win regardless of order (`check_module`).
+- Policy rules can match modules by signer (`match.signers`), so a rule can
+  give access to every module a build key signed
+  ([cpp-policy.md](cpp-policy.md), section 1).
+
+Enforcement on a mesh host (`node::Node`):
+
+- The node installs the runtime's module admission check
+  (`Runtime::set_module_admission`): every new paglet is checked, whether
+  the host creates it, a paglet creates a child (roaming) or a clone (its
+  own class). The check reads the ledger state of the last sync, so it
+  never waits for the node.
+- After every ledger change, paglets whose module is no longer allowed end
+  as failed without running again (`Runtime::terminate`, reason "module no
+  longer trusted: ..."), including paglets recovered from a restart.

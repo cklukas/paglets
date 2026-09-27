@@ -658,3 +658,104 @@ PAGLETS_TEST("passports: owner-signed roots and host-signed links") {
     CHECK(!verify_passport(*decoded, ledger.state(), "clone-1", other_module, 5000));
     REQUIRE_OK(verify_passport(*p, ledger.state(), "root-1", module, 2000));
 }
+
+// ---------------------------------------------------------------------------
+// Module trust (WP11)
+
+PAGLETS_TEST("module trust: signatures, trust records, the roaming policy and revocations") {
+    Admins ad;
+    Ledger ledger = make_ledger({&ad.a});
+    const SigningKey signer = SigningKey::generate();
+    const SigningKey other = SigningKey::generate();
+    const auto signed_module = paglets::sha256(Bytes{1});
+    const auto listed_module = paglets::sha256(Bytes{2});
+    const auto later_module = paglets::sha256(Bytes{3});
+    const auto unknown_module = paglets::sha256(Bytes{4});
+
+    // Without trust records, roaming modules run and nothing else does.
+    CHECK(check_module(ledger.state(), unknown_module, "roaming").allowed);
+    CHECK(!check_module(ledger.state(), unknown_module, "resident").allowed);
+    CHECK(!check_module(ledger.state(), unknown_module, "system").allowed);
+    CHECK(!check_module(ledger.state(), unknown_module, "any").allowed);
+
+    // Signatures count only if the signer made them.
+    issue(ledger, "module-sign", data::module_sign(signed_module, signer.public_key(), "calc", "1.0"), {&signer},
+          false);
+    issue(ledger, "module-sign", data::module_sign(later_module, signer.public_key(), "later", ""), {&signer}, false);
+    const Record forged = issue(ledger, "module-sign",
+                                data::module_sign(listed_module, signer.public_key(), "forged", ""), {&other}, false);
+    CHECK(module_signers(ledger.state(), signed_module) == std::vector<PublicKey>{signer.public_key()});
+    CHECK(module_signers(ledger.state(), listed_module).empty());
+    CHECK(std::ranges::any_of(ledger.state().ignored, [&](const auto& i) { return i.id == forged.id(); }));
+
+    const Record by_signer =
+        issue(ledger, "module-trust",
+              data::module_trust("lab apps", {signer.public_key()}, {}, {"roaming", "resident"}), {&ad.a});
+    const Record by_hash =
+        issue(ledger, "module-trust", data::module_trust("gateway", {}, {listed_module}, {"system"}), {&ad.a});
+    // Only admins trust modules, and a trust record names modules and classes.
+    const Record self_trust =
+        issue(ledger, "module-trust", data::module_trust("mine", {}, {unknown_module}, {"system"}), {&signer}, true);
+    const Record no_class =
+        issue(ledger, "module-trust", data::module_trust("empty", {signer.public_key()}, {}, {}), {&ad.a});
+    for (const Record* r : {&self_trust, &no_class}) {
+        CHECK(std::ranges::any_of(ledger.state().ignored, [&](const auto& i) { return i.id == r->id(); }));
+    }
+    auto v = check_module(ledger.state(), signed_module, "resident");
+    CHECK(v.allowed);
+    CHECK(v.trust == by_signer.id());
+    CHECK(!check_module(ledger.state(), signed_module, "system").allowed);
+    CHECK(check_module(ledger.state(), listed_module, "system").trust == by_hash.id());
+    CHECK(!check_module(ledger.state(), listed_module, "resident").allowed);
+    CHECK(!check_module(ledger.state(), unknown_module, "system").allowed);
+
+    // The mesh can require trust for roaming modules as well.
+    issue(ledger, "module-policy", data::module_policy(RoamingModules::trusted), {&ad.a});
+    CHECK(ledger.state().roaming_modules == RoamingModules::trusted);
+    CHECK(!check_module(ledger.state(), unknown_module, "roaming").allowed);
+    CHECK(check_module(ledger.state(), signed_module, "roaming").allowed);
+
+    // Revocations: a module, a signer key, a trust record.
+    issue(ledger, "revoke", data::revoke_module(signed_module, "vulnerable"), {&ad.a});
+    auto revoked = check_module(ledger.state(), signed_module, "roaming");
+    CHECK(!revoked.allowed);
+    CHECK_EQ(revoked.reason, std::string("module revoked"));
+    CHECK(check_module(ledger.state(), later_module, "roaming").allowed);
+    issue(ledger, "revoke", data::revoke_key(signer.public_key(), "lost"), {&ad.a});
+    CHECK(!check_module(ledger.state(), later_module, "roaming").allowed);
+    issue(ledger, "revoke", data::revoke_record(by_hash.id(), "retired"), {&ad.a});
+    CHECK(!check_module(ledger.state(), listed_module, "system").allowed);
+
+    // The same records in another order give the same state.
+    Ledger copy = make_ledger({&ad.a});
+    auto records = ledger.records();
+    std::ranges::reverse(records);
+    for (const Record* r : records) REQUIRE_OK(copy.add(*r));
+    CHECK(copy.state().digest() == ledger.state().digest());
+}
+
+PAGLETS_TEST("policy: rules match modules by their signers") {
+    Admins ad;
+    Ledger ledger = make_ledger({&ad.a});
+    const SigningKey signer = SigningKey::generate();
+    const SigningKey host = SigningKey::generate();
+    const auto module = paglets::sha256(Bytes{7});
+    issue(ledger, "module-sign", data::module_sign(module, signer.public_key(), "tool", ""), {&signer}, false);
+    data::RuleSpec spec;
+    spec.name = "signed tools";
+    spec.decision = Decision::allow;
+    spec.service = "server-info";
+    spec.ops = {"summary"};
+    spec.match.signers = std::vector<PublicKey>{signer.public_key()};
+    const Record rule = issue(ledger, "policy-rule", data::policy_rule(spec), {&ad.a});
+    const Item item{"server-info", {"summary"}, {}, {}};
+    const Principal tool{"p1", key_id(SigningKey::generate().public_key()), paglets::to_hex(module), "roaming"};
+    Principal other = tool;
+    other.module = paglets::to_hex(paglets::sha256(Bytes{8}));
+    auto e = evaluate(ledger.state(), tool, host.public_key(), item);
+    CHECK(e.decision == Decision::allow);
+    CHECK(e.rule == rule.id());
+    CHECK(evaluate(ledger.state(), other, host.public_key(), item).decision == Decision::deny);
+    issue(ledger, "revoke", data::revoke_key(signer.public_key(), "lost"), {&ad.a});
+    CHECK(evaluate(ledger.state(), tool, host.public_key(), item).decision == Decision::deny);
+}

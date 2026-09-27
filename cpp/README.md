@@ -189,6 +189,19 @@ $H ledger approve --ledger ledger --admin alice.key <grant-request-id>
 $H ledger audit --ledger ledger
 ```
 
+Module trust ([design](../planning/cpp-modules.md)): signers vouch for
+modules, admins decide which modules may run as roaming, resident or system
+paglets; `module-policy trusted` makes roaming modules need trust as well.
+Hosts end paglets whose module loses trust:
+
+```bash
+$H keys init --role signer --name build-bot --out build-bot.key
+$H ledger sign-module --ledger ledger --key build-bot.key --name calc --version 1.2 calc.wasm
+$H ledger trust --ledger ledger --admin alice.key --name "lab apps" --class roaming --signer <signer-key-id>
+$H ledger module-policy --ledger ledger --admin alice.key trusted
+$H ledger revoke --ledger ledger --admin alice.key --module calc.wasm --reason vulnerable
+```
+
 Moving a paglet as a memory image between processes or hosts (the module
 must be the same file on both sides; images are independent of CPU
 architecture and operating system):

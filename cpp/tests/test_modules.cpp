@@ -229,3 +229,45 @@ PAGLETS_TEST("runtime: module use counts survive restarts; the host collects unu
     f.runtime->shutdown();
     std::filesystem::remove_all(dir);
 }
+
+PAGLETS_TEST("runtime: the module admission check applies to every new paglet; terminate ends paglets") {
+    Fixture f;
+    const auto conformance = f.module("conformance.wasm");
+    const auto hello = f.module("hello.wasm");
+    f.runtime->set_module_admission([&](const std::string& module, rt::TrustClass trust) {
+        if (module == hello) return std::expected<void, std::string>(std::unexpected(std::string("not here")));
+        if (trust != rt::TrustClass::roaming) {
+            return std::expected<void, std::string>(std::unexpected(std::string("roaming only")));
+        }
+        return std::expected<void, std::string>();
+    });
+    auto refused = f.runtime->create(hello);
+    REQUIRE(!refused.has_value());
+    CHECK_EQ(refused.error(), std::string("not here"));
+    CHECK(!f.runtime->create(conformance, rt::CreateOptions{{}, rt::TrustClass::resident}).has_value());
+    auto id = f.runtime->create(conformance);
+    REQUIRE_OK(id);
+    // Children of another module and clones pass the same check.
+    CHECK_EQ(f.code(*id, "child", Cmd{.name = hello}), static_cast<std::int64_t>(abi::denied));
+    CHECK(f.code(*id, "child", Cmd{}) > 0);
+    CHECK(f.logged("child refused: not here"));
+
+    // An idle paglet ends at once; a busy one when its handler is stopped.
+    auto idle = f.runtime->create(conformance);
+    REQUIRE_OK(idle);
+    f.runtime->wait_idle();
+    REQUIRE(f.runtime->terminate(*idle, "no longer wanted").has_value());
+    auto ending = f.runtime->ending(*idle);
+    REQUIRE(ending.has_value());
+    CHECK(ending->failed);
+    CHECK_EQ(ending->reason, std::string("no longer wanted"));
+    auto busy = f.runtime->request(*id, "busy", enc(Cmd{.ms = 10'000}));
+    std::this_thread::sleep_for(100ms);
+    REQUIRE(f.runtime->terminate(*id, "stopped").has_value());
+    CHECK_EQ(busy.get().status, static_cast<std::int32_t>(abi::failed));
+    CHECK(eventually([&] { return f.runtime->ending(*id).has_value(); }));
+    CHECK_EQ(f.runtime->ending(*id)->reason, std::string("stopped"));
+    CHECK_EQ(f.runtime->terminate(*id, "again").error(), static_cast<std::int32_t>(abi::not_found));
+    f.runtime->set_module_admission({});
+    CHECK(f.runtime->create(hello).has_value());
+}

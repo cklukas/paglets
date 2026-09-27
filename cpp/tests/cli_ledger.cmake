@@ -86,3 +86,28 @@ host(EXPECT_FAIL ARGS ledger rule --ledger "${L}" --admin "${DIR}/alice.key" ${P
 host(ARGS ledger show --ledger "${L}")
 expect("ask  files  read  staff docs")
 host(ARGS ledger audit --ledger "${L}")
+
+# Module trust: a signer signs a module, an admin trusts the signer; signer keys are not enrolled.
+host(ARGS keys init --role signer --name sam --out "${DIR}/sam.key" ${P} --kdf interactive)
+set(sam "${OUT}")
+set(module "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+set(bad_module "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
+host(ARGS ledger sign-module --ledger "${L}" --key "${DIR}/sam.key" ${P} --name calc --version 1.0 ${module})
+host(EXPECT_FAIL ARGS ledger request --ledger "${L}" --key "${DIR}/sam.key" ${P})
+host(EXPECT_FAIL ARGS ledger sign-module --ledger "${L}" --key "${DIR}/sam.key" ${P} --name calc not-a-module)
+host(ARGS ledger trust --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name "lab apps" --class roaming
+          --class resident --signer ${sam})
+host(EXPECT_FAIL ARGS ledger trust --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name bad --class admin
+          --signer ${sam})
+host(EXPECT_FAIL ARGS ledger trust --ledger "${L}" --admin "${DIR}/olga.key" ${P} --name mine --class system
+          --module ${module})
+host(ARGS ledger module-policy --ledger "${L}" --admin "${DIR}/alice.key" ${P} trusted)
+host(ARGS ledger revoke --ledger "${L}" --admin "${DIR}/alice.key" ${P} --module ${bad_module} --reason vulnerable)
+host(ARGS ledger rule --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name "signed tools" --decision allow
+          --service server-info --op summary --signer ${sam})
+host(ARGS ledger show --ledger "${L}")
+expect("module trust (roaming modules: trusted)")
+expect("roaming,resident  lab apps  signer ")
+expect("calc 1.0  signer ")
+expect("module ${bad_module}")
+expect("allow  server-info  summary  signed tools")

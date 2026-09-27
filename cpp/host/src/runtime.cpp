@@ -171,6 +171,7 @@ struct PagletRec {
     std::size_t spawned_this_call = 0;
 
     bool budget_exceeded = false;
+    std::optional<std::string> kill_reason;   // Runtime::terminate while running
     SteadyClock::time_point call_deadline{};  // of the guest call in progress
     std::uint64_t handled = 0;
     SteadyClock::time_point last_checkpoint{};
@@ -204,6 +205,7 @@ struct Runtime::Impl {
     bool stopping = false;
 
     std::unique_ptr<ModuleStore> modules;
+    Runtime::ModuleAdmission admission;
     SteadyClock::time_point next_module_gc{};
     std::map<PagletId, std::unique_ptr<PagletRec>> paglets;
     std::map<PagletId, Ending> endings;
@@ -312,6 +314,13 @@ struct Runtime::Impl {
     void retire(PagletRec& rec) {
         if (rec.instance) retired.push_back(std::move(rec.instance));
         rec.loaded.reset();
+    }
+
+    // The module admission check (mu held); empty if the module may run.
+    std::string refusal(const std::string& module, TrustClass trust) const {
+        if (!admission) return {};
+        auto ok = admission(module, trust);
+        return ok ? std::string() : ok.error();
     }
 
     // Removes a paglet record; its module loses a user.
@@ -569,6 +578,7 @@ struct Runtime::Impl {
         {
             std::lock_guard lock(mu);
             in_call.erase(&rec);
+            if (rec.kill_reason) return std::unexpected(*rec.kill_reason);
             if (rec.budget_exceeded) {
                 return std::unexpected("handler exceeded its time budget of " +
                                        std::to_string(config.handler_budget.count()) + " ms");
@@ -859,6 +869,10 @@ public:
             if (!check_paglet_module(*info, TrustClass::roaming)) return abi::denied;
             module = *spec.module;
         }
+        if (auto why = rt_.refusal(module, TrustClass::roaming); !why.empty()) {
+            rt_.log(2, rec_.id, "child refused: " + why);
+            return abi::denied;
+        }
         if (rec_.spawned_this_call >= rt_.config.spawn_limit_per_call || rec_.caps.size() >= rt_.config.cap_limit) {
             return abi::quota;
         }
@@ -902,10 +916,14 @@ public:
                     rec_.caps.size() >= rt_.config.cap_limit) {
                     return abi::quota;
                 }
+                const TrustClass trust = rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust;
+                if (auto why = rt_.refusal(rec_.module, trust); !why.empty()) {
+                    rt_.log(2, rec_.id, "clone refused: " + why);
+                    return abi::denied;
+                }
                 const PagletId id = new_paglet_id();
                 // The module has a user (this paglet), so it is in the store.
-                PagletRec* created = rt_.new_paglet(
-                    id, rec_.module, rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust, rec_.owner);
+                PagletRec* created = rt_.new_paglet(id, rec_.module, trust, rec_.owner);
                 if (created == nullptr) return abi::internal;
                 auto caps = rt_.take_caps(rec_, arg.caps);
                 if (!caps) {
@@ -1419,6 +1437,11 @@ void Runtime::Impl::lane_loop(std::size_t index) {
         bool remove = false;
         process(*rec, std::move(node.mapped()), remove);
         lock.lock();
+        if (!remove && rec->kill_reason) {
+            retire(*rec);
+            end_paglet(*rec, true, *rec->kill_reason);
+            remove = true;
+        }
         if (!remove) {
             finish_call(*rec, remove, lock);
         }
@@ -1687,6 +1710,7 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
     auto info = impl_->modules->info(module);
     if (!info) return std::unexpected("unknown module " + std::string(module));
     if (auto ok = check_paglet_module(*info, options.trust); !ok) return std::unexpected(ok.error());
+    if (auto why = impl_->refusal(std::string(module), options.trust); !why.empty()) return std::unexpected(why);
     PagletId id = new_paglet_id();
     if (options.id) {
         const bool hex =
@@ -1785,6 +1809,28 @@ std::expected<void, std::int32_t> Runtime::dispose(const PagletId& id) {
     env.type = Envelope::Type::dispose;
     impl_->enqueue(*rec, std::move(env), control_priority);
     return {};
+}
+
+std::expected<void, std::int32_t> Runtime::terminate(const PagletId& id, std::string reason) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    if (rec == nullptr) return std::unexpected(abi::not_found);
+    if (rec->native) return std::unexpected(abi::denied);
+    if (rec->running) {
+        // The lane ends it when the call returns.
+        rec->kill_reason = std::move(reason);
+        if (rec->instance) rec->instance->terminate();
+        return {};
+    }
+    impl_->retire(*rec);
+    impl_->end_paglet(*rec, true, std::move(reason));
+    impl_->idle_cv.notify_all();
+    return {};
+}
+
+void Runtime::set_module_admission(ModuleAdmission admission) {
+    std::lock_guard lock(impl_->mu);
+    impl_->admission = std::move(admission);
 }
 
 std::optional<PagletInfo> Runtime::info(const PagletId& id) const {

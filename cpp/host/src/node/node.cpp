@@ -83,6 +83,24 @@ struct Node::Impl {
     std::set<std::string> answered;                   // denials delivered on this host
     std::map<std::string, mesh::Passport> passports;  // of paglets created here
     runtime::SystemContext* grants_ctx = nullptr;
+    // The ledger state as of the last sync, for the runtime's module
+    // admission check (called under the runtime's lock, so it cannot take mu).
+    std::mutex trust_mu;
+    std::shared_ptr<const mesh::LedgerState> trust;
+
+    std::expected<void, std::string> admit(const std::string& module, runtime::TrustClass trust_class) {
+        std::shared_ptr<const mesh::LedgerState> st;
+        {
+            std::lock_guard lock(trust_mu);
+            st = trust;
+        }
+        if (!st) return {};
+        auto digest = mesh::parse_key_id(module);
+        if (!digest) return std::unexpected("invalid module hash " + module);
+        auto v = mesh::check_module(*st, *digest, runtime::to_string(trust_class));
+        if (!v.allowed) return std::unexpected(v.reason);
+        return {};
+    }
 
     // -- mu held -----------------------------------------------------------
 
@@ -172,6 +190,18 @@ struct Node::Impl {
         std::set<std::string, std::less<>> ended;
         for (const auto& id : st.ended_grants) ended.insert(hex(id));
         runtime.set_revoked_grants(std::move(ended));
+        {
+            std::lock_guard lock(trust_mu);
+            trust = std::make_shared<const mesh::LedgerState>(st);
+        }
+        // Paglets whose module lost the mesh's trust end (also paglets
+        // recovered before this host saw the change).
+        for (const auto& p : runtime.list()) {
+            if (p.module.empty()) continue;  // native system paglets
+            if (auto ok = admit(p.module, p.trust); !ok) {
+                (void)runtime.terminate(p.id, "module no longer trusted: " + ok.error());
+            }
+        }
         if (grants_ctx == nullptr) return;
         bool changed = false;
         const std::int64_t now = mesh::unix_ms();
@@ -394,7 +424,9 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
     impl_->load();
 }
 
-Node::~Node() = default;
+Node::~Node() {
+    impl_->runtime.set_module_admission({});
+}
 
 std::expected<void, std::string> Node::start() {
     auto grants = std::make_shared<GrantsService>(*impl_);
@@ -415,6 +447,9 @@ std::expected<void, std::string> Node::start() {
         return allowed;
     });
     sync();
+    impl_->runtime.set_module_admission([impl = impl_.get()](const std::string& module, runtime::TrustClass trust) {
+        return impl->admit(module, trust);
+    });
     return {};
 }
 

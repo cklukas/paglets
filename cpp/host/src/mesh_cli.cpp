@@ -8,6 +8,8 @@
 
 #include <paglets/mesh/crypto.hpp>
 #include <paglets/mesh/ledger.hpp>
+#include <paglets/sha256.hpp>
+#include <paglets/wasm/engine.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -35,7 +37,7 @@ namespace fs = std::filesystem;
 
 int usage() {
     std::cerr
-        << "usage: paglets-host keys init --role admin|owner|host --name NAME --out FILE\n"
+        << "usage: paglets-host keys init --role admin|owner|host|signer --name NAME --out FILE\n"
            "                             [--passphrase-file FILE] [--kdf moderate|interactive]\n"
            "       paglets-host keys show FILE\n"
            "       paglets-host mesh create --name NAME --ledger DIR --admin KEY... [--admin-quorum N] [--quorum N]\n"
@@ -47,14 +49,22 @@ int usage() {
            "                                  [--label L | --group G]...\n"
            "       paglets-host ledger remove --ledger DIR --admin KEY... host|owner KEY-ID\n"
            "       paglets-host ledger revoke --ledger DIR --admin KEY... KEY-ID|RECORD-ID [--reason TEXT]\n"
+           "       paglets-host ledger revoke --ledger DIR --admin KEY... --module MODULE [--reason TEXT]\n"
            "       paglets-host ledger admins --ledger DIR --admin KEY... [--add KEY-ID]... [--remove KEY-ID]...\n"
            "                                  [--admin-quorum N] [--quorum N]\n"
            "       paglets-host ledger sign --ledger DIR --admin KEY... RECORD-ID\n"
            "       paglets-host ledger rule --ledger DIR --admin KEY... --name NAME --decision allow|ask|deny\n"
            "                                --service SERVICE --op OP... [--owner KEY-ID]... [--group G]...\n"
-           "                                [--module HASH]... [--trust T]... [--host-label L]... [--root R]...\n"
-           "                                [--path PATTERN]... [--max-duration MS] [--priority N]\n"
+           "                                [--module HASH]... [--signer KEY-ID]... [--trust T]...\n"
+           "                                [--host-label L]... [--root R]... [--path PATTERN]...\n"
+           "                                [--max-duration MS] [--priority N]\n"
            "       paglets-host ledger audit --ledger DIR\n"
+           "       paglets-host ledger sign-module --ledger DIR --key SIGNER-KEY --name NAME [--version V] MODULE\n"
+           "       paglets-host ledger trust --ledger DIR --admin KEY... --name NAME --class C...\n"
+           "                                 [--signer KEY-ID]... [--module MODULE]...\n"
+           "       paglets-host ledger module-policy --ledger DIR --admin KEY... any|trusted\n"
+           "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
+           "system; 'module-policy trusted' makes roaming modules need trust as well.\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
            "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
@@ -75,8 +85,8 @@ struct Options {
     std::vector<std::string> groups;
     std::vector<std::string> add;
     std::vector<std::string> remove;
-    std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths;
-    std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service;
+    std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths, classes, signers;
+    std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service, version;
     std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
     bool ignored = false;
     bool host_only = false;
@@ -156,6 +166,12 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = append(o.modules);
         } else if (a == "--trust") {
             ok = append(o.trust);
+        } else if (a == "--class") {
+            ok = append(o.classes);
+        } else if (a == "--signer") {
+            ok = append(o.signers);
+        } else if (a == "--version") {
+            ok = set(o.version);
         } else if (a == "--host-label") {
             ok = append(o.host_labels);
         } else if (a == "--root") {
@@ -286,6 +302,26 @@ std::string joined(const std::vector<std::string>& list) {
 
 // -- keys ----------------------------------------------------------------------
 
+// A module given as a .wasm file (hashed) or as its hash.
+std::expected<Digest, std::string> module_hash(const std::string& text) {
+    if (auto h = parse_hex32(text)) return *h;
+    std::error_code ec;
+    if (!fs::is_regular_file(text, ec)) return std::unexpected("not a module file or hash: " + text);
+    auto bytes = paglets::wasm::read_file(text);
+    if (!bytes) return std::unexpected(bytes.error());
+    return paglets::sha256(*bytes);
+}
+
+std::expected<std::vector<PublicKey>, std::string> key_ids(const std::vector<std::string>& texts) {
+    std::vector<PublicKey> out;
+    for (const auto& text : texts) {
+        auto key = parse_key_id(text);
+        if (!key) return std::unexpected("a key is given by its key ID (64 hex digits): " + text);
+        out.push_back(*key);
+    }
+    return out;
+}
+
 int keys_init(const Options& o) {
     if (!o.role || !o.name || !o.out || !o.positional.empty()) return usage();
     auto role = parse_key_role(*o.role);
@@ -395,10 +431,24 @@ int ledger_show(const Options& o) {
         std::cout << "  " << short_id(id) << "  paglet " << g.principal.paglet.substr(0, 8) << "  " << describe(g.item)
                   << "  " << (g.by_admin ? "approved" : "by rule") << "\n";
     }
-    if (!st.revoked_keys.empty() || !st.revoked_records.empty()) {
+    std::cout << "module trust (roaming modules: " << to_string(st.roaming_modules) << "):\n";
+    for (const auto& t : st.module_trust) {
+        std::cout << "  " << short_id(t.id) << "  " << joined(t.classes) << "  " << t.name;
+        for (const auto& k : t.signers) std::cout << "  signer " << key_id(k).substr(0, 16);
+        for (const auto& m : t.modules) std::cout << "  module " << paglets::to_hex(m).substr(0, 16);
+        std::cout << "\n";
+    }
+    std::cout << "module signatures:\n";
+    for (const auto& m : st.module_signatures) {
+        std::cout << "  " << paglets::to_hex(m.module).substr(0, 16) << "  " << m.name
+                  << (m.version.empty() ? "" : " " + m.version) << "  signer " << key_id(m.signer).substr(0, 16)
+                  << "\n";
+    }
+    if (!st.revoked_keys.empty() || !st.revoked_records.empty() || !st.revoked_modules.empty()) {
         std::cout << "revoked:\n";
         for (const auto& k : st.revoked_keys) std::cout << "  key    " << key_id(k) << "\n";
         for (const auto& r : st.revoked_records) std::cout << "  record " << record_id_hex(r) << "\n";
+        for (const auto& m : st.revoked_modules) std::cout << "  module " << paglets::to_hex(m) << "\n";
     }
     if (o.ignored) {
         std::cout << "records without effect:\n";
@@ -479,6 +529,7 @@ int ledger_request(const Options& o) {
     auto info = read_key_info(*o.key);
     if (!info) return fail(info.error());
     if (info->role == KeyRole::admin) return fail("admins are added with 'ledger admins', not by request");
+    if (info->role == KeyRole::signer) return fail("signer keys are not enrolled; admins trust them ('ledger trust')");
     auto key = open_key(*o.key, *passphrases);
     if (!key) return fail(key.error());
     const bool host = info->role == KeyRole::host;
@@ -554,7 +605,14 @@ int ledger_remove(const Options& o) {
 }
 
 int ledger_revoke(const Options& o) {
-    if (o.positional.size() != 1) return usage();
+    if (o.modules.size() == 1 && o.positional.empty()) {
+        auto module = module_hash(o.modules[0]);
+        if (!module) return fail(module.error());
+        auto s = AdminSession::open(o);
+        if (!s) return fail(s.error());
+        return s->issue("revoke", data::revoke_module(*module, o.reason.value_or("")));
+    }
+    if (o.positional.size() != 1 || !o.modules.empty()) return usage();
     auto s = AdminSession::open(o);
     if (!s) return fail(s.error());
     const std::string& text = o.positional[0];
@@ -616,6 +674,11 @@ int ledger_rule(const Options& o) {
     }
     if (!o.groups.empty()) spec.match.groups = o.groups;
     if (!o.modules.empty()) spec.match.modules = o.modules;
+    if (!o.signers.empty()) {
+        auto signers = key_ids(o.signers);
+        if (!signers) return fail(signers.error());
+        spec.match.signers = std::move(*signers);
+    }
     if (!o.trust.empty()) spec.match.trust = o.trust;
     if (!o.host_labels.empty()) spec.match.hosts = HostSelector{{}, o.host_labels};
     if (!o.roots.empty() || !o.paths.empty()) {
@@ -629,6 +692,57 @@ int ledger_rule(const Options& o) {
     auto s = AdminSession::open(o);
     if (!s) return fail(s.error());
     return s->issue("policy-rule", data::policy_rule(spec));
+}
+
+int ledger_sign_module(const Options& o) {
+    if (o.positional.size() != 1 || !o.key || !o.name) return usage();
+    auto module = module_hash(o.positional[0]);
+    if (!module) return fail(module.error());
+    auto ledger = open_ledger(o);
+    if (!ledger) return fail(ledger.error());
+    auto info = read_key_info(*o.key);
+    if (!info) return fail(info.error());
+    if (info->role == KeyRole::host) return fail("host keys do not sign modules");
+    auto passphrases = Passphrases::make(o);
+    if (!passphrases) return fail(passphrases.error());
+    auto key = open_key(*o.key, *passphrases);
+    if (!key) return fail(key.error());
+    auto r = ledger->draft("module-sign",
+                           data::module_sign(*module, key->public_key(), *o.name, o.version.value_or("")), false);
+    if (!r) return fail(r.error());
+    r->sign(*key);
+    if (auto added = ledger->add(*r); !added) return fail(added.error());
+    std::cout << record_id_hex(r->id()) << "\n";
+    return 0;
+}
+
+int ledger_trust(const Options& o) {
+    if (!o.positional.empty() || !o.name || o.classes.empty() || (o.signers.empty() && o.modules.empty())) {
+        return usage();
+    }
+    for (const auto& c : o.classes) {
+        if (c != "roaming" && c != "resident" && c != "system") return fail("unknown trust class " + c);
+    }
+    auto signers = key_ids(o.signers);
+    if (!signers) return fail(signers.error());
+    std::vector<Digest> modules;
+    for (const auto& text : o.modules) {
+        auto module = module_hash(text);
+        if (!module) return fail(module.error());
+        modules.push_back(*module);
+    }
+    auto s = AdminSession::open(o);
+    if (!s) return fail(s.error());
+    return s->issue("module-trust", data::module_trust(*o.name, *signers, modules, o.classes));
+}
+
+int ledger_module_policy(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto roaming = parse_roaming_modules(o.positional[0]);
+    if (!roaming) return fail("the module policy is 'any' or 'trusted'");
+    auto s = AdminSession::open(o);
+    if (!s) return fail(s.error());
+    return s->issue("module-policy", data::module_policy(*roaming));
 }
 
 int ledger_audit(const Options& o) {
@@ -692,6 +806,9 @@ int mesh_command(int argc, char** argv) {
             if (action == "sign") return ledger_sign(o);
             if (action == "rule") return ledger_rule(o);
             if (action == "audit") return ledger_audit(o);
+            if (action == "sign-module") return ledger_sign_module(o);
+            if (action == "trust") return ledger_trust(o);
+            if (action == "module-policy") return ledger_module_policy(o);
         }
     } catch (const std::exception& e) {
         return fail(e.what());

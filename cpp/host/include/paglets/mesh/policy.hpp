@@ -43,6 +43,7 @@ struct Match {
     std::optional<std::vector<PublicKey>> owners;
     std::optional<std::vector<std::string>> groups;
     std::optional<std::vector<std::string>> modules;  // hex SHA-256
+    std::optional<std::vector<PublicKey>> signers;    // modules with a valid signature of one of them
     std::optional<std::vector<std::string>> trust;
     std::optional<HostSelector> hosts;
     int members() const;

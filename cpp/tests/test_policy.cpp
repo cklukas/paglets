@@ -576,3 +576,42 @@ PAGLETS_TEST("passports: a mesh host creates root paglets only from valid passpo
     CHECK(!net.a->create(module, *child));  // not a root passport
     CHECK(!net.f->runtime->info(std::string(32, 'e')));
 }
+
+PAGLETS_TEST("module trust: a mesh host runs only modules the ledger allows; paglets end when trust ends") {
+    TwoHosts net;
+    const std::string module = net.f->module("explorer.wasm");
+    const paglets::Digest hash = *parse_key_id(module);
+    const SigningKey signer = SigningKey::generate();
+    auto ended_because = [&](const rt::PagletId& id, std::string_view text) {
+        for (int i = 0; i < 200; ++i) {
+            if (auto e = net.f->runtime->ending(id)) return e->failed && e->reason.find(text) != std::string::npos;
+            std::this_thread::sleep_for(10ms);
+        }
+        return false;
+    };
+
+    // By default roaming modules need no trust.
+    const auto early = net.explorer();
+    // Once the mesh requires it, untrusted paglets end and new ones are refused.
+    net.admin("module-policy", data::module_policy(RoamingModules::trusted));
+    net.settle();
+    CHECK(ended_because(early, "module no longer trusted: module not trusted for roaming paglets"));
+    auto refused = net.f->runtime->create(module, rt::CreateOptions{{}, rt::TrustClass::roaming, net.k.owner.id()});
+    REQUIRE(!refused.has_value());
+    CHECK(refused.error().find("not trusted") != std::string::npos);
+
+    // A trusted signer's module runs as roaming, not as resident.
+    REQUIRE_OK(
+        net.b->submit(signed_record(*net.ledger_b, "module-sign",
+                                    data::module_sign(hash, signer.public_key(), "explorer", "1"), {&signer}, false)));
+    net.admin("module-trust", data::module_trust("explorers", {signer.public_key()}, {}, {"roaming"}));
+    net.settle();
+    const auto trusted = net.explorer();
+    CHECK_EQ(net.f->runtime->call(trusted, "journal", {}, 10s).status, 0);
+    CHECK(!net.f->runtime->create(module, rt::CreateOptions{{}, rt::TrustClass::resident, net.k.owner.id()}));
+
+    // Revoking the module ends its paglets on every host.
+    net.admin("revoke", data::revoke_module(hash, "vulnerable"));
+    net.settle();
+    CHECK(ended_because(trusted, "module revoked"));
+}

@@ -425,7 +425,7 @@ struct Deriver {
         for (const Record* r : records) {
             const std::string& type = r->type();
             if (type == "genesis" || type == "admin-set" || type.ends_with("-request") || type == "audit" ||
-                type == "grant-release") {
+                type == "grant-release" || type == "module-sign") {
                 continue;  // not admin records
             }
             auto ok = check_admin_record(*r);
@@ -442,14 +442,18 @@ struct Deriver {
             const Fields f = r->fields();
             const Value* key = f.get("key");
             const Value* record = f.get("record");
+            const Value* module = f.get("module");
             auto k = key == nullptr ? std::nullopt : as_key(*key);
             auto id = record == nullptr ? std::nullopt : as_key(*record);
-            if ((key != nullptr && !k) || (record != nullptr && !id) || (!k && !id)) {
+            auto m = module == nullptr ? std::nullopt : as_key(*module);
+            if ((key != nullptr && !k) || (record != nullptr && !id) || (module != nullptr && !m) ||
+                (!k && !id && !m)) {
                 ignore(*r, "malformed revocation");
                 continue;
             }
             if (k) st.revoked_keys.insert(*k);
             if (id) st.revoked_records.insert(*id);
+            if (m) st.revoked_modules.insert(*m);
         }
 
         std::map<RecordId, PendingRequest> open;
@@ -465,6 +469,21 @@ struct Deriver {
             const Fields f = r->fields();
             const Value* key_value = f.get("key");
             const auto key = key_value == nullptr ? std::nullopt : as_key(*key_value);
+            if (type == "module-sign") {
+                auto sig = parse_module_signature(*r);
+                if (!sig) {
+                    ignore(*r, "malformed module signature");
+                } else if (!r->signed_by(sig->signer)) {
+                    ignore(*r, "module signature not signed by its signer");
+                } else if (st.revoked_keys.contains(sig->signer)) {
+                    ignore(*r, "key revoked");
+                } else if (st.revoked_records.contains(r->id())) {
+                    ignore(*r, "revoked");
+                } else {
+                    st.module_signatures.push_back(std::move(*sig));
+                }
+                continue;
+            }
             if (type == "host-enroll-request" || type == "owner-enroll-request") {
                 auto name = f.str("name");
                 auto labels = f.get("labels") == nullptr
@@ -528,6 +547,21 @@ struct Deriver {
                 }
                 rule->order = order;
                 st.rules.push_back(std::move(*rule));
+            } else if (type == "module-trust") {
+                auto trust = parse_module_trust(*r);
+                if (!trust) {
+                    ignore(*r, "malformed module trust");
+                    continue;
+                }
+                st.module_trust.push_back(std::move(*trust));
+            } else if (type == "module-policy") {
+                auto roaming = f.str("roaming");
+                auto parsed = roaming ? parse_roaming_modules(*roaming) : std::nullopt;
+                if (!parsed) {
+                    ignore(*r, "malformed module policy");
+                    continue;
+                }
+                st.roaming_modules = *parsed;
             } else if (type == "request-deny") {
                 const Value* request = f.get("request");
                 auto request_id = request == nullptr ? std::nullopt : as_key(*request);
@@ -630,6 +664,10 @@ Value LedgerState::to_value() const {
                      {"ended_grants", keys(ended_grants)},
                      {"grant_requests", ids(grant_requests)},
                      {"audit", ids(audit)},
+                     {"module_trust", ids(module_trust)},
+                     {"module_signatures", ids(module_signatures)},
+                     {"revoked_modules", keys(revoked_modules)},
+                     {"roaming_modules", Value(to_string(roaming_modules))},
                      {"clock", Value(clock)},
                      {"records", Value(static_cast<std::int64_t>(records))}});
 }

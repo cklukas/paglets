@@ -26,7 +26,9 @@ An **item** is one piece of access: `{service, ops, root?, path?}`. For
 name a directory; for other services `ops` are operations.
 
 `match` selects principals: `owners` [key], `groups` [str], `modules`
-[hex hash], `trust` [str], `hosts` {`keys` [key], `labels` [str]}. Absent
+[hex hash], `signers` [key] (modules with a valid signature of one of them,
+[cpp-modules.md](cpp-modules.md), section 4), `trust` [str], `hosts`
+{`keys` [key], `labels` [str]}. Absent
 members match everything. `scope` limits files items: `roots` [str] and
 `paths` [pattern] (`*`, `?`, `**` as in `files.find`, matched against the
 item's path; an item for a directory is covered when the pattern matches the
@@ -105,7 +107,7 @@ host (`LedgerState::audit`, `paglets-host ledger audit`).
 ## 8. Administration
 
 `paglets-host ledger rule` adds rules (`--decision`, `--service`, `--op`,
-match options `--owner`, `--group`, `--module`, `--trust`, `--host-label`,
+match options `--owner`, `--group`, `--module`, `--signer`, `--trust`, `--host-label`,
 scope options `--root`, `--path`, `--max-duration`, `--priority`);
 `ledger approve` and `ledger deny` decide grant requests as well as
 enrollment requests; `ledger revoke` ends grants; `ledger show` lists rules,

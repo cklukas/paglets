@@ -17,7 +17,9 @@
 // - genesis: every initial admin;
 // - admin-set: the admin-set quorum of its epoch;
 // - host-enroll, host-remove, owner-enroll, owner-remove, request-deny,
-//   revoke, policy-rule: the normal admin quorum;
+//   revoke, policy-rule, module-trust, module-policy: the normal admin
+//   quorum;
+// - module-sign: the signer key it names;
 // - host-enroll-request, owner-enroll-request: the key they name;
 // - grant-request: the requesting host, or the owner (early approval);
 // - grant: the normal admin quorum, or a host under an allow rule;
@@ -28,6 +30,7 @@
 
 #pragma once
 
+#include <paglets/mesh/module_trust.hpp>
 #include <paglets/mesh/policy.hpp>
 #include <paglets/mesh/record.hpp>
 
@@ -103,6 +106,12 @@ struct LedgerState {
     std::set<RecordId> ended_grants;           // revoked or released
     std::vector<GrantRequest> grant_requests;  // pending
     std::vector<AuditEntry> audit;             // in ledger order
+
+    // Module trust (module_trust.hpp, planning/cpp-modules.md).
+    std::vector<ModuleTrust> module_trust;           // valid, in ledger order
+    std::vector<ModuleSignature> module_signatures;  // valid, in ledger order
+    std::set<Digest> revoked_modules;
+    RoamingModules roaming_modules = RoamingModules::any;
 
     std::int64_t clock = 0;  // largest clock of any record
     std::size_t records = 0;

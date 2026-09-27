@@ -224,6 +224,7 @@ std::string_view to_string(KeyRole role) {
         case KeyRole::admin: return "admin";
         case KeyRole::owner: return "owner";
         case KeyRole::host: return "host";
+        case KeyRole::signer: return "signer";
     }
     return "owner";
 }
@@ -232,6 +233,7 @@ std::optional<KeyRole> parse_key_role(std::string_view text) {
     if (text == "admin") return KeyRole::admin;
     if (text == "owner") return KeyRole::owner;
     if (text == "host") return KeyRole::host;
+    if (text == "signer") return KeyRole::signer;
     return std::nullopt;
 }
 
@@ -282,7 +284,7 @@ std::expected<void, std::string> save_key(const std::filesystem::path& path, con
     ensure_crypto();
     const bool encrypt = passphrase && !passphrase->empty();
     if (role != KeyRole::host && !encrypt) {
-        return std::unexpected(std::string("admin and owner keys need a passphrase"));
+        return std::unexpected(std::string("admin, owner and signer keys need a passphrase"));
     }
     msgpack::Writer w;
     w.write_map_header(encrypt ? 10 : 6);

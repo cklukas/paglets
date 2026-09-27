@@ -37,6 +37,7 @@ add_library(paglets_mesh STATIC
     src/mesh/gossip.cpp
     src/mesh/ledger.cpp
     src/mesh/passport.cpp
+    src/mesh/module_trust.cpp
     src/mesh/policy.cpp
     src/mesh/record.cpp
     src/mesh/value.cpp)

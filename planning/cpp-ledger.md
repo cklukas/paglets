@@ -64,10 +64,14 @@ Record types:
 | `owner-enroll` | `quorum.default` admins | `key`, `name`, `groups` [str], `request`? |
 | `owner-remove` | `quorum.default` admins | `key` |
 | `request-deny` | `quorum.default` admins | `request`, `reason`? |
-| `revoke` | `quorum.default` admins | `key`? or `record`?, `reason`? |
+| `revoke` | `quorum.default` admins | `key`?, `record`? or `module`?, `reason`? |
+| `module-sign` | the signer key it names | `module`, `signer`, `name`, `version`? |
+| `module-trust` | `quorum.default` admins | `name`, `signers`?, `modules`?, `classes` |
+| `module-policy` | `quorum.default` admins | `roaming` (`any`, `trusted`) |
 
 Records of other types are stored and replicated but have no effect, so
 newer record types (policy rules and grants in WP9) pass through older hosts.
+Module records are described in [cpp-modules.md](cpp-modules.md), section 4.
 
 ## 4. Deriving the state
 

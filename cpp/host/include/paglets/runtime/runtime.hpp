@@ -145,6 +145,18 @@ public:
 
     std::expected<void, std::int32_t> deactivate(const PagletId& id);
     std::expected<void, std::int32_t> dispose(const PagletId& id);
+    // Ends a paglet as failed without running it again (for example when its
+    // module loses the mesh's trust); a handler in progress is terminated.
+    std::expected<void, std::int32_t> terminate(const PagletId& id, std::string reason);
+
+    // Decides whether a module may run as a trust class; a mesh host installs
+    // the ledger's module trust (planning/cpp-modules.md). Consulted whenever
+    // a paglet is created: by create(), and when paglets create children
+    // (roaming) and clones (their own class). Called with the runtime's lock
+    // held, so it must not call the runtime.
+    using ModuleAdmission =
+        std::function<std::expected<void, std::string>(const std::string& module, TrustClass trust)>;
+    void set_module_admission(ModuleAdmission admission);
 
     std::optional<PagletInfo> info(const PagletId& id) const;
     std::vector<PagletInfo> list() const;

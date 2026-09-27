@@ -98,7 +98,8 @@ bool better(const Rule& a, const Rule& b) {
 }  // namespace
 
 int Match::members() const {
-    return (owners ? 1 : 0) + (groups ? 1 : 0) + (modules ? 1 : 0) + (trust ? 1 : 0) + (hosts ? 1 : 0);
+    return (owners ? 1 : 0) + (groups ? 1 : 0) + (modules ? 1 : 0) + (signers ? 1 : 0) + (trust ? 1 : 0) +
+           (hosts ? 1 : 0);
 }
 
 std::string_view to_string(Decision d) {
@@ -193,6 +194,7 @@ std::optional<Match> parse_match(const Value& value) {
     if (!optional_member(f, "owners", match.owners, keys_of) ||
         !optional_member(f, "groups", match.groups, strings_of) ||
         !optional_member(f, "modules", match.modules, strings_of) ||
+        !optional_member(f, "signers", match.signers, keys_of) ||
         !optional_member(f, "trust", match.trust, strings_of) ||
         !optional_member(f, "hosts", match.hosts, parse_hosts)) {
         return std::nullopt;
@@ -205,6 +207,7 @@ Value match_value(const Match& match) {
     if (match.owners) m.emplace_back("owners", keys_value(*match.owners));
     if (match.groups) m.emplace_back("groups", strings_value(*match.groups));
     if (match.modules) m.emplace_back("modules", strings_value(*match.modules));
+    if (match.signers) m.emplace_back("signers", keys_value(*match.signers));
     if (match.trust) m.emplace_back("trust", strings_value(*match.trust));
     if (match.hosts) m.emplace_back("hosts", to_value(*match.hosts));
     return Value(std::move(m));
@@ -382,6 +385,15 @@ bool rule_covers(const LedgerState& state, const Rule& rule, const Principal& pr
         }
     }
     if (m.modules && !contains(*m.modules, principal.module)) return false;
+    if (m.signers) {
+        const auto module = parse_key_id(principal.module);  // the same hex form as a hash
+        if (!module) return false;
+        const auto signers = module_signers(state, *module);
+        if (!std::ranges::any_of(*m.signers,
+                                 [&](const PublicKey& k) { return std::ranges::binary_search(signers, k); })) {
+            return false;
+        }
+    }
     if (m.trust && !contains(*m.trust, principal.trust)) return false;
     if (m.hosts && !selects(state, *m.hosts, host)) return false;
     if (rule.scope) {
