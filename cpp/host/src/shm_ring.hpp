@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "ipc.hpp"
+
 namespace paglets::ipc {
 
 inline constexpr std::size_t default_ring_capacity = 1024 * 1024;
@@ -68,19 +70,12 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free, "rings need lock-
 // Size of the mapping for two rings of `capacity` bytes (a power of two).
 std::size_t ring_region_size(std::size_t capacity);
 
-// Where one side receives and sends wake-up bytes: the same socket on POSIX,
-// the read end of one pipe and the write end of the other on Windows.
-struct Doorbell {
-    std::intptr_t read = -1;
-    std::intptr_t write = -1;
-};
-
 class RingChannel {
 public:
     RingChannel() = default;
-    // `host_side` selects which ring is outgoing; the channel owns the
-    // doorbell handles.
-    RingChannel(SharedMemory memory, std::size_t capacity, Doorbell doorbell, bool host_side);
+    // `host_side` selects which ring is outgoing; `doorbell` is this side of
+    // a duplex stream for wake-ups (owned by the channel).
+    RingChannel(SharedMemory memory, std::size_t capacity, Ends doorbell, bool host_side);
     RingChannel(const RingChannel&) = delete;
     RingChannel& operator=(const RingChannel&) = delete;
     RingChannel(RingChannel&& other) noexcept;
@@ -110,7 +105,7 @@ private:
     std::uint8_t* out_data_ = nullptr;
     RingControl* in_ = nullptr;
     std::uint8_t* in_data_ = nullptr;
-    Doorbell doorbell_;
+    Ends doorbell_;
 };
 
 }  // namespace paglets::ipc

@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include "ipc.hpp"
+
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wasm/snapshot.hpp>
 
@@ -60,14 +62,15 @@ public:
 std::unique_ptr<Executor> make_in_process_executor();
 
 // Runs instances in a worker process started from `executable`; the process
-// is (re)started when needed. Not available on Windows yet.
+// is (re)started when needed.
 std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(
     std::filesystem::path executable, bool sandbox, std::function<void(const std::string&)> warn);
 
 // Main loop of a worker process (paglets-worker): calls arrive through the
-// shared-memory rings in `shm_handle` (doorbell: `main_fd`), terminations
-// on `control_fd`. With `sandbox` it applies the OS sandbox before it
-// accepts work.
-int run_worker(int main_fd, int control_fd, std::intptr_t shm_handle, std::size_t ring_capacity, bool sandbox);
+// shared-memory rings in `shm_handle` (wake-ups on `doorbell`),
+// terminations on `control`. With `sandbox` it applies the OS sandbox
+// before it accepts work.
+int run_worker(ipc::Ends doorbell, ipc::Ends control, std::intptr_t shm_handle, std::size_t ring_capacity,
+               bool sandbox);
 
 }  // namespace paglets::runtime

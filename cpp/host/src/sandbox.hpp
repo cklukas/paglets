@@ -7,7 +7,10 @@
 // open files, create sockets, run programs or start processes.
 //
 // Linux: a seccomp filter (no_new_privs, denylist returning EPERM, process
-// creation refused while threads are allowed). Other platforms: not yet.
+// creation refused while threads are allowed). macOS: an SBPL profile
+// (sandbox_init). Windows: job objects (no processes, no UI; the host's job
+// ends workers with the host) and a restricted token (no privileges,
+// integrity level Low); network access is not restricted there yet.
 
 #pragma once
 

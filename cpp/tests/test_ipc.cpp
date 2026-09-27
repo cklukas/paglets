@@ -13,10 +13,6 @@
 #include <stdexcept>
 #include <thread>
 
-#ifndef _WIN32
-
-#include <unistd.h>
-
 namespace ipc = paglets::ipc;
 
 namespace {
@@ -29,14 +25,16 @@ struct Pair {
 Pair make_pair(std::size_t capacity) {
     auto memory = ipc::SharedMemory::create(ipc::ring_region_size(capacity));
     if (!memory) throw std::runtime_error(memory.error());
-    auto sockets = ipc::socket_pair();
-    if (!sockets) throw std::runtime_error(sockets.error());
+    auto doorbell = ipc::duplex_pair();
+    if (!doorbell) throw std::runtime_error(doorbell.error());
     // The worker side maps the same memory a second time, as a worker does.
-    auto second = ipc::SharedMemory::attach(::dup(static_cast<int>(memory->handle())), memory->size());
+    auto handle = ipc::duplicate_handle(memory->handle());
+    if (!handle) throw std::runtime_error(handle.error());
+    auto second = ipc::SharedMemory::attach(*handle, memory->size());
     if (!second) throw std::runtime_error(second.error());
     Pair p;
-    p.host = ipc::RingChannel(std::move(*memory), capacity, ipc::Doorbell{sockets->first, sockets->first}, true);
-    p.worker = ipc::RingChannel(std::move(*second), capacity, ipc::Doorbell{sockets->second, sockets->second}, false);
+    p.host = ipc::RingChannel(std::move(*memory), capacity, doorbell->host, true);
+    p.worker = ipc::RingChannel(std::move(*second), capacity, doorbell->child, false);
     return p;
 }
 
@@ -100,5 +98,3 @@ PAGLETS_TEST("ipc rings: a closed peer is noticed") {
     auto f = p.host.receive();
     CHECK(!f.has_value());
 }
-
-#endif

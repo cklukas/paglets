@@ -21,7 +21,9 @@
 #include <random>
 #include <thread>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -772,18 +774,33 @@ PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
     std::filesystem::remove_all(dir);
 }
 
-#ifndef _WIN32
 namespace {
 
 // Kills a worker process and waits until it is gone (it is a child of this
 // test process, which hosts the runtime).
 void kill_and_reap(int pid) {
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
+    if (process == nullptr) return;
+    TerminateProcess(process, 9);
+    WaitForSingleObject(process, 5000);
+    CloseHandle(process);
+#else
     ::kill(pid, SIGKILL);
     for (int i = 0; i < 500; ++i) {
         int status = 0;
         if (::waitpid(pid, &status, WNOHANG) == pid) return;
         std::this_thread::sleep_for(10ms);
     }
+#endif
+}
+
+int own_pid() {
+#ifdef _WIN32
+    return static_cast<int>(GetCurrentProcessId());
+#else
+    return ::getpid();
+#endif
 }
 
 }  // namespace
@@ -805,7 +822,7 @@ PAGLETS_TEST("runtime: a killed worker process only affects its paglets") {
         f.runtime->wait_idle();  // the checkpoint after the last call is written
         const auto workers = f.runtime->worker_processes();
         REQUIRE(workers.size() == 1);
-        CHECK(workers[0] != ::getpid());
+        CHECK(workers[0] != own_pid());
         kill_and_reap(workers[0]);
         // The next delivery notices the lost worker and resumes the paglet
         // from its last checkpoint in a new worker process.
@@ -843,4 +860,3 @@ PAGLETS_TEST("runtime: paglets run in worker processes when configured") {
     CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
     CHECK(!f.runtime->worker_processes().empty());
 }
-#endif

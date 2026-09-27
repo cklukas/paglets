@@ -18,9 +18,7 @@
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <poll.h>
 #include <sys/mman.h>
-#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -41,53 +39,6 @@ inline void cpu_relax() {
 }
 
 constexpr std::size_t control_size = (sizeof(RingControl) + 63) / 64 * 64;
-
-#ifndef _WIN32
-#ifdef MSG_NOSIGNAL
-constexpr int send_flags = MSG_NOSIGNAL;
-#else
-constexpr int send_flags = 0;
-#endif
-#endif
-
-bool doorbell_send(std::intptr_t handle) {
-    const std::uint8_t byte = 1;
-#ifdef _WIN32
-    DWORD written = 0;
-    return WriteFile(reinterpret_cast<HANDLE>(handle), &byte, 1, &written, nullptr) && written == 1;
-#else
-    while (true) {
-        const ssize_t n = ::send(static_cast<int>(handle), &byte, 1, send_flags);
-        if (n == 1) return true;
-        if (n < 0 && errno == EINTR) continue;
-        return false;
-    }
-#endif
-}
-
-bool doorbell_receive(std::intptr_t handle) {
-    std::uint8_t byte = 0;
-#ifdef _WIN32
-    DWORD read = 0;
-    return ReadFile(reinterpret_cast<HANDLE>(handle), &byte, 1, &read, nullptr) && read == 1;
-#else
-    while (true) {
-        const ssize_t n = ::recv(static_cast<int>(handle), &byte, 1, 0);
-        if (n == 1) return true;
-        if (n < 0 && errno == EINTR) continue;
-        return false;
-    }
-#endif
-}
-
-void close_handle(std::intptr_t handle) {
-    if (handle < 0) return;
-#ifdef _WIN32
-    CloseHandle(reinterpret_cast<HANDLE>(handle));
-#else
-    ::close(static_cast<int>(handle));
-#endif
-}
 
 }  // namespace
 
@@ -187,7 +138,7 @@ std::size_t ring_region_size(std::size_t capacity) {
 // ---------------------------------------------------------------------------
 // RingChannel
 
-RingChannel::RingChannel(SharedMemory memory, std::size_t capacity, Doorbell doorbell, bool host_side)
+RingChannel::RingChannel(SharedMemory memory, std::size_t capacity, Ends doorbell, bool host_side)
     : memory_(std::move(memory)), capacity_(capacity), doorbell_(doorbell) {
     std::uint8_t* base = memory_.data();
     auto* a = reinterpret_cast<RingControl*>(base);
@@ -217,7 +168,7 @@ RingChannel::RingChannel(RingChannel&& other) noexcept
       out_data_(std::exchange(other.out_data_, nullptr)),
       in_(std::exchange(other.in_, nullptr)),
       in_data_(std::exchange(other.in_data_, nullptr)),
-      doorbell_(std::exchange(other.doorbell_, Doorbell{})) {}
+      doorbell_(std::exchange(other.doorbell_, Ends{})) {}
 
 RingChannel& RingChannel::operator=(RingChannel&& other) noexcept {
     if (this != &other) {
@@ -228,7 +179,7 @@ RingChannel& RingChannel::operator=(RingChannel&& other) noexcept {
         out_data_ = std::exchange(other.out_data_, nullptr);
         in_ = std::exchange(other.in_, nullptr);
         in_data_ = std::exchange(other.in_data_, nullptr);
-        doorbell_ = std::exchange(other.doorbell_, Doorbell{});
+        doorbell_ = std::exchange(other.doorbell_, Ends{});
     }
     return *this;
 }
@@ -238,28 +189,20 @@ RingChannel::~RingChannel() {
 }
 
 void RingChannel::close() {
-    if (doorbell_.write != doorbell_.read) close_handle(doorbell_.write);
-    close_handle(doorbell_.read);
-    doorbell_ = Doorbell{};
+    close_ends(doorbell_);
     memory_ = SharedMemory();
     out_ = in_ = nullptr;
     out_data_ = in_data_ = nullptr;
 }
 
 bool RingChannel::closed_by_peer() const {
-    if (doorbell_.read < 0) return true;
-#ifdef _WIN32
-    DWORD available = 0;
-    return !PeekNamedPipe(reinterpret_cast<HANDLE>(doorbell_.read), nullptr, 0, nullptr, &available, nullptr) ||
-           available > 0;
-#else
-    pollfd p{static_cast<int>(doorbell_.read), POLLIN, 0};
-    return ::poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
-#endif
+    // Between calls the peer sends no wake-ups: a readable stream is closed.
+    return readable_or_closed(doorbell_.read);
 }
 
 std::expected<void, std::string> RingChannel::consume_wake_up() {
-    if (!doorbell_receive(doorbell_.read)) return std::unexpected(std::string("ipc: peer closed the connection"));
+    std::uint8_t byte = 0;
+    if (!read_all(doorbell_.read, &byte, 1)) return std::unexpected(std::string("ipc: peer closed the connection"));
     return {};
 }
 
@@ -267,7 +210,10 @@ std::expected<void, std::string> RingChannel::consume_wake_up() {
 // consistently (store own, then load the other's, on both sides): either the
 // waiter sees the ring update, or the peer sees the waiting flag.
 void RingChannel::wake(std::atomic<std::uint32_t>& flag) {
-    if (flag.load() != 0 && flag.exchange(0) == 1) doorbell_send(doorbell_.write);
+    if (flag.load() != 0 && flag.exchange(0) == 1) {
+        const std::uint8_t byte = 1;
+        (void)write_all(doorbell_.write, &byte, 1);  // a closed peer shows up at the next wait
+    }
 }
 
 template <class Condition>
