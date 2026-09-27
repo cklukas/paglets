@@ -5,7 +5,7 @@
 //
 //   paglets-host --version | --info
 //   paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...
-//                    [--state-dir DIR] [--threads N] [--keep] [--in-process]
+//                    [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]
 //   paglets-host list --state-dir DIR
 //   paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]
 //
@@ -14,7 +14,8 @@
 // survive the host process: `run --keep` leaves them there, `list` and
 // `call` resume them from their last memory image. Paglets run in worker
 // processes (paglets-worker next to this binary) unless --in-process is given
-// or no worker executable is found.
+// or no worker executable is found; on Linux the workers run in a seccomp
+// sandbox (--no-sandbox turns it off, for debugging).
 
 #include <paglets/abi.hpp>
 #include <paglets/runtime/runtime.hpp>
@@ -74,7 +75,7 @@ std::string_view architecture() {
 int usage() {
     std::cerr << "usage: paglets-host --version | --info\n"
                  "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
-                 "                        [--state-dir DIR] [--threads N] [--keep] [--in-process]\n"
+                 "                        [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]\n"
                  "       paglets-host list --state-dir DIR\n"
                  "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n";
     return 2;
@@ -116,6 +117,7 @@ struct Options {
     unsigned threads = 2;
     bool keep = false;
     bool in_process = false;
+    bool no_sandbox = false;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -146,6 +148,8 @@ std::optional<Options> parse(int argc, char** argv) {
             o.keep = true;
         } else if (a == "--in-process") {
             o.in_process = true;
+        } else if (a == "--no-sandbox") {
+            o.no_sandbox = true;
         } else if (a.starts_with("--")) {
             return std::nullopt;
         } else {
@@ -193,6 +197,7 @@ rt::Config config_of(const Options& o) {
     rt::Config c;
     c.threads = o.threads;
     if (o.state_dir) c.state_dir = *o.state_dir;
+    c.sandbox_workers = !o.no_sandbox;
     if (!o.in_process && !self_path.empty()) {
         auto worker = self_path.parent_path() / "paglets-worker";
 #ifdef _WIN32

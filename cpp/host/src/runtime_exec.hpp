@@ -61,9 +61,10 @@ std::unique_ptr<Executor> make_in_process_executor();
 // Runs instances in a worker process started from `executable`; the process
 // is (re)started when needed. Not available on Windows yet.
 std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(
-    std::filesystem::path executable, std::function<void(const std::string&)> warn);
+    std::filesystem::path executable, bool sandbox, std::function<void(const std::string&)> warn);
 
-// Main loop of a worker process (paglets-worker).
-int run_worker(int main_fd, int control_fd);
+// Main loop of a worker process (paglets-worker); with `sandbox` it applies
+// the OS sandbox before it accepts work.
+int run_worker(int main_fd, int control_fd, bool sandbox);
 
 }  // namespace paglets::runtime

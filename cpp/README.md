@@ -114,7 +114,9 @@ build/macos-arm64/host/paglets-host run build/macos-arm64/guests/ping_pong.wasm 
 Message bodies and arguments are JSON, passed to the paglet as MessagePack;
 replies are printed as JSON. Paglets run in worker processes
 (`paglets-worker`, found next to `paglets-host`; one per scheduler lane, set
-with `--threads`); `--in-process` runs them in the host process instead. With a state directory, paglets outlive the host
+with `--threads`); `--in-process` runs them in the host process instead. On
+Linux the workers run in a seccomp sandbox (`--no-sandbox` for debugging;
+`paglets-worker --check-sandbox` verifies it). With a state directory, paglets outlive the host
 process and resume from their last memory image:
 
 ```bash

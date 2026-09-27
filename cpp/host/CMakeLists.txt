@@ -8,6 +8,7 @@ add_library(paglets_host STATIC
     src/runtime.cpp
     src/runtime_exec.cpp
     src/runtime_store.cpp
+    src/sandbox.cpp
     src/sha256.cpp
     src/wasm_binary.cpp
     src/wasm_direct.cpp

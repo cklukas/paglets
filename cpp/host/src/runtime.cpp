@@ -764,7 +764,10 @@ std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool de
     rec.imports = std::make_unique<Imports>(*this, rec);
     auto placed = executor->place(rec.id, rec.module, config.limits, image ? &*image : nullptr, *rec.imports);
     if (!placed) return std::unexpected(placed.error());
-    rec.instance = std::move(*placed);
+    {
+        std::lock_guard lock(mu);  // info() and the watchdog read it under the lock
+        rec.instance = std::move(*placed);
+    }
     // A paglet without a stored image is checkpointed after its first handler.
     rec.last_checkpoint = SteadyClock::now();
     rec.checkpoint_due = !rec.image_on_disk;
@@ -784,8 +787,9 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
     }
     if (rec.instance && rec.instance->lost()) {
         // Its worker process ended: continue from the last image.
+        std::lock_guard lock(mu);
         log(2, rec.id, "instance lost with its worker process; resuming from the last image");
-        rec.instance.reset();
+        retire(rec);
     }
     if (env.type == Envelope::Type::deactivate && !rec.instance) return;  // already inactive
 
@@ -1110,10 +1114,11 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
     for (unsigned i = 0; i < n; ++i) {
         auto lane = std::make_unique<Impl::Lane>();
         if (!impl_->config.worker_executable.empty()) {
-            auto worker = make_worker_executor(impl_->config.worker_executable, [this](const std::string& text) {
-                std::lock_guard lock(impl_->mu);
-                impl_->log(2, "", text);
-            });
+            auto worker = make_worker_executor(impl_->config.worker_executable, impl_->config.sandbox_workers,
+                                               [this](const std::string& text) {
+                                                   std::lock_guard lock(impl_->mu);
+                                                   impl_->log(2, "", text);
+                                               });
             if (worker) {
                 lane->executor = std::move(*worker);
                 impl_->uses_workers = true;
@@ -1162,6 +1167,7 @@ void Runtime::shutdown(bool save_state) {
                 impl_->persist(*rec, *snap);
             }
         }
+        std::lock_guard lock(impl_->mu);
         if (rec->instance) instances.push_back(std::move(rec->instance));
     }
     instances.clear();  // before the records and executors they refer to

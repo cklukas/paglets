@@ -1,7 +1,8 @@
 # paglets/cpp: milestone M1 progress
 
-Status: in progress. WP3, WP4, WP6 and WP7 are done. WP5 is done except OS
-sandboxing of workers, worker processes on Windows and log redirection. Companion to
+Status: in progress. WP3, WP4, WP6 and WP7 are done. WP5 is done except
+worker processes and their sandbox on Windows and macOS, and log
+redirection. Companion to
 [cpp-edition-plan.md](cpp-edition-plan.md); M0 is closed in
 [cpp-m0-results.md](cpp-m0-results.md).
 
@@ -11,7 +12,7 @@ sandboxing of workers, worker processes on Windows and log redirection. Companio
 |---|---|---|
 | WP3 Paglet ABI v1 | Written spec, reviewed; conformance test list | **Done**: [cpp-abi-v1.md](cpp-abi-v1.md), conformance tests C01–C30 all automated. Review by the owner pending |
 | WP4 Guest SDK | Samples build and pass ABI conformance tests | **Done**: `cpp/sdk` (`paglets/paglet.hpp`), `paglets_add_module(...)`, samples hello, counter, ping-pong, plus the conformance guest |
-| WP5 Host core and workers | Create, message, deactivate, activate, dispose locally; killing a worker only affects its paglets | **Met** on Linux and macOS: registry, trust classes, lifecycle, priority mailboxes, scheduler lanes, time budgets, memory limits, trap handling, import validation per trust class; worker processes (`paglets-worker`, one per lane) with restart, and paglets of a killed worker resume from their last image (test "a killed worker process only affects its paglets"). Open: OS sandboxing of workers, workers on Windows (in-process there), stdout/stderr to the log, shared-memory rings |
+| WP5 Host core and workers | Create, message, deactivate, activate, dispose locally; killing a worker only affects its paglets | **Met** on Linux and macOS: registry, trust classes, lifecycle, priority mailboxes, scheduler lanes, time budgets, memory limits, trap handling, import validation per trust class; worker processes (`paglets-worker`, one per lane) with restart, and paglets of a killed worker resume from their last image (test "a killed worker process only affects its paglets"). Workers on Linux run in a seccomp sandbox (`paglets-worker --check-sandbox`, a CTest case). Open: sandbox on macOS and Windows, workers on Windows (in-process there), stdout/stderr to the log, shared-memory rings |
 | WP6 Capabilities and messaging | Paglets can only message what they hold capabilities for; revoked and expired capabilities fail; conformance tests for every operation | **Done** for ABI v1: endpoint rights, badges, expiry, use limits, derive, transfer, drop, inspect, one-shot reply capabilities with timeouts, host-stamped sender records, mailbox quota. Open: revocation tree (needs grants from WP9), per-sender rate quotas |
 | WP7 Image store and persistence | kill -9 the host; on restart, paglets resume from their last image | **Done**: state directory with modules and paglet files (record + image, replaced atomically), checkpoints after handlers (policy by interval), recovery of paglets, capabilities and timers; requests in flight at the crash are answered `timeout`. Open: per-paglet storage and scratch directories |
 
@@ -45,6 +46,12 @@ sandboxing of workers, worker processes on Windows and log redirection. Companio
   paglet in the call fails, the others resume from their last image (or fail
   without one), and the worker is started again. `paglets-host` uses workers
   when `paglets-worker` is next to it (`--in-process` turns them off).
+- **Worker sandbox** (Linux): after startup a worker sets `no_new_privs` and
+  a seccomp filter: file opening and creation, sockets, `execve`, process
+  creation (`clone` without `CLONE_THREAD`, `fork`), `ptrace`, `mount`, BPF,
+  key and module system calls return `EPERM`; other architectures' system
+  call numbers kill the process. `paglets-worker --check-sandbox` verifies
+  the denials (CTest `worker_sandbox`).
 - **`paglets-host`** (M1 command line): `run` a module with JSON messages,
   `list` and `call` paglets resumed from a state directory. CTest runs a
   paglet across two host processes.
@@ -119,14 +126,20 @@ machine: 8 µs).
     its worker when it is destroyed while the worker's calls take the runtime
     lock for imports (ThreadSanitizer: lock-order inversion); destroyed
     instances are collected and released after the lock.
+12. **Sanitizer exit handlers need system calls the sandbox refuses**
+    (LeakSanitizer forks at exit); sandboxed processes leave with `_Exit`.
+13. **Every write of a paglet's instance pointer happens under the runtime
+    lock**, since `info()` and the watchdog read it (ThreadSanitizer, found
+    through a test that polls `info()`).
 
 ## Next steps
 
-1. WP5 remainder: OS sandboxing of workers per platform (seccomp on Linux,
-   sandbox profiles on macOS, job objects on Windows), worker processes on
-   Windows, stdout/stderr of guests to the log, shared-memory rings and
-   asynchronous imports (finding 8), placement that keeps communicating
-   paglets on one lane.
+1. WP5 remainder: worker sandbox on macOS (sandbox profile) and Windows
+   (job object, restricted token), worker processes on Windows, stdout/stderr
+   of guests to the log, shared-memory rings and asynchronous imports
+   (finding 8), placement that keeps communicating paglets on one lane. The
+   seccomp denylist should become an allowlist once the set of system calls
+   a worker needs is known on every supported libc (review in WP21).
 2. The allocation work of finding 1.
 3. Windows (MinGW-w64): the CI job is green; decide whether it leaves
    experimental.

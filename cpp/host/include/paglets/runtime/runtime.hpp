@@ -52,6 +52,8 @@ struct Config {
     // Worker process executable (paglets-worker): one worker per lane runs
     // the paglet instances. Empty: paglets run in the host process.
     std::filesystem::path worker_executable;
+    // OS sandbox for worker processes (Linux: seccomp; elsewhere not yet).
+    bool sandbox_workers = true;
     wasm::Limits limits{};
     std::chrono::milliseconds handler_budget{5000};
     // With a state directory: checkpoint an active paglet after a handler

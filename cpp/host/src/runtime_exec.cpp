@@ -4,6 +4,7 @@
 #include "runtime_exec.hpp"
 
 #include "ipc.hpp"
+#include "sandbox.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/msgpack.hpp>
@@ -180,8 +181,8 @@ private:
 
 class WorkerExecutor final : public Executor {
 public:
-    WorkerExecutor(std::filesystem::path executable, std::function<void(const std::string&)> warn)
-        : executable_(std::move(executable)), warn_(std::move(warn)) {}
+    WorkerExecutor(std::filesystem::path executable, bool sandbox, std::function<void(const std::string&)> warn)
+        : executable_(std::move(executable)), sandbox_(sandbox), warn_(std::move(warn)) {}
 
     ~WorkerExecutor() override {
         std::lock_guard lock(mu_);
@@ -327,7 +328,9 @@ private:
         const std::string exe = executable_.string();
         std::string fd_main = "3";
         std::string fd_control = "4";
-        char* argv[] = {const_cast<char*>(exe.c_str()), fd_main.data(), fd_control.data(), nullptr};
+        std::string no_sandbox = "--no-sandbox";
+        char* argv[] = {const_cast<char*>(exe.c_str()), fd_main.data(), fd_control.data(),
+                        sandbox_ ? nullptr : no_sandbox.data(), nullptr};
         pid_t pid = -1;
         const int rc = ::posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv, environ);
         posix_spawn_file_actions_destroy(&actions);
@@ -388,6 +391,7 @@ private:
     }
 
     std::filesystem::path executable_;
+    bool sandbox_ = true;
     std::function<void(const std::string&)> warn_;
     std::mutex mu_;          // main channel and process state
     std::mutex control_mu_;  // control channel (terminate from the watchdog)
@@ -519,16 +523,24 @@ std::unique_ptr<Executor> make_in_process_executor() {
 #ifndef _WIN32
 
 std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(
-    std::filesystem::path executable, std::function<void(const std::string&)> warn) {
+    std::filesystem::path executable, bool sandbox, std::function<void(const std::string&)> warn) {
     if (!std::filesystem::exists(executable)) {
         return std::unexpected("worker executable not found: " + executable.string());
     }
-    return std::make_unique<WorkerExecutor>(std::move(executable), std::move(warn));
+    return std::make_unique<WorkerExecutor>(std::move(executable), sandbox, std::move(warn));
 }
 
-int run_worker(int main_fd, int control_fd) {
+int run_worker(int main_fd, int control_fd, bool sandbox) {
     ::signal(SIGPIPE, SIG_IGN);
     wasm::ensure_runtime();
+    if (sandbox) {
+        // Everything that opens files lazily is initialized first.
+        std::uint8_t warm[8];
+        wasm::fill_random(warm);
+        if (auto ok = sandbox_worker(); !ok) {
+            std::cerr << "paglets-worker: running without OS sandbox: " << ok.error() << "\n";
+        }
+    }
     ipc::Channel main(main_fd);
     ipc::Channel control(control_fd);
     std::mutex mu;
@@ -691,12 +703,12 @@ int run_worker(int main_fd, int control_fd) {
 
 #else  // _WIN32
 
-std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(std::filesystem::path,
+std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(std::filesystem::path, bool,
                                                                            std::function<void(const std::string&)>) {
     return std::unexpected(std::string("worker processes are not supported on Windows yet"));
 }
 
-int run_worker(int, int) {
+int run_worker(int, int, bool) {
     return 2;
 }
 

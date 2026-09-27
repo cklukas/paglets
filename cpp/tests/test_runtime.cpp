@@ -122,6 +122,18 @@ bool contains(const std::vector<std::string>& v, std::string_view s) {
     return std::ranges::find(v, s) != v.end();
 }
 
+// Polls the journal until it contains `entry` (slow sanitizer builds need
+// more time than the nominal delays).
+bool journal_eventually(Fixture& f, const rt::PagletId& id, std::string_view entry,
+                        std::chrono::milliseconds timeout = 5000ms) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until) {
+        if (contains(f.journal(id), entry)) return true;
+        std::this_thread::sleep_for(20ms);
+    }
+    return false;
+}
+
 std::ptrdiff_t index_of(const std::vector<std::string>& v, std::string_view s) {
     auto it = std::ranges::find(v, s);
     return it == v.end() ? -1 : it - v.begin();
@@ -200,8 +212,9 @@ PAGLETS_TEST("abi C06: created comes first, once, with args and caps") {
 PAGLETS_TEST("abi C07: messages are delivered by priority, FIFO within a priority") {
     Fixture f;
     auto id = f.create("conformance.wasm");
-    auto busy = f.runtime->request(id, "busy", enc(Cmd{.ms = 300}));
-    std::this_thread::sleep_for(100ms);  // the paglet is inside "busy" now
+    CHECK_EQ(f.call(id, "count").status, 0);  // started (and its worker, if any)
+    auto busy = f.runtime->request(id, "busy", enc(Cmd{.ms = 600}));
+    std::this_thread::sleep_for(150ms);  // the paglet is inside "busy" now
     REQUIRE(f.runtime->send(id, "a", {}, 1));
     REQUIRE(f.runtime->send(id, "b", {}, 5));
     REQUIRE(f.runtime->send(id, "c", {}, 1));
@@ -261,8 +274,7 @@ PAGLETS_TEST("abi C12: request timeout; a later reply is discarded") {
     const auto child = static_cast<std::int32_t>(f.code(a, "child", Cmd{}));
     const auto b = f.target_of(a, child);
     CHECK(f.code(a, "request", Cmd{.handle = child, .name = "defer", .ms = 100}) > 0);
-    std::this_thread::sleep_for(300ms);
-    CHECK(contains(f.journal(a), "reply:timeout:"));
+    CHECK(journal_eventually(f, a, "reply:timeout:"));
     CHECK_EQ(f.code(b, "answer", Cmd{.payload = text("too late")}), 0);
     auto j = f.journal(a);
     CHECK_EQ(std::ranges::count_if(j, [](const std::string& e) { return e.starts_with("reply:"); }), 1);
@@ -414,10 +426,9 @@ PAGLETS_TEST("abi C23: timers fire; dropped timers do not") {
     CHECK(f.code(id, "timer", Cmd{.name = "tick", .ms = 50}) > 0);
     const auto cancelled = static_cast<std::int32_t>(f.code(id, "timer", Cmd{.name = "never", .ms = 150}));
     CHECK_EQ(f.code(id, "drop", Cmd{.handle = cancelled}), 0);
-    std::this_thread::sleep_for(400ms);
-    auto j = f.journal(id);
-    CHECK(contains(j, "timer:tick"));
-    CHECK(!contains(j, "timer:never"));
+    CHECK(journal_eventually(f, id, "timer:tick"));
+    std::this_thread::sleep_for(300ms);  // past the cancelled timer's deadline
+    CHECK(!contains(f.journal(id), "timer:never"));
 }
 
 // ---------------------------------------------------------------------------
@@ -450,8 +461,10 @@ PAGLETS_TEST("abi C24b: deactivate with wake_after_ms activates without a messag
              0);
     f.runtime->wait_idle();
     CHECK(f.runtime->info(id)->state == rt::PagletState::inactive);
-    std::this_thread::sleep_for(300ms);
-    f.runtime->wait_idle();
+    const auto until = std::chrono::steady_clock::now() + 5s;
+    while (f.runtime->info(id)->state != rt::PagletState::active && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(20ms);
+    }
     CHECK(f.runtime->info(id)->state == rt::PagletState::active);
 }
 
@@ -605,7 +618,7 @@ PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
         Fixture f(std::move(c));
         id = f.create("conformance.wasm", text("durable"));
         for (int i = 0; i < 3; ++i) f.call(id, "count");
-        CHECK(f.code(id, "timer", Cmd{.name = "after-restart", .ms = 400}) > 0);
+        CHECK(f.code(id, "timer", Cmd{.name = "after-restart", .ms = 400}) > 0);  // fires after the restart
         sleeper = f.create("conformance.wasm");
         f.call(sleeper, "count");
         REQUIRE(f.runtime->deactivate(sleeper));
@@ -621,11 +634,10 @@ PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
         REQUIRE(f.runtime->info(sleeper).has_value());
         CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 4);
         CHECK_EQ(dec<std::int64_t>(f.call(sleeper, "count").payload), 2);
-        std::this_thread::sleep_for(600ms);
+        CHECK(journal_eventually(f, id, "timer:after-restart"));
         auto j = f.journal(id);
         CHECK(contains(j, "event:created:durable:0"));
         CHECK(contains(j, "event:activated"));
-        CHECK(contains(j, "timer:after-restart"));
     }
     std::filesystem::remove_all(dir);
 }

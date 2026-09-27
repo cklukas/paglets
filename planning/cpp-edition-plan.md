@@ -3,7 +3,8 @@
 Status: milestone M0 (WP0–WP2) done, results in
 [cpp-m0-results.md](cpp-m0-results.md). Milestone M1 in progress: WP3 (ABI
 v1, [cpp-abi-v1.md](cpp-abi-v1.md)), WP4, WP6 and WP7 done, WP5 done except
-OS sandboxing and Windows workers; see [cpp-m1-results.md](cpp-m1-results.md).
+the worker sandbox on macOS and Windows and Windows workers; see
+[cpp-m1-results.md](cpp-m1-results.md).
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.
 It keeps the concepts that proved useful in the Python edition (hosts, mobile
