@@ -47,14 +47,18 @@ Override only the lifecycle hooks you need:
 def on_creation(self, event):
     self.state.visits.append(f"created:{event.host_name}")
 
+
 def on_dispatching(self, event):
     self.state.visits.append(f"leaving:{event.source_host_name}")
+
 
 def on_arrival(self, event):
     self.state.visits.append(f"arrived:{event.host_name}")
 
+
 def on_clone(self, event):
     self.state.visits.append(f"clone:{event.host_name}")
+
 
 def run(self):
     self.state.visits.append(f"run:{self.context.name}")
@@ -352,9 +356,7 @@ from paglets.persistence.persistency import DeactivationPolicy
 
 def handle_message(self, message: Message):
     if message.kind == "pause":
-        return self.deactivate(
-            policy=DeactivationPolicy(activate_at=time.time() + 3600)
-        ).to_wire()
+        return self.deactivate(policy=DeactivationPolicy(activate_at=time.time() + 3600)).to_wire()
     return self.not_handled()
 ```
 

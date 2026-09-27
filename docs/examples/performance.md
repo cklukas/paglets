@@ -145,12 +145,10 @@ client = OperationClient(proxy)
 reply = client.call(
     PERFORMANCE_COLLECT,
     PerformanceCollectRequest(
-        request=dataclass_to_wire(
-            BenchmarkRequest(duration_seconds=0.5, disk_size_bytes=64 * 1024 * 1024)
-        ),
+        request=dataclass_to_wire(BenchmarkRequest(duration_seconds=0.5, disk_size_bytes=64 * 1024 * 1024)),
         timeout=120.0,
         output_path="/tmp/perf-summary.json",
-    )
+    ),
 )
 output_path = reply.output_path
 ```

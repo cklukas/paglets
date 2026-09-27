@@ -192,7 +192,7 @@ reply = client.call(
         request=dataclass_to_wire(SearchRequest(mode="grep", pattern="TODO", paths=["."])),
         timeout=60.0,
         output_path="/tmp/paglets-search.jsonl",
-    )
+    ),
 )
 
 output_path = reply.output_path
