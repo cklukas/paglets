@@ -99,3 +99,69 @@ contract calls the generated `serve`, and callers use the generated
 `Client`, whether the service is a guest or a native system paglet.
 System paglets and their contracts need C++26 reflection on the host; the
 host-only build without reflection leaves them out.
+
+## 6. The standard system paglets
+
+`services::install_system_services(runtime, config)` registers them; the
+contracts are in `cpp/common/include/paglets/services/`, so guests get
+typed clients with `paglets_add_module(... SERVICES files server_info ...)`
+and `#include <paglets/services/<service>.gen.hpp>`.
+
+| Service | Default endpoint | Operations | Notes |
+|---|---|---|---|
+| `directory` | yes | lookup, publish, unpublish, list | Service lookups reply with a non-transferable endpoint carrying the operations the policy allows (default: all; WP9 installs the ledger's). Published names: same owner or `is_public`; removed when the paglet ends; kept in the state directory |
+| `storage` | yes | get, put, remove, list | Per paglet (by host-stamped sender), in the paglet's storage directory, quota per paglet; keys stored as hex file names, so keys differing in case stay apart on macOS and Windows |
+| `user-info` | yes | notify | Kept per owner (bounded), logged, passed to the host's sink |
+| `files` | via directory | list, stat, find, read, write, mkdir, move, remove | Acts on a lent `dir` capability; rights `read`, `write`, `create`, `delete`; at most 4 MB per read/write |
+| `server-info` | via directory | summary, load, volumes, processes | Platform layer; CPU use since the previous `load` |
+| `artifacts` | via directory | put, get, stat | Content-addressed (SHA-256); `put` replies with an `artifact` capability |
+| `pubsub` | via directory | create, publish, subscribe, unsubscribe | Topics reached only through `topic` capabilities; publications are messages named by the subscriber, badge = topic name; host-local until WP14 |
+
+Every system paglet also answers `describe` with its schema descriptor.
+
+### 6.1 Named roots and path safety
+
+`files` never takes host paths from paglets. A `dir` capability names a
+root (`ServicesConfig::roots`, later the host's enrollment record) and a
+relative path; requests add a relative path below it (no `.`, `..`,
+empty segments, `\` or `:`). Resolution:
+
+- the capability's directory is resolved canonically and must lie inside
+  its root (a capability for a linked directory that leads out is refused);
+- for operations on entries (stat, list entries, move, remove) the parent is
+  resolved canonically and must lie inside the capability's directory, and
+  the final name is taken literally (a link is reported, removed or moved as
+  a link);
+- for operations on content (read, write, listing a directory, find) the
+  whole path is resolved and must lie inside;
+- find does not enter linked directories.
+
+Open (WP21): the checks and the operation are not atomic; `openat2` with
+`RESOLVE_BENEATH` on Linux and handle-relative opens elsewhere would close
+the race with a concurrent local user who can create links in the root.
+
+### 6.2 Platform layer
+
+`host/src/platform/` implements system information once per platform, all
+into the same structures:
+
+| Data | Linux | macOS | Windows |
+|---|---|---|---|
+| OS, version, CPU model | uname, /etc/os-release, /proc/cpuinfo or device tree | uname, kern.osproductversion, machdep.cpu.brand_string | RtlGetVersion, registry |
+| CPU use | /proc/stat | host_processor_info | NtQuerySystemInformation (per processor), GetSystemTimes |
+| Memory | /proc/meminfo (MemAvailable) | hw.memsize, host_statistics64 | GlobalMemoryStatusEx |
+| Load average | getloadavg | getloadavg | not available (absent) |
+| Volumes | /proc/self/mounts without pseudo file systems, statvfs | getfsstat without non-browsable system volumes | logical drives, GetDiskFreeSpaceEx, GetVolumeInformation |
+| Processes | /proc/<pid> (statm, stat) | proc_listpids, proc_pidinfo | ToolHelp snapshot, GetProcessMemoryInfo, GetProcessTimes |
+
+Values a platform cannot provide are absent (`optional`), never zero.
+
+### 6.3 WP10 exit
+
+The explorer test guest (`cpp/tests/guests/explorer.cpp`) is one roaming
+paglet that looks up `files` and `server-info` in the directory, finds
+`**/*.csv` below a lent directory, reads the first match and reports the
+host's summary, load, volumes and processes through the generated clients.
+The same test (`cpp/tests/test_services.cpp`) runs in CI on Linux (x86-64,
+arm64), macOS and Windows; the result schema is the contract's, identical
+everywhere by construction.

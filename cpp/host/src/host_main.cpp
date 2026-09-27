@@ -6,6 +6,7 @@
 //   paglets-host --version | --info
 //   paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...
 //                    [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]
+//                    [--root NAME=DIR]...
 //   paglets-host list --state-dir DIR
 //   paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]
 //   paglets-host keys|mesh|ledger ...   (mesh_cli.cpp: keys and the mesh ledger)
@@ -24,7 +25,11 @@
 #include <paglets/runtime/runtime.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/json_msgpack.hpp>
+#if PAGLETS_HAVE_REFLECTION
+#include <paglets/services/system_services.hpp>
+#endif
 
+#include <expected>
 #include <filesystem>
 #include <iostream>
 #include <system_error>
@@ -79,6 +84,7 @@ int usage() {
     std::cerr << "usage: paglets-host --version | --info\n"
                  "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
                  "                        [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]\n"
+                 "                        [--root NAME=DIR]...   (named roots of the files service)\n"
                  "       paglets-host list --state-dir DIR\n"
                  "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n"
                  "       paglets-host keys|mesh|ledger ...   (keys and the mesh ledger; no arguments for help)\n";
@@ -118,6 +124,7 @@ struct Options {
     std::optional<std::string> args;
     std::optional<std::string> state_dir;
     std::optional<std::string> expect;
+    std::vector<std::pair<std::string, std::string>> roots;
     unsigned threads = 2;
     bool keep = false;
     bool in_process = false;
@@ -148,6 +155,12 @@ std::optional<Options> parse(int argc, char** argv) {
             auto v = value(i);
             if (!v) return std::nullopt;
             o.threads = static_cast<unsigned>(std::stoul(*v));
+        } else if (a == "--root") {
+            auto v = value(i);
+            if (!v) return std::nullopt;
+            const auto eq = v->find('=');
+            if (eq == std::string::npos || eq == 0) return std::nullopt;
+            o.roots.emplace_back(v->substr(0, eq), v->substr(eq + 1));
         } else if (a == "--keep") {
             o.keep = true;
         } else if (a == "--in-process") {
@@ -216,9 +229,30 @@ rt::Config config_of(const Options& o) {
     return c;
 }
 
+// The standard system paglets (files, server-info, directory, storage,
+// artifacts, pubsub, user-info), registered before paglets are created.
+std::expected<void, std::string> install_services(rt::Runtime& runtime, const Options& o) {
+#if PAGLETS_HAVE_REFLECTION
+    paglets::services::ServicesConfig sc;
+    for (const auto& [name, dir] : o.roots) sc.roots[name] = dir;
+    if (o.state_dir) sc.state_dir = *o.state_dir;
+    sc.notify = [](const paglets::services::Notification& n) {
+        std::cout << "notification for " << n.owner << ": " << n.title << (n.text.empty() ? "" : " - " + n.text)
+                  << "\n";
+    };
+    auto installed = paglets::services::install_system_services(runtime, std::move(sc));
+    if (!installed) return std::unexpected(installed.error());
+#else
+    (void)runtime;
+    if (!o.roots.empty()) return std::unexpected(std::string("this build has no system paglets (no reflection)"));
+#endif
+    return {};
+}
+
 int cmd_run(const Options& o) {
     if (o.positional.size() != 1) return usage();
     rt::Runtime runtime(config_of(o));
+    if (auto s = install_services(runtime, o); !s) return fail(s.error());
     auto module = runtime.add_module_file(o.positional[0]);
     if (!module) return fail(module.error());
     auto args = body_of(o.args);
@@ -245,7 +279,9 @@ int cmd_run(const Options& o) {
 int cmd_list(const Options& o) {
     if (!o.state_dir) return usage();
     rt::Runtime runtime(config_of(o));
+    if (auto s = install_services(runtime, o); !s) return fail(s.error());
     for (const auto& p : runtime.list()) {
+        if (p.trust == rt::TrustClass::system && p.module.empty()) continue;  // native system paglets
         std::cout << p.id << "  " << rt::to_string(p.trust) << "  " << rt::to_string(p.state) << "  module "
                   << p.module.substr(0, 16) << "  owner " << p.owner << "\n";
     }
@@ -255,9 +291,12 @@ int cmd_list(const Options& o) {
 int cmd_call(const Options& o) {
     if (!o.state_dir || o.positional.size() < 2 || o.positional.size() > 3) return usage();
     rt::Runtime runtime(config_of(o));
+    if (auto s = install_services(runtime, o); !s) return fail(s.error());
     std::vector<rt::PagletId> targets;
     if (o.positional[0] == "all") {
-        for (const auto& p : runtime.list()) targets.push_back(p.id);
+        for (const auto& p : runtime.list()) {
+            if (!p.module.empty()) targets.push_back(p.id);
+        }
     } else {
         targets.push_back(o.positional[0]);
     }

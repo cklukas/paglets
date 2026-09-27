@@ -64,6 +64,15 @@ class ContractPaglet : public runtime::SystemPaglet {
 public:
     std::string_view name() const override { return Contract::service; }
 
+    std::vector<std::string> operations() const override {
+        std::vector<std::string> ops;
+        template for (constexpr auto op : std::define_static_array(wire::operations_of(^^Contract))) {
+            ops.emplace_back(std::meta::identifier_of(op));
+        }
+        ops.emplace_back("describe");
+        return ops;
+    }
+
     // The descriptor of the contract's schema namespace (JSON).
     static std::string describe() { return wire::namespace_descriptor<std::meta::parent_of(^^Contract)>().dump(); }
 

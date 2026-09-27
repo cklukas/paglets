@@ -948,12 +948,13 @@ public:
         std::lock_guard lock(rt_.mu);
         if (auto u = rt_.usable(cap); u != abi::ok) return u;
         if (cap.kind != Cap::Kind::resource || cap.target != id_ || cap.resource_type != type) return abi::bad_handle;
-        if (!op_allowed(cap.ops, right)) return abi::denied;
+        if (!right.empty() && !op_allowed(cap.ops, right)) return abi::denied;
         return abi::ok;
     }
 
     std::expected<void, std::int32_t> send(const PagletId& to, std::string_view name, Bytes payload,
-                                           std::vector<Cap> caps, std::int32_t priority) override {
+                                           std::vector<Cap> caps, std::int32_t priority,
+                                           std::optional<std::string> badge) override {
         if (!abi::valid_message_name(name) || priority < 0 || priority > abi::max_priority) {
             return std::unexpected(abi::invalid_argument);
         }
@@ -968,6 +969,7 @@ public:
         env.delivered.payload = std::move(payload);
         env.delivered.priority = priority;
         env.delivered.sender = self->sender(rt_.config.host_name);
+        env.delivered.badge = std::move(badge);
         env.caps = std::move(caps);
         rt_.enqueue(*target, std::move(env), priority);
         return {};
@@ -1747,6 +1749,21 @@ std::expected<PagletId, std::string> Runtime::add_system_paglet(std::shared_ptr<
     // endpoint to the new paglet yet, so no message reaches it before.
     paglet->start(*context);
     return id;
+}
+
+std::shared_ptr<SystemPaglet> Runtime::system_paglet_object(std::string_view name) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->system_paglets.find(name);
+    if (it == impl_->system_paglets.end()) return nullptr;
+    auto rec = impl_->paglets.find(it->second);
+    return rec == impl_->paglets.end() ? nullptr : rec->second->native;
+}
+
+std::vector<std::string> Runtime::system_paglet_names() const {
+    std::lock_guard lock(impl_->mu);
+    std::vector<std::string> names;
+    for (const auto& [name, id] : impl_->system_paglets) names.push_back(name);
+    return names;
 }
 
 std::optional<PagletId> Runtime::system_paglet(std::string_view name) const {

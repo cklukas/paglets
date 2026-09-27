@@ -41,9 +41,36 @@ add_library(paglets_mesh STATIC
 target_link_libraries(paglets_mesh PUBLIC paglets_host PRIVATE Sodium::Sodium)
 target_compile_options(paglets_mesh PRIVATE ${PAGLETS_WARNINGS})
 
+# The standard system paglets and the host platform layer (WP10); they use
+# C++26 reflection for their service contracts.
+if(PAGLETS_ENABLE_REFLECTION)
+    add_library(paglets_services STATIC
+        src/platform/platform_common.cpp
+        src/platform/platform_linux.cpp
+        src/platform/platform_macos.cpp
+        src/platform/platform_windows.cpp
+        src/services/artifacts.cpp
+        src/services/common.cpp
+        src/services/directory.cpp
+        src/services/files.cpp
+        src/services/install.cpp
+        src/services/pubsub.cpp
+        src/services/server_info.cpp
+        src/services/storage.cpp
+        src/services/user_info.cpp)
+    target_link_libraries(paglets_services PUBLIC paglets_host)
+    target_compile_options(paglets_services PRIVATE ${PAGLETS_WARNINGS})
+    if(WIN32)
+        target_link_libraries(paglets_services PRIVATE psapi)
+    endif()
+endif()
+
 # The host binary and its worker processes.
 add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp)
 target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh)
+if(TARGET paglets_services)
+    target_link_libraries(paglets-host PRIVATE paglets_services)
+endif()
 target_compile_options(paglets-host PRIVATE ${PAGLETS_WARNINGS})
 add_executable(paglets-worker src/worker_main.cpp)
 target_link_libraries(paglets-worker PRIVATE paglets_host)

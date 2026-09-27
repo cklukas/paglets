@@ -75,8 +75,8 @@ public:
     // An endpoint capability to a paglet (or another system paglet).
     virtual Cap endpoint(const PagletId& target, std::vector<std::string> ops) = 0;
 
-    // abi::ok when `cap` is usable (not revoked, not expired) and, for a
-    // resource, provided by this system paglet with `type` and `right`;
+    // abi::ok when `cap` is usable (not revoked, not expired), a resource of
+    // this system paglet with `type` and, unless `right` is empty, `right`;
     // otherwise the error to answer with.
     virtual std::int32_t check(const Cap& cap, std::string_view type, std::string_view right) const = 0;
 
@@ -84,7 +84,8 @@ public:
     // abi::Error (not_found, quota, invalid_argument).
     virtual std::expected<void, std::int32_t> send(const PagletId& to, std::string_view name, Bytes payload,
                                                    std::vector<Cap> caps = {},
-                                                   std::int32_t priority = abi::default_priority) = 0;
+                                                   std::int32_t priority = abi::default_priority,
+                                                   std::optional<std::string> badge = std::nullopt) = 0;
     // Answers a deferred request.
     virtual std::expected<void, std::int32_t> reply(Cap reply, std::int32_t status, Bytes payload = {},
                                                     std::vector<Cap> caps = {}) = 0;
@@ -102,6 +103,8 @@ public:
     // resident paglet (planning/cpp-security-and-communication.md, 7.5);
     // empty: none.
     virtual std::vector<std::string> default_ops() const { return {}; }
+    // Every operation it offers (for the directory and policies).
+    virtual std::vector<std::string> operations() const { return {}; }
 
     // Called once when the runtime registers it.
     virtual void start(SystemContext&) {}

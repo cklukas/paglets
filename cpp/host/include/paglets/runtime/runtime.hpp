@@ -150,6 +150,8 @@ public:
     // one; register system paglets before creating paglets.
     std::expected<PagletId, std::string> add_system_paglet(std::shared_ptr<SystemPaglet> paglet);
     std::optional<PagletId> system_paglet(std::string_view name) const;
+    std::shared_ptr<SystemPaglet> system_paglet_object(std::string_view name) const;
+    std::vector<std::string> system_paglet_names() const;  // sorted
 
     // Capabilities of a paglet (tests, tools and the host's grant handling).
     std::vector<std::pair<std::int32_t, Cap>> capabilities(const PagletId& id) const;

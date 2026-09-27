@@ -4,6 +4,11 @@
 paglets_add_guest(testbed LANGUAGE C NO_SDK SOURCES guests/testbed.c)
 paglets_add_guest(forbidden LANGUAGE C NO_SDK SOURCES guests/forbidden.c)
 paglets_add_module(conformance SOURCES guests/conformance.cpp)
+paglets_add_module(explorer
+    SOURCES guests/explorer.cpp
+    SCHEMA_HEADER guests/explorer_msgs.hpp
+    SCHEMA_NAMESPACE explorer
+    SERVICES files server_info directory storage artifacts pubsub user_info)
 paglets_add_module(calc_user
     SOURCES guests/calc_user.cpp
     SCHEMA_HEADER guests/calc_contract.hpp
@@ -28,14 +33,17 @@ set(test_sources
     test_mesh.cpp
     test_system.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh)
+if(TARGET paglets_services)
+    target_link_libraries(paglets_tests PRIVATE paglets_services)
+endif()
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter hello ping_pong conformance testbed forbidden calc_user)
+foreach(guest counter hello ping_pong conformance testbed forbidden calc_user explorer)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()
@@ -66,6 +74,11 @@ if(PAGLETS_TEST_GUEST_DIR)
     add_test(NAME host_run_hello
              COMMAND paglets-host run "${PAGLETS_TEST_GUEST_DIR}/hello.wasm" --call greet "\"world\"")
     set_tests_properties(host_run_hello PROPERTIES PASS_REGULAR_EXPRESSION "hello, world")
+    # With the system paglets and a named root.
+    add_test(NAME host_run_services
+             COMMAND paglets-host run "${PAGLETS_TEST_GUEST_DIR}/hello.wasm" --root "data=${CMAKE_CURRENT_BINARY_DIR}"
+                     --call greet "\"roots\"")
+    set_tests_properties(host_run_services PROPERTIES PASS_REGULAR_EXPRESSION "hello, roots")
     add_test(NAME host_state_clean COMMAND ${CMAKE_COMMAND} -E rm -rf "${state}")
     add_test(NAME host_state_save
              COMMAND paglets-host run "${PAGLETS_TEST_GUEST_DIR}/counter.wasm" --state-dir "${state}" --keep

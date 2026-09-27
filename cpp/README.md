@@ -11,17 +11,20 @@ runtime) is closed ([results](../planning/cpp-m1-results.md)): the paglet
 ABI v1 ([specification](../planning/cpp-abi-v1.md)), the guest SDK,
 capabilities and messaging, persistence with crash recovery, and sandboxed
 worker processes on Linux, macOS and Windows. Milestone M2 (mesh identity,
-policy and system paglets) is in progress.
+policy and system paglets) is in progress: keys, the signed ledger with
+gossip, enrollment and passports (WP8) and the system paglets (WP10) work.
 
 ## Layout
 
 ```text
-common/include/paglets/   MessagePack primitives and the paglet ABI v1 documents (host and guests)
+common/include/paglets/   MessagePack primitives, the paglet ABI v1 documents and the service
+                          contracts (host and guests)
 host/                     host library: Wasm engine, memory images, runtime, wire codecs;
                           mesh library: keys, ledger, gossip, passports;
+                          services library: system paglets and the platform layer;
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
-tools/schema_gen/         guest schema generator (C++26 reflection -> plain C++)
+tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
 examples/                 sample paglets: hello, counter, ping_pong
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
@@ -123,7 +126,12 @@ workers run in an operating-system sandbox (Linux: seccomp; macOS: a sandbox
 profile; Windows: a job object and a restricted token) and cannot open
 files, create sockets or start programs (`--no-sandbox` for debugging;
 `paglets-worker --check-sandbox` verifies it). Output a paglet writes to
-stdout or stderr goes to the host log. With a state directory, paglets outlive the host
+stdout or stderr goes to the host log. The host runs the standard system paglets
+(files, server-info, directory, storage, artifacts, pubsub, user-info;
+[design](../planning/cpp-system-paglets.md)); `--root NAME=DIR` gives the
+files service a named root. Guests call services through typed clients
+generated from the contracts in `common/include/paglets/services/`
+(`paglets_add_module(... SERVICES files server_info ...)`). With a state directory, paglets outlive the host
 process and resume from their last memory image:
 
 ```bash

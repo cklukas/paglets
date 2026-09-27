@@ -9,11 +9,15 @@
 #
 # paglets_add_module(<name>
 #     SOURCES <files...>
-#     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>])
+#     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>]
+#     [SERVICES <service>...])
 #
 # Builds a paglet module in C++ with the guest SDK (paglet ABI v1). Produces
 # ${PAGLETS_GUEST_OUTPUT_DIR}/<name>.wasm and, with a schema, the generated
-# <name>.schema.gen.hpp and <name>.schema.json.
+# <name>.schema.gen.hpp and <name>.schema.json. SERVICES names standard
+# system services (files, server_info, directory, storage, artifacts, pubsub,
+# user_info); the module can then include <paglets/services/<service>.gen.hpp>
+# with their codecs and typed clients.
 #
 # paglets_add_guest(<name> SOURCES <files...> [LANGUAGE C|CXX] [NO_SDK] ...)
 #
@@ -80,11 +84,39 @@ set(PAGLETS_GUEST_COMMON_FLAGS
     -Wl,--export=__stack_pointer
     -Wl,--strip-debug)
 
+set(PAGLETS_SERVICE_SCHEMA_DIR "${PROJECT_BINARY_DIR}/service-schemas" CACHE INTERNAL "")
+
+# Generates <paglets/services/<service>.gen.hpp> once per build.
+function(paglets_service_schema service out_var)
+    set(header "${PROJECT_SOURCE_DIR}/common/include/paglets/services/${service}.hpp")
+    set(gen "${PAGLETS_SERVICE_SCHEMA_DIR}/paglets/services/${service}.gen.hpp")
+    if(NOT EXISTS "${header}")
+        message(FATAL_ERROR "paglets: unknown service ${service}")
+    endif()
+    set(gen_target "paglets_service_${service}_schema_gen")
+    if(NOT TARGET ${gen_target})
+        add_executable(${gen_target} "${PROJECT_SOURCE_DIR}/tools/schema_gen/schema_gen.cpp")
+        target_link_libraries(${gen_target} PRIVATE paglets_host)
+        target_compile_definitions(${gen_target} PRIVATE
+            "PAGLETS_SCHEMA_HEADER=\"${header}\"" "PAGLETS_SCHEMA_NAMESPACE=paglets::services::${service}")
+        add_custom_command(
+            OUTPUT "${gen}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${PAGLETS_SERVICE_SCHEMA_DIR}/paglets/services"
+            COMMAND ${gen_target} "${gen}" "${PAGLETS_SERVICE_SCHEMA_DIR}/paglets/services/${service}.schema.json"
+                    "paglets/services/${service}.hpp"
+            DEPENDS ${gen_target} "${header}"
+            COMMENT "Generating guest client of the ${service} service"
+            VERBATIM)
+        add_custom_target(paglets_service_${service}_schema DEPENDS "${gen}")
+    endif()
+    set(${out_var} "${gen}" PARENT_SCOPE)
+endfunction()
+
 function(paglets_add_guest name)
     if(NOT PAGLETS_GUESTS_AVAILABLE)
         return()
     endif()
-    cmake_parse_arguments(G "NO_SDK" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE" "SOURCES" ${ARGN})
+    cmake_parse_arguments(G "NO_SDK" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE" "SOURCES;SERVICES" ${ARGN})
     if(NOT G_LANGUAGE)
         set(G_LANGUAGE CXX)
     endif()
@@ -112,6 +144,20 @@ function(paglets_add_guest name)
     else()
         set(compiler "${PAGLETS_WASI_CLANG}")
         set(lang_flags -std=c17)
+    endif()
+
+    if(G_SERVICES)
+        if(NOT PAGLETS_ENABLE_REFLECTION)
+            message(WARNING "paglets: guest ${name} needs the schema generator (C++26 reflection); skipped")
+            return()
+        endif()
+        set(service_targets "")
+        foreach(service IN LISTS G_SERVICES)
+            paglets_service_schema(${service} gen)
+            list(APPEND depends "${gen}")
+            list(APPEND service_targets paglets_service_${service}_schema)
+        endforeach()
+        list(APPEND include_flags "-I${PAGLETS_SERVICE_SCHEMA_DIR}")
     endif()
 
     if(G_SCHEMA_HEADER)
@@ -148,6 +194,9 @@ function(paglets_add_guest name)
         COMMENT "Building guest paglet ${name}.wasm"
         VERBATIM)
     add_custom_target(${name}_wasm ALL DEPENDS "${out}")
+    if(G_SERVICES)
+        add_dependencies(${name}_wasm ${service_targets})
+    endif()
 endfunction()
 
 function(paglets_add_module name)
