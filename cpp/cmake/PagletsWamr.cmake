@@ -16,13 +16,21 @@ option(PAGLETS_WAMR_FAST_INTERP "Use the WAMR fast interpreter (OFF: classic int
 # use guard pages instead of explicit checks. With a 39-bit address space (for
 # example Raspberry Pi OS kernels) that limits a process to about 60 instances;
 # software bound checks have no such limit.
-option(PAGLETS_WAMR_HW_BOUND_CHECK "Use guard-page (hardware) memory bound checks" ON)
+# On Windows WAMR catches guard-page faults with MSVC structured exception
+# handling (__try/__except), which MinGW-w64 GCC does not support.
+if(MINGW)
+    set(_paglets_hw_bound_default OFF)
+else()
+    set(_paglets_hw_bound_default ON)
+endif()
+option(PAGLETS_WAMR_HW_BOUND_CHECK "Use guard-page (hardware) memory bound checks" ${_paglets_hw_bound_default})
 
 FetchContent_Declare(
     wamr
     GIT_REPOSITORY https://github.com/bytecodealliance/wasm-micro-runtime.git
     GIT_TAG ${PAGLETS_WAMR_TAG}
     GIT_SHALLOW TRUE
+    PATCH_COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/patch-wamr.cmake
     # WAMR's own top-level project is not used; runtime_lib.cmake is included below.
     SOURCE_SUBDIR paglets-no-cmake-project)
 FetchContent_MakeAvailable(wamr)
@@ -93,6 +101,20 @@ if(PAGLETS_SANITIZE)
     # The fast interpreter reads and writes its compiled bytecode unaligned by
     # design; keep ASan and the other UBSan checks, skip the alignment check.
     target_compile_options(paglets_vmlib PRIVATE $<$<COMPILE_LANGUAGE:C>:-fno-sanitize=alignment>)
+    # WAMR detects native stack overflow by comparing the address of a local
+    # variable with the thread's stack boundary. ASan's use-after-return
+    # detection (on by default in GCC 16's libasan) moves locals to a heap
+    # "fake stack", so every call looked like an overflow. Keep locals of the
+    # runtime on the real stack; host code keeps the check.
+    include(CheckCCompilerFlag)
+    set(CMAKE_REQUIRED_FLAGS -fsanitize=address)
+    check_c_compiler_flag(-fsanitize-address-use-after-return=never PAGLETS_HAS_ASAN_UAR_NEVER)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(PAGLETS_HAS_ASAN_UAR_NEVER)
+        target_compile_options(paglets_vmlib PRIVATE -fsanitize-address-use-after-return=never)
+    else()
+        target_compile_options(paglets_vmlib PRIVATE --param=asan-use-after-return=0)
+    endif()
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(paglets_vmlib PUBLIC Threads::Threads)

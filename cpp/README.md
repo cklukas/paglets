@@ -62,7 +62,7 @@ Build options:
 | `PAGLETS_ENABLE_REFLECTION` | on if the compiler supports it | reflection codecs and guest schema generation |
 | `PAGLETS_BUILD_GUESTS` | `ON` | build guest `.wasm` modules (needs the WASI toolchain) |
 | `PAGLETS_WAMR_FAST_INTERP` | `ON` | WAMR fast interpreter (`OFF`: classic interpreter) |
-| `PAGLETS_WAMR_HW_BOUND_CHECK` | `ON` | guard-page bound checks; turn `OFF` on kernels with a 39-bit address space (Raspberry Pi OS) to run more than ~60 instances per process |
+| `PAGLETS_WAMR_HW_BOUND_CHECK` | `ON` (`OFF` with MinGW-w64) | guard-page bound checks; turn `OFF` on kernels with a 39-bit address space (Raspberry Pi OS) to run more than ~60 instances per process. MinGW-w64 GCC cannot build them (WAMR catches the faults with MSVC `__try`/`__except`) |
 | `PAGLETS_SANITIZE` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
 
 ## Tools

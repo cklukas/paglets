@@ -109,6 +109,26 @@ implementation); a faster hash is an easy later improvement.
 10. **Host → guest call overhead (~0.4 µs)** is mostly WAMR's call setup;
     export lookups are cached. Batching several messages per call is an
     option for WP5 if needed.
+11. **ASan's use-after-return detection breaks WAMR's native stack check.**
+    GCC 16's libasan turns `detect_stack_use_after_return` on by default, so
+    local variables live on a heap "fake stack"; WAMR compares the address of
+    a local with the thread's stack boundary and reported "native stack
+    overflow" on every call (Linux CI; not seen on macOS). The WAMR library is
+    now built with `--param=asan-use-after-return=0` (clang:
+    `-fsanitize-address-use-after-return=never`); host code keeps the check.
+12. **WAMR leaves a stale thread-local exec env after a native stack
+    overflow** detected before a call (hardware bound checks,
+    `call_wasm_with_hw_bound_check` returns without clearing it). The next
+    instantiation on that thread then uses the freed exec env (ASan:
+    heap-use-after-free) or fails with "invalid exec env". Only reachable
+    through finding 11 so far, but a real native stack overflow in a host
+    thread would hit it too; worth an upstream report, and a guard in the
+    engine before M2.
+13. **WAMR on MinGW-w64 GCC**: `win_file.c` has line comments ending in a
+    backslash, which GCC reads as a line continuation (the build applies
+    `cpp/cmake/patch-wamr.cmake` to the checkout), and hardware bound checks
+    use MSVC structured exception handling (`__try`/`__except`), so MinGW
+    builds default to software bound checks.
 
 ## Open items carried into M1
 
