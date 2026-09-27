@@ -53,6 +53,8 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(PagletsWamr)
 include(PagletsGuest)
+# Cryptography of the mesh (keys, ledger signatures, passports).
+find_package(Sodium 1.0.18 REQUIRED)
 
 add_subdirectory(host)
 add_subdirectory(examples)

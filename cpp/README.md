@@ -18,6 +18,7 @@ policy and system paglets) is in progress.
 ```text
 common/include/paglets/   MessagePack primitives and the paglet ABI v1 documents (host and guests)
 host/                     host library: Wasm engine, memory images, runtime, wire codecs;
+                          mesh library: keys, ledger, gossip, passports;
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> plain C++)
@@ -37,11 +38,13 @@ cmake/                    WAMR build (with source fixes) and guest build functio
 macOS (Homebrew):
 
 ```bash
-brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja
+brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja libsodium pkgconf
 ```
 
 Linux: GCC 16 plus [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) in
-`/opt/wasi-sdk` (or set `WASI_SDK_PATH`). The guest toolchain can also be
+`/opt/wasi-sdk` (or set `WASI_SDK_PATH`), and libsodium 1.0.18 or later
+(`apt install libsodium-dev pkg-config`). Windows (MSYS2 UCRT64):
+`mingw-w64-ucrt-x86_64-libsodium` and `mingw-w64-ucrt-x86_64-pkgconf`. The guest toolchain can also be
 given explicitly with `-DPAGLETS_WASI_CLANG=... -DPAGLETS_WASI_SYSROOT=...`.
 
 ## Build and test
@@ -140,6 +143,26 @@ build/macos-arm64/host/paglets-spike runtime build/macos-arm64/guests/counter.wa
     --worker build/macos-arm64/host/paglets-worker
 build/macos-arm64/host/paglets-spike call-bench build/macos-arm64/guests/counter.wasm status
 ```
+
+Keys and the mesh security ledger (M2, [design](../planning/cpp-ledger.md)).
+Until hosts talk to each other, the ledger commands work on a local ledger
+directory; admin and owner keys are encrypted with a passphrase (read from
+the terminal, or `--passphrase-file`):
+
+```bash
+H=build/macos-arm64/host/paglets-host
+$H keys init --role admin --name alice --out alice.key
+$H keys init --role host --name lab-1 --out lab-1.key
+$H mesh create --name lab --ledger ledger --admin alice.key
+$H ledger request --ledger ledger --key lab-1.key --label linux   # prints the request ID
+$H ledger show --ledger ledger                                     # lists pending requests
+$H ledger approve --ledger ledger --admin alice.key <request-id>
+$H ledger revoke --ledger ledger --admin alice.key <key-id> --reason retired
+```
+
+`ledger enroll`, `remove`, `deny`, `admins` (add or remove admins, change the
+quorum) and `sign` (co-sign a record that needs several admins) complete the
+set; `paglets-host ledger` prints the full usage.
 
 Moving a paglet as a memory image between processes or hosts (the module
 must be the same file on both sides; images are independent of CPU

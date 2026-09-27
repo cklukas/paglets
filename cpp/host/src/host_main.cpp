@@ -8,6 +8,7 @@
 //                    [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]
 //   paglets-host list --state-dir DIR
 //   paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]
+//   paglets-host keys|mesh|ledger ...   (mesh_cli.cpp: keys and the mesh ledger)
 //
 // Message bodies and arguments are given as JSON and passed to the paglet as
 // MessagePack; replies are printed as JSON. With a state directory, paglets
@@ -16,6 +17,8 @@
 // processes (paglets-worker next to this binary) unless --in-process is given
 // or no worker executable is found; on Linux the workers run in a seccomp
 // sandbox (--no-sandbox turns it off, for debugging).
+
+#include "mesh_cli.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/runtime/runtime.hpp>
@@ -77,7 +80,8 @@ int usage() {
                  "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
                  "                        [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]\n"
                  "       paglets-host list --state-dir DIR\n"
-                 "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n";
+                 "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n"
+                 "       paglets-host keys|mesh|ledger ...   (keys and the mesh ledger; no arguments for help)\n";
     return 2;
 }
 
@@ -287,6 +291,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "--info") return info();
+    if (paglets::cli::is_mesh_command(cmd)) return paglets::cli::mesh_command(argc, argv);
     auto options = parse(argc, argv);
     if (!options) return usage();
     try {

@@ -20,13 +20,14 @@ set(test_sources
     test_engine.cpp
     test_snapshot.cpp
     test_runtime.cpp
-    test_ipc.cpp)
+    test_ipc.cpp
+    test_mesh.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
-target_link_libraries(paglets_tests PRIVATE paglets_host)
+target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh)
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
 foreach(guest counter hello ping_pong conformance testbed forbidden)
@@ -72,3 +73,8 @@ if(PAGLETS_TEST_GUEST_DIR)
     set_tests_properties(host_state_save PROPERTIES FIXTURES_REQUIRED host_state_clean FIXTURES_SETUP host_state)
     set_tests_properties(host_state_resume PROPERTIES FIXTURES_REQUIRED host_state)
 endif()
+
+# paglets-host: keys, mesh creation, enrollment requests and decisions.
+add_test(NAME host_cli_ledger
+         COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-ledger
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_ledger.cmake)

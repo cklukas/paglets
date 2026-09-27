@@ -29,9 +29,21 @@ if(PAGLETS_ENABLE_REFLECTION)
     target_compile_definitions(paglets_host PUBLIC PAGLETS_HAVE_REFLECTION=1)
 endif()
 
+# Mesh identity: keys, the security ledger, gossip replication, passports.
+# Worker processes do not link it.
+add_library(paglets_mesh STATIC
+    src/mesh/crypto.cpp
+    src/mesh/gossip.cpp
+    src/mesh/ledger.cpp
+    src/mesh/passport.cpp
+    src/mesh/record.cpp
+    src/mesh/value.cpp)
+target_link_libraries(paglets_mesh PUBLIC paglets_host PRIVATE Sodium::Sodium)
+target_compile_options(paglets_mesh PRIVATE ${PAGLETS_WARNINGS})
+
 # The host binary and its worker processes.
-add_executable(paglets-host src/host_main.cpp)
-target_link_libraries(paglets-host PRIVATE paglets_host)
+add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp)
+target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh)
 target_compile_options(paglets-host PRIVATE ${PAGLETS_WARNINGS})
 add_executable(paglets-worker src/worker_main.cpp)
 target_link_libraries(paglets-worker PRIVATE paglets_host)
