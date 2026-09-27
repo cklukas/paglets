@@ -49,6 +49,7 @@ std::optional<abi::SenderRecord> caller_of(const runtime::ServiceCall& call);
 
 class ServerInfo final : public ContractPaglet<server_info::Contract, ServerInfo> {
 public:
+    bool ambient() const override { return true; }
     void start(runtime::SystemContext& ctx) override;
     Result<server_info::Summary> summary(const server_info::SummaryRequest&, Operation&);
     Result<server_info::Load> load(const server_info::LoadRequest&, Operation&);

@@ -11,8 +11,9 @@ runtime) is closed ([results](../planning/cpp-m1-results.md)): the paglet
 ABI v1 ([specification](../planning/cpp-abi-v1.md)), the guest SDK,
 capabilities and messaging, persistence with crash recovery, and sandboxed
 worker processes on Linux, macOS and Windows. Milestone M2 (mesh identity,
-policy and system paglets) is in progress: keys, the signed ledger with
-gossip, enrollment and passports (WP8) and the system paglets (WP10) work.
+policy and system paglets) is closed ([results](../planning/cpp-m2-results.md)):
+keys, the signed ledger with gossip, enrollment and passports; allow/ask/deny
+policy with grants and an audit log; and the system paglets.
 
 ## Layout
 
@@ -171,6 +172,19 @@ $H ledger revoke --ledger ledger --admin alice.key <key-id> --reason retired
 `ledger enroll`, `remove`, `deny`, `admins` (add or remove admins, change the
 quorum) and `sign` (co-sign a record that needs several admins) complete the
 set; `paglets-host ledger` prints the full usage.
+
+Access to host resources follows the mesh policy
+([design](../planning/cpp-policy.md)): rules decide allow, ask or deny;
+paglets ask the `grants` system paglet; admins approve or deny requests from
+any host; every decision lands in the audit log:
+
+```bash
+$H ledger rule --ledger ledger --admin alice.key --name "staff docs" --decision ask \
+    --service files --op read --group staff --root data --path "docs/**"
+$H ledger show --ledger ledger                     # rules, grants, pending grant requests
+$H ledger approve --ledger ledger --admin alice.key <grant-request-id>
+$H ledger audit --ledger ledger
+```
 
 Moving a paglet as a memory image between processes or hosts (the module
 must be the same file on both sides; images are independent of CPU

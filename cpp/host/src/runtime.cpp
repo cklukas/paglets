@@ -1578,7 +1578,16 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
     auto it = impl_->modules.find(std::string(module));
     if (it == impl_->modules.end()) return std::unexpected("unknown module " + std::string(module));
     if (auto ok = check_paglet_module(it->second->info(), options.trust); !ok) return std::unexpected(ok.error());
-    const PagletId id = new_paglet_id();
+    PagletId id = new_paglet_id();
+    if (options.id) {
+        const bool hex =
+            options.id->size() == 32 && options.id->find_first_not_of("0123456789abcdef") == std::string::npos;
+        if (!hex) return std::unexpected("a paglet ID has 32 lowercase hex digits");
+        if (impl_->paglets.contains(*options.id) || impl_->endings.contains(*options.id)) {
+            return std::unexpected("paglet " + *options.id + " exists or existed");
+        }
+        id = *options.id;
+    }
     PagletRec& rec = impl_->new_paglet(id, it->second, options.trust, std::move(options.owner));
     rec.checkpoint_interval = options.checkpoint_interval;
     impl_->install_services(rec);

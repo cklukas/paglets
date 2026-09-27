@@ -3,9 +3,10 @@
 Status: milestone M0 (WP0–WP2) done, results in
 [cpp-m0-results.md](cpp-m0-results.md). Milestone M1 (WP3–WP7) closed, results in
 [cpp-m1-results.md](cpp-m1-results.md); the ABI v1 spec is
-[cpp-abi-v1.md](cpp-abi-v1.md). Milestone M2 (WP8–WP10) in progress: WP8
-([cpp-ledger.md](cpp-ledger.md)) and WP10
-([cpp-system-paglets.md](cpp-system-paglets.md)) done; see
+[cpp-abi-v1.md](cpp-abi-v1.md). Milestone M2 (WP8–WP10) closed: ledger and
+identity ([cpp-ledger.md](cpp-ledger.md)), policy and grants
+([cpp-policy.md](cpp-policy.md)), system paglets
+([cpp-system-paglets.md](cpp-system-paglets.md)); results in
 [cpp-m2-results.md](cpp-m2-results.md).
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.

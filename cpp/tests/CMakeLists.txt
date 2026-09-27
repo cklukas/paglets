@@ -8,7 +8,7 @@ paglets_add_module(explorer
     SOURCES guests/explorer.cpp
     SCHEMA_HEADER guests/explorer_msgs.hpp
     SCHEMA_NAMESPACE explorer
-    SERVICES files server_info directory storage artifacts pubsub user_info)
+    SERVICES files server_info directory storage artifacts pubsub user_info grants)
 paglets_add_module(calc_user
     SOURCES guests/calc_user.cpp
     SCHEMA_HEADER guests/calc_contract.hpp
@@ -33,13 +33,13 @@ set(test_sources
     test_mesh.cpp
     test_system.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh)
-if(TARGET paglets_services)
-    target_link_libraries(paglets_tests PRIVATE paglets_services)
+if(TARGET paglets_node)
+    target_link_libraries(paglets_tests PRIVATE paglets_node)
 endif()
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})

@@ -105,6 +105,10 @@ public:
     virtual std::vector<std::string> default_ops() const { return {}; }
     // Every operation it offers (for the directory and policies).
     virtual std::vector<std::string> operations() const { return {}; }
+    // True if its operations read or change host state without a capability
+    // (server-info): the mesh policy decides who may use which operation.
+    // Other system paglets act only on capabilities or the caller's own data.
+    virtual bool ambient() const { return false; }
 
     // Called once when the runtime registers it.
     virtual void start(SystemContext&) {}

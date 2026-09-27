@@ -11,6 +11,8 @@
 
 #include "services.hpp"
 
+#include <paglets/glob.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -75,55 +77,6 @@ Result<files::Entry> entry_of(const fs::path& p, std::string rel) {
         default: e.type = files::EntryType::other; break;
     }
     return e;
-}
-
-// Wildcards within a segment: `*` any characters, `?` one character.
-bool match_segment(std::string_view pattern, std::string_view text) {
-    std::size_t p = 0;
-    std::size_t t = 0;
-    std::size_t star = std::string_view::npos;
-    std::size_t mark = 0;
-    while (t < text.size()) {
-        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == text[t])) {
-            ++p;
-            ++t;
-        } else if (p < pattern.size() && pattern[p] == '*') {
-            star = p++;
-            mark = t;
-        } else if (star != std::string_view::npos) {
-            p = star + 1;
-            t = ++mark;
-        } else {
-            return false;
-        }
-    }
-    while (p < pattern.size() && pattern[p] == '*') ++p;
-    return p == pattern.size();
-}
-
-std::vector<std::string_view> segments(std::string_view path) {
-    std::vector<std::string_view> out;
-    std::size_t start = 0;
-    while (start <= path.size()) {
-        const std::size_t end = std::min(path.find('/', start), path.size());
-        if (end > start) out.push_back(path.substr(start, end - start));
-        start = end + 1;
-    }
-    return out;
-}
-
-// `**` matches any number of segments.
-bool match_path(const std::vector<std::string_view>& pattern, std::size_t pi, const std::vector<std::string_view>& path,
-                std::size_t si) {
-    if (pi == pattern.size()) return si == path.size();
-    if (pattern[pi] == "**") {
-        for (std::size_t k = si; k <= path.size(); ++k) {
-            if (match_path(pattern, pi + 1, path, k)) return true;
-        }
-        return false;
-    }
-    if (si == path.size() || !match_segment(pattern[pi], path[si])) return false;
-    return match_path(pattern, pi + 1, path, si + 1);
 }
 
 }  // namespace
@@ -213,7 +166,7 @@ Result<files::FindReply> Files::find(const files::FindRequest& q, Operation& op)
     if (!dir) return std::unexpected(dir.error());
     std::error_code ec;
     if (!fs::is_directory(*dir, ec)) return std::unexpected(ec ? error_of(ec) : abi::invalid_argument);
-    const auto pattern = segments(q.pattern);
+    const auto pattern = glob::segments(q.pattern);
     if (std::ranges::count(pattern, std::string_view("**")) > 4) return std::unexpected(abi::invalid_argument);
     const std::size_t limit = std::clamp<std::size_t>(q.limit, 1, 10000);
     files::FindReply reply;
@@ -221,7 +174,7 @@ Result<files::FindReply> Files::find(const files::FindRequest& q, Operation& op)
     fs::recursive_directory_iterator it(*dir, fs::directory_options::skip_permission_denied, ec);
     for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         const std::string rel = utf8_of(it->path().lexically_relative(*dir));
-        if (!match_path(pattern, 0, segments(rel), 0)) continue;
+        if (!glob::match_segments(pattern, 0, glob::segments(rel), 0)) continue;
         auto e = entry_of(it->path(), join_relative(r->rel, rel));
         if (!e) continue;
         if (q.min_size && e->size < *q.min_size) continue;

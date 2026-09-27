@@ -11,24 +11,24 @@
 // the same records therefore derive the same state, whatever order the
 // records arrived in.
 //
-// Record types and their data:
+// Record types (their data: planning/cpp-ledger.md, planning/cpp-policy.md),
+// and who signs them:
 //
-// | Type | Signed by | Data |
-// |---|---|---|
-// | `genesis` | every initial admin | `name`, `admins` [key], `quorum` {`admin_set`, `default`} |
-// | `admin-set` | `quorum.admin_set` admins of its epoch | `add` [key], `remove` [{`key`, `keep` [record ID]}],
-// `quorum`? | | `host-enroll-request` | the host key itself | `key`, `name`, `labels` [str] | | `host-enroll` |
-// `quorum.default` admins | `key`, `name`, `labels` [str], `request`? | | `host-remove` | `quorum.default` admins |
-// `key` | | `owner-enroll-request` | the owner key itself | `key`, `name` | | `owner-enroll` | `quorum.default` admins
-// | `key`, `name`, `groups` [str], `request`? | | `owner-remove` | `quorum.default` admins | `key` | | `request-deny` |
-// `quorum.default` admins | `request`, `reason`? | | `revoke` | `quorum.default` admins | `key`? or `record`?,
-// `reason`? |
+// - genesis: every initial admin;
+// - admin-set: the admin-set quorum of its epoch;
+// - host-enroll, host-remove, owner-enroll, owner-remove, request-deny,
+//   revoke, policy-rule: the normal admin quorum;
+// - host-enroll-request, owner-enroll-request: the key they name;
+// - grant-request: the requesting host, or the owner (early approval);
+// - grant: the normal admin quorum, or a host under an allow rule;
+// - grant-release, audit: an enrolled host.
 //
-// Records of other types are kept and replicated but have no effect yet
-// (types of later work packages, or of newer hosts).
+// Records of other types are kept and replicated but have no effect (types
+// of newer hosts).
 
 #pragma once
 
+#include <paglets/mesh/policy.hpp>
 #include <paglets/mesh/record.hpp>
 
 #include <chrono>
@@ -96,6 +96,14 @@ struct LedgerState {
     std::set<PublicKey> revoked_keys;
     std::set<RecordId> revoked_records;
     std::vector<IgnoredRecord> ignored;
+
+    // Policy (planning/cpp-policy.md).
+    std::vector<Rule> rules;                   // in ledger order
+    std::map<RecordId, Grant> grants;          // valid; expiry is checked when used
+    std::set<RecordId> ended_grants;           // revoked or released
+    std::vector<GrantRequest> grant_requests;  // pending
+    std::vector<AuditEntry> audit;             // in ledger order
+
     std::int64_t clock = 0;  // largest clock of any record
     std::size_t records = 0;
 

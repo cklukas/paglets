@@ -77,3 +77,12 @@ host(ARGS ledger revoke --ledger "${L}" --admin "${DIR}/alice.key" ${P} ${h1} --
 host(ARGS ledger show --ledger "${L}")
 expect("key    ${h1}")
 expect_not("${h1}  h1  linux")
+
+# Policy: a rule, listed by show; the audit log is empty without hosts at work.
+host(ARGS ledger rule --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name "staff docs" --decision ask
+          --service files --op read --group staff --root data --path "docs/**")
+host(EXPECT_FAIL ARGS ledger rule --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name bad --decision maybe
+          --service files --op read)
+host(ARGS ledger show --ledger "${L}")
+expect("ask  files  read  staff docs")
+host(ARGS ledger audit --ledger "${L}")

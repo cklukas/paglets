@@ -57,4 +57,13 @@ struct Text {
     std::string text;
 };
 
+// Asks the grants service for access.
+struct Access {
+    std::string service;
+    std::vector<std::string> ops;
+    std::string root;
+    std::string path;
+    std::int64_t duration_ms = 3'600'000;
+};
+
 }  // namespace explorer

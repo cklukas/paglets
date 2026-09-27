@@ -36,6 +36,7 @@ add_library(paglets_mesh STATIC
     src/mesh/gossip.cpp
     src/mesh/ledger.cpp
     src/mesh/passport.cpp
+    src/mesh/policy.cpp
     src/mesh/record.cpp
     src/mesh/value.cpp)
 target_link_libraries(paglets_mesh PUBLIC paglets_host PRIVATE Sodium::Sodium)
@@ -63,6 +64,12 @@ if(PAGLETS_ENABLE_REFLECTION)
     if(WIN32)
         target_link_libraries(paglets_services PRIVATE psapi)
     endif()
+
+    # A host in a mesh: ledger and gossip tied to the runtime, the grants
+    # system paglet (WP9).
+    add_library(paglets_node STATIC src/node/node.cpp)
+    target_link_libraries(paglets_node PUBLIC paglets_services paglets_mesh)
+    target_compile_options(paglets_node PRIVATE ${PAGLETS_WARNINGS})
 endif()
 
 # The host binary and its worker processes.

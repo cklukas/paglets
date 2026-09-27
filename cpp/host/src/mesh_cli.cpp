@@ -50,6 +50,13 @@ int usage() {
            "       paglets-host ledger admins --ledger DIR --admin KEY... [--add KEY-ID]... [--remove KEY-ID]...\n"
            "                                  [--admin-quorum N] [--quorum N]\n"
            "       paglets-host ledger sign --ledger DIR --admin KEY... RECORD-ID\n"
+           "       paglets-host ledger rule --ledger DIR --admin KEY... --name NAME --decision allow|ask|deny\n"
+           "                                --service SERVICE --op OP... [--owner KEY-ID]... [--group G]...\n"
+           "                                [--module HASH]... [--trust T]... [--host-label L]... [--root R]...\n"
+           "                                [--path PATTERN]... [--max-duration MS] [--priority N]\n"
+           "       paglets-host ledger audit --ledger DIR\n"
+           "Requests are enrollment or grant requests; approving a grant request grants each item\n"
+           "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
            "--passphrase-file (used for every key of the command). IDs may be abbreviated to a unique\n"
            "prefix of at least 8 hex digits where the ledger knows them.\n";
@@ -68,9 +75,11 @@ struct Options {
     std::vector<std::string> groups;
     std::vector<std::string> add;
     std::vector<std::string> remove;
-    std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf;
-    std::optional<std::int64_t> admin_quorum, quorum;
+    std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths;
+    std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service;
+    std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
     bool ignored = false;
+    bool host_only = false;
 };
 
 std::optional<Options> parse(int first, int argc, char** argv) {
@@ -133,6 +142,36 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = number(o.quorum);
         } else if (a == "--ignored") {
             o.ignored = true;
+        } else if (a == "--host-only") {
+            o.host_only = true;
+        } else if (a == "--decision") {
+            ok = set(o.decision);
+        } else if (a == "--service") {
+            ok = set(o.service);
+        } else if (a == "--op") {
+            ok = append(o.ops);
+        } else if (a == "--owner") {
+            ok = append(o.owners);
+        } else if (a == "--module") {
+            ok = append(o.modules);
+        } else if (a == "--trust") {
+            ok = append(o.trust);
+        } else if (a == "--host-label") {
+            ok = append(o.host_labels);
+        } else if (a == "--root") {
+            ok = append(o.roots);
+        } else if (a == "--path") {
+            ok = append(o.paths);
+        } else if (a == "--max-duration") {
+            ok = number(o.max_duration);
+        } else if (a == "--priority") {
+            auto v = next();
+            try {
+                ok = v.has_value();
+                if (ok) o.priority = std::stoll(*v);
+            } catch (const std::exception&) {
+                ok = false;
+            }
         } else if (a.starts_with("--")) {
             ok = false;
         } else {
@@ -230,6 +269,13 @@ std::expected<Digest, std::string> resolve(std::string_view text, const std::vec
 
 std::string short_id(const Digest& id) {
     return to_hex(id).substr(0, 16);
+}
+
+std::string describe(const Item& item) {
+    std::string out = item.service + " " + (item.ops.empty() ? std::string("-") : "");
+    for (std::size_t i = 0; i < item.ops.size(); ++i) out += (i == 0 ? "" : ",") + item.ops[i];
+    if (!item.root.empty()) out += " " + item.root + (item.path.empty() ? "" : "/" + item.path);
+    return out;
 }
 
 std::string joined(const std::vector<std::string>& list) {
@@ -332,6 +378,23 @@ int ledger_show(const Options& o) {
         std::cout << "  " << short_id(p.id) << "  " << (p.kind == RequestKind::host ? "host " : "owner") << "  "
                   << p.name << "  " << key_id(p.key) << "\n";
     }
+    std::cout << "rules:\n";
+    for (const auto& r : st.rules) {
+        std::cout << "  " << short_id(r.id) << "  " << to_string(r.decision) << "  " << r.service << "  "
+                  << joined(r.ops) << "  " << r.name << "\n";
+    }
+    std::cout << "pending grant requests:\n";
+    for (const auto& g : st.grant_requests) {
+        for (const auto& item : g.items) {
+            std::cout << "  " << short_id(g.id) << "  paglet " << g.principal.paglet.substr(0, 8) << "  "
+                      << describe(item) << "  " << g.reason << "\n";
+        }
+    }
+    std::cout << "grants:\n";
+    for (const auto& [id, g] : st.grants) {
+        std::cout << "  " << short_id(id) << "  paglet " << g.principal.paglet.substr(0, 8) << "  " << describe(g.item)
+                  << "  " << (g.by_admin ? "approved" : "by rule") << "\n";
+    }
     if (!st.revoked_keys.empty() || !st.revoked_records.empty()) {
         std::cout << "revoked:\n";
         for (const auto& k : st.revoked_keys) std::cout << "  key    " << key_id(k) << "\n";
@@ -389,6 +452,7 @@ struct AdminSession {
     std::vector<Digest> request_ids() const {
         std::vector<Digest> ids;
         for (const auto& p : ledger.state().pending) ids.push_back(p.id);
+        for (const auto& g : ledger.state().grant_requests) ids.push_back(g.id);
         return ids;
     }
     std::vector<Digest> record_ids() const {
@@ -436,6 +500,21 @@ int ledger_approve(const Options& o) {
     auto id = resolve(o.positional[0], s->request_ids(), "request");
     if (!id) return fail(id.error());
     const LedgerState& st = s->ledger.state();
+    if (auto g = std::ranges::find(st.grant_requests, *id, &GrantRequest::id); g != st.grant_requests.end()) {
+        // A grant for each item, valid for the requested duration.
+        const GrantRequest request = *g;
+        HostSelector hosts;
+        if (o.host_only && !request.by_owner) hosts.keys.push_back(request.host);
+        const std::int64_t expires = unix_ms() + request.duration_ms;
+        for (const auto& item : request.items) {
+            if (int rc = s->issue("grant", data::grant(request.principal, item, hosts, expires, request.id,
+                                                       std::nullopt, std::nullopt));
+                rc != 0) {
+                return rc;
+            }
+        }
+        return 0;
+    }
     auto it = std::ranges::find(st.pending, *id, &PendingRequest::id);
     if (it == st.pending.end()) return fail("no pending request " + o.positional[0]);
     const PendingRequest request = *it;
@@ -517,6 +596,58 @@ int ledger_admins(const Options& o) {
     return s->issue("admin-set", data::admin_set(s->ledger, add, remove, quorum));
 }
 
+int ledger_rule(const Options& o) {
+    if (!o.positional.empty() || !o.name || !o.decision || !o.service || o.ops.empty()) return usage();
+    auto decision = parse_decision(*o.decision);
+    if (!decision) return fail("the decision is allow, ask or deny");
+    data::RuleSpec spec;
+    spec.name = *o.name;
+    spec.decision = *decision;
+    spec.service = *o.service;
+    spec.ops = o.ops;
+    if (!o.owners.empty()) {
+        std::vector<PublicKey> owners;
+        for (const auto& text : o.owners) {
+            auto key = parse_key_id(text);
+            if (!key) return fail("an owner is given by its key ID (64 hex digits): " + text);
+            owners.push_back(*key);
+        }
+        spec.match.owners = std::move(owners);
+    }
+    if (!o.groups.empty()) spec.match.groups = o.groups;
+    if (!o.modules.empty()) spec.match.modules = o.modules;
+    if (!o.trust.empty()) spec.match.trust = o.trust;
+    if (!o.host_labels.empty()) spec.match.hosts = HostSelector{{}, o.host_labels};
+    if (!o.roots.empty() || !o.paths.empty()) {
+        Scope scope;
+        if (!o.roots.empty()) scope.roots = o.roots;
+        if (!o.paths.empty()) scope.paths = o.paths;
+        spec.scope = std::move(scope);
+    }
+    spec.max_duration_ms = o.max_duration;
+    spec.priority = o.priority.value_or(0);
+    auto s = AdminSession::open(o);
+    if (!s) return fail(s.error());
+    return s->issue("policy-rule", data::policy_rule(spec));
+}
+
+int ledger_audit(const Options& o) {
+    auto ledger = open_ledger(o);
+    if (!ledger) return fail(ledger.error());
+    const LedgerState& st = ledger->state();
+    for (const auto& e : st.audit) {
+        auto host = st.hosts.find(e.host);
+        std::cout << e.time << "  " << (host == st.hosts.end() ? key_id(e.host).substr(0, 8) : host->second.name)
+                  << "  paglet " << e.principal.paglet.substr(0, 8) << "  owner " << e.principal.owner.substr(0, 8)
+                  << "  " << to_string(e.decision) << "  " << describe(e.item);
+        if (e.rule) std::cout << "  rule " << short_id(*e.rule);
+        if (e.grant) std::cout << "  grant " << short_id(*e.grant);
+        if (e.request) std::cout << "  request " << short_id(*e.request);
+        std::cout << "\n";
+    }
+    return 0;
+}
+
 int ledger_sign(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto s = AdminSession::open(o);
@@ -559,6 +690,8 @@ int mesh_command(int argc, char** argv) {
             if (action == "revoke") return ledger_revoke(o);
             if (action == "admins") return ledger_admins(o);
             if (action == "sign") return ledger_sign(o);
+            if (action == "rule") return ledger_rule(o);
+            if (action == "audit") return ledger_audit(o);
         }
     } catch (const std::exception& e) {
         return fail(e.what());

@@ -11,6 +11,7 @@
 #include <paglets/services/artifacts.gen.hpp>
 #include <paglets/services/directory.gen.hpp>
 #include <paglets/services/files.gen.hpp>
+#include <paglets/services/grants.gen.hpp>
 #include <paglets/services/pubsub.gen.hpp>
 #include <paglets/services/server_info.gen.hpp>
 #include <paglets/services/storage.gen.hpp>
@@ -82,6 +83,16 @@ public:
                                m.badge().value_or(""));
         });
         router().on("journal", [this](Message& m) { m.reply(journal_); });
+        router().on<explorer::Access>("request_access", [](const explorer::Access& q, Message& m) { access(q, m); });
+        router().on<explorer::Text>("release", [](const explorer::Text& q, Message& m) { release(q, m); });
+        // Late answers of the grants service (after an admin decided).
+        router().on<svc::grants::Answer>("grants.granted", [this](const svc::grants::Answer& a, Message& m) {
+            const auto handle = m.cap_count() > 0 ? m.take_cap(0).handle() : 0;
+            journal_.push_back("granted-late:" + std::to_string(handle) + ":" + a.grant);
+        });
+        router().on<svc::grants::Answer>("grants.denied", [this](const svc::grants::Answer& a, Message&) {
+            journal_.push_back("denied-late:" + a.request + ":" + a.reason);
+        });
         router().on("info", [](Message& m) {
             auto info = paglets::self_info();
             if (info) m.reply_raw(abi::encode(*info));
@@ -398,6 +409,40 @@ private:
             }
             paglets::reply_to(*reply, out);
         });
+    }
+
+    // "granted:<handle>:<grant>", "pending:<request>" or "denied:<rule>".
+    static void access(const explorer::Access& q, Message& m) {
+        auto reply = std::make_shared<Capability>(m.defer_reply());
+        auto grants = paglets::service("grants");
+        if (!grants) return (void)paglets::reply_to(*reply, failure("service", grants.error()));
+        svc::grants::Client c{*grants};
+        svc::grants::Request request{svc::grants::Item{q.service, q.ops, q.root, q.path}, q.duration_ms, "test"};
+        auto sent = c.request(request, [reply](paglets::Result<svc::grants::Answer> a, Message& msg) {
+            if (!a) return (void)paglets::reply_to(*reply, failure("request", a.error()));
+            switch (a->status) {
+                case svc::grants::Status::granted: {
+                    const auto handle = msg.cap_count() > 0 ? msg.take_cap(0).handle() : 0;
+                    paglets::reply_to(*reply, "granted:" + std::to_string(handle) + ":" + a->grant);
+                    return;
+                }
+                case svc::grants::Status::pending: paglets::reply_to(*reply, "pending:" + a->request); return;
+                case svc::grants::Status::denied: paglets::reply_to(*reply, "denied:" + a->rule); return;
+            }
+        });
+        if (!sent) paglets::reply_to(*reply, failure("request", sent.error()));
+    }
+
+    static void release(const explorer::Text& q, Message& m) {
+        auto reply = std::make_shared<Capability>(m.defer_reply());
+        auto grants = paglets::service("grants");
+        if (!grants) return (void)paglets::reply_to(*reply, failure("service", grants.error()));
+        svc::grants::Client c{*grants};
+        (void)c.release(
+            svc::grants::ReleaseRequest{q.text}, [reply](paglets::Result<svc::grants::ReleaseReply> r, Message&) {
+                paglets::reply_to(
+                    *reply, r ? std::string(r->released ? "released" : "unknown") : failure("release", r.error()));
+            });
     }
 
     std::vector<std::string> journal_;

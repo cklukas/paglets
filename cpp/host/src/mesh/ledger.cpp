@@ -313,6 +313,93 @@ struct Deriver {
         return {};
     }
 
+    // Grant requests, grants, releases and audit entries: records of hosts
+    // (and owners), valid only from enrolled keys; host-derived grants only
+    // within an allow rule.
+    void derive_policy(const std::set<RecordId>& admin_valid, std::set<RecordId>& resolved) {
+        std::map<RecordId, GrantRequest> open;
+        std::set<RecordId> released;
+        for (const Record* r : records) {
+            const std::string& type = r->type();
+            if (type == "grant-request") {
+                auto g = parse_grant_request(*r);
+                if (!g) {
+                    ignore(*r, "malformed grant request");
+                } else if (!r->signed_by(g->host)) {
+                    ignore(*r, "grant request not signed by its requester");
+                } else if (g->by_owner ? !st.is_owner(g->host) : !st.is_host(g->host)) {
+                    ignore(*r, "grant request from a key that is not an enrolled host or the owner");
+                } else {
+                    open[r->id()] = std::move(*g);
+                }
+            } else if (type == "grant-release") {
+                const Value* grant = r->fields().get("grant");
+                const Bytes* id = grant == nullptr ? nullptr : grant->as_bin();
+                const bool by_host =
+                    std::ranges::any_of(r->signatures(), [&](const Record::Signed& s) { return st.is_host(s.key); });
+                if (id == nullptr || id->size() != 32) {
+                    ignore(*r, "malformed grant release");
+                } else if (!by_host) {
+                    ignore(*r, "grant release not signed by an enrolled host");
+                } else {
+                    RecordId g{};
+                    std::copy(id->begin(), id->end(), g.begin());
+                    released.insert(g);
+                }
+            } else if (type == "audit") {
+                auto a = parse_audit(*r);
+                if (!a) {
+                    ignore(*r, "malformed audit record");
+                } else if (!r->signed_by(a->host) || !st.is_host(a->host)) {
+                    ignore(*r, "audit record not signed by an enrolled host");
+                } else {
+                    st.audit.push_back(std::move(*a));
+                }
+            }
+        }
+        for (const Record* r : records) {
+            if (r->type() != "grant") continue;
+            auto g = parse_grant(*r);
+            if (!g) {
+                ignore(*r, "malformed grant");
+                continue;
+            }
+            if (admin_valid.contains(r->id())) {
+                g->by_admin = true;
+            } else if (auto why = check_derived_grant(*r, *g); !why.empty()) {
+                ignore(*r, why);
+                continue;
+            }
+            if (g->request) resolved.insert(*g->request);
+            if (st.revoked_records.contains(r->id()) || released.contains(r->id())) {
+                st.ended_grants.insert(r->id());
+                continue;
+            }
+            st.grants.emplace(r->id(), std::move(*g));
+        }
+        for (auto& [id, request] : open) {
+            if (!resolved.contains(id) && !st.revoked_records.contains(id)) {
+                st.grant_requests.push_back(std::move(request));
+            }
+        }
+    }
+
+    // Empty if `g` is a valid grant a host derived from an allow rule;
+    // otherwise why not.
+    std::string check_derived_grant(const Record& r, const Grant& g) const {
+        if (g.issuer == PublicKey{} || !r.signed_by(g.issuer)) return "grant not signed by an admin quorum or its host";
+        if (!st.is_host(g.issuer)) return "grant issued by a key that is not an enrolled host";
+        if (!g.rule) return "host grant without a rule";
+        auto it = std::ranges::find(st.rules, *g.rule, &Rule::id);
+        if (it == st.rules.end()) return "grant from a rule that is not valid";
+        if (it->decision != Decision::allow) return "grant from a rule that does not allow";
+        if (!rule_covers(st, *it, g.principal, g.issuer, g.item)) return "grant outside its rule";
+        if (it->max_duration_ms && g.expires > r.time() + *it->max_duration_ms) {
+            return "grant longer than its rule allows";
+        }
+        return {};
+    }
+
     void run() {
         st.mesh = mesh;
         st.records = records.size();
@@ -336,8 +423,17 @@ struct Deriver {
         // Revocations first: they win over enrollments regardless of order.
         std::set<RecordId> admin_valid;
         for (const Record* r : records) {
-            if (r->type() == "genesis" || r->type() == "admin-set" || r->type().ends_with("-request")) continue;
-            if (auto ok = check_admin_record(*r); !ok) {
+            const std::string& type = r->type();
+            if (type == "genesis" || type == "admin-set" || type.ends_with("-request") || type == "audit" ||
+                type == "grant-release") {
+                continue;  // not admin records
+            }
+            auto ok = check_admin_record(*r);
+            if (type == "grant") {
+                if (ok) admin_valid.insert(r->id());  // otherwise possibly derived by a host (below)
+                continue;
+            }
+            if (!ok) {
                 ignore(*r, ok.error());
                 continue;
             }
@@ -358,9 +454,14 @@ struct Deriver {
 
         std::map<RecordId, PendingRequest> open;
         std::set<RecordId> resolved;
+        std::size_t order = 0;
         for (const Record* r : records) {
+            ++order;
             const std::string& type = r->type();
-            if (type == "genesis" || type == "admin-set" || type == "revoke") continue;
+            if (type == "genesis" || type == "admin-set" || type == "revoke" || type == "grant" ||
+                type == "grant-request" || type == "grant-release" || type == "audit") {
+                continue;  // policy records follow below
+            }
             const Fields f = r->fields();
             const Value* key_value = f.get("key");
             const auto key = key_value == nullptr ? std::nullopt : as_key(*key_value);
@@ -419,6 +520,14 @@ struct Deriver {
                 } else {
                     st.owners.erase(*key);
                 }
+            } else if (type == "policy-rule") {
+                auto rule = parse_rule(*r);
+                if (!rule) {
+                    ignore(*r, "malformed policy rule");
+                    continue;
+                }
+                rule->order = order;
+                st.rules.push_back(std::move(*rule));
             } else if (type == "request-deny") {
                 const Value* request = f.get("request");
                 auto request_id = request == nullptr ? std::nullopt : as_key(*request);
@@ -435,6 +544,7 @@ struct Deriver {
             st.hosts.erase(key);
             st.owners.erase(key);
         }
+        derive_policy(admin_valid, resolved);
         for (auto& [id, request] : open) {
             if (resolved.contains(id) || st.revoked_keys.contains(request.key)) continue;
             if (request.kind == RequestKind::host ? st.is_host(request.key) : st.is_owner(request.key)) continue;
@@ -492,6 +602,16 @@ Value LedgerState::to_value() const {
     }
     Array pending_list;
     for (const auto& p : pending) pending_list.push_back(Value::bin(p.id));
+    auto ids = [](const auto& list) {
+        Array a;
+        for (const auto& e : list) a.push_back(Value::bin(e.id));
+        return Value(std::move(a));
+    };
+    auto grant_ids = [this] {
+        Array a;
+        for (const auto& [id, g] : grants) a.push_back(Value::bin(id));
+        return Value(std::move(a));
+    };
     Array ignored_list;
     for (const auto& i : ignored) ignored_list.push_back(Value::bin(i.id));
     return Value(Map{{"mesh", Value::bin(mesh)},
@@ -505,6 +625,11 @@ Value LedgerState::to_value() const {
                      {"revoked_keys", keys(revoked_keys)},
                      {"revoked_records", keys(revoked_records)},
                      {"ignored", Value(std::move(ignored_list))},
+                     {"rules", ids(rules)},
+                     {"grants", grant_ids()},
+                     {"ended_grants", keys(ended_grants)},
+                     {"grant_requests", ids(grant_requests)},
+                     {"audit", ids(audit)},
                      {"clock", Value(clock)},
                      {"records", Value(static_cast<std::int64_t>(records))}});
 }

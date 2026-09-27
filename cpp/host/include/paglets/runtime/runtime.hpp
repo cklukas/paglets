@@ -73,6 +73,9 @@ struct CreateOptions {
     Bytes args;
     TrustClass trust = TrustClass::roaming;
     std::string owner = "local";
+    // A paglet ID chosen in advance (32 lowercase hex digits), for example
+    // one a passport or an early grant approval names. Default: a new one.
+    std::optional<PagletId> id;
     // Checkpoint policy of this paglet (default: Config::checkpoint_interval);
     // children and clones inherit it.
     std::optional<std::chrono::milliseconds> checkpoint_interval;

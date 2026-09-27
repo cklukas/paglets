@@ -1,6 +1,6 @@
 # paglets/cpp: milestone M2 progress
 
-Status: in progress. WP8 and WP10 are done; WP9 is next. Companion to
+Status: **closed**. WP8, WP9 and WP10 are done. Companion to
 [cpp-edition-plan.md](cpp-edition-plan.md); M1 is closed in
 [cpp-m1-results.md](cpp-m1-results.md).
 
@@ -9,7 +9,7 @@ Status: in progress. WP8 and WP10 are done; WP9 is next. Companion to
 | Work package | Exit criterion | State |
 |---|---|---|
 | WP8 Mesh ledger and identity | Three hosts converge on the same state after partitions; an admin approves an enrollment from any host; records from a removed admin are ignored | **Met**: test "gossip: three hosts converge after partitions (WP8 exit)" (two partitions; an owner request made on one host is approved on another; a removed admin's later record is ignored everywhere). Design in [cpp-ledger.md](cpp-ledger.md) |
-| WP9 Policy and grants | A roaming paglet gets file access only after a rule or an admin approval; every decision is audited | Open |
+| WP9 Policy and grants | A roaming paglet gets file access only after a rule or an admin approval from a different host; access ends on expiry or revocation everywhere; every decision is audited | **Met**: test "policy: file access only after a rule or an approval from another host; revocation and expiry end it (WP9 exit)". Design in [cpp-policy.md](cpp-policy.md) |
 | WP10 System paglet framework | The same roaming paglet reads files and reports load and free space on macOS, Linux and Windows with identical schemas | **Met**: test "services: a roaming paglet finds and reads files and reports load and space (WP10 exit)" on all CI platforms. Design in [cpp-system-paglets.md](cpp-system-paglets.md) |
 
 ## WP8: what was built
@@ -66,6 +66,25 @@ Status: in progress. WP8 and WP10 are done; WP9 is next. Companion to
   guest through the generated clients (including symbolic link escapes on
   POSIX), clean under ASan + UBSan and ThreadSanitizer.
 
+## WP9: what was built
+
+- **Policy records** in the ledger (`mesh/policy.hpp`): allow/ask/deny rules
+  with principal and host matches, scopes for files, maximum durations and
+  priorities; grant requests (from hosts, or from owners for early
+  approval), grants (approved by admins, or derived by hosts within an
+  allow rule and checked by every other host), releases, audit entries.
+- **Evaluation**: the most specific rule wins, default deny; `preflight`
+  of capability manifests for a target host.
+- **Node** (`node/node.hpp`): a host's ledger copy and gossip tied to its
+  runtime; the `grants` system paglet (request, status, release, list);
+  approvals and denials delivered to local paglets as messages;
+  revocations and releases reach the runtime's revocation tree; the
+  directory's policy for services with ambient authority (server-info).
+- **Paglet IDs chosen in advance** (`CreateOptions::id`), for passports and
+  early approval.
+- **Command line**: `ledger rule`, grant approvals and denials, `ledger
+  audit`.
+
 ## Findings
 
 1. **Signer-chosen clocks cannot order an admin's removal against the
@@ -91,11 +110,24 @@ Status: in progress. WP8 and WP10 are done; WP9 is next. Companion to
 6. **`linux` is a predefined macro** in GNU language modes, so the OS is a
    string in the server-info schema, not an enum.
 
+7. **Hosts must not mint access their rules do not give.** A grant derived
+   by a host names its rule; every host re-checks that the rule allows it
+   for that principal, item and duration, so a host's grant is only as good
+   as the admins' rule behind it.
+8. **Capability-gated services need no policy.** Files, artifacts and
+   pubsub act only on lent capabilities, storage and user-info only on the
+   caller's own data; only services with ambient authority (server-info)
+   need rules for their endpoints.
+9. **MinGW-w64 GCC ignores `__declspec(thread)`**, which WAMR's Windows
+   platform uses for its thread-local variables: they were process-wide, so
+   the first thread to cache its stack boundary set it for all threads
+   ("native stack overflow" on the others, depending on stack addresses).
+   `patch-wamr.cmake` uses `__thread` for GCC; worth an upstream report.
+
 ## Next steps
 
-1. WP9: policy rules, grants system paglet, capability manifests, audit;
-   host glue between the ledger and the runtime (revoked grants, directory
-   policy, materialized `dir` capabilities).
+1. M3: movement between hosts (WP11 module store and code mobility, WP12
+   transport), with grants materialized on arrival.
 2. Passport checks in the runtime once a host runs with a ledger (WP11,
    WP12); ledger checkpoints and pruning; platform key stores for host keys
    and a key agent.

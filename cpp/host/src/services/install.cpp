@@ -29,6 +29,7 @@ public:
         c.transferable = true;
         c.grant = std::move(grant);
         c.expires = expires;
+        c.id = impl::random_hex(16);
         return c;
     }
 
