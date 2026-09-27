@@ -80,10 +80,7 @@ jobs:
 
       - name: Smoke-test command line entry points
         run: |
-          uv run paglets-host --help
-          uv run paglets-mesh-benchmark --help
-          uv run paglets-mesh-info --help
-          uv run paglets-perf-test --help
-          uv run paglets-pi-compute --help
-          uv run paglets-search --help
-          uv run paglets-sysinfo --help
+          uv run paglets --help
+          for command in host sys mesh jobs artifacts search examples; do
+            uv run paglets "$command" --help
+          done
