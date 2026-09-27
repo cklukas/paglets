@@ -69,6 +69,36 @@ struct ModuleCollection {
     std::size_t bytes = 0;
 };
 
+// Where a host gets modules it does not have (planning/cpp-modules.md,
+// section 5). What a source returns is not trusted: the store verifies it
+// against the hash it asked for (ModuleStore::add_verified).
+class ModuleSource {
+public:
+    virtual ~ModuleSource() = default;
+    virtual std::string name() const = 0;
+    // The bytes of the module with this hash, if the source has it.
+    virtual std::expected<std::vector<std::uint8_t>, std::string> fetch(const Digest& hash) = 0;
+};
+
+// The .wasm files in a directory (not its subdirectories), for example a
+// build's guest directory. Files are hashed once and again when they change.
+class DirectorySource final : public ModuleSource {
+public:
+    explicit DirectorySource(std::filesystem::path dir);
+    std::string name() const override;
+    std::expected<std::vector<std::uint8_t>, std::string> fetch(const Digest& hash) override;
+
+private:
+    struct Seen {
+        std::uintmax_t size = 0;
+        std::filesystem::file_time_type modified{};
+        Digest hash{};
+    };
+    std::filesystem::path dir_;
+    std::mutex mu_;
+    std::map<std::filesystem::path, Seen> seen_;
+};
+
 class ModuleStore {
 public:
     using Warn = std::function<void(const std::string&)>;

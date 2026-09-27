@@ -72,6 +72,39 @@ std::expected<wasm::ModuleInfo, std::string> check(std::span<const std::uint8_t>
 
 }  // namespace
 
+DirectorySource::DirectorySource(fs::path dir) : dir_(std::move(dir)) {}
+
+std::string DirectorySource::name() const {
+    return "directory " + dir_.string();
+}
+
+std::expected<std::vector<std::uint8_t>, std::string> DirectorySource::fetch(const Digest& hash) {
+    std::lock_guard lock(mu_);
+    std::error_code ec;
+    for (fs::directory_iterator it(dir_, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path& path = it->path();
+        if (path.extension() != ".wasm" || !it->is_regular_file(ec)) continue;
+        const auto size = it->file_size(ec);
+        if (ec) continue;
+        const auto modified = it->last_write_time(ec);
+        if (ec) continue;
+        auto seen = seen_.find(path);
+        if (seen == seen_.end() || seen->second.size != size || seen->second.modified != modified) {
+            auto bytes = wasm::read_file(path.string());
+            if (!bytes) continue;
+            seen = seen_.insert_or_assign(path, Seen{size, modified, sha256(*bytes)}).first;
+            if (seen->second.hash == hash) return std::move(*bytes);
+            continue;
+        }
+        if (seen->second.hash == hash) {
+            auto bytes = wasm::read_file(path.string());
+            if (bytes) return std::move(*bytes);
+        }
+    }
+    if (ec) return std::unexpected("cannot read " + dir_.string() + ": " + ec.message());
+    return std::unexpected("not in " + dir_.string());
+}
+
 ModuleStore::ModuleStore(ModuleStoreConfig config, Warn warn) : config_(std::move(config)), warn_(std::move(warn)) {
     if (!warn_) warn_ = [](const std::string&) {};
     if (config_.dir.empty()) return;

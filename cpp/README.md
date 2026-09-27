@@ -13,7 +13,12 @@ capabilities and messaging, persistence with crash recovery, and sandboxed
 worker processes on Linux, macOS and Windows. Milestone M2 (mesh identity,
 policy and system paglets) is closed ([results](../planning/cpp-m2-results.md)):
 keys, the signed ledger with gossip, enrollment and passports; allow/ask/deny
-policy with grants and an audit log; and the system paglets.
+policy with grants and an audit log; and the system paglets. Milestone M3
+(movement between hosts) has started: WP11 gives hosts a module store with
+a cache of compiled modules and garbage collection, module trust in the
+ledger, and code mobility: a host fetches modules it lacks from its sources
+or other hosts, verified by hash, and runs paglets launched from another
+host ([design](../planning/cpp-modules.md)).
 
 ## Layout
 

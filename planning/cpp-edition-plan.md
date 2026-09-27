@@ -7,7 +7,8 @@ Status: milestone M0 (WP0–WP2) done, results in
 identity ([cpp-ledger.md](cpp-ledger.md)), policy and grants
 ([cpp-policy.md](cpp-policy.md)), system paglets
 ([cpp-system-paglets.md](cpp-system-paglets.md)); results in
-[cpp-m2-results.md](cpp-m2-results.md).
+[cpp-m2-results.md](cpp-m2-results.md). Milestone M3: WP11 (module store,
+module trust, code mobility) done ([cpp-modules.md](cpp-modules.md)).
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.
 It keeps the concepts that proved useful in the Python edition (hosts, mobile
