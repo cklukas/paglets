@@ -24,6 +24,7 @@ env/
 build/
 dist/
 site/
+public/
 *.egg-info/
 *.egg
 uv.lock

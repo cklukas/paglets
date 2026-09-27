@@ -45,11 +45,23 @@ The contract has four operations:
 
 Provider-side routing is in `ServerInfoAgent.handle_message`:
 
-<div class="paglets-code-source">Source: <a href="https://github.com/cklukas/paglets/blob/main/src/paglets/system/server_info/agent.py">ServerInfoAgent.handle_message in agent.py</a></div>
+<!-- snippet: src/paglets/system/server_info/agent.py:server-info-routing | ServerInfoAgent.handle_message in agent.py -->
+Source: [ServerInfoAgent.handle_message in agent.py](https://github.com/cklukas/paglets/blob/main/src/paglets/system/server_info/agent.py)
 
 ```python
---8<-- "src/paglets/system/server_info/agent.py:server-info-routing"
+def handle_message(self, message: Message):
+    return SERVER_INFO.route(
+        message,
+        {
+            GET_LOAD: self.get_load,
+            GET_DISK: self.get_disk,
+            LIST_PROCESSES: self.list_processes,
+            GET_SUMMARY: self.get_summary,
+        },
+        default=self.not_handled(),
+    )
 ```
+<!-- /snippet -->
 
 Consumer code can call the typed service directly:
 

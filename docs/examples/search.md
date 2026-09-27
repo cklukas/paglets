@@ -110,47 +110,31 @@ The below Mermaid `sequenceDiagram` explains the calling sequence
 between the CLI, entry host, parent search paglet, child paglets, and local
 filesystems:
 
-```mermaid
-sequenceDiagram
-    participant CLI as "paglets search CLI"
-    participant Entry as "entry host"
-    participant Parent as "parent MeshSearchAgent"
-    participant Child as "child MeshSearchAgent"
-    participant FS as "local filesystem"
-
-    CLI->>Entry: create parent agent
-    CLI->>Parent: start(SearchRequest, targets, timeout)
-    Parent->>Entry: available_hosts()
-    loop "for each target host"
-        Parent->>Child: clone_to(host)
-        Child->>FS: traverse and search local paths
-        Child-->>Parent: child_events(SearchEvent batch)
-    end
-    Parent-->>CLI: accepted job metadata and output path
-    Child-->>Parent: child_done(HostSearchSummary)
-    CLI->>Parent: cleanup()
-```
+1. **paglets search CLI → entry host**: create parent agent
+2. **paglets search CLI → parent MeshSearchAgent**: start(SearchRequest, targets, timeout)
+3. **parent MeshSearchAgent → entry host**: available_hosts()
+4. Repeat for each target host:
+   1. **parent MeshSearchAgent → child MeshSearchAgent**: clone_to(host)
+   2. **child MeshSearchAgent → local filesystem**: traverse and search local paths
+   3. **child MeshSearchAgent → parent MeshSearchAgent** (reply): child_events(SearchEvent batch)
+5. **parent MeshSearchAgent → paglets search CLI** (reply): accepted job metadata and output path
+6. **child MeshSearchAgent → parent MeshSearchAgent** (reply): child_done(HostSearchSummary)
+7. **paglets search CLI → parent MeshSearchAgent**: cleanup()
 
 The following Mermaid `flowchart` explains the parent and child program
 flow without focusing on every individual call:
 
-```mermaid
-flowchart TD
-    Start["CLI starts search"] --> Parent["Create parent MeshSearchAgent"]
-    Parent --> Resolve["Resolve online same-version target hosts"]
-    Resolve --> Clone{"Any targets?"}
-    Clone -- "yes" --> Children["Clone child agents to targets"]
-    Clone -- "no" --> NoTargets["Record mesh error"]
-    Children --> LocalSearch["Each child searches local paths"]
-    LocalSearch --> EventBatch["Send child_events batches to parent"]
-    EventBatch --> Output["Parent writes JSONL output and streams user messages"]
-    LocalSearch --> Done["Send child_done summary"]
-    Done --> Complete{"All hosts complete?"}
-    Complete -- "no" --> Output
-    Complete -- "yes" --> Summary["Return final summary"]
-    NoTargets --> Summary
-    Summary --> Cleanup["Dispose child agents and parent"]
-```
+1. The CLI starts the search and creates the parent `MeshSearchAgent`.
+2. The parent resolves the online same-version target hosts.
+3. Without targets, it records a mesh error and goes to step 7.
+4. Otherwise it clones child agents to the targets; each child searches its
+   local paths.
+5. Children send `child_events` batches to the parent, which writes JSONL
+   output and streams user messages.
+6. Each child sends a `child_done` summary when it has finished; the parent
+   keeps writing output until all hosts are complete.
+7. The parent returns the final summary.
+8. Child agents and the parent are disposed.
 
 ### Search Options
 

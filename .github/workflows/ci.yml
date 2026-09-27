@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  # ckdocs is built from ck-git-hosting at this commit (documentation site generator).
+  CKDOCS_REF: 7d693f09c830e8b1272e444d238d8c130d153afa
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -30,7 +34,7 @@ jobs:
           cache-suffix: ci-${{ matrix.python-version }}
 
       - name: Install project
-        run: uv sync --dev --extra docs
+        run: uv sync --dev
 
       - name: Lint
         run: uv run ruff check .
@@ -44,8 +48,17 @@ jobs:
       - name: Test
         run: uv run pytest --cov=paglets --cov-report=term-missing --cov-report=xml
 
-      - name: Build documentation
-        run: uv run --extra docs mkdocs build --strict
+      - name: Build ckdocs
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/cklukas/ck-git-hosting.git "$RUNNER_TEMP/ck-git-hosting"
+          git -C "$RUNNER_TEMP/ck-git-hosting" checkout --quiet "$CKDOCS_REF"
+          make -C "$RUNNER_TEMP/ck-git-hosting" BUILD_ROOT="$RUNNER_TEMP" BUILD_DIR="$RUNNER_TEMP/ckdocs" client
+          echo "$RUNNER_TEMP/ckdocs/bin" >> "$GITHUB_PATH"
+
+      - name: Check documentation
+        run: |
+          uv run python tools/docs_sync.py --check
+          ckdocs check --root .
 
       - name: Build package
         run: uv build

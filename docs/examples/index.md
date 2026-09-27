@@ -59,11 +59,57 @@ On first start, `paglets host` copies the bundled launch config to
 `~/.paglets/launch.toml`. The bundled config declares built-in resident
 services:
 
-<div class="paglets-code-source">Source: <a href="https://github.com/cklukas/paglets/blob/main/src/paglets/config/defaults/launch.toml">src/paglets/config/defaults/launch.toml</a></div>
+<!-- snippet: src/paglets/config/defaults/launch.toml | src/paglets/config/defaults/launch.toml -->
+Source: [src/paglets/config/defaults/launch.toml](https://github.com/cklukas/paglets/blob/main/src/paglets/config/defaults/launch.toml)
 
 ```toml
---8<-- "src/paglets/config/defaults/launch.toml"
+[launch]
+demo_config_id = "paglets-default-launch"
+demo_config_version = "5"
+
+[[resident_services]]
+class = "paglets.system.server_info.agent:ServerInfoAgent"
+enabled = true
+agent_id = "service.server-info"
+singleton = true
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
+state = { service_scope = "mesh" }
+
+[[resident_services]]
+class = "paglets.system.mesh_info.agent:MeshInfoAgent"
+enabled = true
+agent_id = "service.mesh-info"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
+state = { service_scope = "mesh" }
+
+# --8<-- [start:compute-slots-service]
+[[resident_services]]
+class = "paglets.system.compute_slots.agent:ComputeSlotsAgent"
+enabled = true
+agent_id = "service.compute-slots"
+singleton = true
+lifecycle = "eager"
+scope = "mesh"
+idle_timeout = 0.0
+state = { service_scope = "mesh" }
+# --8<-- [end:compute-slots-service]
+
+[[resident_services]]
+class = "paglets.system.user_info.agent:UserInfoAgent"
+enabled = true
+agent_id = "service.user-info"
+singleton = true
+lifecycle = "lazy"
+scope = "mesh"
+idle_timeout = 30.0
+state = { service_scope = "mesh" }
 ```
+<!-- /snippet -->
 
 The command-line examples dynamically discover a reachable entry host from
 local/LAN probes and mesh multicast beacons. The entry host is only the
