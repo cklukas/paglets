@@ -12,6 +12,7 @@
 #include <paglets/wasm/binary.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
@@ -583,6 +584,32 @@ PAGLETS_TEST("runtime: ping-pong sample bounces between parent and child") {
     CHECK_EQ(dec<std::uint32_t>(r.payload), 25u);
     f.runtime->wait_idle();
     CHECK_EQ(f.runtime->list().size(), std::size_t{1});  // the child disposed itself
+}
+
+PAGLETS_TEST("runtime: children start on their creator's lane, but load still spreads") {
+    rt::Config c;
+    c.threads = 4;
+    Fixture f(std::move(c));
+    auto parent = f.create("conformance.wasm");
+    CHECK_EQ(f.call(parent, "count").status, 0);
+    const auto first = static_cast<std::int32_t>(f.code(parent, "child", Cmd{}));
+    const auto kid = f.target_of(parent, first);
+    CHECK_EQ(f.call(kid, "count").status, 0);
+    REQUIRE(f.runtime->info(parent)->lane >= 0);
+    CHECK_EQ(f.runtime->info(kid)->lane, f.runtime->info(parent)->lane);
+    // Many children: the creator's lane fills up only to a margin above the others.
+    std::vector<rt::PagletId> kids;
+    for (int i = 0; i < 16; ++i) {
+        kids.push_back(f.target_of(parent, static_cast<std::int32_t>(f.code(parent, "child", Cmd{}))));
+    }
+    for (const auto& k : kids) CHECK_EQ(f.call(k, "count").status, 0);
+    std::array<int, 4> per_lane{};
+    for (const auto& p : f.runtime->list()) {
+        if (p.lane >= 0) ++per_lane[static_cast<std::size_t>(p.lane)];
+    }
+    const auto [lo, hi] = std::ranges::minmax(per_lane);
+    CHECK(lo >= 2);
+    CHECK(hi - lo <= 4);
 }
 
 PAGLETS_TEST("runtime: many paglets on several threads") {

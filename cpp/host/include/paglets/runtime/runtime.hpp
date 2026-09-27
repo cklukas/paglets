@@ -86,6 +86,7 @@ struct PagletInfo {
     std::size_t mailbox = 0;
     std::size_t caps = 0;
     std::uint64_t handled = 0;  // handler calls
+    int lane = -1;              // scheduler lane while placed, -1 otherwise
 };
 
 // Why a paglet ended.

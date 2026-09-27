@@ -123,7 +123,8 @@ struct PagletRec {
     std::uint64_t next_seq = 0;
     bool running = false;
     bool queued = false;
-    int lane = -1;  // scheduler lane while placed (active or about to be activated)
+    int lane = -1;       // scheduler lane while placed (active or about to be activated)
+    int lane_hint = -1;  // lane of a paglet it talks to (its creator, or a recent sender)
 
     std::set<std::uint64_t> pending_requests;
     std::uint64_t next_correlation = 1;
@@ -218,10 +219,17 @@ struct Runtime::Impl {
     void make_ready(PagletRec& rec) {
         if (rec.running || rec.queued || rec.awaiting_image || rec.mailbox.empty()) return;
         if (rec.lane < 0) {
-            // Place on the lane with the fewest placed paglets.
+            // Place next to the paglet it talks to, unless that lane is
+            // clearly busier than the least loaded one; otherwise on the
+            // least loaded lane.
             std::size_t best = 0;
             for (std::size_t i = 1; i < lanes.size(); ++i) {
                 if (lanes[i]->placed < lanes[best]->placed) best = i;
+            }
+            if (rec.lane_hint >= 0 && static_cast<std::size_t>(rec.lane_hint) < lanes.size()) {
+                const std::size_t slack = 1 + lanes[best]->placed / 4;
+                const auto hint = static_cast<std::size_t>(rec.lane_hint);
+                if (lanes[hint]->placed <= lanes[best]->placed + slack) best = hint;
             }
             rec.lane = static_cast<int>(best);
             ++lanes[best]->placed;
@@ -492,6 +500,7 @@ public:
         env.delivered.sender = rec_.sender(rt_.config.host_name);
         env.delivered.badge = (*cap)->badge;
         env.caps = std::move(*caps);
+        if (target->lane < 0) target->lane_hint = rec_.lane;
         rt_.enqueue(*target, std::move(env), m.priority);
         return abi::ok;
     }
@@ -524,6 +533,7 @@ public:
         env.delivered.badge = (*cap)->badge;
         env.caps = std::move(*caps);
         env.reply_cap = std::move(reply);
+        if (target->lane < 0) target->lane_hint = rec_.lane;
         rt_.enqueue(*target, std::move(env), m.priority);
         rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(m.timeout_ms),
                      Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
@@ -648,6 +658,7 @@ public:
         ++rec_.spawned_this_call;
         const PagletId id = new_paglet_id();
         PagletRec& child = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
+        child.lane_hint = rec_.lane;
         rt_.enqueue_start(child, abi::EventKind::created, std::move(spec.args), std::move(*caps), std::nullopt);
         return rt_.add_cap(rec_, rt_.endpoint_to(id));
     }
@@ -682,6 +693,7 @@ public:
                 PagletRec& clone = rt_.new_paglet(
                     id, rec_.module, rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust, rec_.owner);
                 clone.awaiting_image = true;
+                clone.lane_hint = rec_.lane;
                 rec_.clones.push_back(PendingClone{id, std::move(arg.args), std::move(*caps)});
                 return rt_.add_cap(rec_, rt_.endpoint_to(id));
             }
@@ -1308,7 +1320,8 @@ std::optional<PagletInfo> Runtime::info(const PagletId& id) const {
                       r.instance ? PagletState::active : PagletState::inactive,
                       r.mailbox.size(),
                       r.caps.size(),
-                      r.handled};
+                      r.handled,
+                      r.lane};
 }
 
 std::vector<PagletInfo> Runtime::list() const {
