@@ -86,28 +86,33 @@ notifications, the CLI surface.
 
 ### 3.1 Architecture
 
-```mermaid
-flowchart LR
-    Admin([Mesh admin CLI<br/>admin key])
-    subgraph Host["paglets/cpp host"]
-        subgraph Control["Host control process"]
-            API[HTTP API / relay client]
-            Mesh[Mesh + ledger replication]
-            Sched[Scheduler, mailboxes,<br/>capability tables]
-            Store[(Module store<br/>image store<br/>ledger, artifacts)]
-            SysP[System paglets:<br/>files, server-info, locator,<br/>directory, grants, ...]
-        end
-        subgraph Workers["Worker processes (one pool)"]
-            W1[Worker 1: WAMR<br/>paglets A, B]
-            W2[Worker 2: WAMR<br/>paglet C]
-        end
-    end
-    Admin -- signed records --> API
-    API <--> Sched
-    Mesh <--> API
-    Sched <-- IPC --> Workers
-    Sched <--> SysP
-    Sched <--> Store
+```text
+  Mesh admin CLI (admin key)
+          |
+          | signed records
+          v
++------------------------------------------------------------------+
+| paglets/cpp host                                                 |
+|                                                                  |
+|  Host control process                                            |
+|  +------------------------+     +------------------------------+ |
+|  | HTTP API/relay client  |<--->| Mesh + ledger replication    | |
+|  +-----------+------------+     +------------------------------+ |
+|              |                                                   |
+|  +-----------v------------+     +------------------------------+ |
+|  | Scheduler, mailboxes,  |<--->| System paglets: files,       | |
+|  | capability tables      |     | server-info, locator, ...    | |
+|  +-----+------------+-----+     +------------------------------+ |
+|        |            |                                            |
+|        |            +--------->  Module store, image store,      |
+|        |                         ledger, artifacts               |
+|        | IPC                                                     |
+|  Worker processes (one pool)                                     |
+|  +----------------------+   +----------------------+             |
+|  | Worker 1: WAMR       |   | Worker 2: WAMR       |             |
+|  | paglets A, B         |   | paglet C             |             |
+|  +----------------------+   +----------------------+             |
++------------------------------------------------------------------+
 ```
 
 - The **host control process** is native C++. It owns networking, the mesh,
@@ -602,8 +607,14 @@ stop.
 
 **WP22: Documentation and release**
 
-- MkDocs section for paglets/cpp, README updates, packaging (release archives
-  per platform, Homebrew formula), changelog, first release `cpp-v0.1.0`.
+- Documentation site for paglets/cpp built with **ckdocs** (from
+  ck-git-hosting): `ckdocs.yml` plus a `docs/` tree, `ckdocs check` (strict:
+  broken links and heading fragments fail) as a CI step, published on ck-git
+  Pages and GitHub Pages. Pages stay within ckdocs' Markdown subset: no raw
+  HTML, footnotes, definition lists, math or Mermaid; diagrams as text or
+  image files.
+- README updates, packaging (release archives per platform, Homebrew
+  formula), changelog, first release `cpp-v0.1.0`.
 
 ### Research work packages
 

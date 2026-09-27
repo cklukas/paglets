@@ -118,3 +118,6 @@ implementation); a faster hash is an easy later improvement.
   the Raspberry Pi in progress).
 - AOT/JIT measurements, and a faster page hash for image capture.
 - Choose bound-check mode and instances per worker process per platform (WP5).
+- Documentation uses ckdocs (not MkDocs): add a `ckdocs.yml` and a
+  `ckdocs check` CI step once paglets/cpp gets user documentation (WP22), and
+  keep planning and README Markdown within the ckdocs subset.
