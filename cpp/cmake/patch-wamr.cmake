@@ -38,3 +38,23 @@ if(_at GREATER_EQUAL 0)
 elseif(NOT _text MATCHES "paglets: unlink under cluster->lock")
     message(FATAL_ERROR "patch-wamr: wasm_exec_env_destroy has changed; review the patch")
 endif()
+
+# The Windows platform declares thread-local variables with
+# __declspec(thread), which MinGW-w64 GCC ignores ("'thread' attribute
+# directive ignored"): the variables become process-wide. Among them are the
+# cached native stack boundary (the first thread to compute it sets it for
+# every thread, so another thread's instances fail with "native stack
+# overflow" depending on where the stacks lie) and the current execution
+# environment. GCC and clang need __thread.
+set(_file "${CMAKE_CURRENT_SOURCE_DIR}/core/shared/platform/windows/platform_internal.h")
+file(READ "${_file}" _text)
+set(_old "#define os_thread_local_attribute __declspec(thread)\n")
+set(_new "/* paglets: MinGW-w64 GCC ignores __declspec(thread) */\n#if defined(_MSC_VER)\n#define os_thread_local_attribute __declspec(thread)\n#else\n#define os_thread_local_attribute __thread\n#endif\n")
+string(FIND "${_text}" "${_old}" _at)
+if(_at GREATER_EQUAL 0 AND NOT _text MATCHES "paglets: MinGW-w64 GCC ignores")
+    string(REPLACE "${_old}" "${_new}" _patched "${_text}")
+    file(WRITE "${_file}" "${_patched}")
+    message(STATUS "patch-wamr: thread-local variables on Windows with GCC")
+elseif(NOT _text MATCHES "paglets: MinGW-w64 GCC ignores")
+    message(FATAL_ERROR "patch-wamr: windows/platform_internal.h has changed; review the patch")
+endif()
