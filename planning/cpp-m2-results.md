@@ -81,7 +81,8 @@ Status: **closed**. WP8, WP9 and WP10 are done. Companion to
   revocations and releases reach the runtime's revocation tree; the
   directory's policy for services with ambient authority (server-info).
 - **Paglet IDs chosen in advance** (`CreateOptions::id`), for passports and
-  early approval.
+  early approval; `Node::create` makes root paglets from verified
+  passports (ID and owner from the passport).
 - **Command line**: `ledger rule`, grant approvals and denials, `ledger
   audit`.
 
@@ -128,6 +129,6 @@ Status: **closed**. WP8, WP9 and WP10 are done. Companion to
 
 1. M3: movement between hosts (WP11 module store and code mobility, WP12
    transport), with grants materialized on arrival.
-2. Passport checks in the runtime once a host runs with a ledger (WP11,
+2. Passport links for children and clones, and checks on arrival (WP11,
    WP12); ledger checkpoints and pruning; platform key stores for host keys
    and a key agent.

@@ -533,14 +533,46 @@ PAGLETS_TEST("policy: early approval of a manifest before the paglet exists") {
     net.admin("grant", data::grant(principal, Item{"files", {"read"}, "data", "docs"}, {}, unix_ms() + 3'600'000,
                                    request.id(), {}, {}));
     net.settle();
-    // The paglet starts with the planned ID and receives its grant.
-    auto id = net.f->runtime->create(net.f->module("explorer.wasm"),
-                                     rt::CreateOptions{.owner = net.k.owner.id(), .id = planned});
+    // The owner's passport for the paglet names the same ID; the host
+    // creates it from the passport and delivers the grant.
+    const std::string module = net.f->module("explorer.wasm");
+    auto passport =
+        Passport::issue(net.k.owner, net.a->mesh(), *parse_key_id(module), planned,
+                        manifest_value({Item{"files", {"read"}, "data", "docs"}}), unix_ms(), unix_ms() + 3'600'000);
+    REQUIRE_OK(passport);
+    auto id = net.a->create(module, *passport);
     REQUIRE_OK(id);
     CHECK(*id == planned);
-    net.a->sync();
     const std::string late = net.journal_entry(planned, "granted-late:");
     REQUIRE(!late.empty());
     const auto handle = std::stoi(late.substr(std::string("granted-late:").size()));
     CHECK(net.ask(planned, "read_file", explorer::Explore{handle, "report.txt"}) == "content:quarterly numbers");
+}
+
+PAGLETS_TEST("passports: a mesh host creates root paglets only from valid passports") {
+    TwoHosts net;
+    const std::string module = net.f->module("explorer.wasm");
+    const paglets::Digest hash = *parse_key_id(module);
+    const std::int64_t now = unix_ms();
+    auto issue = [&](const SigningKey& owner, const paglets::Digest& h, std::string id, std::int64_t expires) {
+        auto p = Passport::issue(owner, net.a->mesh(), h, std::move(id), Value(), now - 1000, expires);
+        REQUIRE_OK(p);
+        return *p;
+    };
+    const auto good = issue(net.k.owner, hash, std::string(32, 'd'), now + 60'000);
+    auto id = net.a->create(module, good);
+    REQUIRE_OK(id);
+    const auto info = net.f->runtime->info(*id);
+    REQUIRE(info.has_value());
+    CHECK(info->owner == net.k.owner.id() && info->trust == rt::TrustClass::roaming);
+    CHECK(net.a->passport(*id).has_value());
+    CHECK(!net.a->create(module, good));  // the ID exists
+
+    CHECK(!net.a->create(module, issue(net.k.other_owner, hash, std::string(32, 'e'), now + 60'000)));  // not enrolled
+    CHECK(!net.a->create(module, issue(net.k.owner, paglets::sha256(Bytes{1}), std::string(32, 'e'), now + 60'000)));
+    CHECK(!net.a->create(module, issue(net.k.owner, hash, std::string(32, 'e'), now - 1)));  // expired
+    auto child = good.extend(net.k.host_b, "child", std::string(32, 'f'), hash, now);
+    REQUIRE_OK(child);
+    CHECK(!net.a->create(module, *child));  // not a root passport
+    CHECK(!net.f->runtime->info(std::string(32, 'e')));
 }

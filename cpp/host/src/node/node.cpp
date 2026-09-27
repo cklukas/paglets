@@ -9,6 +9,7 @@
 #include <paglets/wire/reflect.hpp>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 #include <set>
 
@@ -78,8 +79,9 @@ struct Node::Impl {
     std::unique_ptr<mesh::Replica> replica;
     fs::path state_dir;
     bool dirty = false;
-    std::set<std::string> materialized;  // grants delivered on this host
-    std::set<std::string> answered;      // denials delivered on this host
+    std::set<std::string> materialized;               // grants delivered on this host
+    std::set<std::string> answered;                   // denials delivered on this host
+    std::map<std::string, mesh::Passport> passports;  // of paglets created here
     runtime::SystemContext* grants_ctx = nullptr;
 
     // -- mu held -----------------------------------------------------------
@@ -127,6 +129,21 @@ struct Node::Impl {
         const mesh::Fields f{*v->as_map()};
         if (auto m = f.strings("materialized")) materialized.insert(m->begin(), m->end());
         if (auto a = f.strings("answered")) answered.insert(a->begin(), a->end());
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(state_dir / "passports", ec)) {
+            auto p = wasm::read_file(entry.path().string());
+            if (!p) continue;
+            if (auto passport = mesh::Passport::decode(*p)) passports.emplace(passport->paglet(), std::move(*passport));
+        }
+    }
+
+    void save_passport(const mesh::Passport& passport) const {
+        if (state_dir.empty()) return;
+        std::error_code ec;
+        fs::create_directories(state_dir / "passports", ec);
+        const fs::path file = state_dir / "passports" / (passport.paglet() + ".passport");
+        const fs::path temp = file.string() + ".tmp";
+        if (wasm::write_file(temp.string(), passport.encode())) fs::rename(temp, file, ec);
     }
 
     void save() const {
@@ -451,6 +468,36 @@ void Node::sync() {
     std::lock_guard lock(impl_->mu);
     impl_->dirty = false;
     impl_->sync_locked();
+}
+
+std::expected<runtime::PagletId, std::string> Node::create(std::string_view module, const mesh::Passport& passport,
+                                                           runtime::Bytes args) {
+    auto hash = mesh::parse_key_id(module);  // module hashes have the form of key IDs
+    if (!hash) return std::unexpected("module " + std::string(module) + " is not a hex SHA-256");
+    std::lock_guard lock(impl_->mu);
+    if (!passport.links().empty()) return std::unexpected(std::string("a root paglet needs a root passport"));
+    if (auto ok = mesh::verify_passport(passport, impl_->ledger.state(), passport.paglet(), *hash, mesh::unix_ms());
+        !ok) {
+        return std::unexpected("passport: " + ok.error());
+    }
+    runtime::CreateOptions options;
+    options.args = std::move(args);
+    options.trust = runtime::TrustClass::roaming;
+    options.owner = mesh::key_id(passport.root().owner);
+    options.id = passport.paglet();
+    auto id = impl_->runtime.create(module, std::move(options));
+    if (!id) return id;
+    impl_->passports.emplace(*id, passport);
+    impl_->save_passport(passport);
+    impl_->sync_locked();  // grants approved in advance
+    return id;
+}
+
+std::optional<mesh::Passport> Node::passport(const runtime::PagletId& paglet) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->passports.find(paglet);
+    if (it == impl_->passports.end()) return std::nullopt;
+    return it->second;
 }
 
 }  // namespace paglets::node

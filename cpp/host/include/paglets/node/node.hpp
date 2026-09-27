@@ -17,6 +17,7 @@
 
 #include <paglets/mesh/gossip.hpp>
 #include <paglets/mesh/ledger.hpp>
+#include <paglets/mesh/passport.hpp>
 #include <paglets/runtime/runtime.hpp>
 #include <paglets/services/system_services.hpp>
 
@@ -63,6 +64,15 @@ public:
     // Applies the ledger to the runtime (called after every change; also
     // after creating a paglet that may have grants approved in advance).
     void sync();
+
+    // Creates a root paglet from its passport (planning/cpp-ledger.md,
+    // section 6): the passport must verify against the ledger for this
+    // module; the paglet gets the passport's ID and owner and is roaming.
+    // Grants approved in advance are delivered right away. The passport is
+    // kept with the paglet (passport()).
+    std::expected<runtime::PagletId, std::string> create(std::string_view module, const mesh::Passport& passport,
+                                                         runtime::Bytes args = {});
+    std::optional<mesh::Passport> passport(const runtime::PagletId& paglet) const;
 
     struct Impl;
 

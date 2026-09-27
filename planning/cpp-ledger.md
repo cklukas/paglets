@@ -164,6 +164,10 @@ digests later), no rate limits per peer yet (WP21).
   not expired, every linking host enrolled and not revoked, and the last
   element names the expected paglet and module.
 
-Open: the host checks passports when paglets arrive (WP11/WP12) and on
-creation once the host runs with a ledger (WP12); manifests get their
-meaning in WP9.
+A host in a mesh creates root paglets from their passports
+(`node::Node::create`): the passport must verify for the module, and the
+paglet gets its ID and owner; the host keeps the passport with the paglet.
+Manifests are evaluated by the policy (planning/cpp-policy.md, section 6).
+
+Open: host-signed links for children and clones as the runtime creates
+them, and checks on arrival (M3, WP11/WP12).
