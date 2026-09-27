@@ -19,9 +19,11 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace paglets::runtime {
 
@@ -54,6 +56,12 @@ public:
                                                                       const wasm::Limits& limits,
                                                                       const wasm::Snapshot* image,
                                                                       wasm::HostImports& imports) = 0;
+
+    // Drops the compiled modules of the executor that are not in `keep`
+    // (a worker process compiles its own copies). Called on the lane thread.
+    virtual void retain_modules(const std::set<std::string>& keep) { (void)keep; }
+    // Hashes of the modules a worker process has compiled (none in-process).
+    virtual std::vector<std::string> loaded_modules() const { return {}; }
 
     // Process ID of the worker process, if there is one running.
     virtual std::optional<int> process_id() const { return std::nullopt; }

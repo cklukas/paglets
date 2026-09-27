@@ -173,41 +173,11 @@ std::expected<PagletFile, std::string> read_paglet_file(const fs::path& path) {
 }  // namespace
 
 Store::Store(fs::path root) : root_(std::move(root)) {
-    fs::create_directories(root_ / "modules");
     fs::create_directories(root_ / "paglets");
 }
 
 fs::path Store::paglet_file(const std::string& id) const {
     return root_ / "paglets" / (id + ".paglet");
-}
-
-std::expected<void, std::string> Store::save_module(const std::string& hash, std::span<const std::uint8_t> bytes) {
-    const fs::path path = root_ / "modules" / (hash + ".wasm");
-    if (fs::exists(path)) return {};
-    return write_atomically(path, bytes);
-}
-
-std::vector<std::shared_ptr<wasm::Module>> Store::load_modules(const Warn& warn) const {
-    std::vector<std::shared_ptr<wasm::Module>> out;
-    for (const auto& entry : fs::directory_iterator(root_ / "modules")) {
-        if (entry.path().extension() != ".wasm") continue;
-        auto bytes = wasm::read_file(entry.path().string());
-        if (!bytes) {
-            warn(bytes.error());
-            continue;
-        }
-        if (to_hex(sha256(*bytes)) != entry.path().stem().string()) {
-            warn("module file does not match its hash: " + entry.path().string());
-            continue;
-        }
-        auto module = wasm::Module::load(std::move(*bytes), wasm::ImportPolicy::system());
-        if (!module) {
-            warn(module.error());
-            continue;
-        }
-        out.push_back(std::move(*module));
-    }
-    return out;
 }
 
 std::expected<void, std::string> Store::save_paglet(const PagletRecord& record, const wasm::Snapshot& image) {

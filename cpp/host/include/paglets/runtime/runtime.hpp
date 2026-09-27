@@ -12,6 +12,7 @@
 #pragma once
 
 #include <paglets/runtime/capability.hpp>
+#include <paglets/runtime/modules.hpp>
 #include <paglets/runtime/system.hpp>
 #include <paglets/wasm/engine.hpp>
 
@@ -66,6 +67,12 @@ struct Config {
     std::size_t cap_limit = 1024;
     std::size_t timer_limit = 64;
     std::size_t spawn_limit_per_call = 16;
+    // Module store (modules.hpp): compiled modules kept without users, and
+    // garbage collection of modules without users that were not used within
+    // the grace period, every interval (0: only on request).
+    std::size_t module_cache_bytes = 64u * 1024 * 1024;
+    std::chrono::milliseconds module_gc_grace{std::chrono::hours(24)};
+    std::chrono::milliseconds module_gc_interval{std::chrono::minutes(10)};
     LogFunction log;  // default: stderr
 };
 
@@ -118,6 +125,11 @@ public:
     // hex hash. Adding the same module again is a no-op.
     std::expected<std::string, std::string> add_module(Bytes wasm);
     std::expected<std::string, std::string> add_module_file(const std::filesystem::path& path);
+    // The module store (with the state directory: `modules/` in it). Every
+    // paglet on this host counts as a user of its module.
+    ModuleStore& modules();
+    // Hashes of the modules compiled in worker processes (diagnostics).
+    std::vector<std::string> worker_modules() const;
 
     // Creates a paglet; `created` is its first delivery.
     std::expected<PagletId, std::string> create(std::string_view module, CreateOptions options = {});

@@ -25,12 +25,13 @@ inline constexpr std::size_t max_frame = 256u * 1024 * 1024;
 
 // Operations of the control process (first array element of a request).
 enum class Op : std::int32_t {
-    load_module = 1,  // [op, hash, bytes]                        -> [0] | [1, error]
-    create = 2,       // [op, paglet, hash, stack, pages, image?]  -> [0] | [1, error]
-    call = 3,         // [op, paglet, export, [lead...], data]     -> imports..., [0, result] | [1, error]
-    capture = 4,      // [op, paglet]                              -> [0, image] | [1, error]
-    destroy = 5,      // [op, paglet]                              -> [0]
-    terminate = 6,    // [op, paglet] on the control channel, no answer
+    load_module = 1,    // [op, hash, bytes]                        -> [0] | [1, error]
+    create = 2,         // [op, paglet, hash, stack, pages, image?]  -> [0] | [1, error]
+    call = 3,           // [op, paglet, export, [lead...], data]     -> imports..., [0, result] | [1, error]
+    capture = 4,        // [op, paglet]                              -> [0, image] | [1, error]
+    destroy = 5,        // [op, paglet]                              -> [0]
+    terminate = 6,      // [op, paglet] on the control channel, no answer
+    unload_module = 7,  // [op, hash] -> [0]; instances keep their module
 };
 
 // A frame from the worker during a call: [import_marker, name, a, b, data]

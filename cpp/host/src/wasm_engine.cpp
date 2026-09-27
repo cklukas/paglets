@@ -328,6 +328,18 @@ void deinit_thread() {
 // ---------------------------------------------------------------------------
 // Module
 
+namespace {
+
+// WAMR's loader is not safe for concurrent use: the fast interpreter fills a
+// process-wide handler table on every load. Modules are loaded and unloaded
+// one at a time (instances of loaded modules run concurrently).
+std::mutex& loader_mutex() {
+    static std::mutex mu;
+    return mu;
+}
+
+}  // namespace
+
 std::expected<std::shared_ptr<Module>, std::string> Module::load(std::vector<std::uint8_t> bytes,
                                                                  const ImportPolicy& policy) {
     ensure_runtime();
@@ -346,7 +358,11 @@ std::expected<std::shared_ptr<Module>, std::string> Module::load(std::vector<std
     m->bytes_ = std::move(bytes);
 
     char error[256] = {};
-    m->module_ = wasm_runtime_load(m->bytes_.data(), static_cast<std::uint32_t>(m->bytes_.size()), error, sizeof error);
+    {
+        std::lock_guard lock(loader_mutex());
+        m->module_ =
+            wasm_runtime_load(m->bytes_.data(), static_cast<std::uint32_t>(m->bytes_.size()), error, sizeof error);
+    }
     if (m->module_ == nullptr) {
         return std::unexpected("WAMR load failed: " + error_text(error));
     }
@@ -358,6 +374,7 @@ std::expected<std::shared_ptr<Module>, std::string> Module::load(std::vector<std
 
 Module::~Module() {
     if (module_ != nullptr) {
+        std::lock_guard lock(loader_mutex());
         wasm_runtime_unload(module_);
     }
 }

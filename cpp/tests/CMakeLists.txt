@@ -31,7 +31,8 @@ set(test_sources
     test_runtime.cpp
     test_ipc.cpp
     test_mesh.cpp
-    test_system.cpp)
+    test_system.cpp
+    test_modules.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp)
 endif()

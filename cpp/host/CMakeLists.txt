@@ -7,6 +7,7 @@ add_library(paglets_host STATIC
     src/ipc.cpp
     src/runtime.cpp
     src/runtime_exec.cpp
+    src/runtime_modules.cpp
     src/runtime_store.cpp
     src/sandbox.cpp
     src/shm_ring.cpp

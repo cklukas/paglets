@@ -184,6 +184,28 @@ public:
         stop("host stopping");
     }
 
+    void retain_modules(const std::set<std::string>& keep) override {
+        std::lock_guard lock(mu_);
+        if (!alive_) return;
+        for (auto it = loaded_.begin(); it != loaded_.end();) {
+            if (keep.contains(*it)) {
+                ++it;
+                continue;
+            }
+            msgpack::Writer w;
+            w.write_array_header(2);
+            w.write_int(static_cast<std::int32_t>(ipc::Op::unload_module));
+            w.write_str(*it);
+            if (!round_trip(w.bytes())) return;  // the worker ended; nothing is loaded
+            it = loaded_.erase(it);
+        }
+    }
+
+    std::vector<std::string> loaded_modules() const override {
+        std::lock_guard lock(mu_);
+        return {loaded_.begin(), loaded_.end()};
+    }
+
     std::expected<std::unique_ptr<Placed>, std::string> place(const std::string& paglet,
                                                               const std::shared_ptr<wasm::Module>& module,
                                                               const wasm::Limits& limits, const wasm::Snapshot* image,
@@ -395,7 +417,7 @@ private:
     std::filesystem::path executable_;
     bool sandbox_ = true;
     std::function<void(const std::string&)> warn_;
-    std::mutex mu_;          // main channel and process state
+    mutable std::mutex mu_;  // main channel and process state
     std::mutex control_mu_;  // control channel (terminate from the watchdog)
     ipc::RingChannel main_;  // calls and imports
     ipc::Channel control_;   // terminations
@@ -622,6 +644,16 @@ int run_worker(ipc::Ends doorbell, ipc::Ends control_ends, std::intptr_t shm_han
                     modules[hash] = std::move(*module);
                     answer = ok_frame();
                 }
+                break;
+            }
+            case ipc::Op::unload_module: {
+                std::string hash;
+                if (!msgpack::read_value(r, hash)) {
+                    answer = error_frame("malformed unload_module");
+                    break;
+                }
+                modules.erase(hash);
+                answer = ok_frame();
                 break;
             }
             case ipc::Op::create: {

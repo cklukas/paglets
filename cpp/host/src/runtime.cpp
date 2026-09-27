@@ -1,6 +1,7 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
+#include <paglets/runtime/modules.hpp>
 #include <paglets/runtime/runtime.hpp>
 
 #include "runtime_exec.hpp"
@@ -136,7 +137,8 @@ struct PendingClone {
 
 struct PagletRec {
     PagletId id;
-    std::shared_ptr<wasm::Module> module;  // null for native system paglets
+    std::string module;                    // hex hash; empty for native system paglets
+    std::shared_ptr<wasm::Module> loaded;  // the compiled module while an instance exists
     std::shared_ptr<SystemPaglet> native;
     std::unique_ptr<SystemContext> context;
     TrustClass trust = TrustClass::roaming;
@@ -177,7 +179,7 @@ struct PagletRec {
     std::unique_ptr<wasm::HostImports> imports;
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints
 
-    std::string module_hash() const { return module ? module->hash_hex() : std::string(); }
+    const std::string& module_hash() const { return module; }
     abi::SenderRecord sender(const std::string& host) const {
         return {id, owner, std::string(to_string(trust)), module_hash(), host};
     }
@@ -201,7 +203,8 @@ struct Runtime::Impl {
     std::condition_variable clock_cv;
     bool stopping = false;
 
-    std::map<std::string, std::shared_ptr<wasm::Module>> modules;  // by hex hash
+    std::unique_ptr<ModuleStore> modules;
+    SteadyClock::time_point next_module_gc{};
     std::map<PagletId, std::unique_ptr<PagletRec>> paglets;
     std::map<PagletId, Ending> endings;
     // A lane is one scheduler thread with its own ready queue. A paglet stays
@@ -308,6 +311,15 @@ struct Runtime::Impl {
     std::vector<std::unique_ptr<Placed>> retired;
     void retire(PagletRec& rec) {
         if (rec.instance) retired.push_back(std::move(rec.instance));
+        rec.loaded.reset();
+    }
+
+    // Removes a paglet record; its module loses a user.
+    void erase_paglet(const PagletId& id) {
+        auto it = paglets.find(id);
+        if (it == paglets.end()) return;
+        if (!it->second->module.empty()) modules->remove_user(it->second->module);
+        paglets.erase(it);
     }
 
     // Releases the lane of a paglet whose instance is gone.
@@ -400,8 +412,10 @@ struct Runtime::Impl {
         return abi::ok;
     }
 
-    PagletRec& new_paglet(const PagletId& id, std::shared_ptr<wasm::Module> module, TrustClass trust,
-                          std::string owner) {
+    // A new paglet record; nullptr if its module is not in the store (a
+    // module a paglet uses cannot be collected).
+    PagletRec* new_paglet(const PagletId& id, std::string module, TrustClass trust, std::string owner) {
+        if (!module.empty() && !modules->add_user(module)) return nullptr;
         auto rec = std::make_unique<PagletRec>();
         rec->id = id;
         rec->module = std::move(module);
@@ -414,7 +428,7 @@ struct Runtime::Impl {
         self.transferable = true;
         self.id = new_cap_id();
         rec->caps.emplace(abi::self_handle, std::move(self));
-        PagletRec& ref = *rec;
+        PagletRec* ref = rec.get();
         paglets.emplace(id, std::move(rec));
         return ref;
     }
@@ -505,7 +519,7 @@ struct Runtime::Impl {
         rec.caps.clear();
         for (auto& clone : rec.clones) {
             for (auto& cap : clone.caps) drop_cap(std::move(cap), status);
-            paglets.erase(clone.id);
+            erase_paglet(clone.id);
         }
         rec.clones.clear();
         if (store) store->remove_paglet(rec.id);
@@ -515,7 +529,7 @@ struct Runtime::Impl {
         notify_ended(rec.id);
         endings[rec.id] = Ending{rec.id, failed, std::move(reason)};
         if (failed) log(3, rec.id, "paglet failed: " + endings[rec.id].reason);
-        paglets.erase(rec.id);  // rec is destroyed here
+        erase_paglet(rec.id);  // rec is destroyed here
     }
 
     void persist(PagletRec& rec, const wasm::Snapshot& snap) {
@@ -588,6 +602,16 @@ struct Runtime::Impl {
     void clock_loop();
     void fire(Deadline d);
     void recover();
+
+    // Garbage collection of the module store (clock thread, without mu).
+    void collect_modules() {
+        auto r = modules->collect(config.module_gc_grace);
+        if (r.removed.empty()) return;
+        std::lock_guard lock(mu);
+        log(1, "",
+            "module store: removed " + std::to_string(r.removed.size()) + " unused modules (" +
+                std::to_string((r.bytes + 1023) / 1024) + " KB)");
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -828,21 +852,26 @@ public:
         abi::ChildSpec spec;
         if (!abi::decode(doc, spec)) return abi::malformed;
         std::lock_guard lock(rt_.mu);
-        std::shared_ptr<wasm::Module> module = rec_.module;
+        std::string module = rec_.module;
         if (spec.module) {
-            auto it = rt_.modules.find(*spec.module);
-            if (it == rt_.modules.end()) return abi::not_found;
-            module = it->second;
-            if (!check_paglet_module(module->info(), TrustClass::roaming)) return abi::denied;
+            auto info = rt_.modules->info(*spec.module);
+            if (!info) return abi::not_found;
+            if (!check_paglet_module(*info, TrustClass::roaming)) return abi::denied;
+            module = *spec.module;
         }
         if (rec_.spawned_this_call >= rt_.config.spawn_limit_per_call || rec_.caps.size() >= rt_.config.cap_limit) {
             return abi::quota;
         }
-        auto caps = rt_.take_caps(rec_, spec.caps);
-        if (!caps) return caps.error();
-        ++rec_.spawned_this_call;
         const PagletId id = new_paglet_id();
-        PagletRec& child = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
+        PagletRec* created = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
+        if (created == nullptr) return abi::not_found;  // collected since the check
+        auto caps = rt_.take_caps(rec_, spec.caps);
+        if (!caps) {
+            rt_.erase_paglet(id);
+            return caps.error();
+        }
+        ++rec_.spawned_this_call;
+        PagletRec& child = *created;
         child.lane_hint = rec_.lane;
         child.checkpoint_interval = rec_.checkpoint_interval;
         rt_.install_services(child);
@@ -873,12 +902,18 @@ public:
                     rec_.caps.size() >= rt_.config.cap_limit) {
                     return abi::quota;
                 }
-                auto caps = rt_.take_caps(rec_, arg.caps);
-                if (!caps) return caps.error();
-                ++rec_.spawned_this_call;
                 const PagletId id = new_paglet_id();
-                PagletRec& clone = rt_.new_paglet(
+                // The module has a user (this paglet), so it is in the store.
+                PagletRec* created = rt_.new_paglet(
                     id, rec_.module, rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust, rec_.owner);
+                if (created == nullptr) return abi::internal;
+                auto caps = rt_.take_caps(rec_, arg.caps);
+                if (!caps) {
+                    rt_.erase_paglet(id);
+                    return caps.error();
+                }
+                ++rec_.spawned_this_call;
+                PagletRec& clone = *created;
                 clone.awaiting_image = true;
                 clone.lane_hint = rec_.lane;
                 clone.checkpoint_interval = rec_.checkpoint_interval;
@@ -1143,12 +1178,15 @@ std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool de
     if (!image && rec.started) {
         return std::unexpected(std::string("the paglet's state was lost with its worker process (no image)"));
     }
+    auto module = modules->acquire(rec.module);
+    if (!module) return std::unexpected(module.error());
     rec.imports = std::make_unique<Imports>(*this, rec);
-    auto placed = executor->place(rec.id, rec.module, config.limits, image ? &*image : nullptr, *rec.imports);
+    auto placed = executor->place(rec.id, *module, config.limits, image ? &*image : nullptr, *rec.imports);
     if (!placed) return std::unexpected(placed.error());
     {
         std::lock_guard lock(mu);  // info() and the watchdog read it under the lock
         rec.instance = std::move(*placed);
+        rec.loaded = std::move(*module);
     }
     // A paglet without a stored image is checkpointed after its first handler.
     rec.last_checkpoint = SteadyClock::now();
@@ -1278,7 +1316,7 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
             if (!snap) {
                 log(3, rec.id, "clone failed: " + snap.error());
                 for (auto& c : pc.caps) drop_cap(std::move(c), abi::failed);
-                paglets.erase(pc.id);
+                erase_paglet(pc.id);
                 continue;
             }
             // The clone keeps the handle numbers of transferable endpoints,
@@ -1393,8 +1431,16 @@ void Runtime::Impl::lane_loop(std::size_t index) {
         if (!retired.empty()) {
             auto dead = std::move(retired);
             retired.clear();
+            // The lane's worker keeps compiled modules that paglets placed
+            // on the lane use or that the host's cache keeps.
+            std::set<std::string> keep;
+            for (const auto& [pid, p] : paglets) {
+                if (p->loaded && p->lane == static_cast<int>(index)) keep.insert(p->module);
+            }
             lock.unlock();
             dead.clear();
+            for (auto& hash : modules->cached()) keep.insert(std::move(hash));
+            lane.executor->retain_modules(keep);
             lock.lock();
         }
         idle_cv.notify_all();
@@ -1417,7 +1463,15 @@ void Runtime::Impl::clock_loop() {
                 rec->instance->terminate();
             }
         }
+        if (config.module_gc_interval.count() > 0 && now >= next_module_gc) {
+            next_module_gc = now + config.module_gc_interval;
+            lock.unlock();
+            collect_modules();
+            lock.lock();
+            continue;
+        }
         auto wake = now + (in_call.empty() ? 100ms : 5ms);
+        if (config.module_gc_interval.count() > 0) wake = std::min(wake, next_module_gc);
         if (!deadlines.empty() && deadlines.begin()->first <= now) {
             Deadline d = std::move(deadlines.begin()->second);
             deadlines.erase(deadlines.begin());
@@ -1463,19 +1517,16 @@ void Runtime::Impl::fire(Deadline d) {
 void Runtime::Impl::recover() {
     const Warn warn = [this](const std::string& text) { log(2, "", text); };
     for (auto& id : store->load_revoked(warn)) revoked_ids.insert(std::move(id));
-    for (auto& module : store->load_modules(warn)) {
-        modules.emplace(module->hash_hex(), module);
-    }
     for (auto& r : store->load_paglets(warn)) {
-        auto mod = modules.find(r.module);
-        if (mod == modules.end()) {
-            log(3, r.id, "recovery: module " + r.module + " missing; paglet dropped");
-            continue;
-        }
         TrustClass trust = TrustClass::roaming;
         if (r.trust == "resident") trust = TrustClass::resident;
         if (r.trust == "system") trust = TrustClass::system;
-        PagletRec& rec = new_paglet(r.id, mod->second, trust, r.owner);
+        PagletRec* created = r.module.empty() ? nullptr : new_paglet(r.id, r.module, trust, r.owner);
+        if (created == nullptr) {
+            log(3, r.id, "recovery: module " + r.module + " missing; paglet dropped");
+            continue;
+        }
+        PagletRec& rec = *created;
         rec.started = r.started;
         rec.next_handle = r.next_handle;
         rec.next_correlation = r.next_correlation;
@@ -1520,6 +1571,16 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
                            ("paglets-work-" + to_hex(std::span<const std::uint8_t>(suffix)));
         impl_->own_work_root = true;
     }
+    {
+        ModuleStoreConfig mc;
+        if (!impl_->config.state_dir.empty()) mc.dir = impl_->config.state_dir / "modules";
+        mc.cache_bytes = impl_->config.module_cache_bytes;
+        impl_->modules = std::make_unique<ModuleStore>(std::move(mc), [impl = impl_.get()](const std::string& text) {
+            std::lock_guard lock(impl->mu);
+            impl->log(2, "", text);
+        });
+    }
+    impl_->next_module_gc = SteadyClock::now() + impl_->config.module_gc_interval;
     if (!impl_->config.state_dir.empty()) {
         impl_->store.emplace(impl_->config.state_dir);
         std::lock_guard lock(impl_->mu);
@@ -1586,6 +1647,7 @@ void Runtime::shutdown(bool save_state) {
         if (rec->instance) instances.push_back(std::move(rec->instance));
     }
     instances.clear();  // before the records and executors they refer to
+    impl_->modules->flush();
     std::lock_guard lock(impl_->mu);
     impl_->retired.clear();
     if (impl_->own_work_root) {
@@ -1599,24 +1661,19 @@ const Config& Runtime::config() const {
 }
 
 std::expected<std::string, std::string> Runtime::add_module(Bytes bytes) {
-    auto info = wasm::parse_module(bytes);
-    if (!info) return std::unexpected("invalid module: " + info.error());
-    if (auto ok = check_paglet_module(*info, TrustClass::system); !ok) return std::unexpected(ok.error());
-    const std::string hash = to_hex(sha256(bytes));
-    {
-        std::lock_guard lock(impl_->mu);
-        if (impl_->modules.contains(hash)) return hash;
+    return impl_->modules->add(std::move(bytes));
+}
+
+ModuleStore& Runtime::modules() {
+    return *impl_->modules;
+}
+
+std::vector<std::string> Runtime::worker_modules() const {
+    std::set<std::string> out;
+    for (const auto& lane : impl_->lanes) {
+        for (auto& hash : lane->executor->loaded_modules()) out.insert(std::move(hash));
     }
-    Bytes copy;
-    if (impl_->store) copy = bytes;
-    auto module = wasm::Module::load(std::move(bytes), wasm::ImportPolicy::system());
-    if (!module) return std::unexpected(module.error());
-    std::lock_guard lock(impl_->mu);
-    if (impl_->store) {
-        if (auto ok = impl_->store->save_module(hash, copy); !ok) return std::unexpected(ok.error());
-    }
-    impl_->modules.emplace(hash, std::move(*module));
-    return hash;
+    return {out.begin(), out.end()};
 }
 
 std::expected<std::string, std::string> Runtime::add_module_file(const std::filesystem::path& path) {
@@ -1627,9 +1684,9 @@ std::expected<std::string, std::string> Runtime::add_module_file(const std::file
 
 std::expected<PagletId, std::string> Runtime::create(std::string_view module, CreateOptions options) {
     std::lock_guard lock(impl_->mu);
-    auto it = impl_->modules.find(std::string(module));
-    if (it == impl_->modules.end()) return std::unexpected("unknown module " + std::string(module));
-    if (auto ok = check_paglet_module(it->second->info(), options.trust); !ok) return std::unexpected(ok.error());
+    auto info = impl_->modules->info(module);
+    if (!info) return std::unexpected("unknown module " + std::string(module));
+    if (auto ok = check_paglet_module(*info, options.trust); !ok) return std::unexpected(ok.error());
     PagletId id = new_paglet_id();
     if (options.id) {
         const bool hex =
@@ -1640,7 +1697,9 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
         }
         id = *options.id;
     }
-    PagletRec& rec = impl_->new_paglet(id, it->second, options.trust, std::move(options.owner));
+    PagletRec* created = impl_->new_paglet(id, std::string(module), options.trust, std::move(options.owner));
+    if (created == nullptr) return std::unexpected("unknown module " + std::string(module));
+    PagletRec& rec = *created;
     rec.checkpoint_interval = options.checkpoint_interval;
     impl_->install_services(rec);
     impl_->enqueue_start(rec, abi::EventKind::created, std::move(options.args), {}, std::nullopt);
@@ -1799,7 +1858,7 @@ std::expected<PagletId, std::string> Runtime::add_system_paglet(std::shared_ptr<
         if (impl_->system_paglets.contains(name) || impl_->find(id) != nullptr) {
             return std::unexpected("system paglet " + name + " exists");
         }
-        PagletRec& rec = impl_->new_paglet(id, nullptr, TrustClass::system, "host");
+        PagletRec& rec = *impl_->new_paglet(id, {}, TrustClass::system, "host");
         rec.native = paglet;
         rec.context = std::make_unique<NativeContext>(*this, *impl_, id);
         rec.started = true;

@@ -42,16 +42,13 @@ struct PagletRecord {
 using Warn = std::function<void(const std::string&)>;
 
 // State directory layout:
-//   modules/<hash>.wasm    paglet modules by SHA-256
+//   modules/               the module store (modules.hpp)
 //   paglets/<id>.paglet    record and last memory image, replaced atomically
 //   storage/<id>/          durable storage of a paglet (see Runtime::storage_dir)
 //   work/<id>/             scratch space, cleared when the host starts
 class Store {
 public:
     explicit Store(std::filesystem::path root);
-
-    std::expected<void, std::string> save_module(const std::string& hash, std::span<const std::uint8_t> bytes);
-    std::vector<std::shared_ptr<wasm::Module>> load_modules(const Warn& warn) const;
 
     std::expected<void, std::string> save_paglet(const PagletRecord& record, const wasm::Snapshot& image);
     std::vector<PagletRecord> load_paglets(const Warn& warn) const;
