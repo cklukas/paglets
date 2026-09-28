@@ -2007,10 +2007,17 @@ void Runtime::shutdown(bool save_state) {
         std::lock_guard lock(impl_->mu);
         if (rec->instance) instances.push_back(std::move(rec->instance));
     }
+    {
+        // Retired instances too, but not under the runtime's lock: ending a
+        // worker instance takes the worker's lock, which lanes hold while
+        // they call into the runtime.
+        std::lock_guard lock(impl_->mu);
+        for (auto& r : impl_->retired) instances.push_back(std::move(r));
+        impl_->retired.clear();
+    }
     instances.clear();  // before the records and executors they refer to
     impl_->modules->flush();
     std::lock_guard lock(impl_->mu);
-    impl_->retired.clear();
     if (impl_->own_work_root) {
         std::error_code ec;
         std::filesystem::remove_all(impl_->work_root, ec);
