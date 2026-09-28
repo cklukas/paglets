@@ -66,6 +66,7 @@ if(APPLE AND NOT OPENSSL_ROOT_DIR)
     endforeach()
 endif()
 find_package(OpenSSL 3.0 REQUIRED)
+find_package(Zstd 1.4 REQUIRED)
 
 add_subdirectory(host)
 add_subdirectory(examples)

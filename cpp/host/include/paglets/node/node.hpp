@@ -118,6 +118,26 @@ public:
                                                      runtime::Bytes args = {});
     std::optional<LaunchStatus> launch_status(std::uint64_t launch) const;
 
+    // -- movement (planning/cpp-networking.md, section 6) --
+
+    // Asks a paglet here to move; the destination is a transfer ticket:
+    // `<host name | key ID | label:L | any>[?retries=N&arrival=active|inactive]`.
+    std::expected<void, std::string> dispatch(const runtime::PagletId& paglet, std::string destination);
+    // How long the other side of a move may take for each step (default 30 s).
+    void set_move_timeout(std::chrono::milliseconds timeout);
+    // Memory pages kept for later moves (default 256 MB).
+    void set_page_cache_bytes(std::size_t bytes);
+    struct MoveStats {
+        std::uint64_t moves_out = 0;       // paglets and clones that left
+        std::uint64_t moves_in = 0;        // that arrived
+        std::uint64_t moves_failed = 0;    // that stayed
+        std::uint64_t pages_sent = 0;      // memory pages sent
+        std::uint64_t pages_received = 0;  // received
+        std::uint64_t pages_reused = 0;    // found here and not transferred
+        std::uint64_t bytes_sent = 0;      // compressed page bytes sent
+    };
+    MoveStats move_stats() const;
+
     struct Impl;
 
 private:

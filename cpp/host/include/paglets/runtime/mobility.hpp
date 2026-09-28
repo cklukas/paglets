@@ -71,6 +71,19 @@ struct TravelState {
 };
 Bytes encode_state(const TravelState& state);
 std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_t> bytes);
+Bytes encode_remote(const RemoteMessage& message);
+std::expected<RemoteMessage, std::string> decode_remote(std::span<const std::uint8_t> bytes);
+Bytes encode_caps(const std::vector<Cap>& caps);
+std::expected<std::vector<Cap>, std::string> decode_caps(std::span<const std::uint8_t> bytes);
+
+// A paglet created by another on this host (a child or a local clone), for
+// the mesh to extend the creator's passport (Runtime::take_spawns).
+struct Spawn {
+    PagletId parent;
+    PagletId child;
+    std::string kind;    // "child" or "clone"
+    std::string module;  // hex hash
+};
 
 struct Departure {
     std::uint64_t move = 0;  // for finish_departure

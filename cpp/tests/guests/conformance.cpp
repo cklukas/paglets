@@ -60,6 +60,13 @@ public:
             m.reply_raw(paglets::Bytes(m.payload().begin(), m.payload().end()));
         });
         r.on("journal", [this](Message& m) { m.reply(journal_); });
+        // Memory that stays the same (Cmd.ms bytes of a fixed pattern): moves
+        // then have pages to reuse.
+        r.on<Cmd>("ballast", [this](const Cmd& c, Message& m) {
+            ballast_.assign(static_cast<std::size_t>(c.ms), 0);
+            for (std::size_t i = 0; i < ballast_.size(); ++i) ballast_[i] = static_cast<std::uint8_t>(i * 131 + 7);
+            m.reply(static_cast<std::int64_t>(ballast_.size()));
+        });
         r.on("count", [this](Message& m) {
             ++count_;
             m.reply(count_);
@@ -270,6 +277,7 @@ private:
     void note(std::string entry) { journal_.push_back(std::move(entry)); }
 
     std::vector<std::string> journal_;
+    std::vector<std::uint8_t> ballast_;
     std::vector<Capability> deferred_;
     std::int64_t count_ = 0;
 };

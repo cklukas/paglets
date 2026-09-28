@@ -188,6 +188,7 @@ struct PagletRec {
     std::optional<std::string> dispatch_to;  // destination of a pending dispatch
     bool moving = false;                     // departed, outcome pending: messages are held
     bool arriving = false;                   // prepared here, not yet committed
+    bool dormant = false;                    // arrived inactive: runs when a message comes
     std::optional<Envelope> arrival_start;   // its first delivery, on commit
 
     const std::string& module_hash() const { return module; }
@@ -232,6 +233,12 @@ struct Runtime::Impl {
     std::map<std::uint64_t, Moving> departures;
     std::uint64_t next_move = 1;
     std::vector<Departure> outgoing;  // for the depart hook, outside the lock
+    std::deque<Spawn> spawns;         // children and local clones, for the mesh
+
+    void record_spawn(const PagletId& parent, const PagletId& child, std::string kind, const std::string& module) {
+        if (spawns.size() >= 10000) spawns.pop_front();
+        spawns.push_back(Spawn{parent, child, std::move(kind), module});
+    }
     SteadyClock::time_point next_module_gc{};
     std::map<PagletId, std::unique_ptr<PagletRec>> paglets;
     std::map<PagletId, Ending> endings;
@@ -407,6 +414,7 @@ struct Runtime::Impl {
         if (rec.running || rec.queued || rec.awaiting_image || rec.moving || rec.arriving || rec.mailbox.empty()) {
             return;
         }
+        if (rec.dormant && rec.mailbox.size() < 2) return;  // only its `arrived` event waits
         if (rec.lane < 0) {
             // Place next to the paglet it talks to, unless that lane is
             // clearly busier than the least loaded one; otherwise on the
@@ -1080,6 +1088,7 @@ public:
             return caps.error();
         }
         ++rec_.spawned_this_call;
+        rt_.record_spawn(rec_.id, id, "child", created->module);
         PagletRec& child = *created;
         child.lane_hint = rec_.lane;
         child.checkpoint_interval = rec_.checkpoint_interval;
@@ -1140,6 +1149,7 @@ public:
                     return caps.error();
                 }
                 ++rec_.spawned_this_call;
+                rt_.record_spawn(rec_.id, id, "clone", created->module);
                 PagletRec& clone = *created;
                 clone.awaiting_image = true;
                 clone.lane_hint = rec_.lane;
@@ -1477,6 +1487,7 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
 
     switch (env.type) {
         case Envelope::Type::start: {
+            rec.dormant = false;
             if (env.arrived) {
                 result = call_event(rec, abi::EventKind::arrived, abi::encode(*env.arrived));
                 rec.started = true;
@@ -2411,12 +2422,13 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     return lost;
 }
 
-std::expected<void, std::string> Runtime::commit_arrival(const PagletId& id) {
+std::expected<void, std::string> Runtime::commit_arrival(const PagletId& id, bool activate) {
     Impl& rt = *impl_;
     std::lock_guard lock(rt.mu);
     PagletRec* rec = rt.find(id);
     if (rec == nullptr || !rec->arriving) return std::unexpected("no arrival of " + id);
     rec->arriving = false;
+    rec->dormant = !activate;
     // Stored at once: after a crash the paglet is here, not lost.
     if (rt.store && rec->image) rt.persist(*rec, *rec->image);
     Envelope start = std::move(*rec->arrival_start);
@@ -2454,6 +2466,13 @@ std::expected<void, std::int32_t> Runtime::dispatch(const PagletId& id, std::str
     return {};
 }
 
+std::vector<Spawn> Runtime::take_spawns() {
+    std::lock_guard lock(impl_->mu);
+    std::vector<Spawn> out(impl_->spawns.begin(), impl_->spawns.end());
+    impl_->spawns.clear();
+    return out;
+}
+
 std::optional<std::string> Runtime::location(const PagletId& id) const {
     std::lock_guard lock(impl_->mu);
     auto it = impl_->tombstones.find(id);
@@ -2464,7 +2483,8 @@ std::optional<std::string> Runtime::location(const PagletId& id) const {
 std::optional<PagletInfo> Runtime::info(const PagletId& id) const {
     std::lock_guard lock(impl_->mu);
     auto it = impl_->paglets.find(id);
-    if (it == impl_->paglets.end()) return std::nullopt;
+    // A prepared arrival is not here until the move commits.
+    if (it == impl_->paglets.end() || it->second->arriving) return std::nullopt;
     const PagletRec& r = *it->second;
     return PagletInfo{r.id,
                       r.module_hash(),

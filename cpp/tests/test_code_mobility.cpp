@@ -6,6 +6,7 @@
 // and run paglets launched from another host. The exit scenario: a host with
 // no application code receives and runs a paglet.
 
+#include "mesh_fixture.hpp"
 #include "runtime_fixture.hpp"
 #include "test.hpp"
 
@@ -23,150 +24,7 @@
 #include <tuple>
 
 using namespace paglets::test;
-using namespace paglets::mesh;
-namespace ps = paglets::services;
 namespace fs = std::filesystem;
-using Launch = paglets::node::Node::LaunchStatus;
-
-namespace {
-
-std::string frame_type(const Bytes& frame) {
-    auto v = decode(frame);
-    if (!v || v->as_map() == nullptr) return {};
-    return Fields{*v->as_map()}.str("t").value_or("");
-}
-
-// Hosts connected by an in-memory network. `filter` sees every frame before
-// delivery and may change or drop it.
-struct Mesh {
-    struct Port final : GossipTransport {
-        Mesh* net = nullptr;
-        PublicKey self{};
-        void send(const PublicKey& to, Bytes frame) override { net->queue.emplace_back(self, to, std::move(frame)); }
-    };
-
-    struct Host {
-        std::string name;
-        PublicKey key{};
-        Port port;
-        std::unique_ptr<Fixture> f;
-        std::shared_ptr<ps::SystemServices> services;
-        std::unique_ptr<paglets::node::Node> node;
-    };
-
-    SigningKey admin = SigningKey::generate();
-    SigningKey owner = SigningKey::generate();
-    std::optional<Record> genesis;
-    std::deque<std::tuple<PublicKey, PublicKey, Bytes>> queue;
-    std::vector<std::unique_ptr<Host>> hosts;
-    std::function<bool(const PublicKey& from, const PublicKey& to, Bytes& frame)> filter;
-    std::map<std::string, int> sent;  // frames by type
-
-    Mesh() {
-        auto g = make_genesis("mobility", {&admin}, {}, 1);
-        REQUIRE_OK(g);
-        genesis = *g;
-    }
-
-    ~Mesh() {
-        for (auto& h : hosts) h->node.reset();
-    }
-
-    Host& add_host(const std::string& name) {
-        auto h = std::make_unique<Host>();
-        h->name = name;
-        SigningKey key = SigningKey::generate();
-        h->key = key.public_key();
-        h->port.net = this;
-        h->port.self = h->key;
-        h->f = std::make_unique<Fixture>();
-        auto installed = ps::install_system_services(*h->f->runtime, ps::ServicesConfig{});
-        REQUIRE_OK(installed);
-        h->services = *installed;
-        auto ledger = Ledger::create(*genesis);
-        REQUIRE_OK(ledger);
-        h->node = std::make_unique<paglets::node::Node>(*h->f->runtime, h->services, std::move(*ledger), std::move(key),
-                                                        h->port);
-        REQUIRE_OK(h->node->start());
-        for (auto& other : hosts) {
-            h->node->add_seed(other->key);
-            other->node->add_seed(h->key);
-        }
-        hosts.push_back(std::move(h));
-        return *hosts.back();
-    }
-
-    Host* find(const PublicKey& key) {
-        for (auto& h : hosts) {
-            if (h->key == key) return h.get();
-        }
-        return nullptr;
-    }
-
-    // An admin record made on the first host.
-    void admin_record(const std::string& type, Map data) {
-        auto r = hosts.front()->node->draft(type, std::move(data));
-        REQUIRE_OK(r);
-        r->sign(admin);
-        REQUIRE_OK(hosts.front()->node->submit(*r));
-    }
-
-    void enroll_all() {
-        for (auto& h : hosts) admin_record("host-enroll", data::host_enroll(h->key, h->name, {}));
-        admin_record("owner-enroll", data::owner_enroll(owner.public_key(), "olga", {}));
-        REQUIRE(settle([] { return false; }, 40) || converged());
-    }
-
-    bool converged() {
-        for (auto& h : hosts) {
-            if (h->node->ledger_digest() != hosts.front()->node->ledger_digest()) return false;
-        }
-        return true;
-    }
-
-    void deliver() {
-        while (!queue.empty()) {
-            auto [from, to, frame] = std::move(queue.front());
-            queue.pop_front();
-            ++sent[frame_type(frame)];
-            if (filter && !filter(from, to, frame)) continue;
-            if (Host* h = find(to)) h->node->receive(from, frame);
-        }
-    }
-
-    // Delivers and ticks until `done` holds (or rounds run out).
-    bool settle(const std::function<bool()>& done, int rounds = 200) {
-        for (int i = 0; i < rounds; ++i) {
-            deliver();
-            if (done()) return true;
-            for (auto& h : hosts) h->node->tick();
-            std::this_thread::sleep_for(2ms);
-        }
-        deliver();
-        return done();
-    }
-
-    Passport passport(const std::string& module, std::string paglet) {
-        const std::int64_t now = unix_ms();
-        auto p = Passport::issue(owner, genesis->id(), *parse_key_id(module), std::move(paglet), Value(), now - 1000,
-                                 now + 600'000);
-        REQUIRE_OK(p);
-        return *p;
-    }
-
-    Launch launch(Host& from, Host& to, const Passport& p, Bytes args = {}) {
-        auto id = from.node->launch(to.key, p, std::move(args));
-        REQUIRE_OK(id);
-        REQUIRE(settle([&] { return from.node->launch_status(*id)->state != Launch::State::pending; }));
-        return *from.node->launch_status(*id);
-    }
-};
-
-std::string paglet_id(char c) {
-    return std::string(32, c);
-}
-
-}  // namespace
 
 PAGLETS_TEST("code mobility: a host without application code receives and runs a paglet (WP11 exit)") {
     Mesh net;
@@ -352,56 +210,6 @@ PAGLETS_TEST("code mobility: module sources and launches on the host itself") {
     REQUIRE(net.settle([&] { return a.f->runtime->modules().contains(hello); }));
     CHECK(!a.node->fetching(*parse_key_id(hello)));
 }
-
-namespace {
-
-// A host with a node and the HTTPS transport: frames travel over real
-// channels on the loopback interface.
-struct NetHost {
-    ForwardingTransport forward;
-    std::unique_ptr<Fixture> f;
-    std::shared_ptr<ps::SystemServices> services;
-    std::unique_ptr<paglets::node::Node> node;
-    std::unique_ptr<paglets::net::Transport> transport;
-
-    explicit NetHost(const Record& genesis) {
-        f = std::make_unique<Fixture>();
-        auto installed = ps::install_system_services(*f->runtime, ps::ServicesConfig{});
-        REQUIRE_OK(installed);
-        services = *installed;
-        auto ledger = Ledger::create(genesis);
-        REQUIRE_OK(ledger);
-        node = std::make_unique<paglets::node::Node>(*f->runtime, services, std::move(*ledger), SigningKey::generate(),
-                                                     forward);
-        REQUIRE_OK(node->start());
-        namespace net = paglets::net;
-        transport = std::make_unique<net::Transport>(
-            node->host_key(), genesis.id(), net::TransportConfig{},
-            [this](const net::Identity& peer) -> std::expected<void, std::string> {
-                const auto peers = node->peers();
-                if (peer.role != net::PeerRole::host || std::ranges::find(peers, peer.key) == peers.end()) {
-                    return std::unexpected(std::string("not a host of this mesh"));
-                }
-                return {};
-            },
-            [this](const net::Identity& from, Bytes frame) -> std::vector<Bytes> {
-                if (from.role == net::PeerRole::host) node->receive(from.key, frame);
-                return {};
-            });
-        REQUIRE_OK(transport->start());
-        forward.set_target(transport.get());
-    }
-
-    ~NetHost() {
-        forward.set_target(nullptr);
-        transport->stop();
-        transport.reset();
-        node.reset();
-        f.reset();
-    }
-};
-
-}  // namespace
 
 PAGLETS_TEST("code mobility over HTTPS channels: gossip converges, a launched paglet runs where its module was not") {
     SigningKey admin = SigningKey::generate();

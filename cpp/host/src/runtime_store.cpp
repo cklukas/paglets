@@ -346,4 +346,93 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
     return s;
 }
 
+Bytes encode_caps(const std::vector<Cap>& caps) {
+    msgpack::Writer w;
+    w.write_array_header(caps.size());
+    for (const auto& c : caps) encode_cap(w, c);
+    return w.bytes();
+}
+
+std::expected<std::vector<Cap>, std::string> decode_caps(std::span<const std::uint8_t> bytes) {
+    msgpack::Reader r(bytes);
+    std::uint32_t n = 0;
+    if (!r.read_array_header(n)) return std::unexpected(std::string("malformed capabilities"));
+    std::vector<Cap> out(n);
+    for (auto& c : out) {
+        if (!decode_cap(r, c)) return std::unexpected(std::string("malformed capabilities"));
+    }
+    if (!r.at_end()) return std::unexpected(std::string("malformed capabilities"));
+    return out;
+}
+
+Bytes encode_remote(const RemoteMessage& m) {
+    msgpack::Writer w;
+    w.write_map_header(16);
+    put(w, "kind", static_cast<std::int32_t>(m.kind));
+    put(w, "target", m.target);
+    put(w, "host", m.host);
+    put(w, "name", m.name);
+    put(w, "payload", m.payload);
+    put(w, "priority", m.priority);
+    w.write_str("sender");
+    if (m.sender) {
+        abi::paglets_encode(w, *m.sender);
+    } else {
+        w.write_nil();
+    }
+    put(w, "badge", m.badge);
+    w.write_str("caps");
+    w.write_array_header(m.caps.size());
+    for (const auto& c : m.caps) encode_cap(w, c);
+    put(w, "requester", m.requester);
+    put(w, "requester_host", m.requester_host);
+    put(w, "correlation", m.correlation);
+    put(w, "timeout_ms", m.timeout_ms);
+    put(w, "status", m.status);
+    put(w, "hops", m.hops);
+    put(w, "v", std::int32_t{1});
+    return w.bytes();
+}
+
+std::expected<RemoteMessage, std::string> decode_remote(std::span<const std::uint8_t> bytes) {
+    RemoteMessage m;
+    std::int32_t kind = -1;
+    msgpack::Reader r(bytes);
+    const bool ok = abi::detail::read_map(r, [&](std::string_view k) {
+        if (k == "kind") return msgpack::read_value(r, kind);
+        if (k == "target") return msgpack::read_value(r, m.target);
+        if (k == "host") return msgpack::read_value(r, m.host);
+        if (k == "name") return msgpack::read_value(r, m.name);
+        if (k == "payload") return msgpack::read_value(r, m.payload);
+        if (k == "priority") return msgpack::read_value(r, m.priority);
+        if (k == "sender") {
+            if (r.peek() == msgpack::Kind::nil) return r.read_nil();
+            abi::SenderRecord s;
+            if (!abi::paglets_decode(r, s)) return false;
+            m.sender = std::move(s);
+            return true;
+        }
+        if (k == "badge") return msgpack::read_value(r, m.badge);
+        if (k == "caps") {
+            std::uint32_t n = 0;
+            if (!r.read_array_header(n)) return false;
+            m.caps.resize(n);
+            for (auto& c : m.caps) {
+                if (!decode_cap(r, c)) return false;
+            }
+            return true;
+        }
+        if (k == "requester") return msgpack::read_value(r, m.requester);
+        if (k == "requester_host") return msgpack::read_value(r, m.requester_host);
+        if (k == "correlation") return msgpack::read_value(r, m.correlation);
+        if (k == "timeout_ms") return msgpack::read_value(r, m.timeout_ms);
+        if (k == "status") return msgpack::read_value(r, m.status);
+        if (k == "hops") return msgpack::read_value(r, m.hops);
+        return r.skip();
+    });
+    if (!ok || !r.at_end() || kind < 0 || kind > 2) return std::unexpected(std::string("malformed remote message"));
+    m.kind = static_cast<RemoteMessage::Kind>(kind);
+    return m;
+}
+
 }  // namespace paglets::runtime

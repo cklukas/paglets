@@ -131,3 +131,84 @@ tests in `cpp/tests/test_mobility.cpp` join two runtimes directly.
   the original's transferable endpoints and service handles, and the
   endpoints passed to it; on success endpoints to it name its host.
 - Only roaming paglets move; arriving paglets are always roaming.
+
+## 6. Moving paglets (mesh)
+
+The node's side (`cpp/host/src/node/movement.cpp`; tests in
+`cpp/tests/test_movement.cpp`, over the in-memory network and over HTTPS).
+
+**Transfer tickets.** A destination is a ticket:
+`<target>[?retries=N&arrival=active|inactive]`, where the target is a host
+name, a key ID (or a prefix of at least 8 digits), `label:<label>` or
+`any`. The source picks up to `retries` (default 3) enrolled hosts other
+than itself that match, and skips hosts where an item of the paglet's
+manifest (in its passport) is denied and no grant of the paglet covers it
+(preflight, cpp-policy.md, section 6). It offers the paglet to one host
+after the other until one takes it; `arrival=inactive` stores it on
+arrival without running it until a message comes. Paglets need a
+passport to move (paglets of enrolled owners).
+
+**Frames** (canonical values on the host channels):
+
+| Frame | Members | Meaning |
+|---|---|---|
+| `move-offer` | `r`, `b` (body), `s` (signature) | the signed envelope (below) |
+| `move-want` | `r`, `p` [page index] | pages the destination lacks |
+| `move-pages` | `r`, `p` [[index, zstd bytes]] | pages, at most 1 MB compressed per frame |
+| `move-ready` | `r` | prepared: waiting for the decision |
+| `move-refused` | `r`, `e` | not taken, and why |
+| `move-commit`, `move-abort` | `r` | the source's decision |
+| `move-query` | `r` | a prepared destination asks for the decision |
+| `deliver` | `m` (a remote message) | messages, requests and replies across hosts (section 4) |
+
+**The signed envelope.** The offer's body is a canonical map: version,
+mesh, source and destination host keys, request ID, kind (`dispatch` or
+`clone`), paglet ID, passport, travelling state (section 5), page manifest
+(`page_count`, globals, a SHA-256 hash or nil per 64 KB page), the arrival
+mode, time, and for clones the arguments, capabilities and original. The
+source host signs `"paglets move offer v1" 0x00 SHA-256(body)` with its
+host key, so the destination can check who sent it independent of the
+channel it came through (relays, WP15).
+
+**The destination** refuses before any page moves unless: the offer comes
+from an enrolled host and verifies; it names this host and mesh; the
+passport verifies for the paglet and module (owner enrolled, not expired;
+clones and children carry links signed by enrolled hosts); the module may
+run as a roaming paglet (cpp-modules.md, section 4); the paglet is not here
+already. It then gets the module (cpp-modules.md, section 5, asking the
+source first) and asks only for pages it does not have: pages of images a
+host sent or received stay in a page cache (256 MB, least recently used out),
+so repeated moves between hosts transfer only changed pages. Every page is
+checked against the manifest's hash. With all pages it prepares the arrival
+(capabilities from grants are re-created, section 7) and answers
+`move-ready`.
+
+**Commit.** The source decides: on `move-ready` it records the commit
+(durably, in the node's state) and only then tells the runtime (held
+messages follow the paglet, section 5) and the destination (`move-commit`),
+which starts the paglet and stores it and its passport. A refusal, or no
+answer within the move timeout (30 s per step), moves on to the next host of
+the ticket (the destination is told `move-abort`); when none is left the
+paglet stays with `paglets.move_failed`. A prepared destination that hears
+nothing asks with `move-query` until the source answers; it never decides
+itself, so a paglet neither runs twice nor gets lost.
+
+**Passports.** A moving paglet's passport goes with it (and is removed at
+the source). Clones for another host get a link signed by the source host;
+children and local clones get links when they are made (the runtime reports
+them, `Runtime::take_spawns`), so they can move as well.
+
+## 7. Capabilities on arrival
+
+As section 4.6 of the security design says, grants follow the paglet;
+host-local handles do not:
+
+| Capability | On arrival |
+|---|---|
+| Endpoint to a paglet | Kept, with the host hint of its target |
+| Default service endpoint | The destination's service endpoint under the same handle |
+| Resource capability (`dir`, ...) from a grant | Re-created from the grant if it is the paglet's own, valid, and its host selector covers the destination (the named root must exist there); narrowings the paglet made (fewer rights, a subdirectory, an earlier expiry) stay |
+| Endpoint to a service with ambient authority, from a grant | Re-created the same way |
+| Reply capability | Kept |
+| Timer | Re-armed for its time |
+| Anything else | Lost: listed in the `arrived` event |

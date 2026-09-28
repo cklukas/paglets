@@ -177,7 +177,9 @@ public:
     // Returns the capabilities that could not be re-created here, as
     // descriptions for its `arrived` event.
     std::expected<std::vector<std::string>, std::string> prepare_arrival(Arrival arrival, const RecreateCap& recreate);
-    std::expected<void, std::string> commit_arrival(const PagletId& id);
+    // `activate` false: the paglet stays inactive until a message arrives
+    // (it then receives `arrived` first).
+    std::expected<void, std::string> commit_arrival(const PagletId& id, bool activate = true);
     void abort_arrival(const PagletId& id);
     // Asks a paglet to move (an admin or tool on this host); it dispatches
     // after its current handler, receiving `dispatching` first.
@@ -185,7 +187,11 @@ public:
     // Where a paglet that left this host went (key ID of the host), while
     // this host remembers.
     std::optional<std::string> location(const PagletId& id) const;
+    // Children and local clones created since the last call, for passport
+    // links (the mesh takes them regularly; at most 10 000 are kept).
+    std::vector<Spawn> take_spawns();
 
+    // Paglets of prepared, uncommitted arrivals are not listed.
     std::optional<PagletInfo> info(const PagletId& id) const;
     std::vector<PagletInfo> list() const;
     std::optional<Ending> ending(const PagletId& id) const;
