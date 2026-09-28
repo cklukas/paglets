@@ -37,7 +37,7 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake ninja-build curl ca-certificates git libsodium-dev pkg-config
+          apt-get install -y --no-install-recommends cmake ninja-build curl ca-certificates git libsodium-dev libssl-dev libzstd-dev pkg-config
       - name: Install wasi-sdk
         run: |
           curl -fsSL -o wasi-sdk.tar.gz \
@@ -80,7 +80,7 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends cmake ninja-build curl ca-certificates git libsodium-dev pkg-config
+          apt-get install -y --no-install-recommends cmake ninja-build curl ca-certificates git libsodium-dev libssl-dev libzstd-dev pkg-config
           curl -fsSL -o wasi-sdk.tar.gz \
             "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz"
           mkdir -p /opt/wasi-sdk
@@ -98,7 +98,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchains
-        run: brew install gcc@16 llvm lld wasi-libc wasi-runtimes ninja libsodium pkgconf
+        run: brew install gcc@16 llvm lld wasi-libc wasi-runtimes ninja libsodium openssl@3 zstd pkgconf
       - name: Configure
         working-directory: cpp
         run: cmake --preset macos-arm64
@@ -128,6 +128,8 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-libsodium
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-zstd
             mingw-w64-ucrt-x86_64-pkgconf
             git
       - name: Download guest modules

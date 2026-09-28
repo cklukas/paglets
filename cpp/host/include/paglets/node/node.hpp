@@ -56,6 +56,10 @@ public:
 
     const mesh::PublicKey& host() const;
     const mesh::RecordId& mesh() const;
+    // The host key (for the channels of the network transport).
+    const mesh::SigningKey& host_key() const;
+    // The hosts this node talks to: enrolled hosts and seeds.
+    std::vector<mesh::PublicKey> peers() const;
 
     // Gossip and node frames.
     void add_seed(const mesh::PublicKey& peer);

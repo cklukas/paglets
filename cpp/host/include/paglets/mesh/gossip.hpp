@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <mutex>
 #include <set>
 #include <span>
 #include <string>
@@ -34,6 +35,25 @@ class GossipTransport {
 public:
     virtual ~GossipTransport() = default;
     virtual void send(const PublicKey& to, Bytes frame) = 0;
+};
+
+// Forwards frames to a transport set later, for transports that need the
+// node they serve (the network transport signs its channels with the node's
+// host key). Frames sent before a target is set are dropped.
+class ForwardingTransport final : public GossipTransport {
+public:
+    void set_target(GossipTransport* target) {
+        std::lock_guard lock(mu_);
+        target_ = target;
+    }
+    void send(const PublicKey& to, Bytes frame) override {
+        std::lock_guard lock(mu_);
+        if (target_ != nullptr) target_->send(to, std::move(frame));
+    }
+
+private:
+    std::mutex mu_;
+    GossipTransport* target_ = nullptr;
 };
 
 struct GossipStats {

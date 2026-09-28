@@ -44,12 +44,20 @@ add_library(paglets_mesh STATIC
 target_link_libraries(paglets_mesh PUBLIC paglets_host PRIVATE Sodium::Sodium)
 target_compile_options(paglets_mesh PRIVATE ${PAGLETS_WARNINGS})
 
-# Networking (WP12): Noise channels between identity keys.
+# Networking (WP12): Noise channels between identity keys, carried over
+# HTTPS (cpp-httplib with OpenSSL).
 add_library(paglets_net STATIC
     src/net/channel.cpp
-    src/net/noise.cpp)
-target_link_libraries(paglets_net PUBLIC paglets_mesh PRIVATE Sodium::Sodium)
+    src/net/noise.cpp
+    src/net/transport.cpp)
+target_link_libraries(paglets_net PUBLIC paglets_mesh PRIVATE Sodium::Sodium OpenSSL::SSL OpenSSL::Crypto)
+target_include_directories(paglets_net SYSTEM PRIVATE ${PAGLETS_HTTPLIB_INCLUDE_DIR})
 target_compile_options(paglets_net PRIVATE ${PAGLETS_WARNINGS})
+if(WIN32)
+    # cpp-httplib needs Windows 10 APIs.
+    target_compile_definitions(paglets_net PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_libraries(paglets_net PRIVATE ws2_32 crypt32)
+endif()
 
 # The standard system paglets and the host platform layer (WP10); they use
 # C++26 reflection for their service contracts.

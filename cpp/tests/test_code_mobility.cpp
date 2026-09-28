@@ -12,6 +12,7 @@
 #include <paglets/mesh/gossip.hpp>
 #include <paglets/mesh/ledger.hpp>
 #include <paglets/mesh/passport.hpp>
+#include <paglets/net/transport.hpp>
 #include <paglets/node/node.hpp>
 #include <paglets/services/system_services.hpp>
 
@@ -350,4 +351,106 @@ PAGLETS_TEST("code mobility: module sources and launches on the host itself") {
     a.node->fetch_module(*parse_key_id(hello));
     REQUIRE(net.settle([&] { return a.f->runtime->modules().contains(hello); }));
     CHECK(!a.node->fetching(*parse_key_id(hello)));
+}
+
+namespace {
+
+// A host with a node and the HTTPS transport: frames travel over real
+// channels on the loopback interface.
+struct NetHost {
+    ForwardingTransport forward;
+    std::unique_ptr<Fixture> f;
+    std::shared_ptr<ps::SystemServices> services;
+    std::unique_ptr<paglets::node::Node> node;
+    std::unique_ptr<paglets::net::Transport> transport;
+
+    explicit NetHost(const Record& genesis) {
+        f = std::make_unique<Fixture>();
+        auto installed = ps::install_system_services(*f->runtime, ps::ServicesConfig{});
+        REQUIRE_OK(installed);
+        services = *installed;
+        auto ledger = Ledger::create(genesis);
+        REQUIRE_OK(ledger);
+        node = std::make_unique<paglets::node::Node>(*f->runtime, services, std::move(*ledger), SigningKey::generate(),
+                                                     forward);
+        REQUIRE_OK(node->start());
+        namespace net = paglets::net;
+        transport = std::make_unique<net::Transport>(
+            node->host_key(), genesis.id(), net::TransportConfig{},
+            [this](const net::Identity& peer) -> std::expected<void, std::string> {
+                const auto peers = node->peers();
+                if (peer.role != net::PeerRole::host || std::ranges::find(peers, peer.key) == peers.end()) {
+                    return std::unexpected(std::string("not a host of this mesh"));
+                }
+                return {};
+            },
+            [this](const net::Identity& from, Bytes frame) -> std::vector<Bytes> {
+                if (from.role == net::PeerRole::host) node->receive(from.key, frame);
+                return {};
+            });
+        REQUIRE_OK(transport->start());
+        forward.set_target(transport.get());
+    }
+
+    ~NetHost() {
+        forward.set_target(nullptr);
+        transport->stop();
+        transport.reset();
+        node.reset();
+        f.reset();
+    }
+};
+
+}  // namespace
+
+PAGLETS_TEST("code mobility over HTTPS channels: gossip converges, a launched paglet runs where its module was not") {
+    SigningKey admin = SigningKey::generate();
+    SigningKey owner = SigningKey::generate();
+    auto genesis = make_genesis("network", {&admin}, {}, 1);
+    REQUIRE_OK(genesis);
+    NetHost a(*genesis);
+    NetHost b(*genesis);
+    a.node->add_seed(b.node->host());
+    b.node->add_seed(a.node->host());
+    // Only a knows where b is; b learns a's address from a's channel.
+    a.transport->set_address(b.node->host(), b.transport->url());
+
+    auto admin_record = [&](const std::string& type, Map d) {
+        auto r = a.node->draft(type, std::move(d));
+        REQUIRE_OK(r);
+        r->sign(admin);
+        REQUIRE_OK(a.node->submit(*r));
+    };
+    admin_record("host-enroll", data::host_enroll(a.node->host(), "a", {}));
+    admin_record("host-enroll", data::host_enroll(b.node->host(), "b", {}));
+    admin_record("owner-enroll", data::owner_enroll(owner.public_key(), "olga", {}));
+    auto eventually = [](const std::function<bool()>& done, NetHost& x, NetHost& y) {
+        for (int i = 0; i < 500; ++i) {
+            if (done()) return true;
+            x.node->tick();
+            y.node->tick();
+            std::this_thread::sleep_for(10ms);
+        }
+        return done();
+    };
+    REQUIRE(eventually([&] { return a.node->ledger_digest() == b.node->ledger_digest(); }, a, b));
+    CHECK(b.node->state().is_owner(owner.public_key()));
+    CHECK(b.transport->address(a.node->host()) == a.transport->url());
+
+    const std::string module = a.f->module("conformance.wasm");
+    CHECK(b.f->runtime->modules().list().empty());
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(owner, genesis->id(), *parse_key_id(module), std::string(32, '7'), Value(),
+                                    now - 1000, now + 600'000);
+    REQUIRE_OK(passport);
+    auto launch = a.node->launch(b.node->host(), *passport, text("over https"));
+    REQUIRE_OK(launch);
+    REQUIRE(eventually([&] { return a.node->launch_status(*launch)->state != Launch::State::pending; }, a, b));
+    const Launch status = *a.node->launch_status(*launch);
+    REQUIRE(status.state == Launch::State::running);
+    CHECK_EQ(b.f->call(status.paglet, "count").status, 0);
+    CHECK(contains(b.f->journal(status.paglet), "event:created:over https:0"));
+    CHECK(b.f->runtime->modules().contains(module));
+    CHECK(a.transport->stats().channels_opened >= 1u);
+    CHECK(b.transport->stats().channels_opened >= 1u);  // b answered through its own channel to a
 }

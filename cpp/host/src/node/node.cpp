@@ -766,6 +766,15 @@ const mesh::RecordId& Node::mesh() const {
     return impl_->ledger.mesh();
 }
 
+const mesh::SigningKey& Node::host_key() const {
+    return impl_->key;
+}
+
+std::vector<mesh::PublicKey> Node::peers() const {
+    std::lock_guard lock(impl_->mu);
+    return impl_->replica->peers();
+}
+
 void Node::add_seed(const mesh::PublicKey& peer) {
     std::lock_guard lock(impl_->mu);
     impl_->replica->add_seed(peer);

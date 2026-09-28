@@ -47,14 +47,17 @@ cmake/                    WAMR build (with source fixes) and guest build functio
 macOS (Homebrew):
 
 ```bash
-brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja libsodium pkgconf
+brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja libsodium openssl@3 zstd pkgconf
 ```
 
 Linux: GCC 16 plus [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) in
-`/opt/wasi-sdk` (or set `WASI_SDK_PATH`), and libsodium 1.0.18 or later
-(`apt install libsodium-dev pkg-config`). Windows (MSYS2 UCRT64):
-`mingw-w64-ucrt-x86_64-libsodium` and `mingw-w64-ucrt-x86_64-pkgconf`. The guest toolchain can also be
-given explicitly with `-DPAGLETS_WASI_CLANG=... -DPAGLETS_WASI_SYSROOT=...`.
+`/opt/wasi-sdk` (or set `WASI_SDK_PATH`), libsodium 1.0.18 or later, OpenSSL 3
+and zstd (`apt install libsodium-dev libssl-dev libzstd-dev pkg-config`).
+Windows (MSYS2 UCRT64): `mingw-w64-ucrt-x86_64-libsodium`,
+`mingw-w64-ucrt-x86_64-openssl`, `mingw-w64-ucrt-x86_64-zstd` and
+`mingw-w64-ucrt-x86_64-pkgconf`. The build fetches WAMR and cpp-httplib at
+pinned releases. The guest toolchain can also be given explicitly with
+`-DPAGLETS_WASI_CLANG=... -DPAGLETS_WASI_SYSROOT=...`.
 
 ## Build and test
 

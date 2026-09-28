@@ -42,7 +42,10 @@ std::optional<PeerRole> parse_peer_role(std::string_view text);
 struct Identity {
     mesh::PublicKey key{};
     PeerRole role = PeerRole::host;
-    bool operator==(const Identity&) const = default;
+    // Where the peer says it can be reached (hosts; may be empty). Advisory:
+    // identities compare by key and role.
+    std::string url;
+    bool operator==(const Identity& o) const { return key == o.key && role == o.role; }
 };
 
 // Decides whether the proven peer may use the channel (for example: an
@@ -82,7 +85,8 @@ private:
 class ChannelHandshake {
 public:
     ChannelHandshake(Handshake::Role role, const mesh::SigningKey& identity, PeerRole my_role,
-                     const mesh::RecordId& mesh_id, AcceptPeer accept, std::size_t max_frame = channel_max_frame);
+                     const mesh::RecordId& mesh_id, AcceptPeer accept, std::size_t max_frame = channel_max_frame,
+                     std::string my_url = {});
 
     std::expected<Bytes, std::string> next_message();
     std::expected<void, std::string> receive(std::span<const std::uint8_t> message);

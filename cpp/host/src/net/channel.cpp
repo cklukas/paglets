@@ -91,17 +91,20 @@ std::expected<std::optional<Bytes>, std::string> Channel::open(std::span<const s
 // -- ChannelHandshake -------------------------------------------------------------
 
 ChannelHandshake::ChannelHandshake(Handshake::Role role, const mesh::SigningKey& identity, PeerRole my_role,
-                                   const mesh::RecordId& mesh_id, AcceptPeer accept, std::size_t max_frame)
+                                   const mesh::RecordId& mesh_id, AcceptPeer accept, std::size_t max_frame,
+                                   std::string my_url)
     : handshake_(role, static_key_of(identity), prologue(mesh_id)),
       role_(role),
-      me_{identity.public_key(), my_role},
+      me_{identity.public_key(), my_role, std::move(my_url)},
       accept_(std::move(accept)),
       max_frame_(max_frame) {}
 
 Bytes ChannelHandshake::my_payload() const {
-    return mesh::encode(mesh::Value(mesh::Map{{"v", mesh::Value(payload_version)},
-                                              {"key", mesh::Value::bin(me_.key)},
-                                              {"role", mesh::Value(to_string(me_.role))}}));
+    mesh::Map m{{"v", mesh::Value(payload_version)},
+                {"key", mesh::Value::bin(me_.key)},
+                {"role", mesh::Value(to_string(me_.role))}};
+    if (!me_.url.empty()) m.emplace_back("url", mesh::Value(me_.url));
+    return mesh::encode(mesh::Value(std::move(m)));
 }
 
 std::expected<Bytes, std::string> ChannelHandshake::next_message() {
@@ -131,7 +134,9 @@ std::expected<void, std::string> ChannelHandshake::check_peer(std::span<const st
     auto key = f.fixed<32>("key");
     auto role_text = f.str("role");
     auto role = role_text ? parse_peer_role(*role_text) : std::nullopt;
-    if (!version || *version != payload_version || !key || !role) {
+    std::optional<std::string> url = std::string();
+    if (f.get("url") != nullptr) url = f.str("url");
+    if (!version || *version != payload_version || !key || !role || !url || url->size() > 512) {
         return std::unexpected(std::string("malformed handshake payload"));
     }
     // The identity key must be the one behind the static key the peer proved.
@@ -139,7 +144,7 @@ std::expected<void, std::string> ChannelHandshake::check_peer(std::span<const st
     if (!x || *x != *handshake_.remote_static()) {
         return std::unexpected(std::string("the peer's identity key does not match its channel key"));
     }
-    Identity peer{*key, *role};
+    Identity peer{*key, *role, std::move(*url)};
     if (accept_) {
         if (auto ok = accept_(peer); !ok) return std::unexpected(ok.error());
     }
