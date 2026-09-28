@@ -37,6 +37,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace paglets::node {
 
@@ -188,6 +189,36 @@ public:
     // Ends pins of a paglet on this host (an admin's force-release): the
     // one named, or all. Returns how many ended.
     std::size_t release_pins(const runtime::PagletId& paglet, const std::string& pin = {});
+
+    // -- mesh: host registry and discovery (planning/cpp-mesh.md) --
+
+    struct DiscoveryTiming {
+        std::chrono::milliseconds exchange{2000};  // registry exchange with the next host
+    };
+    void set_discovery_timing(DiscoveryTiming timing);
+    struct HostInfo {
+        mesh::PublicKey key{};
+        std::string name;
+        std::vector<std::string> labels;
+        std::string url;  // empty: not known yet
+        bool self = false;
+        bool online = false;     // heard from recently (this host: always)
+        bool compatible = true;  // same mesh protocol and paglet ABI
+        std::int64_t last_seen_ms = 0;
+        std::int64_t protocol = 0;  // 0: not announced yet
+        std::uint32_t abi_major = 0;
+        std::uint32_t abi_minor = 0;
+        std::string via;  // how its address was learned: gossip, beacon, join
+    };
+    // The enrolled hosts of the mesh, with what this host knows about them.
+    std::vector<HostInfo> hosts() const;
+    // A bootstrap contact answered (Transport::probe): it gets this host's
+    // registry at once.
+    void joined(const mesh::PublicKey& contact);
+    // Multicast beacons (net/beacon.hpp): what this host sends, and what it
+    // heard from `sender_ip`.
+    std::vector<std::uint8_t> beacon() const;
+    void receive_beacon(std::span<const std::uint8_t> beacon, const std::string& sender_ip);
 
     // -- CLI sessions (planning/cpp-networking.md, section 8) --
 

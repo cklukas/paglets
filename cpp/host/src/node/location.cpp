@@ -230,6 +230,13 @@ std::shared_ptr<runtime::SystemPaglet> make_locator(Node::Impl& impl) {
 
 void Node::Impl::heard(const mesh::PublicKey& from) {
     last_heard[from] = Clock::now();
+    last_seen[from] = mesh::unix_ms();
+    // A host heard from for the first time gets this host's registry
+    // (registry.cpp): newcomers learn every address at once.
+    if (!greeted.contains(from) && ledger.state().is_host(from)) {
+        greeted.insert(from);
+        send_registry(from);
+    }
 }
 
 void Node::Impl::update_view() {
@@ -242,7 +249,7 @@ void Node::Impl::update_view() {
             continue;
         }
         auto [it, first] = last_heard.try_emplace(k, now);  // newly seen: up until it stays silent
-        if (now - it->second <= timing.host_timeout) live.push_back(k);
+        if (now - it->second <= timing.host_timeout && compatible(k)) live.push_back(k);
     }
     if (std::ranges::find(live, key.public_key()) == live.end()) live.push_back(key.public_key());
     std::ranges::sort(live);

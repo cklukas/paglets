@@ -211,3 +211,39 @@ PAGLETS_TEST("network: self-signed certificates") {
     CHECK(c->cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
     CHECK(c->key_pem.find("PRIVATE KEY") != std::string::npos);
 }
+
+PAGLETS_TEST("network: hosts of another mesh protocol are refused; probe finds a host by its address") {
+    Host a;
+    TransportConfig other;
+    other.protocol = mesh_protocol + 1;
+    Host b(other);
+    introduce(a, b);
+    a.transport->send(b.key.public_key(), frame_of(1));
+    b.transport->send(a.key.public_key(), frame_of(2));
+    CHECK(a.transport->flush(10s));
+    CHECK(b.transport->flush(10s));
+    CHECK_EQ(a.count(), 0u);
+    CHECK_EQ(b.count(), 0u);
+    CHECK_EQ(a.transport->stats().frames_dropped, 1u);
+    CHECK_EQ(b.transport->stats().frames_dropped, 1u);
+    CHECK(std::ranges::any_of(
+        a.log, [](const std::string& l) { return l.find("incompatible mesh protocol") != std::string::npos; }));
+
+    // A bootstrap contact: only its address is known.
+    Host c;
+    c.allowed.insert(a.key.public_key());
+    a.allowed.insert(c.key.public_key());
+    auto found = c.transport->probe(a.transport->url());
+    REQUIRE_OK(found);
+    CHECK(*found == a.key.public_key());
+    CHECK(c.transport->address(a.key.public_key()) == a.transport->url());
+    c.transport->send(a.key.public_key(), frame_of(3));
+    REQUIRE(a.wait_for(1));
+    // A host it does not accept, or one of the other protocol, is no contact.
+    CHECK(!c.transport->probe(b.transport->url()));
+    c.allowed.insert(b.key.public_key());
+    b.allowed.insert(c.key.public_key());
+    auto refused = c.transport->probe(b.transport->url());
+    REQUIRE(!refused);
+    CHECK(refused.error().find("incompatible") != std::string::npos);
+}

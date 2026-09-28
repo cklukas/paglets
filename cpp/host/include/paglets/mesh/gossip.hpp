@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -35,6 +36,12 @@ class GossipTransport {
 public:
     virtual ~GossipTransport() = default;
     virtual void send(const PublicKey& to, Bytes frame) = 0;
+    // Network addresses of hosts, for transports that use them (the node's
+    // host registry learns and spreads them, planning/cpp-mesh.md).
+    virtual std::optional<std::string> address(const PublicKey&) const { return std::nullopt; }
+    virtual void set_address(const PublicKey&, std::string) {}
+    // Where this host can be reached; empty if the transport has no address.
+    virtual std::string own_address() const { return {}; }
 };
 
 // Forwards frames to a transport set later, for transports that need the
@@ -50,9 +57,21 @@ public:
         std::lock_guard lock(mu_);
         if (target_ != nullptr) target_->send(to, std::move(frame));
     }
+    std::optional<std::string> address(const PublicKey& peer) const override {
+        std::lock_guard lock(mu_);
+        return target_ == nullptr ? std::nullopt : target_->address(peer);
+    }
+    void set_address(const PublicKey& peer, std::string url) override {
+        std::lock_guard lock(mu_);
+        if (target_ != nullptr) target_->set_address(peer, std::move(url));
+    }
+    std::string own_address() const override {
+        std::lock_guard lock(mu_);
+        return target_ == nullptr ? std::string() : target_->own_address();
+    }
 
 private:
-    std::mutex mu_;
+    mutable std::mutex mu_;
     GossipTransport* target_ = nullptr;
 };
 

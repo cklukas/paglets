@@ -13,6 +13,7 @@
 
 #include <paglets/mesh/crypto.hpp>
 #include <paglets/mesh/ledger.hpp>
+#include <paglets/net/beacon.hpp>
 #include <paglets/net/transport.hpp>
 #include <paglets/node/node.hpp>
 #include <paglets/runtime/runtime.hpp>
@@ -48,9 +49,11 @@ int usage() {
                  "                          [--advertise URL] [--peer KEY-ID=URL]... [--root NAME=DIR]...\n"
                  "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
                  "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
+                 "                          [--join URL]... [--no-beacon] [--beacon-port N]\n"
                  "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
-                 "starts with its peers as seeds and waits for its enrollment). Stops on SIGINT/SIGTERM, or\n"
-                 "when the stop file appears.\n";
+                 "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
+                 "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
+                 "Stops on SIGINT/SIGTERM, or when the stop file appears.\n";
     return 2;
 }
 
@@ -65,9 +68,12 @@ struct Options {
     std::vector<std::pair<std::string, std::string>> peers;
     std::map<std::string, std::string> roots;
     std::vector<std::string> sources;
+    std::vector<std::string> joins;
     unsigned threads = 2;
     bool in_process = false;
     bool no_sandbox = false;
+    bool beacon = true;
+    int beacon_port = 0;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -133,6 +139,23 @@ std::optional<Options> parse(int argc, char** argv) {
                 } catch (const std::exception&) {
                     ok = false;
                 }
+            }
+        } else if (a == "--join") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) o.joins.push_back(*v);
+        } else if (a == "--no-beacon") {
+            o.beacon = false;
+        } else if (a == "--beacon-port") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) {
+                try {
+                    o.beacon_port = std::stoi(*v);
+                } catch (const std::exception&) {
+                    ok = false;
+                }
+                ok = ok && o.beacon_port > 0 && o.beacon_port < 65536;
             }
         } else if (a == "--in-process") {
             o.in_process = true;
@@ -244,6 +267,41 @@ int serve_command(int argc, char** argv, const fs::path& self) {
               << "url  " << transport.url() << "\n"
               << std::flush;
 
+    // Discovery (planning/cpp-mesh.md): multicast beacons on the local
+    // network, and bootstrap contacts tried until they answer.
+    std::unique_ptr<net::Beacon> beacon;
+    if (o.beacon) {
+        net::BeaconConfig bc;
+        if (o.beacon_port > 0) bc.port = o.beacon_port;
+        beacon = std::make_unique<net::Beacon>(
+            bc, [&node] { return node.beacon(); },
+            [&node](std::vector<std::uint8_t> datagram, const std::string& ip) { node.receive_beacon(datagram, ip); });
+        if (auto ok = beacon->start(); !ok) {
+            std::cerr << "[mesh] no multicast beacons: " << ok.error() << "\n";
+            beacon.reset();
+        }
+    }
+    std::thread joiner([&] {
+        std::vector<std::string> pending = o.joins;
+        while (!pending.empty() && !stop_requested) {
+            for (auto it = pending.begin(); it != pending.end();) {
+                auto peer = transport.probe(*it);
+                if (peer) {
+                    std::cerr << "[mesh] joined through " << *it << " (host " << mesh::key_id(*peer).substr(0, 16)
+                              << ")\n";
+                    node.joined(*peer);
+                    it = pending.erase(it);
+                } else {
+                    std::cerr << "[mesh] " << *it << ": " << peer.error() << "\n";
+                    ++it;
+                }
+            }
+            for (int i = 0; i < 20 && !pending.empty() && !stop_requested; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    });
+
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
     using namespace std::chrono_literals;
@@ -260,6 +318,9 @@ int serve_command(int argc, char** argv, const fs::path& self) {
         std::this_thread::sleep_for(50ms);
     }
     std::cerr << "[host] stopping\n";
+    stop_requested = true;
+    joiner.join();
+    if (beacon) beacon->stop();
     runtime.shutdown();  // its threads call into the node
     forward.set_target(nullptr);
     transport.stop();

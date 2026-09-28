@@ -173,6 +173,7 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
     impl_->replica->on_change([impl = impl_.get()] { impl->dirty = true; });
     impl_->load();
     impl_->load_locations();
+    impl_->load_registry();
     // Pins survive restarts: the paglets they hold stay here.
     for (const auto& [id, lease] : impl_->pins) (void)impl_->runtime.pin(lease.paglet, id, lease.until);
 }
@@ -246,6 +247,7 @@ void Node::tick() {
     impl_->take_spawns();
     impl_->check_move_deadlines();
     impl_->location_tick();
+    impl_->registry_tick();
 }
 
 std::expected<mesh::AddResult, std::string> Node::submit(const mesh::Record& record) {

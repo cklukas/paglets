@@ -37,7 +37,7 @@ set(test_sources
     test_network.cpp
     test_mobility.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -103,6 +103,11 @@ if(PAGLETS_TEST_GUEST_DIR AND PAGLETS_ENABLE_REFLECTION)
              COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-serve
                      -DGUEST=${PAGLETS_TEST_GUEST_DIR}/counter.wasm -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_serve.cmake)
     set_tests_properties(host_serve_move PROPERTIES TIMEOUT 240)
+    # Three hosts that know one contact each find each other (WP14).
+    add_test(NAME host_mesh_discovery
+             COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-mesh
+                     -DGUEST=${PAGLETS_TEST_GUEST_DIR}/counter.wasm -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_mesh.cmake)
+    set_tests_properties(host_mesh_discovery PROPERTIES TIMEOUT 240)
 endif()
 
 # paglets-host: keys, mesh creation, enrollment requests and decisions.

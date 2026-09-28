@@ -73,8 +73,9 @@ server; each direction uses the channel of its sender:
 - **Addresses**: `https://host:port`, configured per peer. A host announces
   its own address in its channel's handshake payload (`url`); since the
   channel proves the key, a host can only announce an address for itself.
-  A host that knows only a seed thereby becomes reachable to it. Discovery
-  (WP14) will add addresses from gossip.
+  A host that knows only a seed thereby becomes reachable to it. Addresses
+  also come from signed host announcements spread by gossip and multicast
+  beacons, and from bootstrap contacts (planning/cpp-mesh.md).
 - **Acceptance**: a host accepts channels from enrolled hosts and its seeds
   (host role), and CLI sessions of admins and enrolled owners (section 8).
 - **TLS**: keeps reverse proxies and firewalls working, but does not
@@ -229,6 +230,7 @@ serves channels over HTTPS until SIGINT, SIGTERM or a stop file.
 | `--listen HOST:PORT` | address of the HTTPS server (default `127.0.0.1:0`, a free port) |
 | `--advertise URL` | the address announced to peers (default: the listening address) |
 | `--peer KEY-ID=URL` | a seed host and its address (repeatable) |
+| `--join URL`, `--no-beacon`, `--beacon-port N` | discovery: a bootstrap contact (any enrolled host), multicast beacons (planning/cpp-mesh.md) |
 | `--root NAME=DIR` | a named root of the files service (repeatable) |
 | `--module-source DIR` | a directory of modules the host may load (repeatable) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | PEM certificate and key (default: self-signed), CA for peers |
@@ -248,10 +250,11 @@ frames of sections 6 and 7 and of WP11; channels of admins and owners are
 | `call` | `paglet`, `name`, `payload`, `timeout_ms`? | the paglet's owner, admins | the reply's status and payload |
 | `dispatch` | `paglet`, `destination` | the paglet's owner, admins | the move started (a transfer ticket, section 6) |
 | `locate`, `pin`, `pins`, `unpin` | | | location and pins (planning/cpp-location.md, section 7) |
+| `hosts` | | admins, owners | the host registry (planning/cpp-mesh.md, section 5) |
 
 The client side is the `remote` command group of `paglets-host`
 (`status`, `push`, `launch`, `call`, `dispatch`, and the location commands
-`locate`, `pin`, `pins`, `unpin`, all with `--connect URL
+`locate`, `pin`, `pins`, `unpin` and `hosts`, all with `--connect URL
 --key KEY --ledger DIR`). The session's role comes from the key file (admin
 or owner); the client accepts the server only if it is a host enrolled in
 its ledger copy, or the key given with `--host-key`. `launch` signs the

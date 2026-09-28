@@ -123,7 +123,8 @@ std::expected<Connection, std::string> connect(const std::string& url, const mes
     Connection c;
     c.url = url;
     c.http = make_client(url, config);
-    ChannelHandshake hs(Handshake::Role::initiator, identity, role, mesh_id, accept, config.max_frame, my_url);
+    ChannelHandshake hs(Handshake::Role::initiator, identity, role, mesh_id, accept, config.max_frame, my_url,
+                        config.protocol);
     auto m1 = hs.next_message();
     if (!m1) return std::unexpected(m1.error());
     auto r1 = c.http->Post(path_open, as_string(*m1), content_type);
@@ -310,7 +311,7 @@ struct Transport::Impl {
             return ok;
         };
         session->handshake.emplace(Handshake::Role::responder, identity, PeerRole::host, mesh_id, check,
-                                   config.max_frame);
+                                   config.max_frame, std::string(), config.protocol);
         auto ok = session->handshake->receive(as_bytes(req.body));
         auto m2 =
             ok ? session->handshake->next_message() : std::expected<Bytes, std::string>(std::unexpected(ok.error()));
@@ -557,6 +558,26 @@ std::optional<std::string> Transport::address(const mesh::PublicKey& peer) const
     auto it = impl_->addresses.find(peer);
     if (it == impl_->addresses.end()) return std::nullopt;
     return it->second;
+}
+
+std::string Transport::own_address() const {
+    return impl_->own_url();
+}
+
+std::expected<mesh::PublicKey, std::string> Transport::probe(const std::string& url) {
+    Impl& t = *impl_;
+    AcceptPeer check = [&t](const Identity& server) -> std::expected<void, std::string> {
+        if (server.role != PeerRole::host) return std::unexpected(std::string("the server is not a host"));
+        if (server.key == t.identity.public_key()) return std::unexpected(std::string("the server is this host"));
+        return t.accept ? t.accept(server) : std::expected<void, std::string>();
+    };
+    auto c = connect(url, t.identity, PeerRole::host, t.mesh_id, check, t.config, t.own_url());
+    if (!c) return std::unexpected(c.error());
+    ++t.opened;
+    const mesh::PublicKey key = c->server.key;
+    std::lock_guard lock(t.mu);
+    t.addresses[key] = url;
+    return key;
 }
 
 void Transport::send(const mesh::PublicKey& to, Bytes frame) {

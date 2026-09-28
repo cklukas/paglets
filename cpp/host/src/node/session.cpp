@@ -75,6 +75,28 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                                 {"paglets", mesh::Value(std::move(paglets))}});
     }
 
+    if (*type == "hosts") {
+        // The host registry (planning/cpp-mesh.md): admins and owners.
+        mesh::Array list;
+        for (const auto& h : hosts()) {
+            mesh::Array labels;
+            for (const auto& l : h.labels) labels.emplace_back(l);
+            list.emplace_back(
+                mesh::Map{{"key", mesh::Value::bin(h.key)},
+                          {"name", mesh::Value(h.name)},
+                          {"labels", mesh::Value(std::move(labels))},
+                          {"url", mesh::Value(h.url)},
+                          {"self", mesh::Value(h.self)},
+                          {"online", mesh::Value(h.online)},
+                          {"compatible", mesh::Value(h.compatible)},
+                          {"seen", mesh::Value(h.last_seen_ms)},
+                          {"proto", mesh::Value(h.protocol)},
+                          {"abi", mesh::Value(std::to_string(h.abi_major) + "." + std::to_string(h.abi_minor))},
+                          {"via", mesh::Value(h.via)}});
+        }
+        return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
+    }
+
     if (*type == "push") {
         // Records are signed; the ledger decides what they mean.
         const mesh::Array* records = f.array("records");

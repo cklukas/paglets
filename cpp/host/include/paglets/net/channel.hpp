@@ -39,12 +39,21 @@ enum class PeerRole { host, admin, owner };
 std::string_view to_string(PeerRole role);
 std::optional<PeerRole> parse_peer_role(std::string_view text);
 
+// The mesh protocol this build speaks (planning/cpp-mesh.md, section 4):
+// channels between peers of different protocol versions are refused.
+inline constexpr std::int64_t mesh_protocol = 1;
+
 struct Identity {
     mesh::PublicKey key{};
     PeerRole role = PeerRole::host;
     // Where the peer says it can be reached (hosts; may be empty). Advisory:
     // identities compare by key and role.
     std::string url;
+    // Versions the peer announced: mesh protocol, and for hosts the paglet
+    // ABI it runs (major, minor).
+    std::int64_t protocol = mesh_protocol;
+    std::uint32_t abi_major = 0;
+    std::uint32_t abi_minor = 0;
     bool operator==(const Identity& o) const { return key == o.key && role == o.role; }
 };
 
@@ -84,9 +93,12 @@ private:
 // alternates next_message() and receive() until done().
 class ChannelHandshake {
 public:
+    // `protocol`: the mesh protocol announced (other values only in tests).
+    // Peers must speak the same protocol; hosts must run the same ABI major
+    // version.
     ChannelHandshake(Handshake::Role role, const mesh::SigningKey& identity, PeerRole my_role,
                      const mesh::RecordId& mesh_id, AcceptPeer accept, std::size_t max_frame = channel_max_frame,
-                     std::string my_url = {});
+                     std::string my_url = {}, std::int64_t protocol = mesh_protocol);
 
     std::expected<Bytes, std::string> next_message();
     std::expected<void, std::string> receive(std::span<const std::uint8_t> message);

@@ -1,0 +1,238 @@
+// Copyright (c) 2026 by C. Klukas.
+// Licensed under the MIT License. See LICENSE for details.
+
+// The mesh (WP14, planning/cpp-mesh.md): hosts discover each other through
+// any enrolled host, by gossip and by multicast beacons; the host registry
+// knows their addresses, online state and versions; hosts of another
+// protocol or ABI are kept out. The exit: three hosts discover each other
+// and move paglets by host name.
+
+#include "mesh_fixture.hpp"
+#include "runtime_fixture.hpp"
+#include "test.hpp"
+
+#include <paglets/abi.hpp>
+#include <paglets/net/beacon.hpp>
+#include <paglets/net/channel.hpp>
+#include <paglets/sha256.hpp>
+
+#include <random>
+
+using namespace paglets::test;
+using HostInfo = paglets::node::Node::HostInfo;
+
+namespace {
+
+std::int64_t count(Fixture& f, const rt::PagletId& id) {
+    auto r = f.call(id, "count");
+    if (r.status != 0) throw std::runtime_error("count: " + std::string(abi::error_name(r.status)));
+    return dec<std::int64_t>(r.payload);
+}
+
+// Hosts over HTTPS that know nothing about each other's addresses.
+struct Trio {
+    SigningKey admin = SigningKey::generate();
+    SigningKey owner = SigningKey::generate();
+    std::optional<Record> genesis;
+    std::vector<std::unique_ptr<NetHost>> hosts;
+
+    explicit Trio(std::size_t n = 3) {
+        auto g = make_genesis("discovery", {&admin}, {}, 1);
+        REQUIRE_OK(g);
+        genesis = *g;
+        for (std::size_t i = 0; i < n; ++i) hosts.push_back(std::make_unique<NetHost>(*genesis));
+        // Every host has the ledger with the enrollments (an admin handed
+        // it out), but no addresses.
+        std::vector<Record> records;
+        auto record = [&](const std::string& type, Map d) {
+            auto r = hosts[0]->node->draft(type, std::move(d));
+            REQUIRE_OK(r);
+            r->sign(admin);
+            records.push_back(*r);
+            for (auto& h : hosts) REQUIRE_OK(h->node->submit(*r));
+        };
+        const char* names[] = {"a", "b", "c", "d", "e"};
+        for (std::size_t i = 0; i < n; ++i)
+            record("host-enroll", data::host_enroll(hosts[i]->node->host(), names[i], {}));
+        record("owner-enroll", data::owner_enroll(owner.public_key(), "olga", {}));
+        for (auto& h : hosts) {
+            h->node->set_discovery_timing({.exchange = 200ms});
+            h->node->set_location_timing({.heartbeat = 100ms,
+                                          .host_timeout = 3000ms,
+                                          .refresh = std::chrono::minutes(5),
+                                          .record_ttl = std::chrono::hours(1),
+                                          .lookup_timeout = 1000ms});
+        }
+    }
+
+    NetHost& operator[](std::size_t i) { return *hosts[i]; }
+
+    bool eventually(const std::function<bool()>& done, int rounds = 1500) {
+        for (int i = 0; i < rounds; ++i) {
+            if (done()) return true;
+            for (auto& h : hosts) h->node->tick();
+            std::this_thread::sleep_for(10ms);
+        }
+        return done();
+    }
+
+    // Every host knows every other host's address and has heard from it.
+    bool discovered() {
+        for (auto& h : hosts) {
+            for (const auto& info : h->node->hosts()) {
+                if (info.self) continue;
+                if (!info.online || info.url.empty() || !h->transport->address(info.key)) return false;
+            }
+        }
+        return true;
+    }
+};
+
+const HostInfo* info_of(const std::vector<HostInfo>& hosts, const PublicKey& key) {
+    for (const auto& h : hosts) {
+        if (h.key == key) return &h;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+PAGLETS_TEST("mesh: three hosts discover each other through one contact each and move paglets by name (WP14 exit)") {
+    Trio net;
+    auto& a = net[0];
+    auto& b = net[1];
+    auto& c = net[2];
+    // b knows only a's address, c only b's; a knows nobody.
+    auto contact = b.transport->probe(a.transport->url());
+    REQUIRE_OK(contact);
+    CHECK(*contact == a.node->host());
+    b.node->joined(*contact);
+    contact = c.transport->probe(b.transport->url());
+    REQUIRE_OK(contact);
+    c.node->joined(*contact);
+    REQUIRE(net.eventually([&] { return net.discovered(); }));
+
+    // The registry: names, addresses, versions, online.
+    const auto hosts = a.node->hosts();
+    REQUIRE(hosts.size() == 3u);
+    const HostInfo* seen_c = info_of(hosts, c.node->host());
+    REQUIRE(seen_c != nullptr);
+    CHECK(seen_c->name == "c");
+    CHECK(seen_c->url == c.transport->url());
+    CHECK(seen_c->online && seen_c->compatible);
+    CHECK_EQ(seen_c->protocol, paglets::net::mesh_protocol);
+    CHECK_EQ(seen_c->abi_major, abi::version);
+    CHECK_EQ(seen_c->abi_minor, abi::minor_version);
+    CHECK(seen_c->last_seen_ms > 0);
+    CHECK(info_of(hosts, a.node->host())->self);
+    CHECK(net.eventually([&] { return a.node->ledger_digest() == c.node->ledger_digest(); }));
+
+    // Paglets move by host name between hosts that were introduced by nobody.
+    const std::string module = a.f->module("conformance.wasm");
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(net.owner, net.genesis->id(), *parse_key_id(module), paglet_id('8'), Value(),
+                                    now - 1000, now + 600'000);
+    REQUIRE_OK(passport);
+    auto id = a.node->create(module, *passport);
+    REQUIRE_OK(id);
+    CHECK_EQ(count(*a.f, *id), 1);
+    REQUIRE_OK(a.node->dispatch(*id, "c"));
+    REQUIRE(net.eventually([&] { return c.f->runtime->info(*id).has_value() && !a.f->runtime->info(*id); }));
+    CHECK_EQ(count(*c.f, *id), 2);
+    REQUIRE_OK(c.node->dispatch(*id, "b"));
+    REQUIRE(net.eventually([&] { return b.f->runtime->info(*id).has_value() && !c.f->runtime->info(*id); }));
+    CHECK_EQ(count(*b.f, *id), 3);
+    REQUIRE_OK(b.node->dispatch(*id, "a"));
+    REQUIRE(net.eventually([&] { return a.f->runtime->info(*id).has_value() && !b.f->runtime->info(*id); }));
+    CHECK_EQ(count(*a.f, *id), 4);
+
+    // A host that goes away is offline in the registry.
+    net.hosts[2]->f->runtime->shutdown();
+    net.hosts[2]->transport->stop();
+    net.hosts.pop_back();
+    REQUIRE(net.eventually([&] {
+        const HostInfo* h = info_of(a.node->hosts(), seen_c->key);
+        return h != nullptr && !h->online;
+    }));
+}
+
+PAGLETS_TEST("mesh: hosts on the local network find each other by multicast beacons") {
+    Trio net(2);
+    auto& a = net[0];
+    auto& b = net[1];
+    paglets::net::BeaconConfig config;
+    config.port = 40000 + static_cast<int>(std::random_device{}() % 20000);
+    config.interval = 200ms;
+    std::vector<std::unique_ptr<paglets::net::Beacon>> beacons;
+    for (auto& h : net.hosts) {
+        auto* node = h->node.get();
+        beacons.push_back(std::make_unique<paglets::net::Beacon>(
+            config, [node] { return node->beacon(); },
+            [node](std::vector<std::uint8_t> d, const std::string& ip) { node->receive_beacon(d, ip); }));
+        if (auto ok = beacons.back()->start(); !ok) paglets::test::skip("no multicast: " + ok.error());
+    }
+    for (auto& h : net.hosts) h->node->tick();  // the announcements exist
+    if (!net.eventually([&] { return beacons[0]->received() > 0 && beacons[1]->received() > 0; }, 300)) {
+        paglets::test::skip("multicast datagrams do not arrive on this machine");
+    }
+    REQUIRE(net.eventually([&] { return net.discovered(); }));
+    const auto registry = a.node->hosts();
+    const HostInfo* seen = info_of(registry, b.node->host());
+    REQUIRE(seen != nullptr);
+    CHECK_EQ(seen->url, b.transport->url());
+    CHECK(seen->via == "beacon" || seen->via == "gossip");
+
+    // Beacons of another mesh, or forged ones, are ignored.
+    Bytes forged = b.node->beacon();
+    forged[forged.size() / 2] ^= 0x01;
+    a.node->receive_beacon(forged, "127.0.0.1");
+    CHECK(info_of(a.node->hosts(), b.node->host())->url == b.transport->url());
+    for (auto& beacon : beacons) beacon->stop();
+}
+
+PAGLETS_TEST("mesh: the registry keeps hosts of another ABI out of moves and responsibilities") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    auto& c = net.add_host("c");
+    net.enroll_all();
+    // b announces a paglet ABI major version this host does not run.
+    const Bytes body =
+        encode(Value(Map{{"v", Value(std::int64_t{1})},
+                         {"mesh", Value::bin(net.genesis->id())},
+                         {"key", Value::bin(b.key)},
+                         {"url", Value("https://b.example:7443")},
+                         {"proto", Value(paglets::net::mesh_protocol)},
+                         {"abi", Value(Array{Value(std::int64_t{abi::version + 1}), Value(std::int64_t{0})})},
+                         {"time", Value(unix_ms())}}));
+    Bytes message{'p', 'a', 'g', 'l', 'e', 't', 's', ' ', 'h', 'o', 's', 't', ' ', 'a', 'n',
+                  'n', 'o', 'u', 'n', 'c', 'e', 'm', 'e', 'n', 't', ' ', 'v', '1', 0};
+    const auto digest = paglets::sha256(body);
+    message.insert(message.end(), digest.begin(), digest.end());
+    const Signature sig = b.node->host_key().sign(message);
+    Bytes frame = encode(
+        Value(Map{{"t", Value("hosts")}, {"a", Value(Array{Value(Array{Value(body), Value::bin(sig), Value("")})})}}));
+    // Not signed by b: ignored.
+    Bytes forged = frame;
+    forged[forged.size() - 20] ^= 0x01;  // in the signature
+    a.node->receive(c.key, forged);
+    CHECK(info_of(a.node->hosts(), b.key)->compatible);
+    a.node->receive(b.key, frame);
+    const auto registry = a.node->hosts();
+    const HostInfo* seen = info_of(registry, b.key);
+    REQUIRE(seen != nullptr);
+    CHECK(!seen->compatible);
+    CHECK_EQ(seen->abi_major, abi::version + 1);
+    const auto live = a.node->live_hosts();
+    CHECK(std::ranges::find(live, b.key) == live.end());
+
+    // Moves go elsewhere, or fail with the reason.
+    const std::string module = a.f->module("conformance.wasm");
+    auto id = a.node->create(module, net.passport(module, paglet_id('9')));
+    REQUIRE_OK(id);
+    REQUIRE_OK(a.node->dispatch(*id, "b"));
+    REQUIRE(net.settle([&] { return a.node->move_stats().moves_failed == 1u; }));
+    CHECK(journal_eventually(*a.f, *id, "move_failed:b:no host matches b; host b: runs an incompatible paglet ABI:"));
+    REQUIRE_OK(a.node->dispatch(*id, "any"));
+    REQUIRE(net.settle([&] { return c.f->runtime->info(*id).has_value(); }, 400));
+}

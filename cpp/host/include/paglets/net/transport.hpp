@@ -56,6 +56,7 @@ struct TransportConfig {
     std::size_t max_batch_bytes = 8u * 1024 * 1024;  // frames per request
     std::chrono::milliseconds session_idle{600000};  // unused server sessions end
     std::function<void(const std::string&)> log;     // default: none
+    std::int64_t protocol = mesh_protocol;           // announced in handshakes (other values: tests)
 };
 
 // A frame from a peer; returns the frames to answer with (CLI sessions).
@@ -94,8 +95,14 @@ public:
     std::string url() const;  // https://<listen host>:<port>
 
     // Where peers are reached: https://host:port (or http:// for tests).
-    void set_address(const mesh::PublicKey& peer, std::string url);
-    std::optional<std::string> address(const mesh::PublicKey& peer) const;
+    void set_address(const mesh::PublicKey& peer, std::string url) override;
+    std::optional<std::string> address(const mesh::PublicKey& peer) const override;
+    // The address this host announces (advertise_url, or url()).
+    std::string own_address() const override;
+    // Opens a channel to a host whose key is not known yet (a bootstrap
+    // contact, planning/cpp-mesh.md): the server must pass `accept` as a
+    // host. Returns its key; its address is then known.
+    std::expected<mesh::PublicKey, std::string> probe(const std::string& url);
 
     // Queues a frame for a peer (a host); returns at once.
     void send(const mesh::PublicKey& to, Bytes frame) override;

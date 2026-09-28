@@ -25,7 +25,12 @@ changed memory pages travel again), their grants and transfer tickets
 ([design](../planning/cpp-networking.md)). WP13 finds them anywhere: location
 records on hosts chosen by consistent hashing, updated by a majority on
 every move, with failover when hosts go down, and pins that keep a paglet on
-its host for a while ([design](../planning/cpp-location.md)).
+its host for a while ([design](../planning/cpp-location.md)). WP14 makes the
+hosts a mesh: they find each other through any enrolled host, by gossip of
+signed host announcements and by multicast beacons on the local network,
+keep a registry of the hosts with their addresses, online state and
+versions, and refuse hosts of another mesh protocol or paglet ABI
+([design](../planning/cpp-mesh.md)).
 
 ## Layout
 
@@ -232,9 +237,10 @@ $H ledger enroll --ledger ledger --admin alice.key host <lab-2-key-id> lab-2   #
 $H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga
 cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2
 $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
-    --peer <lab-2-key-id>=https://lab-2:7443 &
+    --advertise https://lab-1:7443 &
 $H serve --key lab-2.key --ledger ledger-lab-2 --state state-2 --listen 0.0.0.0:7443 \
-    --peer <lab-1-key-id>=https://lab-1:7443 &
+    --advertise https://lab-2:7443 --join https://lab-1:7443 &     # any enrolled host; beacons find the rest
+$H remote hosts --connect https://lab-2:7443 --key alice.key --ledger ledger
 $H remote launch --connect https://lab-1:7443 --key olga.key --ledger ledger \
     build/macos-arm64/guests/counter.wasm                          # prints the paglet ID
 $H remote call --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> \

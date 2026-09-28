@@ -372,6 +372,38 @@ struct Node::Impl {
     void load_locations();
     void save_locations();
 
+    // Host registry and discovery (registry.cpp, planning/cpp-mesh.md).
+    struct HostEntry {
+        mesh::Bytes body;  // the host's signed announcement
+        mesh::Signature signature{};
+        std::string url;             // where it is reached (announced, or seen by a beacon)
+        std::int64_t announced = 0;  // time of the announcement, Unix milliseconds
+        std::int64_t protocol = 0;
+        std::uint32_t abi_major = 0;
+        std::uint32_t abi_minor = 0;
+        std::string via;  // gossip, beacon, join
+    };
+    std::map<mesh::PublicKey, HostEntry> registry;
+    std::map<mesh::PublicKey, std::int64_t> last_seen;  // Unix milliseconds of the last frame
+    std::set<mesh::PublicKey> greeted;                  // hosts sent the registry after first contact
+    std::optional<HostEntry> own_entry;
+    Clock::time_point next_exchange{};
+    std::size_t next_exchange_peer = 0;
+    bool registry_dirty = false;
+    bool addresses_applied = false;
+    DiscoveryTiming discovery;
+
+    void registry_tick();
+    void announce_self();
+    std::optional<HostEntry> verify_announcement(const mesh::Bytes& body, const mesh::Signature& signature,
+                                                 std::string& why) const;
+    bool learn(const mesh::PublicKey& from, HostEntry entry, const std::string& fallback_url);
+    void send_registry(const mesh::PublicKey& to, const std::optional<mesh::PublicKey>& except_about = std::nullopt);
+    void on_hosts(const mesh::PublicKey& from, const mesh::Fields& f);
+    bool compatible(const mesh::PublicKey& host) const;
+    void load_registry();
+    void save_registry();
+
     std::expected<void, std::string> admit(const std::string& module, runtime::TrustClass trust_class) {
         std::shared_ptr<const mesh::LedgerState> st;
         {
@@ -704,6 +736,8 @@ struct Node::Impl {
             on_move_abort(from, f);
         } else if (*type == "move-query") {
             on_move_query(from, f);
+        } else if (*type == "hosts") {
+            on_hosts(from, f);
         } else if (!on_location_frame(*type, from, f)) {
             return false;
         }

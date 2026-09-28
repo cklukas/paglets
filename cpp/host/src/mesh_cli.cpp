@@ -75,6 +75,7 @@ int usage() {
            "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
            "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
+           "       paglets-host remote hosts --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote locate --connect URL --key KEY --ledger DIR PAGLET\n"
            "       paglets-host remote pin --connect URL --key KEY --ledger DIR PAGLET [--minutes N] [--reason TEXT]\n"
            "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
@@ -85,6 +86,7 @@ int usage() {
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
            "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket).\n"
+           "hosts lists the enrolled hosts as the host knows them (address, online, versions);\n"
            "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
            "pins lists the pins on the host, unpin ends pins wherever the paglet is (admins).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
@@ -993,6 +995,35 @@ void print_location(const Fields& f) {
               << "moves: " << f.integer("moves").value_or(0) << "\n";
 }
 
+int remote_hosts(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("hosts")}});
+    if (!a) return fail(a.error());
+    if (const Array* hosts = Fields{*a}.array("hosts")) {
+        for (const auto& h : *hosts) {
+            if (h.as_map() == nullptr) continue;
+            const Fields f{*h.as_map()};
+            auto flag = [&](std::string_view k) {
+                const Value* v = f.get(k);
+                return v != nullptr && v->as_bool() != nullptr && *v->as_bool();
+            };
+            std::cout << f.str("name").value_or("") << "  " << key_id(*f.fixed<32>("key")).substr(0, 16) << "  "
+                      << (flag("self")     ? "this host"
+                          : flag("online") ? "online"
+                                           : "offline")
+                      << "  " << (f.str("url").value_or("").empty() ? "(no address)" : f.str("url").value_or(""));
+            if (f.integer("proto").value_or(0) != 0) {
+                std::cout << "  protocol " << f.integer("proto").value_or(0) << " abi " << f.str("abi").value_or("");
+            }
+            if (!flag("compatible")) std::cout << "  INCOMPATIBLE";
+            if (!f.str("via").value_or("").empty() && !flag("self")) std::cout << "  via " << f.str("via").value_or("");
+            std::cout << "\n";
+        }
+    }
+    return 0;
+}
+
 int remote_locate(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
@@ -1090,6 +1121,7 @@ int mesh_command(int argc, char** argv) {
             if (action == "launch") return remote_launch(o);
             if (action == "call") return remote_call(o);
             if (action == "dispatch") return remote_dispatch(o);
+            if (action == "hosts") return remote_hosts(o);
             if (action == "locate") return remote_locate(o);
             if (action == "pin") return remote_pin(o);
             if (action == "pins") return remote_pins(o);

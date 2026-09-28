@@ -209,7 +209,15 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
             const std::string id = mesh::key_id(k);
             match = h.name == t || id == t || (t.size() >= 8 && id.starts_with(t));
         }
-        if (match) matches.push_back(k);
+        if (!match) continue;
+        // Hosts that could not run the paglet: another protocol or ABI, or
+        // an older ABI minor version (the paglet may use newer imports).
+        if (auto r = registry.find(k);
+            !compatible(k) || (r != registry.end() && r->second.abi_minor < abi::minor_version)) {
+            why_not.push_back("host " + h.name + ": runs an incompatible paglet ABI");
+            continue;
+        }
+        matches.push_back(k);
     }
     std::vector<mesh::PublicKey> out;
     const std::int64_t now = mesh::unix_ms();
