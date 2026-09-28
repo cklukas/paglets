@@ -138,6 +138,57 @@ public:
     };
     MoveStats move_stats() const;
 
+    // -- location and pins (planning/cpp-location.md) --
+
+    struct LocationTiming {
+        std::chrono::milliseconds heartbeat{2000};                    // to every enrolled host
+        std::chrono::milliseconds host_timeout{10000};                // not heard from for this long: down
+        std::chrono::milliseconds refresh{std::chrono::minutes(5)};   // holders re-send their records
+        std::chrono::milliseconds record_ttl{std::chrono::hours(1)};  // records not refreshed end
+        std::chrono::milliseconds lookup_timeout{3000};               // per step of a lookup
+    };
+    void set_location_timing(LocationTiming timing);
+    // Enrolled hosts this host believes are up (itself included), sorted.
+    std::vector<mesh::PublicKey> live_hosts() const;
+    // The hosts that keep a paglet's location record, in this host's view.
+    std::vector<mesh::PublicKey> responsible(const runtime::PagletId& paglet) const;
+    struct LocationRecord {
+        mesh::PublicKey host{};
+        std::uint64_t moves = 0;
+        std::int64_t moved_ms = 0;
+    };
+    // The record this host keeps for a paglet (as a responsible host).
+    std::optional<LocationRecord> location_record(const runtime::PagletId& paglet) const;
+
+    struct Located {
+        enum class State { pending, found, failed };
+        State state = State::pending;
+        mesh::PublicKey host{};
+        std::uint64_t moves = 0;
+        std::int64_t moved_ms = 0;
+        std::string owner;
+        std::string pin;  // with a pin: its ID and end
+        std::int64_t pinned_until = 0;
+        std::string error;
+    };
+    // Finds a paglet anywhere in the mesh (and with `pin_for`, pins it where
+    // it is); the result arrives through receive() and tick().
+    std::uint64_t locate(const runtime::PagletId& paglet,
+                         std::chrono::milliseconds pin_for = std::chrono::milliseconds(0), std::string reason = {});
+    std::optional<Located> located(std::uint64_t lookup) const;
+    struct PinInfo {
+        std::string pin;
+        runtime::PagletId paglet;
+        std::int64_t until = 0;
+        std::string holder;
+        std::string reason;
+    };
+    // Pins of paglets on this host.
+    std::vector<PinInfo> pins() const;
+    // Ends pins of a paglet on this host (an admin's force-release): the
+    // one named, or all. Returns how many ended.
+    std::size_t release_pins(const runtime::PagletId& paglet, const std::string& pin = {});
+
     // -- CLI sessions (planning/cpp-networking.md, section 8) --
 
     // Answers a request of an admin's or owner's session (`role`: "admin" or

@@ -11,6 +11,7 @@
 
 #include <paglets/services/contract.hpp>
 #include <paglets/services/grants.hpp>
+#include <paglets/services/locator.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/reflect.hpp>
 
@@ -137,6 +138,8 @@ inline bool valid_path(std::string_view path) {
 using namespace detail;
 
 class GrantsService;
+class LocatorService;
+std::shared_ptr<runtime::SystemPaglet> make_locator(Node::Impl& impl);
 
 struct Node::Impl {
     Impl(runtime::Runtime& rt, std::shared_ptr<services::SystemServices> svc, mesh::Ledger l, mesh::SigningKey k,
@@ -200,12 +203,21 @@ struct Node::Impl {
         Clock::time_point deadline{};
         std::vector<std::string> failures;
         int attempts = 0;
+        // The paglet's move counter after this move; on move-ready the
+        // location records are updated on a majority of the responsible
+        // hosts before the move commits (location.cpp).
+        std::uint64_t moves = 0;
+        bool recording = false;
+        std::vector<mesh::PublicKey> responsible;
+        std::set<mesh::PublicKey> acks;
+        int bumps = 0;
     };
     std::map<std::uint64_t, Outgoing> outgoing;  // by request (one per offer)
     struct Decision {
         bool committed = false;
         mesh::PublicKey to{};
         Clock::time_point expires{};
+        std::uint64_t moves = 0;  // committed: the paglet's move counter there
     };
     std::map<std::uint64_t, Decision> decisions;  // outcomes of offers, for queries
     struct Incoming {                             // a paglet arriving here
@@ -222,6 +234,7 @@ struct Node::Impl {
         std::vector<runtime::Cap> clone_caps;
         std::string original;
         bool activate = true;
+        std::uint64_t moves = 0;
         Clock::time_point deadline{};
     };
     std::map<std::pair<mesh::PublicKey, std::uint64_t>, Incoming> incoming;  // by source and request
@@ -251,6 +264,113 @@ struct Node::Impl {
     void on_move_query(const mesh::PublicKey& from, const mesh::Fields& f);
     void arrival_pages_complete(const mesh::PublicKey& from, std::uint64_t request);
     void refuse_arrival(const mesh::PublicKey& from, std::uint64_t request, const std::string& why);
+    void commit_move(std::uint64_t request);
+
+    // Location records and pins (location.cpp, planning/cpp-location.md).
+    struct LocRecord {
+        mesh::PublicKey host{};
+        std::uint64_t moves = 0;
+        std::int64_t moved = 0;  // when it arrived there (or was created), Unix milliseconds
+        std::string owner;       // key ID of its owner
+        std::int64_t refreshed = 0;
+    };
+    // Records this host keeps as one of the responsible hosts.
+    std::map<runtime::PagletId, LocRecord> records;
+    bool records_dirty = false;
+    // Move counters of the paglets on this host.
+    struct Held {
+        std::uint64_t moves = 0;
+        std::int64_t moved = 0;
+    };
+    std::map<runtime::PagletId, Held> held;
+    std::map<runtime::PagletId, std::pair<LocRecord, Clock::time_point>> loc_cache;
+    // Liveness: when each enrolled host was last heard from.
+    std::map<mesh::PublicKey, Clock::time_point> last_heard;
+    std::vector<mesh::PublicKey> view;                            // live hosts, sorted
+    std::vector<std::pair<std::uint64_t, mesh::PublicKey>> ring;  // consistent hashing over the view
+    Clock::time_point next_heartbeat{};
+    Clock::time_point last_tick{};
+    Clock::time_point next_refresh{};
+    LocationTiming timing;
+
+    struct LookupResult {
+        std::int32_t status = 0;  // abi::ok or an abi::Error
+        std::string error;
+        LocRecord where;
+        std::string pin;
+        std::int64_t until = 0;
+        std::int64_t released = 0;  // force: pins ended
+    };
+    using LookupDone = std::function<void(const LookupResult&)>;
+    enum class LookupKind { locate, pin, force };
+    struct Lookup {
+        LookupKind kind = LookupKind::locate;
+        runtime::PagletId paglet;
+        enum class Phase { records, who, target, wait } phase = Phase::records;
+        std::vector<mesh::PublicKey> asked;
+        std::set<mesh::PublicKey> answered;
+        std::size_t need = 0;
+        std::optional<LocRecord> best;
+        mesh::PublicKey target{};
+        int hops = 0;
+        int timeouts = 0;
+        Clock::time_point deadline{};
+        std::string pin;  // pin: the new pin's ID; force: the pin to end (empty: all)
+        std::int64_t until = 0;
+        std::string holder;
+        std::string reason;
+        LookupDone done;
+    };
+    std::map<std::uint64_t, Lookup> lookups;
+    std::map<std::uint64_t, Located> located_results;  // Node::locate
+
+    struct PinLease {
+        runtime::PagletId paglet;
+        std::int64_t until = 0;
+        std::string holder;  // the paglet (or session) that asked for it
+        std::string reason;
+    };
+    std::map<std::string, PinLease> pins;  // pins of paglets on this host, by pin ID
+    struct Release {
+        runtime::Cap reply;
+        Clock::time_point deadline{};
+    };
+    std::map<std::uint64_t, Release> releases;  // pin releases sent to other hosts
+    runtime::SystemContext* locator_ctx = nullptr;
+    std::mutex unresolved_mu;  // taken under the runtime's lock
+    std::deque<runtime::RemoteMessage> unresolved;
+
+    void heard(const mesh::PublicKey& from);
+    void location_tick();
+    void update_view();
+    std::vector<mesh::PublicKey> responsible_for(const runtime::PagletId& paglet);
+    std::vector<mesh::PublicKey> responsible_in(const std::vector<mesh::PublicKey>& hosts,
+                                                const runtime::PagletId& paglet) const;
+    void note_created(const runtime::PagletId& paglet);
+    void publish(const runtime::PagletId& paglet, const LocRecord& rec, std::uint64_t request,
+                 const std::vector<mesh::PublicKey>& to);
+    bool apply_record(const runtime::PagletId& paglet, const LocRecord& rec);
+    std::optional<LocRecord> held_record(const runtime::PagletId& paglet);
+    void record_move(std::uint64_t request);
+    void check_recorded(std::uint64_t request);
+    void abort_recording(std::uint64_t request, const std::string& why);
+    std::uint64_t start_lookup(Lookup l);
+    void lookup_records(std::uint64_t id);
+    void lookup_found(std::uint64_t id, const LocRecord& rec);
+    void lookup_send_target(std::uint64_t id);
+    void lookup_answer(std::uint64_t id, const mesh::PublicKey& from, const mesh::Fields& f);
+    void finish_lookup(std::uint64_t id, LookupResult result);
+    void check_lookups();
+    mesh::Map pin_here(const runtime::PagletId& paglet, const std::string& pin, std::int64_t until,
+                       const std::string& holder, const std::string& reason);
+    mesh::Map force_here(const runtime::PagletId& paglet, const std::string& pin);
+    bool release_here(const runtime::PagletId& paglet, const std::string& pin);
+    void expire_pins();
+    void process_unresolved();
+    void send_remote(runtime::RemoteMessage m);
+    bool on_location_frame(std::string_view type, const mesh::PublicKey& from, const mesh::Fields& f);
+    void load_locations();
+    void save_locations();
 
     std::expected<void, std::string> admit(const std::string& module, runtime::TrustClass trust_class) {
         std::shared_ptr<const mesh::LedgerState> st;
@@ -480,6 +600,7 @@ struct Node::Impl {
         if (!id) return id;
         passports.emplace(*id, passport);
         save_passport(passport);
+        note_created(*id);
         sync_locked();  // grants approved in advance
         return id;
     }
@@ -583,7 +704,7 @@ struct Node::Impl {
             on_move_abort(from, f);
         } else if (*type == "move-query") {
             on_move_query(from, f);
-        } else {
+        } else if (!on_location_frame(*type, from, f)) {
             return false;
         }
         return true;
@@ -603,15 +724,39 @@ struct Node::Impl {
             const std::int64_t now = mesh::unix_ms();
             for (const auto& e : *committed) {
                 const mesh::Array* a = e.as_array();
-                if (a == nullptr || a->size() != 3 || !(*a)[0].as_int() || !(*a)[2].as_int()) continue;
+                if (a == nullptr || a->size() < 3 || !(*a)[0].as_int() || !(*a)[2].as_int()) continue;
                 const mesh::Bytes* to = (*a)[1].as_bin();
                 if (to == nullptr || to->size() != 32 || *(*a)[2].as_int() <= now) continue;
                 Decision d;
                 d.committed = true;
                 std::copy(to->begin(), to->end(), d.to.begin());
                 d.expires = Clock::now() + std::chrono::milliseconds(*(*a)[2].as_int() - now);
+                if (a->size() > 3 && (*a)[3].as_int()) d.moves = static_cast<std::uint64_t>(*(*a)[3].as_int());
                 decisions[static_cast<std::uint64_t>(*(*a)[0].as_int())] = d;
                 next_request = std::max(next_request, static_cast<std::uint64_t>(*(*a)[0].as_int()) + 1);
+            }
+        }
+        // Move counters of the paglets here, and pins (location.cpp).
+        if (const mesh::Array* h = f.array("held")) {
+            for (const auto& e : *h) {
+                const mesh::Array* a = e.as_array();
+                if (a == nullptr || a->size() != 3 || (*a)[0].as_str() == nullptr || !(*a)[1].as_int() ||
+                    !(*a)[2].as_int()) {
+                    continue;
+                }
+                held[*(*a)[0].as_str()] = Held{static_cast<std::uint64_t>(*(*a)[1].as_int()), *(*a)[2].as_int()};
+            }
+        }
+        if (const mesh::Array* list = f.array("pins")) {
+            for (const auto& e : *list) {
+                const mesh::Map* m = e.as_map();
+                if (m == nullptr) continue;
+                const mesh::Fields p{*m};
+                auto id = p.str("pin");
+                auto paglet = p.str("p");
+                auto until = p.integer("until");
+                if (!id || !paglet || !until || *until <= mesh::unix_ms()) continue;
+                pins[*id] = PinLease{*paglet, *until, p.str("holder").value_or(""), p.str("reason").value_or("")};
             }
         }
         std::error_code ec;
@@ -645,12 +790,27 @@ struct Node::Impl {
             if (!d.committed || d.expires <= now) continue;
             committed.emplace_back(mesh::Array{
                 mesh::Value(static_cast<std::int64_t>(r)), mesh::Value::bin(d.to),
-                mesh::Value(unix_now +
-                            std::chrono::duration_cast<std::chrono::milliseconds>(d.expires - now).count())});
+                mesh::Value(unix_now + std::chrono::duration_cast<std::chrono::milliseconds>(d.expires - now).count()),
+                mesh::Value(static_cast<std::int64_t>(d.moves))});
+        }
+        mesh::Array held_list;
+        for (const auto& [id, h] : held) {
+            held_list.emplace_back(
+                mesh::Array{mesh::Value(id), mesh::Value(static_cast<std::int64_t>(h.moves)), mesh::Value(h.moved)});
+        }
+        mesh::Array pin_list;
+        for (const auto& [id, lease] : pins) {
+            pin_list.emplace_back(mesh::Map{{"pin", mesh::Value(id)},
+                                            {"p", mesh::Value(lease.paglet)},
+                                            {"until", mesh::Value(lease.until)},
+                                            {"holder", mesh::Value(lease.holder)},
+                                            {"reason", mesh::Value(lease.reason)}});
         }
         const auto bytes = mesh::encode(mesh::Value(mesh::Map{{"materialized", list(materialized)},
                                                               {"answered", list(answered)},
-                                                              {"committed", mesh::Value(std::move(committed))}}));
+                                                              {"committed", mesh::Value(std::move(committed))},
+                                                              {"held", mesh::Value(std::move(held_list))},
+                                                              {"pins", mesh::Value(std::move(pin_list))}}));
         std::error_code ec;
         fs::create_directories(state_dir, ec);
         const fs::path temp = state_dir / "node.state.tmp";

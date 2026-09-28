@@ -187,6 +187,15 @@ public:
     // Where a paglet that left this host went (key ID of the host), while
     // this host remembers.
     std::optional<std::string> location(const PagletId& id) const;
+    // Pins (planning/cpp-location.md): until `until` (Unix milliseconds) the
+    // paglet stays on this host; its dispatch returns `pinned`, and so does
+    // dispatch() here. Several pins can be held; the paglet can move when
+    // all have ended. Fails with not_found (not here), denied (a system
+    // paglet), bad_state (leaving, or about to), invalid_argument (ended).
+    std::expected<void, std::int32_t> pin(const PagletId& id, std::string pin, std::int64_t until);
+    bool unpin(const PagletId& id, const std::string& pin);
+    // The end of the paglet's last pin, or 0 when it is not pinned.
+    std::int64_t pinned_until(const PagletId& id) const;
     // Children and local clones created since the last call, for passport
     // links (the mesh takes them regularly; at most 10 000 are kept).
     std::vector<Spawn> take_spawns();

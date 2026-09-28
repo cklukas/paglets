@@ -106,7 +106,8 @@ tests in `cpp/tests/test_mobility.cpp` join two runtimes directly.
 - **Tombstones**: a host remembers for 10 minutes (`Config::tombstone_ttl`)
   where a departed paglet went and forwards messages and replies for it
   (at most 4 times per message), so endpoints with stale hints keep
-  working until the location service (WP13) takes over.
+  working; beyond that the location records find the paglet
+  (planning/cpp-location.md, section 3).
 
 ## 5. Departures and arrivals (runtime)
 
@@ -183,8 +184,10 @@ checked against the manifest's hash. With all pages it prepares the arrival
 (capabilities from grants are re-created, section 7) and answers
 `move-ready`.
 
-**Commit.** The source decides: on `move-ready` it records the commit
-(durably, in the node's state) and only then tells the runtime (held
+**Commit.** The source decides: on `move-ready` it first updates the
+paglet's location records on a majority of their hosts
+(planning/cpp-location.md, section 1), then records the commit (durably, in
+the node's state) and only then tells the runtime (held
 messages follow the paglet, section 5) and the destination (`move-commit`),
 which starts the paglet and stores it and its passport. A refusal, or no
 answer within the move timeout (30 s per step), moves on to the next host of
@@ -244,9 +247,11 @@ frames of sections 6 and 7 and of WP11; channels of admins and owners are
 | `launch` | `passport`, `module`?, `args`? | the passport's owner | the new paglet's ID; the module is added only if its hash matches the passport |
 | `call` | `paglet`, `name`, `payload`, `timeout_ms`? | the paglet's owner, admins | the reply's status and payload |
 | `dispatch` | `paglet`, `destination` | the paglet's owner, admins | the move started (a transfer ticket, section 6) |
+| `locate`, `pin`, `pins`, `unpin` | | | location and pins (planning/cpp-location.md, section 7) |
 
 The client side is the `remote` command group of `paglets-host`
-(`status`, `push`, `launch`, `call`, `dispatch`, all with `--connect URL
+(`status`, `push`, `launch`, `call`, `dispatch`, and the location commands
+`locate`, `pin`, `pins`, `unpin`, all with `--connect URL
 --key KEY --ledger DIR`). The session's role comes from the key file (admin
 or owner); the client accepts the server only if it is a host enrolled in
 its ledger copy, or the key given with `--host-key`. `launch` signs the

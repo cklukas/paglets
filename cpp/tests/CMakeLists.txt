@@ -8,7 +8,7 @@ paglets_add_module(explorer
     SOURCES guests/explorer.cpp
     SCHEMA_HEADER guests/explorer_msgs.hpp
     SCHEMA_NAMESPACE explorer
-    SERVICES files server_info directory storage artifacts pubsub user_info grants)
+    SERVICES files server_info directory storage artifacts pubsub user_info grants locator)
 paglets_add_module(calc_user
     SOURCES guests/calc_user.cpp
     SCHEMA_HEADER guests/calc_contract.hpp
@@ -37,7 +37,7 @@ set(test_sources
     test_network.cpp
     test_mobility.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})

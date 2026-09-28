@@ -14,6 +14,7 @@
 #include <zstd.h>
 
 #include <charconv>
+#include <random>
 
 namespace paglets::node {
 
@@ -148,6 +149,11 @@ void Node::Impl::install_mobility() {
                                                                {"m", mesh::Value(runtime::encode_remote(m))}})));
     };
     hooks.depart = [this](runtime::Departure d) { on_depart(std::move(d)); };
+    // Called with the runtime's lock held: queued for location.cpp.
+    hooks.unresolved = [this](runtime::RemoteMessage m) {
+        std::lock_guard lock(unresolved_mu);
+        unresolved.push_back(std::move(m));
+    };
     runtime.set_mobility(std::move(hooks));
 }
 
@@ -170,6 +176,7 @@ void Node::Impl::on_deliver(const mesh::PublicKey& from, const mesh::Fields& f) 
 void Node::Impl::take_spawns() {
     const std::int64_t now = mesh::unix_ms();
     for (const auto& s : runtime.take_spawns()) {
+        if (!held.contains(s.child) && runtime.info(s.child)) note_created(s.child);
         auto parent = passports.find(s.parent);
         auto module = mesh::parse_key_id(s.module);
         if (parent == passports.end() || !module || passports.contains(s.child)) continue;
@@ -226,8 +233,16 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
             }
         }
         if (ok) out.push_back(k);
-        if (out.size() >= static_cast<std::size_t>(ticket.retries)) break;
     }
+    // Several hosts match `any` and labels: spread paglets over them.
+    if (t == "any" || t.starts_with("label:")) {
+        static thread_local std::mt19937_64 random{std::random_device{}()};
+        std::ranges::shuffle(out, random);
+    }
+    // Hosts that are up first (location.cpp keeps the view).
+    update_view();
+    std::ranges::stable_partition(out, [&](const mesh::PublicKey& k) { return std::ranges::binary_search(view, k); });
+    if (out.size() > static_cast<std::size_t>(ticket.retries)) out.resize(static_cast<std::size_t>(ticket.retries));
     return out;
 }
 
@@ -299,6 +314,7 @@ void Node::Impl::offer_next(std::uint64_t request) {
     out.candidates.pop_front();
     ++out.attempts;
     const runtime::Departure& d = out.departure;
+    out.moves = d.clone ? 1 : held[d.state.id].moves + 1;  // the move counter after this move
     mesh::Map body{{"v", mesh::Value(std::int64_t{1})},
                    {"mesh", mesh::Value::bin(ledger.mesh())},
                    {"from", mesh::Value::bin(key.public_key())},
@@ -310,6 +326,7 @@ void Node::Impl::offer_next(std::uint64_t request) {
                    {"state", mesh::Value(runtime::encode_state(d.state))},
                    {"image", image_manifest(d.image)},
                    {"activate", mesh::Value(out.ticket.activate)},
+                   {"moves", mesh::Value(static_cast<std::int64_t>(out.moves))},
                    {"time", mesh::Value(mesh::unix_ms())}};
     if (d.clone) {
         body.emplace_back("clone_args", mesh::Value(d.clone_args));
@@ -367,14 +384,27 @@ void Node::Impl::on_move_ready(const mesh::PublicKey& from, const mesh::Fields& 
     auto r = f.integer("r");
     if (!r) return;
     auto it = outgoing.find(static_cast<std::uint64_t>(*r));
-    if (it == outgoing.end() || it->second.target != from) return;
+    if (it == outgoing.end() || it->second.target != from || it->second.recording) return;
+    // The move commits once a majority of the responsible hosts recorded
+    // where the paglet goes (location.cpp).
+    record_move(it->first);
+}
+
+void Node::Impl::commit_move(std::uint64_t request) {
+    auto it = outgoing.find(request);
+    if (it == outgoing.end()) return;
     Outgoing o = std::move(it->second);
     outgoing.erase(it);
+    const mesh::PublicKey from = o.target;
+    const auto r = static_cast<std::int64_t>(request);
     // The decision is recorded (durably) before the destination hears it.
-    decisions[static_cast<std::uint64_t>(*r)] = Decision{true, from, Clock::now() + decision_ttl};
+    decisions[request] = Decision{true, from, Clock::now() + decision_ttl, o.moves};
     save();
     runtime.finish_departure(o.departure.move, mesh::key_id(from));
+    loc_cache[o.departure.state.id] = {LocRecord{from, o.moves, mesh::unix_ms(), o.departure.state.owner, 0},
+                                       Clock::now()};
     if (!o.departure.clone) {
+        held.erase(o.departure.state.id);
         // Its passport lives on where it went.
         passports.erase(o.departure.state.id);
         if (!state_dir.empty()) {
@@ -383,7 +413,9 @@ void Node::Impl::on_move_ready(const mesh::PublicKey& from, const mesh::Fields& 
         }
     }
     ++move_stats.moves_out;
-    send_frame(from, mesh::Map{{"t", mesh::Value("move-commit")}, {"r", mesh::Value(*r)}});
+    send_frame(from, mesh::Map{{"t", mesh::Value("move-commit")},
+                               {"r", mesh::Value(r)},
+                               {"c", mesh::Value(static_cast<std::int64_t>(o.moves))}});
 }
 
 void Node::Impl::on_move_refused(const mesh::PublicKey& from, const mesh::Fields& f) {
@@ -406,7 +438,9 @@ void Node::Impl::on_move_query(const mesh::PublicKey& from, const mesh::Fields& 
     if (auto o = outgoing.find(request); o != outgoing.end() && o->second.target == from) return;  // undecided
     auto d = decisions.find(request);
     const bool committed = d != decisions.end() && d->second.committed && d->second.to == from;
-    send_frame(from, mesh::Map{{"t", mesh::Value(committed ? "move-commit" : "move-abort")}, {"r", mesh::Value(*r)}});
+    mesh::Map answer{{"t", mesh::Value(committed ? "move-commit" : "move-abort")}, {"r", mesh::Value(*r)}};
+    if (committed) answer.emplace_back("c", mesh::Value(static_cast<std::int64_t>(d->second.moves)));
+    send_frame(from, std::move(answer));
 }
 
 // -- the destination ------------------------------------------------------------------
@@ -480,6 +514,7 @@ void Node::Impl::on_move_offer(const mesh::PublicKey& from, const mesh::Fields& 
     in.passport = std::move(*passport);
     in.clone = *kind == "clone";
     in.activate = activate;
+    in.moves = static_cast<std::uint64_t>(std::max<std::int64_t>(0, b.integer("moves").value_or(0)));
     if (in.clone) {
         in.clone_args = b.bin("clone_args").value_or(runtime::Bytes{});
         auto caps = runtime::decode_caps(b.bin("clone_caps").value_or(runtime::Bytes{0x90}));
@@ -586,6 +621,8 @@ void Node::Impl::on_move_commit(const mesh::PublicKey& from, const mesh::Fields&
     }
     save_passport(*in.passport);
     passports.insert_or_assign(in.state.id, std::move(*in.passport));
+    held[in.state.id] =
+        Held{static_cast<std::uint64_t>(f.integer("c").value_or(static_cast<std::int64_t>(in.moves))), mesh::unix_ms()};
     ++move_stats.moves_in;
     sync_locked();  // grants approved for it meanwhile
 }
@@ -602,9 +639,16 @@ void Node::Impl::on_move_abort(const mesh::PublicKey& from, const mesh::Fields& 
 // A capability the runtime cannot re-create: from the grant it came from,
 // if the grant is the paglet's own, valid and covers this host. Narrowings
 // the paglet made (fewer rights, a subdirectory, an earlier expiry) stay.
-std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet, const runtime::Cap& held) {
-    if (!held.grant) return std::nullopt;
-    auto id = parse_hex_id(*held.grant);
+std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet, const runtime::Cap& kept) {
+    // Pins refer to the pinned paglet, not to their holder's host: they stay
+    // valid (every host has a locator).
+    if (kept.kind == runtime::Cap::Kind::resource && kept.resource_type == "pin" &&
+        kept.target == runtime::system_paglet_id("locator")) {
+        if (!runtime.system_paglet("locator")) return std::nullopt;
+        return kept;
+    }
+    if (!kept.grant) return std::nullopt;
+    auto id = parse_hex_id(*kept.grant);
     if (!id) return std::nullopt;
     const mesh::LedgerState& st = ledger.state();
     auto g = st.grants.find(*id);
@@ -613,20 +657,20 @@ std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet
         return std::nullopt;
     }
     auto full = materialize(*id, g->second);
-    if (!full || full->kind != held.kind) return std::nullopt;
+    if (!full || full->kind != kept.kind) return std::nullopt;
     runtime::Cap c = std::move(*full);
     std::vector<std::string> ops;
-    for (const auto& op : held.ops) {
+    for (const auto& op : kept.ops) {
         if (std::ranges::find(c.ops, op) != c.ops.end() || std::ranges::find(c.ops, std::string("*")) != c.ops.end()) {
             ops.push_back(op);
         }
     }
     c.ops = std::move(ops);
-    if (c.kind == runtime::Cap::Kind::resource && within(c.resource, held.resource)) c.resource = held.resource;
-    if (held.expires && (!c.expires || *held.expires < *c.expires)) c.expires = held.expires;
-    c.uses_left = held.uses_left;
-    c.transferable = c.transferable && held.transferable;
-    c.badge = held.badge;
+    if (c.kind == runtime::Cap::Kind::resource && within(c.resource, kept.resource)) c.resource = kept.resource;
+    if (kept.expires && (!c.expires || *kept.expires < *c.expires)) c.expires = kept.expires;
+    c.uses_left = kept.uses_left;
+    c.transferable = c.transferable && kept.transferable;
+    c.badge = kept.badge;
     materialized.insert(hex(*id));  // delivered: sync does not send it again
     return c;
 }
@@ -639,6 +683,11 @@ void Node::Impl::check_move_deadlines() {
     }
     for (auto r : late) {
         auto it = outgoing.find(r);
+        if (it->second.recording) {
+            abort_recording(r, "the location records could not be updated (" + std::to_string(it->second.acks.size()) +
+                                   " of " + std::to_string(it->second.responsible.size()) + " hosts answered)");
+            continue;
+        }
         it->second.failures.push_back("host " + mesh::key_id(it->second.target).substr(0, 16) + ": no answer in time");
         decisions[r] = Decision{false, it->second.target, now + decision_ttl};
         send_frame(it->second.target,

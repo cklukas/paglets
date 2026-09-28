@@ -22,7 +22,10 @@ host ([design](../planning/cpp-modules.md)). WP12 puts hosts on the network: HTT
 encrypted, mutually authenticated Noise channels between hosts and for CLI
 sessions, and paglets that move between hosts with their state (only
 changed memory pages travel again), their grants and transfer tickets
-([design](../planning/cpp-networking.md)).
+([design](../planning/cpp-networking.md)). WP13 finds them anywhere: location
+records on hosts chosen by consistent hashing, updated by a majority on
+every move, with failover when hosts go down, and pins that keep a paglet on
+its host for a while ([design](../planning/cpp-location.md)).
 
 ## Layout
 
@@ -240,7 +243,13 @@ $H remote dispatch --connect https://lab-1:7443 --key olga.key --ledger ledger <
 $H remote call --connect https://lab-2:7443 --key olga.key --ledger ledger <paglet-id> \
     increment '{"by": 1, "note": "moved"}'
 $H remote status --connect https://lab-2:7443 --key alice.key --ledger ledger
+$H remote locate --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id>   # from any host
+$H remote pin --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> --minutes 30
+$H remote unpin --connect https://lab-1:7443 --key alice.key --ledger ledger <paglet-id>   # admins
 ```
+
+Paglets locate and pin each other through the `locator` system paglet;
+pinning needs a policy rule for service `locator`, operation `pin`.
 
 Moving a paglet as a memory image between processes or hosts (the module
 must be the same file on both sides; images are independent of CPU

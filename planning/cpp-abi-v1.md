@@ -321,6 +321,7 @@ fires.
 | -14 | `failed` | Reply status: the receiver trapped |
 | -15 | `gone` | Reply status: the receiver was disposed or dropped the reply capability |
 | -16 | `revoked` | v1.1: the capability, one it was derived from, or its grant was revoked |
+| -17 | `pinned` | v1.1: `dispatch` while the paglet is pinned to its host |
 
 ## 10. Limits
 
@@ -383,6 +384,7 @@ Each test is run against the host runtime with the conformance guest
 | C38 | v1.1: a dispatch that fails leaves the paglet where it was with its state; it receives `paglets.move_failed` |
 | C39 | v1.1: `clone` with a destination makes the clone on another host (`cloned` there); the original's endpoint reaches it; failures arrive as `paglets.move_failed` with the clone's ID |
 | C40 | v1.1: endpoints to paglets on other hosts carry messages, requests and replies; only endpoints travel with them (`unsupported` otherwise) |
+| C41 | v1.1: a pinned paglet's `dispatch` returns `pinned` and `self_info.pinned_until` names the pin's end; after the release it moves (`test_location.cpp`) |
 
 ## 12. Review
 
@@ -470,3 +472,9 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   capabilities and timers go along; default service endpoints are the
   destination's; resource capabilities are re-created from their grants
   where the grant covers the destination, or listed in `lost`.
+- **Pins** (M3, planning/cpp-location.md). While the paglet is pinned to
+  its host, `dispatch` returns `pinned` (-17) and `self_info` has
+  `pinned_until` (Unix milliseconds; 0 when not pinned): when the last pin
+  ends. Cloning, deactivation and messages are unaffected. Pin capabilities
+  (kind `pin`, from the `locator` system paglet) are resource capabilities
+  with the right `release`.

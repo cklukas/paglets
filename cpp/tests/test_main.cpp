@@ -42,11 +42,14 @@ std::string guest_path(const std::string& file) {
 int main(int argc, char** argv) {
     using namespace paglets::test;
     if (argc > 1) g_guest_dir = argv[1];
+    // An optional second argument runs only the cases whose names contain it.
+    const std::string only = argc > 2 ? argv[2] : "";
 
     int passed = 0;
     int failed = 0;
     int skipped = 0;
     for (const Case& c : registry()) {
+        if (!only.empty() && std::string_view(c.name).find(only) == std::string_view::npos) continue;
         failures_in_case = 0;
         std::string status;
         try {

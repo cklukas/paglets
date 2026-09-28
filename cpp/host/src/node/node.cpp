@@ -172,6 +172,9 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
     impl_->replica = std::make_unique<mesh::Replica>(impl_->ledger, impl_->key.public_key(), transport);
     impl_->replica->on_change([impl = impl_.get()] { impl->dirty = true; });
     impl_->load();
+    impl_->load_locations();
+    // Pins survive restarts: the paglets they hold stay here.
+    for (const auto& [id, lease] : impl_->pins) (void)impl_->runtime.pin(lease.paglet, id, lease.until);
 }
 
 Node::~Node() {
@@ -182,6 +185,7 @@ Node::~Node() {
 std::expected<void, std::string> Node::start() {
     auto grants = std::make_shared<GrantsService>(*impl_);
     if (auto id = impl_->runtime.add_system_paglet(grants); !id) return std::unexpected(id.error());
+    if (auto id = impl_->runtime.add_system_paglet(make_locator(*impl_)); !id) return std::unexpected(id.error());
     // Services with ambient authority: only the operations the rules allow.
     impl_->services->set_policy([impl = impl_.get()](const abi::SenderRecord& caller, std::string_view service,
                                                      const std::vector<std::string>& offered) {
@@ -229,7 +233,9 @@ void Node::add_seed(const mesh::PublicKey& peer) {
 
 void Node::receive(const mesh::PublicKey& from, std::span<const std::uint8_t> frame) {
     std::lock_guard lock(impl_->mu);
+    impl_->heard(from);
     if (!impl_->handle_node_frame(from, frame)) impl_->replica->receive(from, frame);
+    impl_->process_unresolved();
     impl_->sync_if_dirty();
 }
 
@@ -239,6 +245,7 @@ void Node::tick() {
     impl_->check_fetch_deadlines();
     impl_->take_spawns();
     impl_->check_move_deadlines();
+    impl_->location_tick();
 }
 
 std::expected<mesh::AddResult, std::string> Node::submit(const mesh::Record& record) {

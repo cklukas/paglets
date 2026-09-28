@@ -60,5 +60,20 @@ until(TRIES 80 ARGS remote call --connect ${A} --key "${DIR}/olga.key" ${P} ${L}
       "{\"by\": 1, \"note\": \"c\"}" EXPECT "\"value\":8")
 until(ARGS remote status --connect ${A} --key "${DIR}/alice.key" ${P} ${L} EXPECT "${paglet}")
 
+# b finds it on a (WP13); its owner pins it there, so it cannot leave.
+until(TRIES 40 ARGS remote locate --connect ${B} --key "${DIR}/olga.key" ${P} ${L} ${paglet} EXPECT "host:  a ")
+until(ARGS remote pin --connect ${B} --key "${DIR}/olga.key" ${P} ${L} ${paglet} --minutes 5 --reason e2e
+      EXPECT "pin:")
+execute_process(COMMAND "${HOST}" remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} b
+                RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(rc EQUAL 0 OR NOT err MATCHES "pinned")
+    stop_and_fail("a pinned paglet was dispatched: ${err}")
+endif()
+until(ARGS remote pins --connect ${A} --key "${DIR}/alice.key" ${P} ${L} EXPECT "${paglet}")
+# An admin ends the pin through the other host; then it moves again.
+until(ARGS remote unpin --connect ${B} --key "${DIR}/alice.key" ${P} ${L} ${paglet} EXPECT "1 pins ended")
+until(ARGS remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} b)
+until(TRIES 80 ARGS remote locate --connect ${A} --key "${DIR}/alice.key" ${P} ${L} ${paglet} EXPECT "host:  b ")
+
 file(WRITE "${DIR}/stop" "")
-message(STATUS "paglet ${paglet} went from a to b and back")
+message(STATUS "paglet ${paglet} went from a to b and back, was located, pinned and released")

@@ -67,6 +67,7 @@ public:
             for (std::size_t i = 0; i < ballast_.size(); ++i) ballast_[i] = static_cast<std::uint8_t>(i * 131 + 7);
             m.reply(static_cast<std::int64_t>(ballast_.size()));
         });
+        r.on("hops", [this](Message& m) { m.reply(hops_); });
         r.on("count", [this](Message& m) {
             ++count_;
             m.reply(count_);
@@ -225,6 +226,15 @@ public:
             }
             m.reply(static_cast<std::int32_t>(abi::invalid_argument));
         });
+        // Keeps moving (WP13): every Cmd.ms milliseconds the paglet
+        // dispatches itself to Cmd.name; refused dispatches (a pin) are noted
+        // and tried again. Cmd.ms 0 stops it.
+        r.on<Cmd>("roam", [this](const Cmd& c, Message& m) {
+            roam_ms_ = c.ms;
+            roam_to_ = c.name;
+            if (roam_ms_ > 0) (void)paglets::after_raw(roam_ms_, "roam-tick", {});
+            m.reply();
+        });
         // Passes an out-of-bounds (pointer, length) pair to an import (C27).
         r.on("out_of_bounds", [](Message& m) {
             raw_send(abi::self_handle, reinterpret_cast<const void*>(0x7ffffff0), 0x100000);
@@ -249,10 +259,19 @@ public:
     void on_disposing() override { paglets::log("conformance paglet disposing"); }
     void on_dispatching(const abi::DispatchingEvent& e) override { note("event:dispatching:" + e.destination); }
     void on_arrived(const abi::ArrivedEvent& e) override {
+        if (roam_ms_ > 0) {
+            ++hops_;
+            (void)paglets::after_raw(roam_ms_, "roam-tick", {});
+            return;
+        }
         note("event:arrived:" + e.from + ":" + std::to_string(e.lost.size()));
         for (const auto& l : e.lost) note("lost:" + l);
     }
     void on_move_failed(const abi::MoveFailed& f) override {
+        if (roam_ms_ > 0) {
+            (void)paglets::after_raw(roam_ms_, "roam-tick", {});
+            return;
+        }
         note("move_failed:" + f.destination + ":" + f.reason + ":" + f.clone);
     }
     void on_undelivered(const abi::Undelivered& u) override {
@@ -261,6 +280,16 @@ public:
 
     std::int32_t on_message(Message& m) override {
         if (m.kind() == abi::MessageKind::timer) {
+            if (m.name() == "roam-tick") {
+                if (roam_ms_ <= 0) return abi::handled;
+                if (auto r = paglets::dispatch(roam_to_); !r) {
+                    // Pinned (or refused): stay, and try again later.
+                    const std::string entry = "roam:" + std::string(abi::error_name(r.error()));
+                    if (journal_.empty() || journal_.back() != entry) note(entry);
+                    (void)paglets::after_raw(roam_ms_, "roam-tick", {});
+                }
+                return abi::handled;
+            }
             note("timer:" + m.name());
             return abi::handled;
         }
@@ -280,6 +309,9 @@ private:
     std::vector<std::uint8_t> ballast_;
     std::vector<Capability> deferred_;
     std::int64_t count_ = 0;
+    std::int64_t roam_ms_ = 0;
+    std::string roam_to_;
+    std::int64_t hops_ = 0;
 };
 
 }  // namespace

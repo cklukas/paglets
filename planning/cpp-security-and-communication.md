@@ -330,7 +330,8 @@ work with it there" reliable, the mesh supports pinning:
   all have ended. Pins are persisted and survive a host restart.
 - The `pin` right on the endpoint and the maximum pin duration come from mesh
   policy. Admins can force-release pins.
-- If the host shuts down, pins end and their holders are notified.
+- Holders are not told when a pin ends early (an admin ended it); `release`
+  then answers that the pin had ended (planning/cpp-location.md).
 
 ### 5.4 Discovery and groups
 

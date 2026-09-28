@@ -190,6 +190,18 @@ struct PagletRec {
     bool arriving = false;                   // prepared here, not yet committed
     bool dormant = false;                    // arrived inactive: runs when a message comes
     std::optional<Envelope> arrival_start;   // its first delivery, on commit
+    // Pins (the mesh's locator): pin ID -> end (Unix milliseconds). While
+    // one has not ended the paglet stays on this host.
+    std::map<std::string, std::int64_t> pins;
+
+    // The end of the last pin, or 0 when the paglet is not pinned.
+    std::int64_t pinned_until() {
+        const std::int64_t now = wall_ms();
+        std::erase_if(pins, [&](const auto& p) { return p.second <= now; });
+        std::int64_t until = 0;
+        for (const auto& [pin, end] : pins) until = std::max(until, end);
+        return until;
+    }
 
     const std::string& module_hash() const { return module; }
     abi::SenderRecord sender(const std::string& host) const {
@@ -793,6 +805,7 @@ public:
         abi::SelfInfo info{
             rec_.id,      rec_.module_hash(), rec_.owner,   std::string(to_string(rec_.trust)), rt_.config.host_name,
             abi::version, abi::minor_version, rec_.services};
+        info.pinned_until = rec_.pinned_until();
         return abi::encode(info);
     }
 
@@ -1164,6 +1177,7 @@ public:
                 // System and resident paglets stay where they are.
                 if (rec_.trust != TrustClass::roaming) return abi::denied;
                 if (rec_.pending_end) return abi::bad_state;
+                if (rec_.pinned_until() != 0) return abi::pinned;
                 rec_.pending_end = abi::LifecycleOp::dispatch;
                 rec_.dispatch_to = std::move(arg.destination);
                 return abi::ok;
@@ -1534,7 +1548,9 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
         }
         case Envelope::Type::move: {
             std::lock_guard lock(mu);
-            if (!rec.pending_end) {
+            if (const std::int64_t until = rec.pinned_until(); until != 0) {
+                move_failed(rec, env.destination, "pinned until " + std::to_string(until), {});
+            } else if (!rec.pending_end) {
                 rec.pending_end = abi::LifecycleOp::dispatch;
                 rec.dispatch_to = std::move(env.destination);
             }
@@ -1665,6 +1681,9 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
         if (!snap) {
             // The paglet stays; it hears why.
             move_failed(rec, destination, "no image: " + snap.error(), {});
+        } else if (const std::int64_t until = rec.pinned_until(); until != 0) {
+            // Pinned while it prepared to leave: the pin wins.
+            move_failed(rec, destination, "pinned until " + std::to_string(until), {});
         } else {
             Departure d;
             d.move = next_move++;
@@ -2213,6 +2232,11 @@ std::int32_t Runtime::deliver_remote(RemoteMessage m) {
     PagletRec* rec = rt.find(m.target);
     if (rec == nullptr) {
         if (forward(m)) return abi::ok;
+        // The mesh's location records may know where it went.
+        if (rt.mobility.unresolved && m.hops < max_forwards && rt.remote_host(m.target, {}).empty()) {
+            rt.mobility.unresolved(std::move(m));
+            return abi::ok;
+        }
         return refuse(m, abi::not_found);
     }
     if (rec->native) return refuse(m, abi::denied);  // system paglets serve their own host
@@ -2459,11 +2483,37 @@ std::expected<void, std::int32_t> Runtime::dispatch(const PagletId& id, std::str
     if (!rt.mobility.depart) return std::unexpected(abi::unsupported);
     if (destination.empty()) return std::unexpected(abi::invalid_argument);
     if (rec->moving || rec->arriving) return std::unexpected(abi::bad_state);
+    if (rec->pinned_until() != 0) return std::unexpected(abi::pinned);
     Envelope env;
     env.type = Envelope::Type::move;
     env.destination = std::move(destination);
     rt.enqueue(*rec, std::move(env), control_priority);
     return {};
+}
+
+std::expected<void, std::int32_t> Runtime::pin(const PagletId& id, std::string pin, std::int64_t until) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    PagletRec* rec = rt.find(id);
+    if (rec == nullptr || rec->arriving) return std::unexpected(abi::not_found);
+    if (rec->native) return std::unexpected(abi::denied);
+    // About to leave or leaving: the outcome decides where it is.
+    if (rec->moving || rec->pending_end == abi::LifecycleOp::dispatch) return std::unexpected(abi::bad_state);
+    if (until <= wall_ms()) return std::unexpected(abi::invalid_argument);
+    rec->pins[std::move(pin)] = until;
+    return {};
+}
+
+bool Runtime::unpin(const PagletId& id, const std::string& pin) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    return rec != nullptr && rec->pins.erase(pin) > 0;
+}
+
+std::int64_t Runtime::pinned_until(const PagletId& id) const {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    return rec == nullptr ? 0 : rec->pinned_until();
 }
 
 std::vector<Spawn> Runtime::take_spawns() {

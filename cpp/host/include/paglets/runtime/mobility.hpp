@@ -115,6 +115,12 @@ struct MobilityHooks {
     std::function<void(RemoteMessage)> deliver;
     // A departure to carry out; called without the runtime's lock.
     std::function<void(Departure)> depart;
+    // A message or request from another host for a paglet that is not here
+    // and that this host has no tombstone for: the mesh locates the paglet
+    // and sends it there, or answers a request with `not_found`. Called
+    // with the runtime's lock held: queue it. Without it, requests are
+    // answered with `not_found` at once.
+    std::function<void(RemoteMessage)> unresolved;
 };
 
 // On arrival: capabilities the runtime cannot re-create itself (resource

@@ -17,7 +17,9 @@
 #include <paglets/node/node.hpp>
 #include <paglets/services/system_services.hpp>
 
+#include <array>
 #include <deque>
+#include <random>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -55,6 +57,10 @@ struct Mesh {
         std::unique_ptr<Fixture> f;
         std::shared_ptr<ps::SystemServices> services;
         std::unique_ptr<paglets::node::Node> node;
+        bool down = false;  // shut down: no frames in or out, no ticks
+        std::filesystem::path state;
+        ps::ServicesConfig services_config;
+        std::array<std::uint8_t, 32> seed{};  // of the host key, for restarts
     };
 
     SigningKey admin = SigningKey::generate();
@@ -78,28 +84,55 @@ struct Mesh {
         for (auto& h : hosts) h->node.reset();
     }
 
-    Host& add_host(const std::string& name, ps::ServicesConfig services_config = {}) {
+    // `state`: a directory for the runtime and the node (empty: in memory).
+    Host& add_host(const std::string& name, ps::ServicesConfig services_config = {}, std::filesystem::path state = {}) {
         auto h = std::make_unique<Host>();
         h->name = name;
-        SigningKey key = SigningKey::generate();
-        h->key = key.public_key();
+        h->state = std::move(state);
+        h->services_config = std::move(services_config);
+        std::random_device random;
+        for (auto& b : h->seed) b = static_cast<std::uint8_t>(random());
+        auto key = SigningKey::from_seed(h->seed);
+        REQUIRE_OK(key);
+        h->key = key->public_key();
         h->port.net = this;
         h->port.self = h->key;
-        h->f = std::make_unique<Fixture>();
-        auto installed = ps::install_system_services(*h->f->runtime, services_config);
-        REQUIRE_OK(installed);
-        h->services = *installed;
-        auto ledger = Ledger::create(*genesis);
-        REQUIRE_OK(ledger);
-        h->node = std::make_unique<paglets::node::Node>(*h->f->runtime, h->services, std::move(*ledger), std::move(key),
-                                                        h->port);
-        REQUIRE_OK(h->node->start());
+        boot(*h, std::move(*key));
         for (auto& other : hosts) {
             h->node->add_seed(other->key);
             other->node->add_seed(h->key);
         }
         hosts.push_back(std::move(h));
         return *hosts.back();
+    }
+
+    void boot(Host& h, SigningKey key) {
+        rt::Config config;
+        if (!h.state.empty()) config.state_dir = h.state / "runtime";
+        h.f = std::make_unique<Fixture>(std::move(config));
+        auto installed = ps::install_system_services(*h.f->runtime, h.services_config);
+        REQUIRE_OK(installed);
+        h.services = *installed;
+        auto ledger = Ledger::create(*genesis);
+        REQUIRE_OK(ledger);
+        h.node = std::make_unique<paglets::node::Node>(*h.f->runtime, h.services, std::move(*ledger), std::move(key),
+                                                       h.port, h.state.empty() ? h.state : h.state / "node");
+        REQUIRE_OK(h.node->start());
+    }
+
+    // Stops a host (its state stays in its directory) and starts it again;
+    // it learns the ledger from its peers.
+    void restart(Host& h) {
+        h.f->runtime->shutdown();
+        h.node.reset();
+        h.services.reset();
+        h.f.reset();
+        auto key = SigningKey::from_seed(h.seed);
+        REQUIRE_OK(key);
+        boot(h, std::move(*key));
+        for (auto& other : hosts) {
+            if (other.get() != &h) h.node->add_seed(other->key);
+        }
     }
 
     Host* find(const PublicKey& key) {
@@ -142,7 +175,8 @@ struct Mesh {
             auto& [from, to, frame] = next;
             ++sent[frame_type(frame)];
             if (filter && !filter(from, to, frame)) continue;
-            if (Host* h = find(to)) h->node->receive(from, frame);
+            if (Host* src = find(from); src != nullptr && src->down) continue;
+            if (Host* h = find(to); h != nullptr && !h->down) h->node->receive(from, frame);
         }
     }
 
@@ -151,7 +185,9 @@ struct Mesh {
         for (int i = 0; i < rounds; ++i) {
             deliver();
             if (done()) return true;
-            for (auto& h : hosts) h->node->tick();
+            for (auto& h : hosts) {
+                if (!h->down) h->node->tick();
+            }
             std::this_thread::sleep_for(2ms);
         }
         deliver();

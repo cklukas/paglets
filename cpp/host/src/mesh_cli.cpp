@@ -17,6 +17,8 @@
 
 #include <algorithm>
 #include <fstream>
+#include <chrono>
+#include <format>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -73,12 +75,18 @@ int usage() {
            "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
            "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
+           "       paglets-host remote locate --connect URL --key KEY --ledger DIR PAGLET\n"
+           "       paglets-host remote pin --connect URL --key KEY --ledger DIR PAGLET [--minutes N] [--reason TEXT]\n"
+           "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote unpin --connect URL --key ADMIN-KEY --ledger DIR PAGLET [--pin ID]\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
            "system; 'module-policy trusted' makes roaming modules need trust as well.\n"
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
            "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket).\n"
+           "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
+           "pins lists the pins on the host, unpin ends pins wherever the paglet is (admins).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
            "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
@@ -101,8 +109,8 @@ struct Options {
     std::vector<std::string> remove;
     std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths, classes, signers;
     std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service, version;
-    std::optional<std::string> connect, host_key, args, id, expect;
-    std::optional<std::int64_t> hours;
+    std::optional<std::string> connect, host_key, args, id, expect, pin;
+    std::optional<std::int64_t> hours, minutes;
     std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
     bool ignored = false;
     bool host_only = false;
@@ -198,6 +206,10 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = set(o.id);
         } else if (a == "--expect") {
             ok = set(o.expect);
+        } else if (a == "--pin") {
+            ok = set(o.pin);
+        } else if (a == "--minutes") {
+            ok = number(o.minutes);
         } else if (a == "--hours") {
             ok = number(o.hours);
         } else if (a == "--host-label") {
@@ -969,6 +981,76 @@ int remote_dispatch(const Options& o) {
     return 0;
 }
 
+// Unix milliseconds as UTC time.
+std::string format_time(std::int64_t ms) {
+    const std::chrono::sys_seconds t{std::chrono::seconds(ms / 1000)};
+    return std::format("{:%Y-%m-%d %H:%M:%S} UTC", t);
+}
+
+// Where a paglet is, from the answer of locate, pin and unpin.
+void print_location(const Fields& f) {
+    std::cout << "host:  " << f.str("host_name").value_or("") << " " << key_id(*f.fixed<32>("host")) << "\n"
+              << "moves: " << f.integer("moves").value_or(0) << "\n";
+}
+
+int remote_locate(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("locate")}, {"paglet", Value(o.positional[0])}});
+    if (!a) return fail(a.error());
+    print_location(Fields{*a});
+    return 0;
+}
+
+int remote_pin(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("pin")},
+                        {"paglet", Value(o.positional[0])},
+                        {"duration_ms", Value(o.minutes.value_or(10) * 60'000)},
+                        {"reason", Value(o.reason.value_or(""))}});
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    print_location(f);
+    std::cout << "pin:   " << f.str("pin").value_or("") << " until " << format_time(f.integer("until").value_or(0))
+              << "\n";
+    return 0;
+}
+
+int remote_pins(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("pins")}});
+    if (!a) return fail(a.error());
+    if (const Array* pins = Fields{*a}.array("pins")) {
+        for (const auto& p : *pins) {
+            const Array* e = p.as_array();
+            if (e == nullptr || e->size() != 5) continue;
+            std::cout << *(*e)[0].as_str() << "  paglet " << *(*e)[1].as_str() << "  until "
+                      << format_time(*(*e)[2].as_int()) << "  by " << *(*e)[3].as_str();
+            if (!(*e)[4].as_str()->empty()) std::cout << "  (" << *(*e)[4].as_str() << ")";
+            std::cout << "\n";
+        }
+    }
+    return 0;
+}
+
+int remote_unpin(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    Map request{{"t", Value("unpin")}, {"paglet", Value(o.positional[0])}};
+    if (o.pin) request.emplace_back("pin", Value(*o.pin));
+    auto a = r->ask(std::move(request));
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    print_location(f);
+    std::cout << f.integer("released").value_or(0) << " pins ended\n";
+    return 0;
+}
+
 }  // namespace
 
 bool is_mesh_command(std::string_view command) {
@@ -1008,6 +1090,10 @@ int mesh_command(int argc, char** argv) {
             if (action == "launch") return remote_launch(o);
             if (action == "call") return remote_call(o);
             if (action == "dispatch") return remote_dispatch(o);
+            if (action == "locate") return remote_locate(o);
+            if (action == "pin") return remote_pin(o);
+            if (action == "pins") return remote_pins(o);
+            if (action == "unpin") return remote_unpin(o);
         }
     } catch (const std::exception& e) {
         return fail(e.what());

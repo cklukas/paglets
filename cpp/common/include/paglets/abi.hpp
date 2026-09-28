@@ -47,6 +47,7 @@ enum Error : std::int32_t {
     failed = -14,
     gone = -15,
     revoked = -16,  // v1.1
+    pinned = -17,   // v1.1: dispatch while the paglet is pinned (self_info.pinned_until)
 };
 
 inline constexpr std::string_view error_name(std::int32_t code) {
@@ -68,6 +69,7 @@ inline constexpr std::string_view error_name(std::int32_t code) {
         case failed: return "failed";
         case gone: return "gone";
         case revoked: return "revoked";
+        case pinned: return "pinned";
         default: return "error";
     }
 }
@@ -181,6 +183,9 @@ struct SelfInfo {
     std::uint32_t minor = 0;  // v1.1: minor version of the host
     // v1.1: endpoints to system services the host installed, by service name.
     std::vector<std::pair<std::string, std::int32_t>> services;
+    // v1.1: while the paglet is pinned to its host, when the last pin ends
+    // (Unix milliseconds); 0 when it is not pinned.
+    std::int64_t pinned_until = 0;
 };
 
 struct DeriveSpec {
@@ -392,7 +397,7 @@ inline bool paglets_decode(msgpack::Reader& r, Delivered& d) {
 }
 
 inline void paglets_encode(msgpack::Writer& w, const SelfInfo& s) {
-    w.write_map_header(8);
+    w.write_map_header(9);
     detail::put(w, "id", s.id);
     detail::put(w, "module", s.module);
     detail::put(w, "owner", s.owner);
@@ -406,6 +411,7 @@ inline void paglets_encode(msgpack::Writer& w, const SelfInfo& s) {
         w.write_str(name);
         w.write_int(handle);
     }
+    detail::put(w, "pinned_until", s.pinned_until);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
@@ -417,6 +423,7 @@ inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
         if (k == "host") return msgpack::read_value(r, s.host);
         if (k == "abi") return msgpack::read_value(r, s.abi);
         if (k == "minor") return msgpack::read_value(r, s.minor);
+        if (k == "pinned_until") return msgpack::read_value(r, s.pinned_until);
         if (k == "services") {
             std::uint32_t n = 0;
             if (!r.read_map_header(n)) return false;
