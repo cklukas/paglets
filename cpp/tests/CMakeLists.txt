@@ -32,13 +32,14 @@ set(test_sources
     test_ipc.cpp
     test_mesh.cpp
     test_system.cpp
-    test_modules.cpp)
+    test_modules.cpp
+    test_noise.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
-target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh)
+target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net)
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node)
 endif()

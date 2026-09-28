@@ -217,6 +217,17 @@ Signature SigningKey::sign(std::span<const std::uint8_t> message) const {
     return s;
 }
 
+void SigningKey::x25519_secret(std::span<std::uint8_t, 32> out) const {
+    crypto_sign_ed25519_sk_to_curve25519(out.data(), secret_);
+}
+
+std::optional<std::array<std::uint8_t, 32>> x25519_public(const PublicKey& key) {
+    ensure_crypto();
+    std::array<std::uint8_t, 32> out{};
+    if (crypto_sign_ed25519_pk_to_curve25519(out.data(), key.data()) != 0) return std::nullopt;
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 
 std::string_view to_string(KeyRole role) {

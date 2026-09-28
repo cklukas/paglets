@@ -44,6 +44,13 @@ add_library(paglets_mesh STATIC
 target_link_libraries(paglets_mesh PUBLIC paglets_host PRIVATE Sodium::Sodium)
 target_compile_options(paglets_mesh PRIVATE ${PAGLETS_WARNINGS})
 
+# Networking (WP12): Noise channels between identity keys.
+add_library(paglets_net STATIC
+    src/net/channel.cpp
+    src/net/noise.cpp)
+target_link_libraries(paglets_net PUBLIC paglets_mesh PRIVATE Sodium::Sodium)
+target_compile_options(paglets_net PRIVATE ${PAGLETS_WARNINGS})
+
 # The standard system paglets and the host platform layer (WP10); they use
 # C++26 reflection for their service contracts.
 if(PAGLETS_ENABLE_REFLECTION)

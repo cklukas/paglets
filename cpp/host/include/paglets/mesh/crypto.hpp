@@ -34,6 +34,10 @@ std::optional<PublicKey> parse_key_id(std::string_view id);
 
 bool verify(const PublicKey& key, std::span<const std::uint8_t> message, const Signature& signature);
 
+// The X25519 form of an Ed25519 public key; nullopt for keys that are not
+// valid curve points.
+std::optional<std::array<std::uint8_t, 32>> x25519_public(const PublicKey& key);
+
 // Signer keys sign modules (module_trust.hpp); like admin and owner keys they
 // are always encrypted.
 enum class KeyRole { admin, owner, host, signer };
@@ -56,6 +60,9 @@ public:
     const PublicKey& public_key() const { return public_; }
     std::string id() const { return key_id(public_); }
     Signature sign(std::span<const std::uint8_t> message) const;
+    // The X25519 form of the secret key, for key exchange in channels
+    // (planning/cpp-networking.md). The caller keeps it in locked memory.
+    void x25519_secret(std::span<std::uint8_t, 32> out) const;
 
 private:
     friend std::expected<void, std::string> save_key(const std::filesystem::path& path, const SigningKey& key,
