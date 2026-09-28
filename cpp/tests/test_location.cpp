@@ -198,17 +198,20 @@ PAGLETS_TEST("location: without records the mesh is asked who holds the paglet")
     fast(net);
     const std::string module = a.f->module("conformance.wasm");
     // A paglet on a host that does not keep its record, whose records get lost.
-    char which = 0;
-    for (char ch : std::string("23456789abcdef")) {
-        const auto r = a.node->responsible(paglet_id(ch));
-        if (std::ranges::find(r, a.key) == r.end()) {
-            which = ch;
-            break;
-        }
+    // (a keeps the records of 3 in 4 paglets: try IDs until one fits)
+    std::mt19937_64 random{std::random_device{}()};
+    std::string which;
+    for (int i = 0; i < 1000 && which.empty(); ++i) {
+        std::string candidate;
+        for (int n = 0; n < 32; ++n) candidate += "0123456789abcdef"[random() % 16];
+        const auto r = a.node->responsible(candidate);
+        if (std::ranges::find(r, a.key) == r.end()) which = candidate;
     }
-    REQUIRE(which != 0);
+    REQUIRE(!which.empty());
     net.filter = [](const PublicKey&, const PublicKey&, Bytes& frame) { return frame_type(frame) != "loc-set"; };
-    const auto id = start(net, a, module, which);
+    auto created = a.node->create(module, net.passport(module, which));
+    REQUIRE_OK(created);
+    const auto id = *created;
     net.settle([] { return false; }, 20);
     for (auto* h : {&b, &c, &d}) CHECK(!h->node->location_record(id).has_value());
     const auto l = locate(net, c, id);

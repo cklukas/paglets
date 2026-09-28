@@ -151,7 +151,8 @@ PAGLETS_TEST("mesh: three hosts discover each other through one contact each and
     net.hosts[2]->transport->stop();
     net.hosts.pop_back();
     REQUIRE(net.eventually([&] {
-        const HostInfo* h = info_of(a.node->hosts(), seen_c->key);
+        const auto now = a.node->hosts();
+        const HostInfo* h = info_of(now, seen_c->key);
         return h != nullptr && !h->online;
     }));
 }
