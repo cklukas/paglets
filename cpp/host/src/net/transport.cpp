@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <deque>
 #include <fstream>
+#include <locale>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -473,7 +474,20 @@ struct Transport::Impl {
 
 Transport::Transport(const mesh::SigningKey& identity, mesh::RecordId mesh, TransportConfig config, AcceptPeer accept,
                      FrameHandler handler)
-    : impl_(std::make_unique<Impl>(identity, mesh, std::move(config), std::move(accept), std::move(handler))) {}
+    : impl_(std::make_unique<Impl>(identity, mesh, std::move(config), std::move(accept), std::move(handler))) {
+    // cpp-httplib compiles regular expressions on its threads; libstdc++
+    // fills the narrow() cache of the ctype facet lazily, character by
+    // character, without synchronization. Filling it at once before any
+    // thread starts leaves only reads.
+    static std::once_flag narrow_cache;
+    std::call_once(narrow_cache, [] {
+        const auto& ctype = std::use_facet<std::ctype<char>>(std::locale());
+        char all[256];
+        char out[256];
+        for (int i = 0; i < 256; ++i) all[i] = static_cast<char>(i);
+        ctype.narrow(all, all + 256, '\0', out);
+    });
+}
 
 Transport::~Transport() {
     stop();
