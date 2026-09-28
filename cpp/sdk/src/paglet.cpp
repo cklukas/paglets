@@ -207,6 +207,10 @@ Result<void> reply_to(Capability& reply, Bytes payload, std::vector<Capability> 
     return status(r);
 }
 
+void Paglet::on_move_failed(const abi::MoveFailed& f) {
+    log(abi::LogLevel::warning, "moving to " + f.destination + " failed: " + f.reason);
+}
+
 void Paglet::on_undelivered(const abi::Undelivered& u) {
     log(abi::LogLevel::warning, "undelivered " + u.name + ": " + std::string(abi::error_name(u.status)));
 }
@@ -243,10 +247,11 @@ Result<void> deactivate(std::optional<std::int64_t> wake_after_ms) {
                                     static_cast<std::uint32_t>(doc.size())));
 }
 
-Result<Endpoint> clone_raw(Bytes args, std::vector<Capability> caps) {
+Result<Endpoint> clone_raw(Bytes args, std::vector<Capability> caps, std::optional<std::string> destination) {
     abi::CloneArg arg;
     arg.args = std::move(args);
     arg.caps = handles_of(caps);
+    arg.destination = std::move(destination);
     const Bytes doc = abi::encode(arg);
     const std::int32_t h = paglets_lifecycle(static_cast<std::int32_t>(abi::LifecycleOp::clone), doc.data(),
                                              static_cast<std::uint32_t>(doc.size()));
@@ -359,6 +364,12 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
     }
 
     // Reports of asynchronous sends and replies come from the host (no sender).
+    if (m.kind() == abi::MessageKind::message && m.name() == abi::move_failed_message && !m.sender()) {
+        abi::MoveFailed f;
+        if (!m.decode(f)) return abi::malformed;
+        paglets::detail::paglet().on_move_failed(f);
+        return abi::handled;
+    }
     if (m.kind() == abi::MessageKind::message && m.name() == abi::undelivered_message && !m.sender()) {
         abi::Undelivered u;
         if (!m.decode(u)) return abi::malformed;

@@ -12,6 +12,7 @@
 #pragma once
 
 #include <paglets/runtime/capability.hpp>
+#include <paglets/runtime/mobility.hpp>
 #include <paglets/runtime/modules.hpp>
 #include <paglets/runtime/system.hpp>
 #include <paglets/wasm/engine.hpp>
@@ -71,6 +72,9 @@ struct Config {
     // garbage collection of modules without users that were not used within
     // the grace period, every interval (0: only on request).
     std::size_t module_cache_bytes = 64u * 1024 * 1024;
+    // How long this host remembers where a departed paglet went, to forward
+    // messages to it (planning/cpp-networking.md, section 4).
+    std::chrono::milliseconds tombstone_ttl{std::chrono::minutes(10)};
     std::chrono::milliseconds module_gc_grace{std::chrono::hours(24)};
     std::chrono::milliseconds module_gc_interval{std::chrono::minutes(10)};
     LogFunction log;  // default: stderr
@@ -157,6 +161,30 @@ public:
     using ModuleAdmission =
         std::function<std::expected<void, std::string>(const std::string& module, TrustClass trust)>;
     void set_module_admission(ModuleAdmission admission);
+
+    // -- movement between hosts (mobility.hpp, planning/cpp-networking.md) --
+
+    // Enables remote endpoints, dispatch and clones for other hosts. Without
+    // hooks, dispatch answers `unsupported`.
+    void set_mobility(MobilityHooks hooks);
+    // A message from another host. Returns abi::ok, or why it was refused
+    // (requests are answered then).
+    std::int32_t deliver_remote(RemoteMessage message);
+    // The outcome of a departure: the host that has the paglet now, or
+    // nullopt if it stays here (it then receives `paglets.move_failed`).
+    void finish_departure(std::uint64_t move, std::optional<std::string> host, std::string reason = {});
+    // An arriving paglet, created without running (messages to it wait).
+    // Returns the capabilities that could not be re-created here, as
+    // descriptions for its `arrived` event.
+    std::expected<std::vector<std::string>, std::string> prepare_arrival(Arrival arrival, const RecreateCap& recreate);
+    std::expected<void, std::string> commit_arrival(const PagletId& id);
+    void abort_arrival(const PagletId& id);
+    // Asks a paglet to move (an admin or tool on this host); it dispatches
+    // after its current handler, receiving `dispatching` first.
+    std::expected<void, std::int32_t> dispatch(const PagletId& id, std::string destination);
+    // Where a paglet that left this host went (key ID of the host), while
+    // this host remembers.
+    std::optional<std::string> location(const PagletId& id) const;
 
     std::optional<PagletInfo> info(const PagletId& id) const;
     std::vector<PagletInfo> list() const;

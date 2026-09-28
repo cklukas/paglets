@@ -301,6 +301,9 @@ public:
     virtual void on_disposing() {}
     // An asynchronous send or reply could not be delivered (default: logged).
     virtual void on_undelivered(const abi::Undelivered& u);
+    // A dispatch, or a clone for another host, did not happen (default:
+    // logged). After a failed dispatch the paglet continues here.
+    virtual void on_move_failed(const abi::MoveFailed& f);
 
     // Default: replies to own requests go to their continuation, everything
     // else to the router.
@@ -328,7 +331,10 @@ Result<Endpoint> create_child(const T& args, std::vector<Capability> caps = {},
 // The following take effect when the current handler returns.
 Result<void> dispose();
 Result<void> deactivate(std::optional<std::int64_t> wake_after_ms = std::nullopt);
-Result<Endpoint> clone_raw(Bytes args = {}, std::vector<Capability> caps = {});
+// With a destination, the clone is made on another host (ABI v1.1; only
+// endpoints can be passed then).
+Result<Endpoint> clone_raw(Bytes args = {}, std::vector<Capability> caps = {},
+                           std::optional<std::string> destination = std::nullopt);
 Result<void> dispatch(std::string destination);
 
 // Delivers the message to this paglet after `delay_ms`; drop the returned

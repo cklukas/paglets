@@ -41,6 +41,10 @@ struct PagletRecord {
 
 using Warn = std::function<void(const std::string&)>;
 
+// Capability entries in MessagePack (stored records, travelling state).
+void encode_cap(msgpack::Writer& w, const Cap& c);
+bool decode_cap(msgpack::Reader& r, Cap& c);
+
 // State directory layout:
 //   modules/               the module store (modules.hpp)
 //   paglets/<id>.paglet    record and last memory image, replaced atomically

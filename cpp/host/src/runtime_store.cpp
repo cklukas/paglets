@@ -3,6 +3,8 @@
 
 #include "runtime_store.hpp"
 
+#include <paglets/runtime/mobility.hpp>
+
 #include <paglets/sha256.hpp>
 
 #include <fstream>
@@ -18,8 +20,10 @@ using abi::detail::put_opt;
 
 constexpr std::string_view file_magic = "PGPAGLET1";
 
+}  // namespace
+
 void encode_cap(msgpack::Writer& w, const Cap& c) {
-    w.write_map_header(17);
+    w.write_map_header(18);
     put(w, "kind", static_cast<std::int32_t>(c.kind));
     put(w, "target", c.target);
     put(w, "ops", c.ops);
@@ -38,6 +42,7 @@ void encode_cap(msgpack::Writer& w, const Cap& c) {
     put(w, "id", c.id);
     put(w, "lineage", c.lineage);
     put(w, "grant", c.grant);
+    put(w, "host", c.host);
 }
 
 bool decode_cap(msgpack::Reader& r, Cap& c) {
@@ -63,9 +68,12 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
         if (k == "id") return msgpack::read_value(r, c.id);
         if (k == "lineage") return msgpack::read_value(r, c.lineage);
         if (k == "grant") return msgpack::read_value(r, c.grant);
+        if (k == "host") return msgpack::read_value(r, c.host);
         return r.skip();
     });
 }
+
+namespace {
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
     w.write_map_header(12);
@@ -236,6 +244,106 @@ std::vector<std::string> Store::load_revoked(const Warn& warn) const {
         ids.clear();
     }
     return ids;
+}
+
+// -- travelling state (mobility.hpp) ---------------------------------------------
+
+namespace {
+constexpr std::int32_t state_version = 1;
+}  // namespace
+
+Bytes encode_state(const TravelState& s) {
+    msgpack::Writer w;
+    w.write_map_header(12);
+    put(w, "v", state_version);
+    put(w, "id", s.id);
+    put(w, "module", s.module);
+    put(w, "trust", s.trust);
+    put(w, "owner", s.owner);
+    put(w, "next_handle", s.next_handle);
+    put(w, "next_correlation", s.next_correlation);
+    put(w, "next_timer", s.next_timer);
+    put(w, "checkpoint_ms", s.checkpoint_ms);
+    w.write_str("services");
+    w.write_array_header(s.services.size());
+    for (const auto& [name, h] : s.services) {
+        w.write_array_header(2);
+        w.write_str(name);
+        w.write_int(h);
+    }
+    w.write_str("caps");
+    w.write_array_header(s.caps.size());
+    for (const auto& [h, cap] : s.caps) {
+        w.write_array_header(2);
+        w.write_int(h);
+        encode_cap(w, cap);
+    }
+    w.write_str("pending");
+    w.write_array_header(s.pending.size());
+    for (const auto& [correlation, ms] : s.pending) {
+        w.write_array_header(2);
+        w.write_uint(correlation);
+        w.write_int(ms);
+    }
+    return w.bytes();
+}
+
+std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_t> bytes) {
+    TravelState s;
+    std::int32_t version = 0;
+    msgpack::Reader r(bytes);
+    const bool ok = abi::detail::read_map(r, [&](std::string_view k) {
+        if (k == "v") return msgpack::read_value(r, version);
+        if (k == "id") return msgpack::read_value(r, s.id);
+        if (k == "module") return msgpack::read_value(r, s.module);
+        if (k == "trust") return msgpack::read_value(r, s.trust);
+        if (k == "owner") return msgpack::read_value(r, s.owner);
+        if (k == "next_handle") return msgpack::read_value(r, s.next_handle);
+        if (k == "next_correlation") return msgpack::read_value(r, s.next_correlation);
+        if (k == "next_timer") return msgpack::read_value(r, s.next_timer);
+        if (k == "checkpoint_ms") return msgpack::read_value(r, s.checkpoint_ms);
+        auto pairs = [&](auto&& one) {
+            std::uint32_t n = 0;
+            if (!r.read_array_header(n)) return false;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                std::uint32_t pair = 0;
+                if (!r.read_array_header(pair) || pair != 2 || !one()) return false;
+            }
+            return true;
+        };
+        if (k == "services") {
+            return pairs([&] {
+                std::string name;
+                std::int32_t h = 0;
+                if (!msgpack::read_value(r, name) || !msgpack::read_value(r, h)) return false;
+                s.services.emplace_back(std::move(name), h);
+                return true;
+            });
+        }
+        if (k == "caps") {
+            return pairs([&] {
+                std::int32_t h = 0;
+                Cap cap;
+                if (!msgpack::read_value(r, h) || !decode_cap(r, cap)) return false;
+                s.caps.emplace_back(h, std::move(cap));
+                return true;
+            });
+        }
+        if (k == "pending") {
+            return pairs([&] {
+                std::uint64_t correlation = 0;
+                std::int64_t ms = 0;
+                if (!msgpack::read_value(r, correlation) || !msgpack::read_value(r, ms)) return false;
+                s.pending.emplace_back(correlation, ms);
+                return true;
+            });
+        }
+        return r.skip();
+    });
+    if (!ok || !r.at_end()) return std::unexpected(std::string("malformed paglet state"));
+    if (version != state_version) return std::unexpected("paglet state version " + std::to_string(version));
+    if (s.id.empty() || s.module.empty()) return std::unexpected(std::string("incomplete paglet state"));
+    return s;
 }
 
 }  // namespace paglets::runtime

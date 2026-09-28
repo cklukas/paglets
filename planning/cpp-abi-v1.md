@@ -379,6 +379,10 @@ Each test is run against the host runtime with the conformance guest
 | C34 | v1.1: revoking a capability or its grant revokes every descendant; parents and siblings stay valid |
 | C35 | v1.1: resource capabilities, service endpoints and revocations survive a restart |
 | C36 | v1.1: asynchronous `send` and `reply` return 0 at once; failures arrive as `paglets.undelivered` with the error, transferred capabilities are released, a failed reply answers `gone`; `request` refuses `async` |
+| C37 | v1.1: `dispatch` delivers `dispatching`, then the paglet continues on the destination with its memory and receives `arrived` (`from`, `lost`); messages sent meanwhile follow it |
+| C38 | v1.1: a dispatch that fails leaves the paglet where it was with its state; it receives `paglets.move_failed` |
+| C39 | v1.1: `clone` with a destination makes the clone on another host (`cloned` there); the original's endpoint reaches it; failures arrive as `paglets.move_failed` with the clone's ID |
+| C40 | v1.1: endpoints to paglets on other hosts carry messages, requests and replies; only endpoints travel with them (`unsupported` otherwise) |
 
 ## 12. Review
 
@@ -445,3 +449,24 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   gave up is released as after a successful call: transferred capabilities
   are dropped, and a failed reply consumes the reply capability, so the
   requester is answered `gone`.
+- **Movement between hosts** (M3, planning/cpp-networking.md). `dispatch`
+  (lifecycle op 4, `{destination}`) is supported on hosts in a mesh and
+  answers `unsupported` elsewhere; system and resident paglets get
+  `denied`. After the handler the paglet receives `dispatching`, its image
+  is taken, and it continues on the destination with `arrived` (`from`: the
+  key ID of the host it came from; `lost`: descriptions of capabilities
+  that could not be re-created there). Messages sent to it meanwhile are
+  held and then follow it. If the move fails the paglet stays, with its
+  state, and receives `paglets.move_failed` (kind 0, priority 7, no sender)
+  with `{destination, reason, clone}`.
+- **Clones for another host**: the clone argument takes `destination`; the
+  clone starts there with `cloned` and the original's memory; the returned
+  endpoint reaches it. Only endpoint capabilities can be passed. Failures
+  arrive as `paglets.move_failed` with the clone's ID.
+- **Capabilities across hosts**: endpoints to paglets name the host of
+  their target and work from any host (messages, requests, replies); only
+  endpoints can travel with messages to other hosts (`unsupported`
+  otherwise). A moving paglet keeps its handle numbers: endpoints, reply
+  capabilities and timers go along; default service endpoints are the
+  destination's; resource capabilities are re-created from their grants
+  where the grant covers the destination, or listed in `lost`.

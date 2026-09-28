@@ -1,6 +1,7 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
+#include <paglets/runtime/mobility.hpp>
 #include <paglets/runtime/modules.hpp>
 #include <paglets/runtime/runtime.hpp>
 
@@ -117,7 +118,7 @@ namespace {
 
 struct Envelope {
     // `ended` only goes to system paglets: a paglet (ended_id) ended.
-    enum class Type { start, message, wake, deactivate, dispose, ended };
+    enum class Type { start, message, wake, deactivate, dispose, ended, move };
     Type type = Type::message;
     abi::EventKind event = abi::EventKind::created;  // start
     Bytes args;                                      // start
@@ -127,12 +128,15 @@ struct Envelope {
     std::optional<Cap> reply_cap;                    // requests
     std::vector<Cap> lent;                           // system paglets: capabilities lent for this message
     PagletId ended_id;                               // ended
+    std::optional<abi::ArrivedEvent> arrived;        // start (arrivals)
+    std::string destination;                         // move (Runtime::dispatch)
 };
 
 struct PendingClone {
     PagletId id;
     Bytes args;
     std::vector<Cap> caps;
+    std::optional<std::string> destination;  // a clone for another host
 };
 
 struct PagletRec {
@@ -180,6 +184,12 @@ struct PagletRec {
     std::unique_ptr<wasm::HostImports> imports;
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints
 
+    // Movement (mobility.hpp).
+    std::optional<std::string> dispatch_to;  // destination of a pending dispatch
+    bool moving = false;                     // departed, outcome pending: messages are held
+    bool arriving = false;                   // prepared here, not yet committed
+    std::optional<Envelope> arrival_start;   // its first delivery, on commit
+
     const std::string& module_hash() const { return module; }
     abi::SenderRecord sender(const std::string& host) const {
         return {id, owner, std::string(to_string(trust)), module_hash(), host};
@@ -206,6 +216,22 @@ struct Runtime::Impl {
 
     std::unique_ptr<ModuleStore> modules;
     Runtime::ModuleAdmission admission;
+
+    // Movement between hosts (mobility.hpp).
+    MobilityHooks mobility;
+    struct Tombstone {
+        std::string host;
+        SteadyClock::time_point expires;
+    };
+    std::map<PagletId, Tombstone> tombstones;  // paglets that left, and where to
+    struct Moving {
+        PagletId paglet;  // the departing paglet, or the original of a clone
+        PagletId clone;   // clones only
+        std::string destination;
+    };
+    std::map<std::uint64_t, Moving> departures;
+    std::uint64_t next_move = 1;
+    std::vector<Departure> outgoing;  // for the depart hook, outside the lock
     SteadyClock::time_point next_module_gc{};
     std::map<PagletId, std::unique_ptr<PagletRec>> paglets;
     std::map<PagletId, Ending> endings;
@@ -265,6 +291,99 @@ struct Runtime::Impl {
 
     abi::SenderRecord host_sender() const { return {"host", "local", "system", "", config.host_name}; }
 
+    bool is_system(const PagletId& id) const {
+        auto it = paglets.find(id);
+        return it != paglets.end() && it->second->native != nullptr;
+    }
+
+    // Where a paglet that is not here lives: the capability's host hint, else
+    // where it went. Empty if unknown.
+    std::string remote_host(const PagletId& id, const std::string& hint) {
+        if (!hint.empty() && hint != mobility.host_id) return hint;
+        auto t = tombstones.find(id);
+        if (t == tombstones.end()) return {};
+        if (SteadyClock::now() >= t->second.expires) {
+            tombstones.erase(t);
+            return {};
+        }
+        return t->second.host;
+    }
+
+    // A capability as it leaves this host: endpoints and reply capabilities
+    // name the host of their target.
+    Cap portable(Cap c) {
+        if (c.kind != Cap::Kind::endpoint && c.kind != Cap::Kind::reply) return c;
+        if (c.kind == Cap::Kind::reply && c.target.empty()) {
+            if (c.host.empty()) c.host = mobility.host_id;  // the host itself asked
+            return c;
+        }
+        if (paglets.contains(c.target)) {
+            c.host = is_system(c.target) ? std::string() : mobility.host_id;
+        } else if (c.host.empty()) {
+            c.host = remote_host(c.target, {});
+        }
+        return c;
+    }
+
+    // Capabilities a message to another host may carry: endpoints to paglets.
+    bool portable_handles(const PagletRec& rec, const std::vector<std::int32_t>& handles) const {
+        return std::ranges::all_of(handles, [&](std::int32_t h) {
+            auto it = rec.caps.find(h);
+            return it == rec.caps.end() || (it->second.kind == Cap::Kind::endpoint && !is_system(it->second.target));
+        });
+    }
+
+    std::vector<Cap> portable_caps(std::vector<Cap> caps) {
+        std::vector<Cap> out;
+        for (auto& c : caps) {
+            if (c.kind == Cap::Kind::endpoint && !is_system(c.target)) {
+                out.push_back(portable(std::move(c)));
+            } else {
+                drop_cap(std::move(c), abi::gone);
+            }
+        }
+        return out;
+    }
+
+    void send_remote(RemoteMessage m) {
+        if (mobility.deliver) mobility.deliver(std::move(m));
+    }
+
+    void move_failed(PagletRec& rec, std::string destination, std::string reason, std::string clone) {
+        Envelope env;
+        env.delivered.kind = abi::MessageKind::message;
+        env.delivered.name = std::string(abi::move_failed_message);
+        env.delivered.payload =
+            abi::encode(abi::MoveFailed{std::move(destination), std::move(reason), std::move(clone)});
+        env.delivered.priority = abi::max_priority;
+        enqueue(rec, std::move(env), abi::max_priority);
+    }
+
+    // The travelling state of a paglet (mu held).
+    TravelState state_of(const PagletRec& rec) {
+        TravelState st;
+        st.id = rec.id;
+        st.module = rec.module;
+        st.trust = std::string(to_string(rec.trust));
+        st.owner = rec.owner;
+        st.next_handle = rec.next_handle;
+        st.next_correlation = rec.next_correlation;
+        st.next_timer = rec.next_timer;
+        st.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
+        st.services = rec.services;
+        for (const auto& [h, c] : rec.caps) st.caps.emplace_back(h, portable(c));
+        const auto now = SteadyClock::now();
+        for (const auto& [at, d] : deadlines) {
+            if (d.type == Deadline::Type::request_timeout && d.paglet == rec.id &&
+                rec.pending_requests.contains(d.id)) {
+                st.pending.emplace_back(
+                    d.id,
+                    std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(at - now).count()));
+            }
+        }
+        return st;
+    }
+
     bool revoked(const Cap& c) const {
         if (c.grant && revoked_grants.contains(*c.grant)) return true;
         if (!c.id.empty() && revoked_ids.contains(c.id)) return true;
@@ -285,7 +404,9 @@ struct Runtime::Impl {
     }
 
     void make_ready(PagletRec& rec) {
-        if (rec.running || rec.queued || rec.awaiting_image || rec.mailbox.empty()) return;
+        if (rec.running || rec.queued || rec.awaiting_image || rec.moving || rec.arriving || rec.mailbox.empty()) {
+            return;
+        }
         if (rec.lane < 0) {
             // Place next to the paglet it talks to, unless that lane is
             // clearly busier than the least loaded one; otherwise on the
@@ -351,8 +472,29 @@ struct Runtime::Impl {
     }
 
     // Delivers the one reply of a request. Late replies are discarded.
+    // `host`: where the requester is, if it is not here.
     void deliver_reply(const PagletId& requester, std::uint64_t correlation, std::int32_t status, Bytes payload,
-                       std::vector<Cap> caps) {
+                       std::vector<Cap> caps, const std::string& host = {}) {
+        const bool here = requester.empty() ? (host.empty() || host == mobility.host_id) : paglets.contains(requester);
+        if (!here) {
+            const std::string where = requester.empty() ? host : remote_host(requester, host);
+            if (where.empty() || !mobility.deliver) {
+                for (auto& c : caps) drop_cap(std::move(c), abi::gone);
+                return;
+            }
+            RemoteMessage m;
+            m.kind = RemoteMessage::Kind::reply;
+            m.target = requester;
+            m.host = where;
+            m.name = "reply";
+            m.payload = std::move(payload);
+            m.priority = abi::max_priority;
+            m.correlation = correlation;
+            m.status = status;
+            m.caps = portable_caps(std::move(caps));
+            send_remote(std::move(m));
+            return;
+        }
         if (requester.empty()) {
             if (auto it = external.find(correlation); it != external.end()) {
                 it->second.set_value(Reply{status, std::move(payload)});
@@ -382,7 +524,7 @@ struct Runtime::Impl {
     // capability answers its request with `status`.
     void drop_cap(Cap cap, std::int32_t status) {
         if (cap.kind == Cap::Kind::reply) {
-            deliver_reply(cap.target, cap.correlation, status, {}, {});
+            deliver_reply(cap.target, cap.correlation, status, {}, {}, cap.host);
         }
     }
 
@@ -665,8 +807,29 @@ public:
         if (auto v = Runtime::Impl::validate(m); v != abi::ok) return v;
         std::lock_guard lock(rt_.mu);
         PagletRec* target = nullptr;
-        auto cap = checked_endpoint(endpoint, m.name, target);
+        std::string remote;
+        auto cap = checked_endpoint(endpoint, m.name, target, remote);
         if (!cap) return cap.error();
+        if (target == nullptr) {
+            // A paglet on another host: only endpoints travel with the message.
+            if (!m.lend.empty()) return abi::invalid_argument;
+            if (!rt_.portable_handles(rec_, m.caps)) return abi::unsupported;
+            auto caps = rt_.take_caps(rec_, m.caps);
+            if (!caps) return caps.error();
+            if ((*cap)->uses_left) --*(*cap)->uses_left;
+            RemoteMessage out;
+            out.kind = RemoteMessage::Kind::message;
+            out.target = (*cap)->target;
+            out.host = remote;
+            out.name = std::move(m.name);
+            out.payload = std::move(m.payload);
+            out.priority = m.priority;
+            out.sender = rec_.sender(rt_.config.host_name);
+            out.badge = (*cap)->badge;
+            out.caps = rt_.portable_caps(std::move(*caps));
+            rt_.send_remote(std::move(out));
+            return abi::ok;
+        }
         auto lent = rt_.lend_caps(rec_, m.lend, *target);
         if (!lent) return lent.error();
         auto caps = rt_.take_caps(rec_, m.caps);
@@ -693,8 +856,36 @@ public:
         if (m.timeout_ms <= 0 || m.async) return abi::invalid_argument;  // a request needs its correlation
         std::lock_guard lock(rt_.mu);
         PagletRec* target = nullptr;
-        auto cap = checked_endpoint(endpoint, m.name, target);
+        std::string remote;
+        auto cap = checked_endpoint(endpoint, m.name, target, remote);
         if (!cap) return cap.error();
+        if (target == nullptr) {
+            if (!m.lend.empty()) return abi::invalid_argument;
+            if (!rt_.portable_handles(rec_, m.caps)) return abi::unsupported;
+            auto caps = rt_.take_caps(rec_, m.caps);
+            if (!caps) return caps.error();
+            if ((*cap)->uses_left) --*(*cap)->uses_left;
+            const std::uint64_t correlation = rec_.next_correlation++;
+            rec_.pending_requests.insert(correlation);
+            RemoteMessage out;
+            out.kind = RemoteMessage::Kind::request;
+            out.target = (*cap)->target;
+            out.host = remote;
+            out.name = std::move(m.name);
+            out.payload = std::move(m.payload);
+            out.priority = m.priority;
+            out.sender = rec_.sender(rt_.config.host_name);
+            out.badge = (*cap)->badge;
+            out.caps = rt_.portable_caps(std::move(*caps));
+            out.requester = rec_.id;
+            out.requester_host = rt_.mobility.host_id;
+            out.correlation = correlation;
+            out.timeout_ms = m.timeout_ms;
+            rt_.send_remote(std::move(out));
+            rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(m.timeout_ms),
+                         Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
+            return static_cast<std::int64_t>(correlation);
+        }
         auto lent = rt_.lend_caps(rec_, m.lend, *target);
         if (!lent) return lent.error();
         auto caps = rt_.take_caps(rec_, m.caps);
@@ -741,11 +932,15 @@ public:
         auto it = rec_.caps.find(handle);
         if (it == rec_.caps.end() || it->second.kind != Cap::Kind::reply) return abi::bad_handle;
         if (!m.lend.empty()) return abi::invalid_argument;
+        const Cap& r = it->second;
+        const bool here =
+            r.target.empty() ? (r.host.empty() || r.host == rt_.mobility.host_id) : rt_.paglets.contains(r.target);
+        if (!here && !rt_.portable_handles(rec_, m.caps)) return abi::unsupported;
         auto caps = rt_.take_caps(rec_, m.caps);
         if (!caps) return caps.error();
         Cap reply = std::move(it->second);
         rec_.caps.erase(it);
-        rt_.deliver_reply(reply.target, reply.correlation, abi::ok, std::move(m.payload), std::move(*caps));
+        rt_.deliver_reply(reply.target, reply.correlation, abi::ok, std::move(m.payload), std::move(*caps), reply.host);
         return abi::ok;
     }
 
@@ -916,6 +1111,20 @@ public:
                     rec_.caps.size() >= rt_.config.cap_limit) {
                     return abi::quota;
                 }
+                if (arg.destination) {
+                    // A clone made on another host: it exists here only as an
+                    // image until the mesh delivered it.
+                    if (arg.destination->empty()) return abi::invalid_argument;
+                    if (!rt_.mobility.depart) return abi::unsupported;
+                    if (rec_.trust != TrustClass::roaming) return abi::denied;
+                    if (!rt_.portable_handles(rec_, arg.caps)) return abi::invalid_argument;
+                    auto caps = rt_.take_caps(rec_, arg.caps);
+                    if (!caps) return caps.error();
+                    ++rec_.spawned_this_call;
+                    const PagletId id = new_paglet_id();
+                    rec_.clones.push_back(PendingClone{id, std::move(arg.args), std::move(*caps), *arg.destination});
+                    return rt_.add_cap(rec_, rt_.endpoint_to(id));
+                }
                 const TrustClass trust = rec_.trust == TrustClass::system ? TrustClass::roaming : rec_.trust;
                 if (auto why = rt_.refusal(rec_.module, trust); !why.empty()) {
                     rt_.log(2, rec_.id, "clone refused: " + why);
@@ -938,7 +1147,17 @@ public:
                 rec_.clones.push_back(PendingClone{id, std::move(arg.args), std::move(*caps)});
                 return rt_.add_cap(rec_, rt_.endpoint_to(id));
             }
-            case abi::LifecycleOp::dispatch: return abi::unsupported;
+            case abi::LifecycleOp::dispatch: {
+                abi::DispatchArg arg;
+                if (!abi::decode(doc, arg) || arg.destination.empty()) return abi::invalid_argument;
+                if (!rt_.mobility.depart) return abi::unsupported;
+                // System and resident paglets stay where they are.
+                if (rec_.trust != TrustClass::roaming) return abi::denied;
+                if (rec_.pending_end) return abi::bad_state;
+                rec_.pending_end = abi::LifecycleOp::dispatch;
+                rec_.dispatch_to = std::move(arg.destination);
+                return abi::ok;
+            }
         }
         return abi::invalid_argument;
     }
@@ -998,13 +1217,19 @@ private:
         rt_.enqueue(rec_, std::move(env), abi::max_priority);
     }
 
-    // Looks up an endpoint capability and its target (mu held).
-    std::expected<Cap*, std::int32_t> checked_endpoint(std::int32_t handle, std::string_view name, PagletRec*& target) {
+    // Looks up an endpoint capability and its target (mu held): a paglet
+    // here, or the host of a paglet elsewhere (`target` null, `remote` set).
+    std::expected<Cap*, std::int32_t> checked_endpoint(std::int32_t handle, std::string_view name, PagletRec*& target,
+                                                       std::string& remote) {
         auto it = rec_.caps.find(handle);
         if (it == rec_.caps.end()) return std::unexpected(abi::bad_handle);
         if (auto c = rt_.check_endpoint(it->second, name); c != abi::ok) return std::unexpected(c);
         target = rt_.find(it->second.target);
-        if (target == nullptr) return std::unexpected(abi::not_found);
+        if (target == nullptr) {
+            remote = rt_.mobility.deliver ? rt_.remote_host(it->second.target, it->second.host) : std::string();
+            if (remote.empty()) return std::unexpected(abi::not_found);
+            return &it->second;
+        }
         if (target->mailbox.size() >= rt_.config.mailbox_limit) return std::unexpected(abi::quota);
         return &it->second;
     }
@@ -1252,6 +1477,11 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
 
     switch (env.type) {
         case Envelope::Type::start: {
+            if (env.arrived) {
+                result = call_event(rec, abi::EventKind::arrived, abi::encode(*env.arrived));
+                rec.started = true;
+                break;
+            }
             abi::StartEvent e;
             {
                 std::lock_guard lock(mu);
@@ -1291,6 +1521,14 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
             rec.pending_end = abi::LifecycleOp::dispose;
             break;
         }
+        case Envelope::Type::move: {
+            std::lock_guard lock(mu);
+            if (!rec.pending_end) {
+                rec.pending_end = abi::LifecycleOp::dispatch;
+                rec.dispatch_to = std::move(env.destination);
+            }
+            break;
+        }
     }
 
     std::lock_guard lock(mu);
@@ -1322,6 +1560,7 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
 void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<std::mutex>& lock) {
     rec.spawned_this_call = 0;
 
+    std::vector<Departure> departing;  // handed to the mesh after the lock is released
     auto clones = std::move(rec.clones);
     rec.clones.clear();
     if (!clones.empty() && rec.instance) {
@@ -1329,6 +1568,36 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
         auto snap = snapshot(rec);
         lock.lock();
         for (auto& pc : clones) {
+            if (pc.destination) {
+                if (!snap) {
+                    move_failed(rec, *pc.destination, snap.error(), pc.id);
+                    for (auto& c : pc.caps) drop_cap(std::move(c), abi::failed);
+                    continue;
+                }
+                // The clone's state: transferable endpoints and the service
+                // endpoints under the original's handles.
+                TravelState st = state_of(rec);
+                st.id = pc.id;
+                std::erase_if(st.caps, [&](const auto& e) {
+                    const bool service =
+                        std::ranges::any_of(rec.services, [&](const auto& sv) { return sv.second == e.first; });
+                    return e.first == abi::self_handle ||
+                           (!service && (e.second.kind != Cap::Kind::endpoint || !e.second.transferable));
+                });
+                st.pending.clear();
+                Departure d;
+                d.move = next_move++;
+                d.state = std::move(st);
+                d.image = *snap;
+                d.destination = *pc.destination;
+                d.clone = true;
+                d.clone_args = std::move(pc.args);
+                d.clone_caps = portable_caps(std::move(pc.caps));
+                d.original = rec.id;
+                departures[d.move] = Moving{rec.id, pc.id, *pc.destination};
+                departing.push_back(std::move(d));
+                continue;
+            }
             PagletRec* clone = find(pc.id);
             if (clone == nullptr) continue;
             if (!snap) {
@@ -1374,6 +1643,32 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
         retire(rec);
         end_paglet(rec, false, "disposed");
         remove = true;
+    } else if (end == abi::LifecycleOp::dispatch && rec.instance) {
+        const std::string destination = rec.dispatch_to.value_or("");
+        rec.dispatch_to.reset();
+        lock.unlock();
+        auto r = call_event(rec, abi::EventKind::dispatching, abi::encode(abi::DispatchingEvent{destination}));
+        std::expected<wasm::Snapshot, std::string> snap = std::unexpected(r ? std::string() : r.error());
+        if (r) snap = snapshot(rec);
+        lock.lock();
+        if (!snap) {
+            // The paglet stays; it hears why.
+            move_failed(rec, destination, "no image: " + snap.error(), {});
+        } else {
+            Departure d;
+            d.move = next_move++;
+            d.state = state_of(rec);
+            d.image = *snap;
+            d.destination = destination;
+            departures[d.move] = Moving{rec.id, {}, destination};
+            // Until the mesh reports the outcome the paglet waits here,
+            // inactive, holding the messages that arrive.
+            rec.moving = true;
+            rec.image = std::move(*snap);
+            retire(rec);
+            rec.imports.reset();
+            departing.push_back(std::move(d));
+        }
     } else if (end == abi::LifecycleOp::deactivate && rec.instance) {
         const auto wake = rec.wake_after_ms;
         rec.wake_after_ms.reset();
@@ -1411,6 +1706,8 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
             rec.checkpoint_due = false;
         }
     }
+    // The mesh gets them once the lane released the paglet (lane_loop).
+    for (auto& d : departing) outgoing.push_back(std::move(d));
 }
 
 void Runtime::Impl::lane_loop(std::size_t index) {
@@ -1451,6 +1748,14 @@ void Runtime::Impl::lane_loop(std::size_t index) {
             make_ready(*rec);
         }
         --running_count;
+        if (!outgoing.empty() && mobility.depart) {
+            auto leaving = std::move(outgoing);
+            outgoing.clear();
+            auto depart = mobility.depart;
+            lock.unlock();
+            for (auto& d : leaving) depart(std::move(d));
+            lock.lock();
+        }
         if (!retired.empty()) {
             auto dead = std::move(retired);
             retired.clear();
@@ -1508,7 +1813,10 @@ void Runtime::Impl::clock_loop() {
 
 void Runtime::Impl::fire(Deadline d) {
     switch (d.type) {
-        case Deadline::Type::request_timeout: deliver_reply(d.paglet, d.id, abi::timeout, {}, {}); break;
+        case Deadline::Type::request_timeout:
+            // Requests of a paglet that left time out where it went.
+            if (d.paglet.empty() || paglets.contains(d.paglet)) deliver_reply(d.paglet, d.id, abi::timeout, {}, {});
+            break;
         case Deadline::Type::wake: {
             if (PagletRec* rec = find(d.paglet)) {
                 Envelope env;
@@ -1816,6 +2124,7 @@ std::expected<void, std::int32_t> Runtime::terminate(const PagletId& id, std::st
     PagletRec* rec = impl_->find(id);
     if (rec == nullptr) return std::unexpected(abi::not_found);
     if (rec->native) return std::unexpected(abi::denied);
+    if (rec->moving || rec->arriving) return std::unexpected(abi::bad_state);  // the mesh decides first
     if (rec->running) {
         // The lane ends it when the call returns.
         rec->kill_reason = std::move(reason);
@@ -1831,6 +2140,325 @@ std::expected<void, std::int32_t> Runtime::terminate(const PagletId& id, std::st
 void Runtime::set_module_admission(ModuleAdmission admission) {
     std::lock_guard lock(impl_->mu);
     impl_->admission = std::move(admission);
+}
+
+// ---------------------------------------------------------------------------
+// Movement between hosts
+
+namespace {
+
+constexpr std::int32_t max_forwards = 4;
+
+std::string describe_cap(std::int32_t handle, const Cap& c) {
+    std::string what;
+    switch (c.kind) {
+        case Cap::Kind::endpoint: what = "endpoint " + c.target; break;
+        case Cap::Kind::reply: what = "reply"; break;
+        case Cap::Kind::timer: what = "timer"; break;
+        case Cap::Kind::resource: what = c.resource_type + " " + c.resource; break;
+    }
+    return "handle " + std::to_string(handle) + ": " + what;
+}
+
+}  // namespace
+
+void Runtime::set_mobility(MobilityHooks hooks) {
+    std::lock_guard lock(impl_->mu);
+    impl_->mobility = std::move(hooks);
+}
+
+std::int32_t Runtime::deliver_remote(RemoteMessage m) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    // Forwards a message for a paglet that left (a bounded number of times).
+    auto forward = [&](RemoteMessage& fwd) -> bool {
+        const std::string where = rt.remote_host(fwd.target, {});
+        if (where.empty() || where == rt.mobility.host_id || fwd.hops >= max_forwards) return false;
+        fwd.host = where;
+        ++fwd.hops;
+        rt.send_remote(std::move(fwd));
+        return true;
+    };
+    // A request that cannot be delivered is answered.
+    auto refuse = [&](RemoteMessage& req, std::int32_t status) {
+        if (req.kind == RemoteMessage::Kind::request) {
+            rt.deliver_reply(req.requester, req.correlation, status, {}, {}, req.requester_host);
+        }
+        return status;
+    };
+    if (m.kind == RemoteMessage::Kind::reply) {
+        if (!m.target.empty() && !rt.paglets.contains(m.target)) {
+            if (!forward(m)) {
+                for (auto& c : m.caps) rt.drop_cap(std::move(c), abi::gone);
+            }
+            return abi::ok;
+        }
+        rt.deliver_reply(m.target, m.correlation, m.status, std::move(m.payload), std::move(m.caps));
+        return abi::ok;
+    }
+    if (!abi::valid_message_name(m.name) || abi::reserved_message_name(m.name)) {
+        return refuse(m, abi::invalid_argument);
+    }
+    PagletRec* rec = rt.find(m.target);
+    if (rec == nullptr) {
+        if (forward(m)) return abi::ok;
+        return refuse(m, abi::not_found);
+    }
+    if (rec->native) return refuse(m, abi::denied);  // system paglets serve their own host
+    if (rec->mailbox.size() >= rt.config.mailbox_limit) return refuse(m, abi::quota);
+    Envelope env;
+    env.delivered.kind = m.kind == RemoteMessage::Kind::request ? abi::MessageKind::request : abi::MessageKind::message;
+    env.delivered.name = std::move(m.name);
+    env.delivered.payload = std::move(m.payload);
+    env.delivered.priority = std::clamp(m.priority, 0, abi::max_priority);
+    env.delivered.sender = std::move(m.sender);
+    env.delivered.badge = std::move(m.badge);
+    for (auto& c : m.caps) {
+        // Endpoints to paglets only; a host's system paglets are its own.
+        if (c.kind == Cap::Kind::endpoint && !c.target.starts_with("system.")) {
+            if (c.host == rt.mobility.host_id) c.host.clear();
+            env.caps.push_back(std::move(c));
+        }
+    }
+    if (m.kind == RemoteMessage::Kind::request) {
+        Cap reply;
+        reply.kind = Cap::Kind::reply;
+        reply.target = std::move(m.requester);
+        reply.correlation = m.correlation;
+        reply.transferable = true;
+        reply.host = std::move(m.requester_host);
+        env.reply_cap = std::move(reply);
+    }
+    const std::int32_t priority = env.delivered.priority;
+    rt.enqueue(*rec, std::move(env), priority);
+    return abi::ok;
+}
+
+void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> host, std::string reason) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    auto node = rt.departures.extract(move);
+    if (node.empty()) return;
+    const Impl::Moving& mv = node.mapped();
+    const auto ttl = SteadyClock::now() + rt.config.tombstone_ttl;
+    if (!mv.clone.empty()) {
+        PagletRec* original = rt.find(mv.paglet);
+        if (host) {
+            // Endpoints to the clone name its host.
+            for (auto& [id, rec] : rt.paglets) {
+                for (auto& [h, c] : rec->caps) {
+                    if (c.kind == Cap::Kind::endpoint && c.target == mv.clone) c.host = *host;
+                }
+            }
+            rt.tombstones[mv.clone] = Impl::Tombstone{*host, ttl};
+        } else if (original != nullptr) {
+            rt.move_failed(*original, mv.destination, reason, mv.clone);
+        }
+        return;
+    }
+    PagletRec* rec = rt.find(mv.paglet);
+    if (rec == nullptr || !rec->moving) return;
+    if (!host) {
+        rec->moving = false;
+        rt.log(2, rec->id, "dispatch to " + mv.destination + " failed: " + reason);
+        rt.move_failed(*rec, mv.destination, std::move(reason), {});
+        rt.make_ready(*rec);
+        return;
+    }
+    // The paglet is on `host` now: messages that waited here follow it.
+    rt.tombstones[rec->id] = Impl::Tombstone{*host, ttl};
+    for (auto& [key, env] : rec->mailbox) {
+        if (env.type != Envelope::Type::message) {
+            if (env.reply_cap) rt.drop_cap(std::move(*env.reply_cap), abi::gone);
+            continue;
+        }
+        RemoteMessage m;
+        m.target = rec->id;
+        m.host = *host;
+        m.name = std::move(env.delivered.name);
+        m.payload = std::move(env.delivered.payload);
+        m.priority = env.delivered.priority;
+        m.sender = std::move(env.delivered.sender);
+        m.badge = std::move(env.delivered.badge);
+        m.caps = rt.portable_caps(std::move(env.caps));
+        switch (env.delivered.kind) {
+            case abi::MessageKind::reply:
+                m.kind = RemoteMessage::Kind::reply;
+                m.correlation = env.delivered.correlation;
+                m.status = env.delivered.status;
+                break;
+            case abi::MessageKind::request: {
+                m.kind = RemoteMessage::Kind::request;
+                Cap reply = rt.portable(std::move(*env.reply_cap));
+                m.requester = std::move(reply.target);
+                m.requester_host = std::move(reply.host);
+                m.correlation = reply.correlation;
+                break;
+            }
+            default: m.kind = RemoteMessage::Kind::message; break;
+        }
+        rt.send_remote(std::move(m));
+    }
+    rec->mailbox.clear();
+    if (rt.store) rt.store->remove_paglet(rec->id);
+    rt.remove_directories(rec->id);
+    rt.notify_ended(rec->id);
+    rt.release_lane(*rec);
+    rt.log(1, rec->id, "moved to host " + host->substr(0, 16));
+    rt.erase_paglet(rec->id);
+    rt.idle_cv.notify_all();
+}
+
+std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Arrival a, const RecreateCap& recreate) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    const TravelState& st = a.state;
+    const bool hex = st.id.size() == 32 && st.id.find_first_not_of("0123456789abcdef") == std::string::npos;
+    if (!hex) return std::unexpected(std::string("invalid paglet ID"));
+    if (rt.paglets.contains(st.id) || rt.endings.contains(st.id)) {
+        return std::unexpected("paglet " + st.id + " exists here");
+    }
+    auto info = rt.modules->info(st.module);
+    if (!info) return std::unexpected("module " + st.module + " is not here");
+    if (to_hex(a.image.module_hash) != st.module) return std::unexpected(std::string("the image is of another module"));
+    // An arriving paglet is always roaming (security design, section 2).
+    if (auto ok = check_paglet_module(*info, TrustClass::roaming); !ok) return std::unexpected(ok.error());
+    if (auto why = rt.refusal(st.module, TrustClass::roaming); !why.empty()) return std::unexpected(why);
+    PagletRec* created = rt.new_paglet(st.id, st.module, TrustClass::roaming, st.owner);
+    if (created == nullptr) return std::unexpected("module " + st.module + " is not here");
+    PagletRec& rec = *created;
+    rt.tombstones.erase(st.id);  // it is back
+    std::vector<std::string> lost;
+    std::set<std::int32_t> service_handles;
+    for (const auto& [name, h] : st.services) service_handles.insert(h);
+    for (const auto& [h, c] : st.caps) {
+        if (h == abi::self_handle) continue;  // new_paglet made the own endpoint
+        std::optional<Cap> here;
+        switch (c.kind) {
+            case Cap::Kind::endpoint:
+                if (c.target.starts_with("system.")) {
+                    PagletRec* sys = rt.find(c.target);
+                    if (sys == nullptr || !sys->native) break;
+                    if (service_handles.contains(h)) {
+                        // Default service endpoints: what this host's service offers.
+                        auto ops = sys->native->default_ops();
+                        if (ops.empty()) break;
+                        Cap e = rt.endpoint_to(c.target);
+                        e.ops = std::move(ops);
+                        e.transferable = false;
+                        here = std::move(e);
+                    } else if (recreate) {
+                        here = recreate(c);
+                    }
+                } else {
+                    here = c;
+                    if (here->host == rt.mobility.host_id || here->target == st.id) here->host.clear();
+                }
+                break;
+            case Cap::Kind::reply:
+                here = c;
+                if (here->host == rt.mobility.host_id) here->host.clear();
+                break;
+            case Cap::Kind::timer: {
+                here = c;
+                here->target = st.id;
+                const auto delay = std::max<std::int64_t>(0, c.fire_at - wall_ms());
+                rt.schedule(SteadyClock::now() + std::chrono::milliseconds(delay),
+                            Deadline{Deadline::Type::timer, st.id, c.timer_id});
+                break;
+            }
+            case Cap::Kind::resource:
+                if (recreate) here = recreate(c);
+                break;
+        }
+        if (here) {
+            rec.caps.insert_or_assign(h, std::move(*here));
+        } else {
+            lost.push_back(describe_cap(h, c));
+        }
+    }
+    for (const auto& [name, h] : st.services) {
+        if (rec.caps.contains(h)) rec.services.emplace_back(name, h);
+    }
+    rec.next_handle = std::max(st.next_handle, 2);
+    rec.next_correlation = st.next_correlation;
+    rec.next_timer = st.next_timer;
+    if (st.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(st.checkpoint_ms);
+    for (const auto& [correlation, ms] : st.pending) {
+        rec.pending_requests.insert(correlation);
+        rt.schedule(SteadyClock::now() + std::chrono::milliseconds(ms),
+                    Deadline{Deadline::Type::request_timeout, st.id, correlation});
+    }
+    rec.image = std::move(a.image);
+    rec.started = true;
+    rec.checkpoint_due = true;
+    rec.arriving = true;
+    Envelope start;
+    start.type = Envelope::Type::start;
+    if (a.clone) {
+        start.event = abi::EventKind::cloned;
+        start.args = std::move(a.clone_args);
+        for (auto& c : a.clone_caps) {
+            if (c.host == rt.mobility.host_id) c.host.clear();
+            start.caps.push_back(std::move(c));
+        }
+        start.original = std::move(a.original);
+    } else {
+        start.event = abi::EventKind::arrived;
+        start.arrived = abi::ArrivedEvent{std::move(a.from), lost};
+    }
+    rec.arrival_start = std::move(start);
+    return lost;
+}
+
+std::expected<void, std::string> Runtime::commit_arrival(const PagletId& id) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    PagletRec* rec = rt.find(id);
+    if (rec == nullptr || !rec->arriving) return std::unexpected("no arrival of " + id);
+    rec->arriving = false;
+    // Stored at once: after a crash the paglet is here, not lost.
+    if (rt.store && rec->image) rt.persist(*rec, *rec->image);
+    Envelope start = std::move(*rec->arrival_start);
+    rec->arrival_start.reset();
+    rt.enqueue(*rec, std::move(start), control_priority);
+    rt.make_ready(*rec);
+    return {};
+}
+
+void Runtime::abort_arrival(const PagletId& id) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    PagletRec* rec = rt.find(id);
+    if (rec == nullptr || !rec->arriving) return;
+    // The paglet stays where it was: nothing here answers for it.
+    rec->mailbox.clear();
+    rt.release_lane(*rec);
+    rt.erase_paglet(id);
+    rt.idle_cv.notify_all();
+}
+
+std::expected<void, std::int32_t> Runtime::dispatch(const PagletId& id, std::string destination) {
+    Impl& rt = *impl_;
+    std::lock_guard lock(rt.mu);
+    PagletRec* rec = rt.find(id);
+    if (rec == nullptr) return std::unexpected(abi::not_found);
+    if (rec->native || rec->trust != TrustClass::roaming) return std::unexpected(abi::denied);
+    if (!rt.mobility.depart) return std::unexpected(abi::unsupported);
+    if (destination.empty()) return std::unexpected(abi::invalid_argument);
+    if (rec->moving || rec->arriving) return std::unexpected(abi::bad_state);
+    Envelope env;
+    env.type = Envelope::Type::move;
+    env.destination = std::move(destination);
+    rt.enqueue(*rec, std::move(env), control_priority);
+    return {};
+}
+
+std::optional<std::string> Runtime::location(const PagletId& id) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->tombstones.find(id);
+    if (it == impl_->tombstones.end() || SteadyClock::now() >= it->second.expires) return std::nullopt;
+    return it->second.host;
 }
 
 std::optional<PagletInfo> Runtime::info(const PagletId& id) const {

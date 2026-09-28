@@ -208,7 +208,9 @@ public:
                     return;
                 }
                 case abi::LifecycleOp::clone: {
-                    auto h = paglets::clone_raw(c.payload, caps_of(c));
+                    std::optional<std::string> destination;
+                    if (!c.name.empty()) destination = c.name;
+                    auto h = paglets::clone_raw(c.payload, caps_of(c), destination);
                     m.reply(h ? h->handle() : h.error());
                     return;
                 }
@@ -238,6 +240,14 @@ public:
     void on_activated() override { note("event:activated"); }
     void on_deactivating() override { note("event:deactivating"); }
     void on_disposing() override { paglets::log("conformance paglet disposing"); }
+    void on_dispatching(const abi::DispatchingEvent& e) override { note("event:dispatching:" + e.destination); }
+    void on_arrived(const abi::ArrivedEvent& e) override {
+        note("event:arrived:" + e.from + ":" + std::to_string(e.lost.size()));
+        for (const auto& l : e.lost) note("lost:" + l);
+    }
+    void on_move_failed(const abi::MoveFailed& f) override {
+        note("move_failed:" + f.destination + ":" + f.reason + ":" + f.clone);
+    }
     void on_undelivered(const abi::Undelivered& u) override {
         note("undelivered:" + u.name + ":" + std::string(abi::error_name(u.status)));
     }

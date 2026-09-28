@@ -45,6 +45,11 @@ struct Cap {
     std::string id;
     std::vector<std::string> lineage;
     std::optional<std::string> grant;
+
+    // Endpoints and reply capabilities whose target is on another host:
+    // the key ID of the host believed to hold it (planning/cpp-networking.md,
+    // section 4). Empty for targets on this host.
+    std::string host;
 };
 
 }  // namespace paglets::runtime

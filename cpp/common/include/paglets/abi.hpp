@@ -234,10 +234,23 @@ struct DeactivateArg {
 struct CloneArg {
     std::vector<std::uint8_t> args;
     std::vector<std::int32_t> caps;
+    // v1.1: make the clone on another host (a destination as for dispatch);
+    // only endpoint capabilities can be passed then.
+    std::optional<std::string> destination;
 };
 
 struct DispatchArg {
     std::string destination;
+};
+
+// v1.1: payload of `paglets.move_failed`, sent to a paglet whose dispatch,
+// or clone to another host, did not happen. After a failed dispatch the
+// paglet continues where it is.
+inline constexpr std::string_view move_failed_message = "paglets.move_failed";
+struct MoveFailed {
+    std::string destination;
+    std::string reason;
+    std::string clone;  // the clone's ID, for a clone; empty for a dispatch
 };
 
 // ---------------------------------------------------------------------------
@@ -541,15 +554,33 @@ inline bool paglets_decode(msgpack::Reader& r, DeactivateArg& a) {
 }
 
 inline void paglets_encode(msgpack::Writer& w, const CloneArg& a) {
-    w.write_map_header(2);
+    w.write_map_header(a.destination ? 3 : 2);
     detail::put(w, "args", a.args);
     detail::put(w, "caps", a.caps);
+    if (a.destination) detail::put(w, "destination", *a.destination);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, CloneArg& a) {
     return detail::read_map(r, [&](std::string_view k) {
         if (k == "args") return msgpack::read_value(r, a.args);
         if (k == "caps") return msgpack::read_value(r, a.caps);
+        if (k == "destination") return msgpack::read_value(r, a.destination);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const MoveFailed& m) {
+    w.write_map_header(3);
+    detail::put(w, "destination", m.destination);
+    detail::put(w, "reason", m.reason);
+    detail::put(w, "clone", m.clone);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, MoveFailed& m) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "destination") return msgpack::read_value(r, m.destination);
+        if (k == "reason") return msgpack::read_value(r, m.reason);
+        if (k == "clone") return msgpack::read_value(r, m.clone);
         return r.skip();
     });
 }
