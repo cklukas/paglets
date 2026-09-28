@@ -18,7 +18,11 @@ policy with grants and an audit log; and the system paglets. Milestone M3
 a cache of compiled modules and garbage collection, module trust in the
 ledger, and code mobility: a host fetches modules it lacks from its sources
 or other hosts, verified by hash, and runs paglets launched from another
-host ([design](../planning/cpp-modules.md)).
+host ([design](../planning/cpp-modules.md)). WP12 puts hosts on the network: HTTPS with end-to-end
+encrypted, mutually authenticated Noise channels between hosts and for CLI
+sessions, and paglets that move between hosts with their state (only
+changed memory pages travel again), their grants and transfer tickets
+([design](../planning/cpp-networking.md)).
 
 ## Layout
 
@@ -165,8 +169,8 @@ build/macos-arm64/host/paglets-spike call-bench build/macos-arm64/guests/counter
 ```
 
 Keys and the mesh security ledger (M2, [design](../planning/cpp-ledger.md)).
-Until hosts talk to each other, the ledger commands work on a local ledger
-directory; admin and owner keys are encrypted with a passphrase (read from
+The ledger commands work on a local ledger directory (a host's copy, or an
+admin's); admin and owner keys are encrypted with a passphrase (read from
 the terminal, or `--passphrase-file`):
 
 ```bash
@@ -208,6 +212,34 @@ $H ledger sign-module --ledger ledger --key build-bot.key --name calc --version 
 $H ledger trust --ledger ledger --admin alice.key --name "lab apps" --class roaming --signer <signer-key-id>
 $H ledger module-policy --ledger ledger --admin alice.key trusted
 $H ledger revoke --ledger ledger --admin alice.key --module calc.wasm --reason vulnerable
+```
+
+Hosts on the network ([design](../planning/cpp-networking.md)):
+`paglets-host serve` runs a host of the mesh with its own copy of the
+ledger; `paglets-host remote` opens an end-to-end channel to a host as an
+admin or owner, to show its status, push ledger records, launch a paglet
+(the module travels with the request), call it or move it with a transfer
+ticket (a host name, a key ID, `label:<label>` or `any`, with
+`?retries=N&arrival=active|inactive`):
+
+```bash
+$H keys init --role owner --name olga --out olga.key
+$H keys init --role host --name lab-2 --out lab-2.key
+$H ledger enroll --ledger ledger --admin alice.key host <lab-2-key-id> lab-2   # lab-1 is enrolled above
+$H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga
+cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2
+$H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
+    --peer <lab-2-key-id>=https://lab-2:7443 &
+$H serve --key lab-2.key --ledger ledger-lab-2 --state state-2 --listen 0.0.0.0:7443 \
+    --peer <lab-1-key-id>=https://lab-1:7443 &
+$H remote launch --connect https://lab-1:7443 --key olga.key --ledger ledger \
+    build/macos-arm64/guests/counter.wasm                          # prints the paglet ID
+$H remote call --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> \
+    increment '{"by": 5, "note": "first"}'
+$H remote dispatch --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> lab-2
+$H remote call --connect https://lab-2:7443 --key olga.key --ledger ledger <paglet-id> \
+    increment '{"by": 1, "note": "moved"}'
+$H remote status --connect https://lab-2:7443 --key alice.key --ledger ledger
 ```
 
 Moving a paglet as a memory image between processes or hosts (the module

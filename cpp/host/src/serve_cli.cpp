@@ -1,0 +1,284 @@
+// Copyright (c) 2026 by C. Klukas.
+// Licensed under the MIT License. See LICENSE for details.
+
+// paglets-host serve: a host of a mesh on the network
+// (planning/cpp-networking.md, section 8). It opens its ledger and host key,
+// runs the runtime with the system paglets and the node, and serves channels
+// over HTTPS: gossip, code mobility and moves with other hosts, CLI sessions
+// of admins and owners.
+
+#include "serve_cli.hpp"
+
+#if PAGLETS_HAVE_REFLECTION
+
+#include <paglets/mesh/crypto.hpp>
+#include <paglets/mesh/ledger.hpp>
+#include <paglets/net/transport.hpp>
+#include <paglets/node/node.hpp>
+#include <paglets/runtime/runtime.hpp>
+#include <paglets/services/system_services.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace paglets::cli {
+
+namespace {
+
+namespace fs = std::filesystem;
+namespace rt = paglets::runtime;
+namespace mesh = paglets::mesh;
+namespace net = paglets::net;
+
+std::atomic<bool> stop_requested{false};
+
+extern "C" void on_signal(int) {
+    stop_requested = true;
+}
+
+int usage() {
+    std::cerr << "usage: paglets-host serve --key HOST-KEY --ledger DIR --state DIR [--listen HOST:PORT]\n"
+                 "                          [--advertise URL] [--peer KEY-ID=URL]... [--root NAME=DIR]...\n"
+                 "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
+                 "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
+                 "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
+                 "starts with its peers as seeds and waits for its enrollment). Stops on SIGINT/SIGTERM, or\n"
+                 "when the stop file appears.\n";
+    return 2;
+}
+
+int fail(const std::string& message) {
+    std::cerr << "paglets-host: " << message << "\n";
+    return 1;
+}
+
+struct Options {
+    std::optional<std::string> key, ledger, state, advertise, tls_cert, tls_key, tls_ca, stop_file;
+    std::string listen = "127.0.0.1:0";
+    std::vector<std::pair<std::string, std::string>> peers;
+    std::map<std::string, std::string> roots;
+    std::vector<std::string> sources;
+    unsigned threads = 2;
+    bool in_process = false;
+    bool no_sandbox = false;
+};
+
+std::optional<Options> parse(int argc, char** argv) {
+    Options o;
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view a = argv[i];
+        auto next = [&]() -> std::optional<std::string> {
+            if (i + 1 >= argc) return std::nullopt;
+            return std::string(argv[++i]);
+        };
+        auto set = [&](std::optional<std::string>& field) {
+            field = next();
+            return field.has_value();
+        };
+        auto pair = [&](std::string& k, std::string& v) {
+            auto x = next();
+            if (!x) return false;
+            const auto eq = x->find('=');
+            if (eq == std::string::npos || eq == 0 || eq + 1 == x->size()) return false;
+            k = x->substr(0, eq);
+            v = x->substr(eq + 1);
+            return true;
+        };
+        bool ok = true;
+        if (a == "--key") {
+            ok = set(o.key);
+        } else if (a == "--ledger") {
+            ok = set(o.ledger);
+        } else if (a == "--state") {
+            ok = set(o.state);
+        } else if (a == "--listen") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) o.listen = *v;
+        } else if (a == "--advertise") {
+            ok = set(o.advertise);
+        } else if (a == "--peer") {
+            std::string k, v;
+            ok = pair(k, v);
+            if (ok) o.peers.emplace_back(k, v);
+        } else if (a == "--root") {
+            std::string k, v;
+            ok = pair(k, v);
+            if (ok) o.roots[k] = v;
+        } else if (a == "--module-source") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) o.sources.push_back(*v);
+        } else if (a == "--tls-cert") {
+            ok = set(o.tls_cert);
+        } else if (a == "--tls-key") {
+            ok = set(o.tls_key);
+        } else if (a == "--tls-ca") {
+            ok = set(o.tls_ca);
+        } else if (a == "--stop-file") {
+            ok = set(o.stop_file);
+        } else if (a == "--threads") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) {
+                try {
+                    o.threads = static_cast<unsigned>(std::stoul(*v));
+                } catch (const std::exception&) {
+                    ok = false;
+                }
+            }
+        } else if (a == "--in-process") {
+            o.in_process = true;
+        } else if (a == "--no-sandbox") {
+            o.no_sandbox = true;
+        } else {
+            ok = false;
+        }
+        if (!ok) return std::nullopt;
+    }
+    if (!o.key || !o.ledger || !o.state) return std::nullopt;
+    return o;
+}
+
+}  // namespace
+
+int serve_command(int argc, char** argv, const fs::path& self) {
+    auto parsed = parse(argc, argv);
+    if (!parsed) return usage();
+    const Options& o = *parsed;
+
+    auto key = mesh::load_key(*o.key, std::nullopt);
+    if (!key) return fail(key.error());
+    auto ledger = mesh::Ledger::open(*o.ledger);
+    if (!ledger) return fail(ledger.error());
+    const mesh::RecordId mesh_id = ledger->mesh();
+    const std::string key_id = key->id();
+
+    const auto colon = o.listen.rfind(':');
+    if (colon == std::string::npos) return fail("--listen is HOST:PORT");
+    net::TransportConfig tc;
+    tc.listen_host = o.listen.substr(0, colon);
+    try {
+        tc.listen_port = std::stoi(o.listen.substr(colon + 1));
+    } catch (const std::exception&) {
+        return fail("--listen is HOST:PORT");
+    }
+    if (o.tls_cert) tc.tls_cert = *o.tls_cert;
+    if (o.tls_key) tc.tls_key = *o.tls_key;
+    if (o.tls_ca) tc.tls_ca = *o.tls_ca;
+    if (o.advertise) tc.advertise_url = *o.advertise;
+    tc.log = [](const std::string& text) { std::cerr << "[net] " << text << "\n"; };
+
+    rt::Config rc;
+    rc.host_name = key_id.substr(0, 16);
+    rc.threads = std::max(1u, o.threads);
+    rc.state_dir = fs::path(*o.state) / "runtime";
+    rc.sandbox_workers = !o.no_sandbox;
+    if (!o.in_process && !self.empty()) {
+        auto worker = self.parent_path() / "paglets-worker";
+#ifdef _WIN32
+        worker += ".exe";
+#endif
+        std::error_code ec;
+        if (fs::exists(worker, ec)) rc.worker_executable = worker;
+    }
+    rc.log = [](const rt::LogRecord& r) {
+        std::cerr << "[" << (r.paglet.empty() ? std::string("host") : r.paglet.substr(0, 8)) << "] " << r.text << "\n";
+    };
+    rt::Runtime runtime(std::move(rc));
+
+    services::ServicesConfig sc;
+    for (const auto& [name, dir] : o.roots) sc.roots[name] = dir;
+    sc.state_dir = fs::path(*o.state) / "services";
+    auto services = services::install_system_services(runtime, std::move(sc));
+    if (!services) return fail(services.error());
+
+    mesh::ForwardingTransport forward;
+    node::Node node(runtime, *services, std::move(*ledger), std::move(*key), forward, fs::path(*o.state) / "node");
+    if (auto ok = node.start(); !ok) return fail(ok.error());
+    for (const auto& dir : o.sources) node.add_module_source(std::make_shared<rt::DirectorySource>(dir));
+
+    net::Transport transport(
+        node.host_key(), mesh_id, tc,
+        [&node](const net::Identity& peer) -> std::expected<void, std::string> {
+            switch (peer.role) {
+                case net::PeerRole::host: {
+                    const auto peers = node.peers();
+                    if (std::ranges::find(peers, peer.key) != peers.end()) return {};
+                    return std::unexpected(std::string("not a host of this mesh"));
+                }
+                case net::PeerRole::admin:
+                    if (node.state().is_admin(peer.key)) return {};
+                    return std::unexpected(std::string("not an admin of this mesh"));
+                case net::PeerRole::owner:
+                    if (node.state().is_owner(peer.key)) return {};
+                    return std::unexpected(std::string("not an enrolled owner"));
+            }
+            return std::unexpected(std::string("unknown role"));
+        },
+        [&node](const net::Identity& from, net::Bytes frame) -> std::vector<net::Bytes> {
+            if (from.role == net::PeerRole::host) {
+                node.receive(from.key, frame);
+                return {};
+            }
+            return {node.answer_session(from.key, net::to_string(from.role), std::move(frame))};
+        });
+    for (const auto& [id, url] : o.peers) {
+        auto peer = mesh::parse_key_id(id);
+        if (!peer) return fail("--peer takes a key ID (64 hex digits): " + id);
+        node.add_seed(*peer);
+        transport.set_address(*peer, url);
+    }
+    if (auto ok = transport.start(); !ok) return fail(ok.error());
+    forward.set_target(&transport);
+
+    std::cout << "host " << key_id << "\n"
+              << "mesh " << mesh::record_id_hex(mesh_id) << "\n"
+              << "url  " << transport.url() << "\n"
+              << std::flush;
+
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
+    using namespace std::chrono_literals;
+    auto next_tick = std::chrono::steady_clock::now();
+    while (!stop_requested) {
+        if (o.stop_file) {
+            std::error_code ec;
+            if (fs::exists(*o.stop_file, ec)) break;
+        }
+        if (std::chrono::steady_clock::now() >= next_tick) {
+            node.tick();
+            next_tick = std::chrono::steady_clock::now() + 500ms;
+        }
+        std::this_thread::sleep_for(50ms);
+    }
+    std::cerr << "[host] stopping\n";
+    runtime.shutdown();  // its threads call into the node
+    forward.set_target(nullptr);
+    transport.stop();
+    return 0;
+}
+
+}  // namespace paglets::cli
+
+#else
+
+#include <iostream>
+
+namespace paglets::cli {
+
+int serve_command(int, char**, const std::filesystem::path&) {
+    std::cerr << "paglets-host: this build has no mesh host (no reflection)\n";
+    return 1;
+}
+
+}  // namespace paglets::cli
+
+#endif

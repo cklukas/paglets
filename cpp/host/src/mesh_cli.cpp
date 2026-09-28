@@ -6,8 +6,12 @@
 
 #include "mesh_cli.hpp"
 
+#include <paglets/abi.hpp>
 #include <paglets/mesh/crypto.hpp>
 #include <paglets/mesh/ledger.hpp>
+#include <paglets/mesh/passport.hpp>
+#include <paglets/net/transport.hpp>
+#include <paglets/wire/json_msgpack.hpp>
 #include <paglets/sha256.hpp>
 #include <paglets/wasm/engine.hpp>
 
@@ -63,8 +67,18 @@ int usage() {
            "       paglets-host ledger trust --ledger DIR --admin KEY... --name NAME --class C...\n"
            "                                 [--signer KEY-ID]... [--module MODULE]...\n"
            "       paglets-host ledger module-policy --ledger DIR --admin KEY... any|trusted\n"
+           "       paglets-host remote status --connect URL --key KEY --ledger DIR [--host-key KEY-ID]\n"
+           "       paglets-host remote push --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE.wasm\n"
+           "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
+           "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
+           "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
            "system; 'module-policy trusted' makes roaming modules need trust as well.\n"
+           "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
+           "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
+           "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
+           "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
            "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
@@ -87,6 +101,8 @@ struct Options {
     std::vector<std::string> remove;
     std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths, classes, signers;
     std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service, version;
+    std::optional<std::string> connect, host_key, args, id, expect;
+    std::optional<std::int64_t> hours;
     std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
     bool ignored = false;
     bool host_only = false;
@@ -172,6 +188,18 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = append(o.signers);
         } else if (a == "--version") {
             ok = set(o.version);
+        } else if (a == "--connect") {
+            ok = set(o.connect);
+        } else if (a == "--host-key") {
+            ok = set(o.host_key);
+        } else if (a == "--args") {
+            ok = set(o.args);
+        } else if (a == "--id") {
+            ok = set(o.id);
+        } else if (a == "--expect") {
+            ok = set(o.expect);
+        } else if (a == "--hours") {
+            ok = number(o.hours);
         } else if (a == "--host-label") {
             ok = append(o.host_labels);
         } else if (a == "--root") {
@@ -777,10 +805,174 @@ int ledger_sign(const Options& o) {
     return 0;
 }
 
+// -- remote: CLI sessions with a host ----------------------------------------
+
+struct Remote {
+    Ledger ledger;
+    SigningKey key;
+    net::ClientSession session;
+
+    static std::expected<Remote, std::string> open(const Options& o) {
+        if (!o.connect || !o.key) return std::unexpected(std::string("--connect and --key are required"));
+        auto ledger = open_ledger(o);
+        if (!ledger) return std::unexpected(ledger.error());
+        auto info = read_key_info(*o.key);
+        if (!info) return std::unexpected(info.error());
+        net::PeerRole role = net::PeerRole::owner;
+        if (info->role == KeyRole::admin) {
+            role = net::PeerRole::admin;
+        } else if (info->role != KeyRole::owner) {
+            return std::unexpected(std::string("sessions use an admin or owner key"));
+        }
+        auto passphrases = Passphrases::make(o);
+        if (!passphrases) return std::unexpected(passphrases.error());
+        auto key = open_key(*o.key, *passphrases);
+        if (!key) return std::unexpected(key.error());
+        std::optional<PublicKey> expected;
+        if (o.host_key) {
+            expected = parse_key_id(*o.host_key);
+            if (!expected) return std::unexpected(std::string("--host-key takes a key ID (64 hex digits)"));
+        }
+        const LedgerState state = ledger->state();
+        auto accept = [expected, state](const net::Identity& server) -> std::expected<void, std::string> {
+            if (server.role != net::PeerRole::host) return std::unexpected(std::string("the server is not a host"));
+            if (expected ? server.key != *expected : !state.is_host(server.key)) {
+                return std::unexpected("host " + key_id(server.key) + " is not enrolled in this ledger copy");
+            }
+            return {};
+        };
+        auto session = net::ClientSession::open(*o.connect, *key, role, ledger->mesh(), accept);
+        if (!session) return std::unexpected(session.error());
+        return Remote{std::move(*ledger), std::move(*key), std::move(*session)};
+    }
+
+    // One request, one answer; failures of the host are errors.
+    std::expected<Map, std::string> ask(Map request) {
+        auto answers = session.exchange({encode(Value(std::move(request)))});
+        if (!answers) return std::unexpected(answers.error());
+        if (answers->size() != 1) return std::unexpected(std::string("no answer"));
+        auto v = decode((*answers)[0]);
+        if (!v || v->as_map() == nullptr) return std::unexpected(std::string("malformed answer"));
+        const Fields f{*v->as_map()};
+        const Value* ok = f.get("ok");
+        if (ok == nullptr || ok->as_bool() == nullptr || !*ok->as_bool()) {
+            return std::unexpected(f.str("e").value_or("refused"));
+        }
+        return *v->as_map();
+    }
+};
+
+std::expected<Bytes, std::string> json_body(const std::optional<std::string>& json) {
+    if (!json) return Bytes{};
+    auto parsed = paglets::wire::Json::parse(*json);
+    if (!parsed) return std::unexpected("not valid JSON: " + *json);
+    return paglets::wire::json_to_msgpack(*parsed);
+}
+
+int remote_status(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("status")}});
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    std::cout << "host:    " << f.str("name").value_or("") << " " << key_id(*f.fixed<32>("key")) << "\n"
+              << "mesh:    " << f.str("mesh").value_or("") << "\n"
+              << "ledger:  " << f.integer("records").value_or(0) << " records, state "
+              << short_id(r->ledger.state().digest()) << " here\n"
+              << "paglets:\n";
+    if (const Array* paglets = f.array("paglets")) {
+        for (const auto& p : *paglets) {
+            const Array* e = p.as_array();
+            if (e == nullptr || e->size() != 4) continue;
+            std::cout << "  " << *(*e)[0].as_str() << "  " << *(*e)[3].as_str() << "  module "
+                      << (*e)[1].as_str()->substr(0, 16) << "  owner " << (*e)[2].as_str()->substr(0, 16) << "\n";
+        }
+    }
+    return 0;
+}
+
+int remote_push(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    Array records;
+    for (const Record* rec : r->ledger.records()) records.emplace_back(rec->encode());
+    auto a = r->ask(Map{{"t", Value("push")}, {"records", Value(std::move(records))}});
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    std::cout << f.integer("added").value_or(0) << " records new to the host\n";
+    if (const Array* errors = f.array("errors")) {
+        for (const auto& e : *errors) std::cerr << "paglets-host: " << *e.as_str() << "\n";
+    }
+    return 0;
+}
+
+int remote_launch(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto module = paglets::wasm::read_file(o.positional[0]);
+    if (!module) return fail(module.error());
+    auto args = json_body(o.args);
+    if (!args) return fail(args.error());
+    std::string id = o.id.value_or("");
+    if (id.empty()) {
+        std::array<std::uint8_t, 16> b{};
+        random_bytes(b);
+        id = paglets::to_hex(std::span<const std::uint8_t>(b));
+    }
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(r->key, r->ledger.mesh(), paglets::sha256(*module), id, Value(), now - 60'000,
+                                    now + o.hours.value_or(24) * 3'600'000);
+    if (!passport) return fail(passport.error());
+    auto a = r->ask(Map{{"t", Value("launch")},
+                        {"passport", Value(passport->encode())},
+                        {"module", Value(std::move(*module))},
+                        {"args", Value(std::move(*args))}});
+    if (!a) return fail(a.error());
+    std::cout << Fields{*a}.str("paglet").value_or("") << "\n";
+    return 0;
+}
+
+int remote_call(const Options& o) {
+    if (o.positional.size() < 2 || o.positional.size() > 3) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto body = json_body(o.positional.size() == 3 ? std::optional<std::string>(o.positional[2]) : std::nullopt);
+    if (!body) return fail(body.error());
+    auto a = r->ask(Map{{"t", Value("call")},
+                        {"paglet", Value(o.positional[0])},
+                        {"name", Value(o.positional[1])},
+                        {"payload", Value(std::move(*body))}});
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    const auto status = static_cast<std::int32_t>(f.integer("status").value_or(0));
+    std::string shown;
+    if (status != 0) {
+        shown = "error: " + std::string(paglets::abi::error_name(status));
+    } else {
+        const Bytes payload = f.bin("payload").value_or(Bytes{});
+        auto json = payload.empty() ? std::nullopt : paglets::wire::msgpack_to_json(payload);
+        shown = payload.empty() ? "ok" : json ? json->dump() : "(" + std::to_string(payload.size()) + " bytes)";
+    }
+    std::cout << shown << "\n";
+    if (o.expect && shown.find(*o.expect) == std::string::npos) return fail("expected " + *o.expect);
+    return status == 0 ? 0 : 1;
+}
+
+int remote_dispatch(const Options& o) {
+    if (o.positional.size() != 2) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(
+        Map{{"t", Value("dispatch")}, {"paglet", Value(o.positional[0])}, {"destination", Value(o.positional[1])}});
+    if (!a) return fail(a.error());
+    return 0;
+}
+
 }  // namespace
 
 bool is_mesh_command(std::string_view command) {
-    return command == "keys" || command == "mesh" || command == "ledger";
+    return command == "keys" || command == "mesh" || command == "ledger" || command == "remote";
 }
 
 int mesh_command(int argc, char** argv) {
@@ -809,6 +1001,13 @@ int mesh_command(int argc, char** argv) {
             if (action == "sign-module") return ledger_sign_module(o);
             if (action == "trust") return ledger_trust(o);
             if (action == "module-policy") return ledger_module_policy(o);
+        }
+        if (group == "remote") {
+            if (action == "status") return remote_status(o);
+            if (action == "push") return remote_push(o);
+            if (action == "launch") return remote_launch(o);
+            if (action == "call") return remote_call(o);
+            if (action == "dispatch") return remote_dispatch(o);
         }
     } catch (const std::exception& e) {
         return fail(e.what());

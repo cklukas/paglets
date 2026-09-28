@@ -138,6 +138,14 @@ public:
     };
     MoveStats move_stats() const;
 
+    // -- CLI sessions (planning/cpp-networking.md, section 8) --
+
+    // Answers a request of an admin's or owner's session (`role`: "admin" or
+    // "owner"; the transport proved the key). Requests and answers are
+    // canonical maps: status, push (ledger records), launch (a paglet from
+    // an owner's passport, with its module), call, dispatch.
+    runtime::Bytes answer_session(const mesh::PublicKey& peer, std::string_view role, runtime::Bytes request);
+
     struct Impl;
 
 private:

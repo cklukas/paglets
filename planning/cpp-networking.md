@@ -1,6 +1,6 @@
 # paglets/cpp: networking and movement (WP12)
 
-Status: in progress. Companion to the plan (sections 3.1, 3.2 and 3.7) and to
+Status: implemented (WP12). Companion to the plan (sections 3.1, 3.2 and 3.7) and to
 [cpp-security-and-communication.md](cpp-security-and-communication.md)
 (sections 3.1, 4.6 and 5.1), which state the goals; this document records the
 concrete design.
@@ -76,7 +76,7 @@ server; each direction uses the channel of its sender:
   A host that knows only a seed thereby becomes reachable to it. Discovery
   (WP14) will add addresses from gossip.
 - **Acceptance**: a host accepts channels from enrolled hosts and its seeds
-  (host role), and CLI sessions of admins and enrolled owners (section 6).
+  (host role), and CLI sessions of admins and enrolled owners (section 8).
 - **TLS**: keeps reverse proxies and firewalls working, but does not
   authenticate hosts (the channels do). A host uses a certificate and key
   from PEM files, or makes a self-signed one (P-256) at start. Peers'
@@ -212,3 +212,56 @@ host-local handles do not:
 | Reply capability | Kept |
 | Timer | Re-armed for its time |
 | Anything else | Lost: listed in the `arrived` event |
+
+## 8. Hosts on the network and CLI sessions
+
+`paglets-host serve` runs a host of a mesh (code in
+`cpp/host/src/serve_cli.cpp`): it opens the host key and the host's copy of
+the ledger, runs the runtime with the system paglets and the node, and
+serves channels over HTTPS until SIGINT, SIGTERM or a stop file.
+
+| Option | Meaning |
+|---|---|
+| `--key FILE`, `--ledger DIR`, `--state DIR` | host key, ledger copy, state (runtime, services, node) |
+| `--listen HOST:PORT` | address of the HTTPS server (default `127.0.0.1:0`, a free port) |
+| `--advertise URL` | the address announced to peers (default: the listening address) |
+| `--peer KEY-ID=URL` | a seed host and its address (repeatable) |
+| `--root NAME=DIR` | a named root of the files service (repeatable) |
+| `--module-source DIR` | a directory of modules the host may load (repeatable) |
+| `--tls-cert`, `--tls-key`, `--tls-ca` | PEM certificate and key (default: self-signed), CA for peers |
+| `--threads N`, `--in-process`, `--no-sandbox`, `--stop-file FILE` | runtime lanes, workers, stopping |
+
+It prints its key ID, the mesh ID and its URL. Host channels carry the
+frames of sections 6 and 7 and of WP11; channels of admins and owners are
+**CLI sessions**: each request frame gets one answer frame, a canonical map
+`{ok: true, ...}` or `{ok: false, e: <reason>}` (`Node::answer_session`,
+`cpp/host/src/node/session.cpp`).
+
+| Request (`t`) | Members | Who | Answer |
+|---|---|---|---|
+| `status` | | admins, owners | host key and name, mesh, ledger digest and record count, paglets (ID, module, owner, state) |
+| `push` | `records` | admins, owners | records added; errors. The ledger checks each record's signatures |
+| `launch` | `passport`, `module`?, `args`? | the passport's owner | the new paglet's ID; the module is added only if its hash matches the passport |
+| `call` | `paglet`, `name`, `payload`, `timeout_ms`? | the paglet's owner, admins | the reply's status and payload |
+| `dispatch` | `paglet`, `destination` | the paglet's owner, admins | the move started (a transfer ticket, section 6) |
+
+The client side is the `remote` command group of `paglets-host`
+(`status`, `push`, `launch`, `call`, `dispatch`, all with `--connect URL
+--key KEY --ledger DIR`). The session's role comes from the key file (admin
+or owner); the client accepts the server only if it is a host enrolled in
+its ledger copy, or the key given with `--host-key`. `launch` signs the
+passport with the owner key on the client and sends the module with it.
+
+## 9. Exit
+
+The exit of WP12: dispatch and clone between two hosts; repeated moves
+transfer only changed pages; grants follow the paglet; failed transfers
+leave the paglet on the source.
+
+| Test | Covers |
+|---|---|
+| `test_noise.cpp` | the Noise test vector, identities, tampering, replays, other meshes |
+| `test_network.cpp` | ordered frames over HTTPS, refused strangers, restarted hosts, CLI sessions, self-signed certificates |
+| `test_mobility.cpp` | ABI C37 to C40 between two runtimes: dispatch, held messages, failed moves, clones, remote requests |
+| `test_movement.cpp` | the exit over the in-memory network (dispatch there and back, page reuse, clones, grants, failed transfers, tickets, lost commits) and over HTTPS |
+| `host_serve_move` (`cpp/tests/cli_serve.cmake`) | two `paglets-host serve` processes; an owner launches a paglet on one with `remote launch`, dispatches it to the other (which fetches the module) and an admin dispatches it back; its state follows |

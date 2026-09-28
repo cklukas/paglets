@@ -84,16 +84,16 @@ if(PAGLETS_ENABLE_REFLECTION)
 
     # A host in a mesh: ledger and gossip tied to the runtime, the grants
     # system paglet (WP9).
-    add_library(paglets_node STATIC src/node/node.cpp src/node/movement.cpp)
+    add_library(paglets_node STATIC src/node/movement.cpp src/node/node.cpp src/node/session.cpp)
     target_link_libraries(paglets_node PUBLIC paglets_services paglets_mesh PRIVATE Zstd::Zstd)
     target_compile_options(paglets_node PRIVATE ${PAGLETS_WARNINGS})
 endif()
 
 # The host binary and its worker processes.
-add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp)
-target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh)
-if(TARGET paglets_services)
-    target_link_libraries(paglets-host PRIVATE paglets_services)
+add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp src/serve_cli.cpp)
+target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh paglets_net)
+if(TARGET paglets_node)
+    target_link_libraries(paglets-host PRIVATE paglets_node)
 endif()
 target_compile_options(paglets-host PRIVATE ${PAGLETS_WARNINGS})
 add_executable(paglets-worker src/worker_main.cpp)

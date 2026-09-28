@@ -96,6 +96,15 @@ if(PAGLETS_TEST_GUEST_DIR)
     set_tests_properties(host_state_resume PROPERTIES FIXTURES_REQUIRED host_state)
 endif()
 
+# WP12 end to end: two hosts serve over HTTPS; the CLI launches a paglet
+# and moves it between them.
+if(PAGLETS_TEST_GUEST_DIR AND PAGLETS_ENABLE_REFLECTION)
+    add_test(NAME host_serve_move
+             COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-serve
+                     -DGUEST=${PAGLETS_TEST_GUEST_DIR}/counter.wasm -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_serve.cmake)
+    set_tests_properties(host_serve_move PROPERTIES TIMEOUT 240)
+endif()
+
 # paglets-host: keys, mesh creation, enrollment requests and decisions.
 add_test(NAME host_cli_ledger
          COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-ledger

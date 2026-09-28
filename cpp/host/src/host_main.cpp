@@ -10,6 +10,8 @@
 //   paglets-host list --state-dir DIR
 //   paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]
 //   paglets-host keys|mesh|ledger ...   (mesh_cli.cpp: keys and the mesh ledger)
+//   paglets-host serve ...              (serve_cli.cpp: a host of a mesh on the network)
+//   paglets-host remote ...             (mesh_cli.cpp: CLI sessions with a host)
 //
 // Message bodies and arguments are given as JSON and passed to the paglet as
 // MessagePack; replies are printed as JSON. With a state directory, paglets
@@ -20,6 +22,7 @@
 // sandbox (--no-sandbox turns it off, for debugging).
 
 #include "mesh_cli.hpp"
+#include "serve_cli.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/runtime/runtime.hpp>
@@ -81,13 +84,16 @@ std::string_view architecture() {
 }
 
 int usage() {
-    std::cerr << "usage: paglets-host --version | --info\n"
-                 "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
-                 "                        [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]\n"
-                 "                        [--root NAME=DIR]...   (named roots of the files service)\n"
-                 "       paglets-host list --state-dir DIR\n"
-                 "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n"
-                 "       paglets-host keys|mesh|ledger ...   (keys and the mesh ledger; no arguments for help)\n";
+    std::cerr
+        << "usage: paglets-host --version | --info\n"
+           "       paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...\n"
+           "                        [--state-dir DIR] [--threads N] [--keep] [--in-process] [--no-sandbox]\n"
+           "                        [--root NAME=DIR]...   (named roots of the files service)\n"
+           "       paglets-host list --state-dir DIR\n"
+           "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n"
+           "       paglets-host keys|mesh|ledger ...   (keys and the mesh ledger; no arguments for help)\n"
+           "       paglets-host serve ...              (a host of a mesh on the network)\n"
+           "       paglets-host remote ...             (sessions with a host: status, push, launch, call, dispatch)\n";
     return 2;
 }
 
@@ -331,6 +337,13 @@ int main(int argc, char** argv) {
     }
     if (cmd == "--info") return info();
     if (paglets::cli::is_mesh_command(cmd)) return paglets::cli::mesh_command(argc, argv);
+    if (cmd == "serve") {
+        try {
+            return paglets::cli::serve_command(argc, argv, self_path);
+        } catch (const std::exception& e) {
+            return fail(e.what());
+        }
+    }
     auto options = parse(argc, argv);
     if (!options) return usage();
     try {
