@@ -642,6 +642,10 @@ struct Transport::Impl {
                 c->http->set_read_timeout(static_cast<time_t>(secs.count()));
                 std::lock_guard lock(u.mu);
                 u.client = c->http.get();
+                // The relay answered the handshake: it is live now, not only
+                // once the first poll returns (on a quiet mesh after poll_wait,
+                // which is as long as the time a relay may stay silent).
+                u.live = true;
             }
             if (u.stop) break;
             auto r = c->http->Post(std::string(path_poll) + c->session, std::string(), content_type);

@@ -3,8 +3,8 @@
 # Licensed under the MIT License. See LICENSE for details.
 
 # Prints the failed tests of the last ctest run in a build directory as
-# GitHub Actions error annotations: the failed checks of each test and the
-# end of its output (for crashes and aborts, which print no check). The
+# GitHub Actions error annotations: what each failed case printed (up to 60
+# lines) and the end of the output (for crashes and aborts, which print no check). The
 # annotations can be read through the API without the job's log.
 #
 #   cpp/tools/ci_failures.sh cpp/build/linux-gcc16
@@ -14,10 +14,16 @@ log="${1:?build directory}/Testing/Temporary/LastTest.log"
 awk '
 function flush(    i, msg, k, from) {
     if (name == "" || passed || !ended) return
+    # Each failed case: what it printed since the case before it ended.
     msg = ""
-    k = 0
-    for (i = 1; i <= n && k < 30; ++i) {
-        if (lines[i] ~ /^\[FAIL\]/ || lines[i] ~ /^    [^ ].*:[0-9]+: /) { msg = msg lines[i] "\n"; ++k }
+    from = 1
+    for (i = 1; i <= n; ++i) {
+        if (lines[i] ~ /^\[(ok|skip) *\]/ || lines[i] ~ /^\[ ok \]/) { from = i + 1; continue }
+        if (lines[i] ~ /^\[FAIL\]/) {
+            if (i - from > 60) from = i - 60
+            for (k = from; k <= i; ++k) msg = msg lines[k] "\n"
+            from = i + 1
+        }
     }
     msg = msg "-- end of output --\n"
     from = n > 15 ? n - 14 : 1
