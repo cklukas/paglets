@@ -6,10 +6,11 @@
 #
 # The runner has no network by default, so this workflow only builds the
 # documentation site with the server's own `ckdocs` (strict: a broken link
-# or heading fragment fails the run). A push to the default branch (main)
-# publishes the site on ck-git Pages; GitHub Pages gets the same site from
-# .github/workflows/docs.yml. Tests and the C++ build run in GitHub Actions
-# (.github/workflows/ci.yml and cpp.yml).
+# or heading fragment fails the run). A push to the hosted project's default
+# branch publishes the site on ck-git Pages. On rpi4 that default is cpp, so
+# ck-git Pages shows the docs including paglets/cpp, while GitHub Pages builds
+# main through .github/workflows/docs.yml. Tests and the C++ build run in
+# GitHub Actions (.github/workflows/ci.yml and cpp.yml).
 version: 1
 on:
   branches: [main, cpp]
