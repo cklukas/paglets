@@ -38,10 +38,29 @@ PAGLETS_FUZZ_SECONDS=600 build/linux-gcc16-asan/tests/paglets_tests guests "fuzz
 as `fuzz-crash-<target>.bin`, and `PAGLETS_FUZZ_REPLAY=<file>` runs a target
 on it alone.
 
-## 2. Still to do
+## 2. Limits
 
-- Quota, pin and clone-bomb tests; ledger partition tests beyond those of
-  WP8.
+One owner's paglets must not take a host over. The runtime's limits
+(`paglets::runtime::Config`), tested by `hardening:` in the unit tests:
+
+| Limit | Default | Beyond it |
+|---|---|---|
+| `owner_paglet_limit` | 10 000 paglets of one owner per host (system paglets do not count) | `create`, children and clones get `quota`; a paglet arriving from another host is refused and stays where it was (`on_move_failed` with the reason) |
+| `spawn_limit_per_call` | 16 children and clones per handler call | `quota` |
+| `pin_limit` | 64 pins held by one paglet (expired pins do not count) | the pin is refused (`quota`) |
+| pin duration | 1 s to 30 days, at most the policy rule's maximum (1 hour without one) | shortened |
+| `mailbox_limit`, `timer_limit`, `cap_limit` | 1 024 messages, 64 timers, 1 024 capabilities per paglet | `quota` |
+| `handler_budget` | 5 s per handler | the handler is ended |
+| storage quota | 16 MB per paglet | `quota` |
+| message size | 1 MB | `too_large` |
+
+A clone bomb (a paglet whose every instance clones itself) stops at the
+owner's limit; the host keeps serving other owners' paglets, and the owner
+can run new paglets as soon as some of the bomb's end.
+
+## 3. Still to do
+
+- Ledger partition tests beyond those of WP8.
 - Key handling review (storage, agent, rotation) and the per-platform worker
   sandbox review.
 - External review of the cryptographic protocol (Noise XX channels, record

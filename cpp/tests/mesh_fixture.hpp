@@ -69,6 +69,8 @@ struct Mesh {
     std::mutex queue_mu;
     std::deque<std::tuple<PublicKey, PublicKey, Bytes>> queue;
     std::vector<std::unique_ptr<Host>> hosts;
+    // Runtime settings of a host before it boots (by its name).
+    std::function<void(const std::string&, rt::Config&)> configure;
     std::function<bool(const PublicKey& from, const PublicKey& to, Bytes& frame)> filter;
     std::map<std::string, int> sent;  // frames by type
 
@@ -109,6 +111,7 @@ struct Mesh {
     void boot(Host& h, SigningKey key) {
         rt::Config config;
         if (!h.state.empty()) config.state_dir = h.state / "runtime";
+        if (configure) configure(h.name, config);
         h.f = std::make_unique<Fixture>(std::move(config));
         auto installed = ps::install_system_services(*h.f->runtime, h.services_config);
         REQUIRE_OK(installed);

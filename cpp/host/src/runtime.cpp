@@ -589,6 +589,16 @@ struct Runtime::Impl {
 
     // A new paglet record; nullptr if its module is not in the store (a
     // module a paglet uses cannot be collected).
+    // Whether `owner` has as many paglets here as one owner may have.
+    bool owner_full(const std::string& owner) const {
+        if (config.owner_paglet_limit == 0) return false;
+        std::size_t n = 0;
+        for (const auto& [id, p] : paglets) {
+            if (p->trust != TrustClass::system && p->owner == owner && ++n >= config.owner_paglet_limit) return true;
+        }
+        return false;
+    }
+
     PagletRec* new_paglet(const PagletId& id, std::string module, TrustClass trust, std::string owner) {
         if (!module.empty() && !modules->add_user(module)) return nullptr;
         auto rec = std::make_unique<PagletRec>();
@@ -1094,7 +1104,8 @@ public:
             rt_.log(2, rec_.id, "child refused: " + why);
             return abi::denied;
         }
-        if (rec_.spawned_this_call >= rt_.config.spawn_limit_per_call || rec_.caps.size() >= rt_.config.cap_limit) {
+        if (rec_.spawned_this_call >= rt_.config.spawn_limit_per_call || rec_.caps.size() >= rt_.config.cap_limit ||
+            rt_.owner_full(rec_.owner)) {
             return abi::quota;
         }
         const PagletId id = new_paglet_id();
@@ -1158,6 +1169,7 @@ public:
                     rt_.log(2, rec_.id, "clone refused: " + why);
                     return abi::denied;
                 }
+                if (rt_.owner_full(rec_.owner)) return abi::quota;
                 const PagletId id = new_paglet_id();
                 // The module has a user (this paglet), so it is in the store.
                 PagletRec* created = rt_.new_paglet(id, rec_.module, trust, rec_.owner);
@@ -2083,6 +2095,9 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
         }
         id = *options.id;
     }
+    if (options.trust != TrustClass::system && impl_->owner_full(options.owner)) {
+        return std::unexpected("quota: the owner has as many paglets here as one owner may have");
+    }
     PagletRec* created = impl_->new_paglet(id, std::string(module), options.trust, std::move(options.owner));
     if (created == nullptr) return std::unexpected("unknown module " + std::string(module));
     PagletRec& rec = *created;
@@ -2383,6 +2398,7 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     // An arriving paglet is always roaming (security design, section 2).
     if (auto ok = check_paglet_module(*info, TrustClass::roaming); !ok) return std::unexpected(ok.error());
     if (auto why = rt.refusal(st.module, TrustClass::roaming); !why.empty()) return std::unexpected(why);
+    if (rt.owner_full(st.owner)) return std::unexpected(std::string("quota: its owner has as many paglets here as one owner may have"));
     PagletRec* created = rt.new_paglet(st.id, st.module, TrustClass::roaming, st.owner);
     if (created == nullptr) return std::unexpected("module " + st.module + " is not here");
     PagletRec& rec = *created;
@@ -2524,7 +2540,12 @@ std::expected<void, std::int32_t> Runtime::pin(const PagletId& id, std::string p
     if (rec->native) return std::unexpected(abi::denied);
     // About to leave or leaving: the outcome decides where it is.
     if (rec->moving || rec->pending_end == abi::LifecycleOp::dispatch) return std::unexpected(abi::bad_state);
-    if (until <= wall_ms()) return std::unexpected(abi::invalid_argument);
+    const std::int64_t now = wall_ms();
+    if (until <= now) return std::unexpected(abi::invalid_argument);
+    std::erase_if(rec->pins, [now](const auto& p) { return p.second <= now; });  // expired
+    if (!rec->pins.contains(pin) && rt.config.pin_limit > 0 && rec->pins.size() >= rt.config.pin_limit) {
+        return std::unexpected(abi::quota);
+    }
     rec->pins[std::move(pin)] = until;
     return {};
 }

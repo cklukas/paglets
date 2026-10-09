@@ -180,3 +180,21 @@ paglet can be found from any host (`remote locate`, or the `locator` system
 paglet). A pin keeps a paglet on its host for a while. Pinning needs a
 policy rule for service `locator`, operation `pin`. See the
 [location design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-location.md).
+
+## Limits
+
+A host keeps one owner's paglets from taking it over:
+
+- at most 10 000 paglets of one owner per host. Beyond that, creating,
+  cloning and moving paglets there fails with `quota`, and a paglet that
+  cannot arrive stays where it was;
+- at most 16 children and clones per handler call;
+- at most 64 pins on one paglet;
+- at most 5 s per handler;
+- a 16 MB storage quota per paglet;
+- messages of at most 1 MB.
+
+A clone bomb therefore stops at the owner's limit, and other owners'
+paglets keep running. The
+[hardening design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-hardening.md)
+lists every limit.

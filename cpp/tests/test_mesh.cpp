@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <deque>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <random>
@@ -604,6 +605,73 @@ PAGLETS_TEST("gossip: three hosts converge after partitions (WP8 exit)") {
     CHECK(st.hosts.size() == 4);
     CHECK(st.pending.empty());
     CHECK(net.dropped > 0);
+}
+
+PAGLETS_TEST("gossip: random partitions and records on five hosts converge to the state of all records (WP21)") {
+    std::uint64_t seed = std::random_device{}();
+    if (const char* s = std::getenv("PAGLETS_PARTITION_SEED")) seed = std::strtoull(s, nullptr, 10);
+    std::mt19937_64 rng(seed);
+    auto pick = [&](std::size_t n) { return static_cast<std::size_t>(rng() % n); };
+    Admins ad;
+    const std::vector<const SigningKey*> admins{&ad.a, &ad.b, &ad.c};
+    auto genesis = make_genesis("random", admins, Quorum{1, 1}, 1);
+    REQUIRE_OK(genesis);
+    Network net;
+    for (int i = 0; i < 5; ++i) net.add(*genesis);
+    std::vector<SigningKey> owners;
+    std::set<PublicKey> revoked;  // by admins that stay admins
+    bool b_removed = false;
+    for (int step = 0; step < 60; ++step) {
+        // The network: split into up to three groups, heal, or stay.
+        const auto weather = pick(10);
+        if (weather < 3) {
+            for (auto& n : net.nodes) net.group[n->key.public_key()] = static_cast<int>(pick(3));
+        } else if (weather < 5) {
+            net.group.clear();
+        }
+        // Something happens on one of the hosts, signed by one of the admins
+        // (which may have been removed elsewhere: then it does not count).
+        auto& n = *net.nodes[pick(net.nodes.size())];
+        const SigningKey* admin = admins[pick(admins.size())];
+        const auto what = pick(10);
+        if (what < 4 || owners.empty()) {
+            owners.push_back(SigningKey::generate());
+            REQUIRE_OK(n.replica->submit(signed_draft(
+                *n.ledger, "owner-enroll",
+                data::owner_enroll(owners.back().public_key(), "o" + std::to_string(owners.size()), {}), {admin})));
+        } else if (what < 6) {
+            const SigningKey& o = owners[pick(owners.size())];
+            if (admin != &ad.b) revoked.insert(o.public_key());  // b's may come after its removal
+            REQUIRE_OK(n.replica->submit(
+                signed_draft(*n.ledger, "revoke", data::revoke_key(o.public_key(), "random"), {admin})));
+        } else if (what < 8) {
+            const SigningKey host = SigningKey::generate();
+            REQUIRE_OK(n.replica->submit(
+                signed_draft(*n.ledger, "host-enroll", data::host_enroll(host.public_key(), "h", {}), {admin})));
+        } else if (what < 9) {
+            REQUIRE_OK(n.replica->submit(signed_draft(
+                *n.ledger, "root-residency", data::root_residency("r" + std::to_string(pick(3)), "host-only"), {admin})));
+        } else if (!b_removed && admin != &ad.b) {
+            b_removed = true;
+            REQUIRE_OK(n.replica->submit(
+                signed_draft(*n.ledger, "admin-set", data::admin_set(*n.ledger, {}, {ad.b.public_key()}), {admin})));
+        }
+        (void)net.settle(2);  // a little gossip within the groups
+    }
+    net.group.clear();
+    if (net.settle(60) < 0) std::cerr << "    seed " << seed << "\n";
+    REQUIRE(net.converged());
+    // Every replica derives the state that all records give, in any order.
+    std::vector<const Record*> all = net.nodes.front()->ledger->records();
+    std::ranges::shuffle(all, rng);
+    const LedgerState reference = derive_state(net.nodes.front()->ledger->mesh(), all);
+    for (const auto& node : net.nodes) {
+        if (node->ledger->state().digest() != reference.digest()) std::cerr << "    seed " << seed << "\n";
+        CHECK(node->ledger->state().digest() == reference.digest());
+        CHECK_EQ(node->ledger->size(), net.nodes.front()->ledger->size());
+    }
+    // Revocations win: a revoked owner is no owner, whatever came after.
+    for (const auto& k : revoked) CHECK(!reference.is_owner(k));
 }
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,12 @@ struct Config {
     std::size_t cap_limit = 1024;
     std::size_t timer_limit = 64;
     std::size_t spawn_limit_per_call = 16;
+    // Paglets of one owner on this host (created, children, clones and
+    // arrivals; system paglets do not count). Against clone bombs: a paglet
+    // whose clones clone again stops at this many (0: no limit).
+    std::size_t owner_paglet_limit = 10'000;
+    // Pins one paglet can hold at a time (pin(): quota beyond).
+    std::size_t pin_limit = 64;
     // Module store (modules.hpp): compiled modules kept without users, and
     // garbage collection of modules without users that were not used within
     // the grace period, every interval (0: only on request).
