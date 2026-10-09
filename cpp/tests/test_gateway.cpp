@@ -13,6 +13,7 @@
 #include "mesh_fixture.hpp"
 #include "runtime_fixture.hpp"
 #include "test.hpp"
+#include "tls_fixture.hpp"
 
 #include <courier_msgs.hpp>
 #include <describer_msgs.hpp>
@@ -273,6 +274,66 @@ PAGLETS_TEST("gateway: web fetches, extracts and downloads within its destinatio
                   wire::to_msgpack(web::DownloadRequest{site.url("/files/report.txt"), std::string(64, '0')}))
               .starts_with("reply:invalid_argument:"));
     CHECK(ask_raw(f, id, h, "search", wire::to_msgpack(web::SearchRequest{"paglets", 5})).starts_with("reply:failed:"));
+}
+
+PAGLETS_TEST("gateway: web checks HTTPS destinations against the system CAs and the extra CA file") {
+    namespace fs = std::filesystem;
+    // An intranet site with a certificate of an internal CA.
+    const TestCert ca = make_test_cert("intranet root", nullptr, true);
+    const TestCert cert = make_test_cert("intranet", &ca, false);
+    httplib::SSLServer server(httplib::SSLServer::PemMemory{cert.cert.data(), cert.cert.size(), cert.key.data(),
+                                                            cert.key.size(), nullptr, 0, nullptr});
+    REQUIRE(server.is_valid());
+    server.Get("/files/report.txt", [](const httplib::Request&, httplib::Response& r) {
+        r.set_content("internal numbers\n", "text/plain");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    std::thread thread([&] { server.listen_after_bind(); });
+    server.wait_until_ready();
+    const std::string base = "https://127.0.0.1:" + std::to_string(port);
+    const fs::path dir = fs::temp_directory_path() / ("paglets-web-ca-" + std::to_string(std::random_device{}()));
+    fs::create_directories(dir);
+    const fs::path ca_file = write_test_file(dir / "intranet-ca.pem", ca.cert);
+
+    auto fetch = [&](const std::string& extra_ca) {
+        Fixture f;
+        auto services = ps::install_system_services(*f.runtime, {});
+        REQUIRE_OK(services);
+        gw::GatewayConfig config;
+        config.web.enabled = true;
+        config.web.internet = false;
+        config.web.internal = {base + "/files/"};
+        config.web.ca_file = extra_ca;
+        config.web.timeout = std::chrono::milliseconds(5000);
+        REQUIRE_OK(gw::install_gateway(*f.runtime, *services, config));
+        const auto id = f.create("conformance.wasm");
+        const auto h = endpoint_to(f, id, "web");
+        return ask_raw(f, id, h, "fetch", wire::to_msgpack(web::FetchRequest{base + "/files/report.txt", "GET", 0}));
+    };
+    // The system's CAs do not know the internal CA; with the CA file, the
+    // site is trusted (the system's CAs stay trusted as well).
+    const auto refused = fetch("");
+    CHECK(refused.starts_with("reply:failed:"));
+    CHECK(refused.find("unable to get local issuer certificate") != std::string::npos);
+    const auto r = decode_ok<web::FetchReply>(fetch(ca_file.string()));
+    CHECK_EQ(r.status, 200);
+    CHECK(std::string(r.body.begin(), r.body.end()) == "internal numbers\n");
+
+    // A CA file that cannot be used is refused when the gateway starts.
+    {
+        Fixture f;
+        auto services = ps::install_system_services(*f.runtime, {});
+        REQUIRE_OK(services);
+        gw::GatewayConfig config;
+        config.web.enabled = true;
+        config.web.ca_file = (dir / "missing.pem").string();
+        auto installed = gw::install_gateway(*f.runtime, *services, config);
+        REQUIRE(!installed);
+        CHECK(installed.error().find("cannot read the web CA file") != std::string::npos);
+    }
+    server.stop();
+    thread.join();
+    fs::remove_all(dir);
 }
 
 PAGLETS_TEST("gateway: ai answers through its backend, with quotas and offers") {

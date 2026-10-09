@@ -17,12 +17,32 @@
 #include <paglets/wire/json.hpp>
 #include <paglets/wire/reflect.hpp>
 
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 
 namespace paglets::gateway {
 
 namespace web = services::web;
+
+// -- CA certificates ---------------------------------------------------------------------------
+
+std::optional<std::string> ca_file_problem(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return "cannot read the web CA file " + path;
+    const std::string pem(std::istreambuf_iterator<char>(in), {});
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    X509* x = bio == nullptr ? nullptr : PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    ERR_clear_error();
+    if (x == nullptr) return "the web CA file " + path + " holds no PEM certificate";
+    X509_free(x);
+    return std::nullopt;
+}
 
 // -- jobs ------------------------------------------------------------------------------------
 
@@ -171,7 +191,11 @@ HttpResult http(const std::string& url_text, const HttpOptions& options, const H
         }
         if (u->scheme == "https") {
             client.enable_server_certificate_verification(true);
-            if (!settings.ca_file.empty()) client.set_ca_cert_path(settings.ca_file);
+            if (!settings.ca_file.empty()) {
+                // Extra CAs (an internal CA): the system's CAs stay trusted.
+                client.set_ca_cert_path(settings.ca_file);
+                client.enable_system_ca(true);
+            }
         }
         httplib::Headers headers{{"User-Agent", "paglets-web/1"}, {"Accept-Encoding", "identity"}};
         int status = 0;
@@ -210,6 +234,11 @@ HttpResult http(const std::string& url_text, const HttpOptions& options, const H
         }
         if (!r && !(too_large && status != 0)) {
             out.error = "request to " + u->host + " failed: " + httplib::to_string(r.error());
+            if (r.error() == httplib::Error::SSLServerVerification && r.ssl_backend_error() != 0 &&
+                r.ssl_backend_error() < 1000) {
+                out.error +=
+                    std::string(" (") + X509_verify_cert_error_string(static_cast<long>(r.ssl_backend_error())) + ")";
+            }
             out.code = abi::failed;
             return out;
         }

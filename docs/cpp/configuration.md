@@ -206,7 +206,8 @@ logs lines such as
 
 and the enrolled host logs
 `[net] channel refused for host <id>: not a host of this mesh`. The joining
-host retries every 2 seconds.
+host retries every 2 seconds. It logs the error again when it changes, and
+otherwise once a minute, ending with `(still; retried every 2 s)`.
 
 To let it in, an admin enrolls its key and brings the record to a live
 host:
@@ -232,7 +233,34 @@ has the host's enrollment, or name the host's key with `--host-key KEY-ID`.
 `serve` listens on `127.0.0.1` unless told otherwise. Start it with
 `--listen 0.0.0.0:PORT` and `--advertise https://NAME:PORT`, and open the
 port in the firewall. A host that announces an address the others cannot
-reach shows as `(no address)` or `offline` in `remote hosts`.
+reach shows as `(no address)`, `offline` or `one-way` in `remote hosts`.
+
+### A host with --tls-ca cannot reach another host
+
+A host started with `--tls-ca` drops the frames for a host whose
+certificate fails the check. It logs the first failure with the reason,
+then `still dropped (N more times, failing for S s)` at most once a
+minute, and `delivered again` when frames get through. `remote hosts` on
+that host shows the other one as `one-way`, with `send failed:` and the
+reason.
+
+```text
+[net] frames to 35115e1c0c962d6e dropped: opening a channel to https://lab-3:7443: HTTP error: SSL server verification failed (unable to get local issuer certificate)
+```
+
+The reasons:
+
+- `unable to get local issuer certificate`: the certificate is
+  self-signed (the default), or from a CA that is not in the CA file. If
+  it comes from an intermediate CA, put the intermediate certificate after
+  the host's certificate in its `--tls-cert` file.
+- `certificate has expired`: renew it. Its host warns about this when it
+  starts.
+- `SSL server hostname verification failed`: the certificate does not
+  name the host or IP address of the URL that the host is reached at (its
+  `--advertise` URL).
+
+See [TLS certificates](hosts-and-meshes.md#tls-certificates).
 
 ### quota
 

@@ -36,6 +36,8 @@ struct Url {
 };
 std::optional<Url> parse_url(std::string_view text);
 std::string url_encode(std::string_view s);
+// Why a CA file (PEM) for HTTPS destinations cannot be used; nullopt: usable.
+std::optional<std::string> ca_file_problem(const std::string& path);
 
 // Work that blocks (network, inference) runs here, not on scheduler lanes:
 // at most `threads` jobs at a time, the rest wait. stop() ends the threads

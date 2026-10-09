@@ -27,6 +27,9 @@ std::expected<std::shared_ptr<Gateway>, std::string> install_gateway(runtime::Ru
         }
         if (!config.web.proxy.empty() && !parse_url(config.web.proxy))
             return std::unexpected("invalid proxy " + config.web.proxy);
+        if (!config.web.ca_file.empty()) {
+            if (auto problem = ca_file_problem(config.web.ca_file)) return std::unexpected(*problem);
+        }
         installed->web = std::make_shared<Web>(config.web, services, config.authorize);
         if (auto id = runtime.add_system_paglet(installed->web); !id) return std::unexpected(id.error());
         if (config.offers) config.offers("web", installed->web->offer());

@@ -50,7 +50,13 @@ until(ARGS remote call --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet
 
 # It moves to b (b has no application code: it fetches the module from a)
 # and keeps its state.
-until(ARGS remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} b)
+# dispatch waits for the move's outcome: a failed move exits with its reason.
+execute_process(COMMAND "${HOST}" remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet}
+                        label:nowhere RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(rc EQUAL 0 OR NOT err MATCHES "the move failed, the paglet stays: no host matches label:nowhere")
+    stop_and_fail("a failed move was not reported: ${err}")
+endif()
+until(ARGS remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} b EXPECT "moved to b ")
 until(TRIES 80 ARGS remote call --connect ${B} --key "${DIR}/olga.key" ${P} ${L} ${paglet} increment
       "{\"by\": 2, \"note\": \"b\"}" EXPECT "\"value\":7")
 

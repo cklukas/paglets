@@ -159,33 +159,82 @@ hosts: the Noise channel inside it proves every host's key against the
 ledger. Therefore the defaults are:
 
 - Without `--tls-cert` and `--tls-key`, a host makes a self-signed
-  certificate when it starts: a new P-256 key, the subject
-  `CN=paglets host <first 16 digits of the key ID>`, valid for ten years.
-  It is kept in memory only, so each start makes a new one.
+  certificate when it starts: a new P-256 key, the subject and issuer
+  `CN=paglets host <first 16 digits of the key ID>`, no subject alternative
+  names, valid from one hour before the start for 3650 days. It is kept in
+  memory only, so each start makes a new one.
 - Without `--tls-ca`, a host does not check the certificates of the hosts
-  it connects to.
+  it connects to. It accepts any certificate, also an expired one or one
+  for another name.
 
-To use your own certificate, give both PEM files:
+To use your own certificate, give both PEM files. The certificate must
+name the host as the other hosts reach it, that is, the host name or IP
+address of its `--advertise` URL, as a subject alternative name (a DNS
+name, or an IP address for a URL with an IP address). A test CA and a
+certificate for `lab-1.example.org` can be made with OpenSSL (in `bash`):
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 3650 \
+    -keyout lab-ca.key -out lab-ca.pem -subj "/CN=lab CA"
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout lab-1.key.pem -out lab-1.csr -subj "/CN=lab-1.example.org"
+openssl x509 -req -in lab-1.csr -CA lab-ca.pem -CAkey lab-ca.key -CAcreateserial -days 825 \
+    -out lab-1.crt.pem -extfile <(printf "subjectAltName=DNS:lab-1.example.org\nextendedKeyUsage=serverAuth\n")
+```
 
 ```bash
 $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
     --advertise https://lab-1.example.org:7443 \
     --tls-cert lab-1.crt.pem --tls-key lab-1.key.pem --tls-ca lab-ca.pem
+openssl s_client -connect lab-1.example.org:7443 -CAfile lab-ca.pem \
+    -verify_hostname lab-1.example.org </dev/null    # Verify return code: 0 (ok)
 ```
 
-`--tls-ca FILE` makes the host check the certificates of every host it
-connects to against the CA certificates in `FILE`. Use it only when every
-host of the mesh has a certificate from that CA, for the name in its URL:
-connections to hosts with self-signed certificates fail then. Relays and
-gossip use the same connections, so one host without a matching
-certificate is unreachable for the hosts that check.
+- The certificate file may hold intermediate CA certificates after the
+  host's certificate. The host sends them along, so the hosts that check
+  need only the root CA.
+- The key must not be encrypted.
+- `serve` refuses to start when it cannot use the files, for example with
+  `paglets-host: the TLS key does not belong to the TLS certificate` or
+  `a TLS certificate needs both the certificate and the key file`.
+- A certificate that has expired or is not valid yet still starts the
+  host, with a warning:
+  `[net] TLS certificate lab-1.crt.pem: expired on <date>; hosts that check certificates (--tls-ca) refuse it`.
+
+`--tls-ca FILE` makes the host check the certificate of every host it
+connects to: for frames, gossip, `--join` contacts, and the relays that a
+`--no-listen` host polls. The certificate must chain to a CA certificate
+in `FILE`, be valid now, and name the host as in its URL. Only the
+certificates in `FILE` count; the system's CA store is not used. `serve`
+does not start when `FILE` cannot be read or holds no PEM certificate
+(`paglets-host: cannot read the TLS CA file FILE`).
+
+A host that fails the check is unreachable for the hosts that check. They
+drop its frames and log the first failure with the reason, then a
+summary at most once a minute, and a line when frames get through again:
+
+```text
+[net] frames to 35115e1c0c962d6e dropped: opening a channel to https://lab-3:7443: HTTP error: SSL server verification failed (unable to get local issuer certificate)
+```
+
+Other reasons are `(certificate has expired)` and, for a certificate
+without the host's name, `SSL server hostname verification failed`. The
+check only covers the connections that the checking host opens. A refused
+host that does not check itself still delivers its frames, so the
+checking hosts list it as `one-way` in `remote hosts`, with the reason
+(`send failed: ...`). Requests that need an answer from them fail, for
+example a move to a checking host
+(`the move failed, the paglet stays: no host took the paglet; host <id>: no answer in time`).
+Give `--tls-ca` to every host of the mesh or to none, and a certificate
+from that CA to every host that listens.
 
 > [!NOTE]
-> `paglets-host remote` does not check TLS certificates. It relies on the
-> Noise channel: it accepts only a host that is enrolled in its ledger copy
-> (or the key given with `--host-key`). `--web-ca` is unrelated to the mesh:
-> it names CA certificates for the HTTPS sites that the `web` gateway
-> fetches.
+> `paglets-host remote` does not check TLS certificates and has no CA
+> option. It relies on the Noise channel: it accepts only a host that is
+> enrolled in its ledger copy (or the key given with `--host-key`), so a
+> TLS interceptor can block a session but cannot read it or pose as the
+> host. `--web-ca` is unrelated to the mesh: it adds CA certificates for
+> the HTTPS sites that the `web` gateway fetches.
 
 Design documents:
 
@@ -219,6 +268,21 @@ ticket, which names the destination in one of these forms:
 - `any`.
 
 A ticket can add `?retries=N&arrival=active|inactive`.
+
+`remote dispatch` waits until the move ended, at most 120 s. It prints
+`moved to lab-2 <key-id>`, or exits with status 1 and the reason, for
+example `the move failed, the paglet stays: no host matches label:gpu`.
+A `call` to a paglet that is moving waits for the move as well (up to
+30 s).
+
+`remote hosts` shows each enrolled host with its state:
+
+| State | Meaning |
+|---|---|
+| `this host` | the host the session is connected to |
+| `online` | heard from recently, and this host's frames reach it |
+| `one-way` | heard from recently, but this host's frames to it fail; `send failed:` gives the reason, for example a refused TLS certificate |
+| `offline` | not heard from recently |
 
 Admin work against a live host:
 

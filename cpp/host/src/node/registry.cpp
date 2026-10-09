@@ -399,6 +399,7 @@ std::vector<Node::HostInfo> Node::hosts() const {
             // Online means heard from, not merely not yet timed out.
             info.online = info.online && impl_->last_seen.contains(k);
             info.compatible = impl_->compatible(k);
+            info.send_error = impl_->transport.send_failure(k).value_or("");
         }
         out.push_back(std::move(info));
     }

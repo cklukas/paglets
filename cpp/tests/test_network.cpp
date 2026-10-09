@@ -3,19 +3,24 @@
 
 // Channels over HTTPS (WP12, planning/cpp-networking.md, section 3): hosts
 // exchange frames through the channels they open to each other's servers,
-// CLI sessions ask and get answers, strangers are refused.
+// CLI sessions ask and get answers, strangers are refused; TLS certificates
+// are checked only against a configured CA file.
 
 #include "test.hpp"
+#include "tls_fixture.hpp"
 
 #include <paglets/net/transport.hpp>
 #include <paglets/sha256.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <map>
+#include <random>
 #include <mutex>
 #include <thread>
 
 using namespace paglets::net;
+using namespace paglets::test;
 namespace mesh = paglets::mesh;
 using namespace std::chrono_literals;
 
@@ -205,11 +210,156 @@ PAGLETS_TEST("network: CLI sessions ask and get answers; the server's identity i
     CHECK(!ClientSession::open(host.transport->url(), owner, PeerRole::owner, paglets::sha256(Bytes{'x'}), {}));
 }
 
+PAGLETS_TEST("network: CLI sessions wait read_timeout for answers that take longer than the timeout") {
+    // A host that answers after 2 s (as a host answers a call when the
+    // paglet replied).
+    const mesh::SigningKey key = mesh::SigningKey::generate();
+    Transport slow(
+        key, mesh_id, TransportConfig{}, [](const Identity&) -> std::expected<void, std::string> { return {}; },
+        [](const Identity&, Bytes frame) -> std::vector<Bytes> {
+            std::this_thread::sleep_for(2s);
+            return {frame};
+        });
+    REQUIRE_OK(slow.start());
+    const mesh::SigningKey owner = mesh::SigningKey::generate();
+    TransportConfig client;
+    client.timeout = 1s;
+    auto impatient = ClientSession::open(slow.url(), owner, PeerRole::owner, mesh_id, {}, client);
+    REQUIRE_OK(impatient);
+    CHECK(!impatient->exchange({Bytes{1}}));  // gave up after 1 s: the answer is lost
+    client.read_timeout = 5s;
+    auto patient = ClientSession::open(slow.url(), owner, PeerRole::owner, mesh_id, {}, client);
+    REQUIRE_OK(patient);
+    auto answer = patient->exchange({Bytes{2}});
+    REQUIRE_OK(answer);
+    CHECK(*answer == std::vector<Bytes>{Bytes{2}});
+}
+
 PAGLETS_TEST("network: self-signed certificates") {
     auto c = self_signed_certificate("paglets test");
     REQUIRE_OK(c);
     CHECK(c->cert_pem.starts_with("-----BEGIN CERTIFICATE-----"));
     CHECK(c->key_pem.find("PRIVATE KEY") != std::string::npos);
+}
+
+PAGLETS_TEST("network: TLS certificates are checked against a CA file; chains are sent along") {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("paglets-tls-" + std::to_string(std::random_device{}()));
+    fs::create_directories(dir);
+    const TestCert root = make_test_cert("test root", nullptr, true);
+    const TestCert intermediate = make_test_cert("test intermediate", &root, true);
+    const TestCert other_root = make_test_cert("other root", nullptr, true);
+    const fs::path root_file = write_test_file(dir / "root.pem", root.cert);
+    // A host serving `cert` (followed by `chain`), checking peers against
+    // the test root when `check`.
+    auto config = [&](const std::string& name, const TestCert& cert, const std::string& chain, bool check) {
+        TransportConfig c;
+        c.tls_cert = write_test_file(dir / (name + ".crt.pem"), cert.cert + chain);
+        c.tls_key = write_test_file(dir / (name + ".key.pem"), cert.key);
+        if (check) c.tls_ca = root_file;
+        return c;
+    };
+    auto logged = [](Host& h, std::string_view text) {
+        std::lock_guard lock(h.mu);
+        return std::ranges::any_of(h.log, [&](const std::string& l) { return l.find(text) != std::string::npos; });
+    };
+
+    // a's certificate comes from the root, b's from an intermediate CA: b
+    // sends the intermediate along, so a root CA file is enough for both.
+    Host a(config("a", make_test_cert("a", &root, false), "", true));
+    Host b(config("b", make_test_cert("b", &intermediate, false), intermediate.cert, true));
+    introduce(a, b);
+    a.transport->send(b.key.public_key(), frame_of(1));
+    b.transport->send(a.key.public_key(), frame_of(2));
+    REQUIRE(b.wait_for(1));
+    REQUIRE(a.wait_for(1));
+
+    // Hosts that check refuse a certificate of another CA, and say why; the
+    // host itself does not check, so its own frames still arrive.
+    Host c(config("c", make_test_cert("c", &other_root, false), "", false));
+    introduce(a, c);
+    a.transport->send(c.key.public_key(), frame_of(3));
+    CHECK(a.transport->flush(10s));
+    CHECK_EQ(c.count(), 0u);
+    CHECK_EQ(a.transport->stats().frames_dropped, 1u);
+    CHECK(logged(a, "SSL server verification failed (unable to get local issuer certificate)"));
+    c.transport->send(a.key.public_key(), frame_of(4));
+    REQUIRE(a.wait_for(2));
+
+    // An expired certificate: its host warns at start, hosts that check refuse it.
+    Host d(config("d", make_test_cert("d", &root, false, -10L * 24 * 3600, -24L * 3600), "", false));
+    CHECK(logged(d, "expired on"));
+    introduce(a, d);
+    a.transport->send(d.key.public_key(), frame_of(5));
+    CHECK(a.transport->flush(10s));
+    CHECK_EQ(d.count(), 0u);
+    CHECK(logged(a, "(certificate has expired)"));
+
+    // CLI sessions do not check certificates: the Noise channel checks the host.
+    const mesh::SigningKey owner = mesh::SigningKey::generate();
+    CHECK(ClientSession::open(c.transport->url(), owner, PeerRole::owner, mesh_id, {}).has_value());
+
+    // Files that cannot be used are refused at start, not at every connection.
+    auto start_error = [&](TransportConfig cfg) {
+        Transport t(a.key, mesh_id, std::move(cfg), {}, {});
+        auto started = t.start();
+        return started ? std::string() : started.error();
+    };
+    TransportConfig bad;
+    bad.tls_ca = dir / "missing.pem";
+    CHECK(start_error(bad).find("cannot read the TLS CA file") != std::string::npos);
+    bad.listen = false;  // hosts without an inbound port check it too
+    CHECK(start_error(bad).find("cannot read the TLS CA file") != std::string::npos);
+    bad = {};
+    bad.tls_ca = dir / "a.key.pem";
+    CHECK(start_error(bad).find("holds no PEM certificate") != std::string::npos);
+    bad = config("e", make_test_cert("e", &root, false), "", false);
+    bad.tls_key = dir / "b.key.pem";
+    CHECK(start_error(bad).find("does not belong to the TLS certificate") != std::string::npos);
+    bad.tls_key.clear();
+    CHECK(start_error(bad).find("needs both") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+PAGLETS_TEST("network: failed deliveries are logged once, summarized, and when they recover") {
+    TransportConfig quick;
+    quick.failure_log_interval = 300ms;
+    Host a(quick);
+    Host b;
+    introduce(a, b);
+    auto count_logged = [&](std::string_view text) {
+        std::lock_guard lock(a.mu);
+        return std::ranges::count_if(a.log, [&](const std::string& l) { return l.find(text) != std::string::npos; });
+    };
+    const auto b_key = b.key.public_key();
+    // b's address leads nowhere first.
+    a.transport->set_address(b_key, "https://127.0.0.1:1");
+    CHECK(!a.transport->send_failure(b_key));
+    for (std::uint32_t i = 0; i < 5; ++i) {
+        a.transport->send(b_key, frame_of(i));
+        CHECK(a.transport->flush(10s));
+    }
+    CHECK_EQ(a.transport->stats().frames_dropped, 5u);
+    CHECK_EQ(count_logged("dropped:"), 1);  // the first failure only
+    REQUIRE(a.transport->send_failure(b_key).has_value());
+    CHECK(a.transport->send_failure(b_key)->find("opening a channel to https://127.0.0.1:1") != std::string::npos);
+    // Repeats are summarized at most every interval.
+    std::this_thread::sleep_for(350ms);
+    a.transport->send(b_key, frame_of(5));
+    CHECK(a.transport->flush(10s));
+    CHECK_EQ(count_logged("still dropped (5 more times"), 1);
+    // A new reason is logged at once.
+    a.transport->set_address(b_key, "https://127.0.0.1:2");
+    a.transport->send(b_key, frame_of(6));
+    CHECK(a.transport->flush(10s));
+    CHECK_EQ(count_logged("dropped: opening a channel to https://127.0.0.1:2"), 1);
+    // The right address: delivered again, and logged.
+    a.transport->set_address(b_key, b.transport->url());
+    a.transport->send(b_key, frame_of(7));
+    REQUIRE(b.wait_for(1));
+    CHECK(a.transport->flush(10s));
+    CHECK(!a.transport->send_failure(b_key));
+    CHECK_EQ(count_logged("frames to " + mesh::key_id(b_key).substr(0, 16) + " delivered again"), 1);
 }
 
 PAGLETS_TEST("network: hosts of another mesh protocol are refused; probe finds a host by its address") {

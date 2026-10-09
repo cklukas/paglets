@@ -10,12 +10,15 @@
 #include "mesh_fixture.hpp"
 #include "runtime_fixture.hpp"
 #include "test.hpp"
+#include "tls_fixture.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/net/beacon.hpp>
 #include <paglets/net/channel.hpp>
 #include <paglets/sha256.hpp>
 
+#include <filesystem>
+#include <future>
 #include <iostream>
 #include <random>
 
@@ -37,8 +40,10 @@ struct Trio {
     std::optional<Record> genesis;
     std::vector<std::unique_ptr<NetHost>> hosts;
 
-    // The last `without_inbound` hosts have no inbound port (WP15).
-    explicit Trio(std::size_t n = 3, std::size_t without_inbound = 0) {
+    // The last `without_inbound` hosts have no inbound port (WP15);
+    // `configure` adjusts a host's transport.
+    explicit Trio(std::size_t n = 3, std::size_t without_inbound = 0,
+                  const std::function<void(std::size_t, paglets::net::TransportConfig&)>& configure = {}) {
         auto g = make_genesis("discovery", {&admin}, {}, 1);
         REQUIRE_OK(g);
         genesis = *g;
@@ -46,6 +51,7 @@ struct Trio {
             paglets::net::TransportConfig tc;
             tc.poll_wait = 1000ms;
             tc.listen = i + without_inbound < n;
+            if (configure) configure(i, tc);
             hosts.push_back(std::make_unique<NetHost>(*genesis, ps::ServicesConfig{}, tc));
         }
         // Every host has the ledger with the enrollments (an admin handed
@@ -174,6 +180,92 @@ PAGLETS_TEST("mesh: three hosts discover each other through one contact each and
         const HostInfo* h = info_of(current, seen_c->key);
         return h != nullptr && !h->online;
     }));
+}
+
+PAGLETS_TEST("mesh: a host that cannot be reached is one-way; CLI sessions hear how a move ended") {
+    namespace fs = std::filesystem;
+    // a checks certificates against a root CA; b has a certificate of
+    // another CA: b reaches a, a does not reach b. c is reached by both.
+    const fs::path dir = fs::temp_directory_path() / ("paglets-oneway-" + std::to_string(std::random_device{}()));
+    fs::create_directories(dir);
+    const TestCert root = make_test_cert("test root", nullptr, true);
+    const TestCert other = make_test_cert("other root", nullptr, true);
+    const TestCert a_cert = make_test_cert("a", &root, false);
+    const TestCert b_cert = make_test_cert("b", &other, false);
+    Trio net(3, 0, [&](std::size_t i, paglets::net::TransportConfig& tc) {
+        if (i == 0) {
+            tc.tls_cert = write_test_file(dir / "a.crt.pem", a_cert.cert);
+            tc.tls_key = write_test_file(dir / "a.key.pem", a_cert.key);
+            tc.tls_ca = write_test_file(dir / "root.pem", root.cert);
+        } else if (i == 1) {
+            tc.tls_cert = write_test_file(dir / "b.crt.pem", b_cert.cert);
+            tc.tls_key = write_test_file(dir / "b.key.pem", b_cert.key);
+        }
+    });
+    auto& a = net[0];
+    auto& b = net[1];
+    auto& c = net[2];
+    for (auto* h : {&b, &c}) {
+        auto contact = h->transport->probe(a.transport->url());
+        REQUIRE_OK(contact);
+        h->node->joined(*contact);
+    }
+    c.transport->set_address(b.node->host(), b.transport->url());
+    b.transport->set_address(c.node->host(), c.transport->url());
+    // a hears from b, but its frames to b fail: one-way, with the reason.
+    REQUIRE(net.eventually([&] {
+        const auto hosts = a.node->hosts();
+        const HostInfo* h = info_of(hosts, b.node->host());
+        return h != nullptr && h->online && !h->send_error.empty();
+    }));
+    const HostInfo seen_b = *info_of(a.node->hosts(), b.node->host());
+    CHECK(seen_b.send_error.find("unable to get local issuer certificate") != std::string::npos);
+    REQUIRE(net.eventually([&] {
+        const auto hosts = b.node->hosts();
+        const HostInfo* h = info_of(hosts, c.node->host());
+        return h != nullptr && h->online && h->send_error.empty();
+    }));
+
+    // An owner's session asks b to move a paglet and waits for the outcome.
+    const std::string module = b.f->module("conformance.wasm");
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(net.owner, net.genesis->id(), *parse_key_id(module), paglet_id('9'), Value(),
+                                    now - 1000, now + 600'000);
+    REQUIRE_OK(passport);
+    auto id = b.node->create(module, *passport);
+    REQUIRE_OK(id);
+    b.node->set_move_timeout(1500ms);
+    auto dispatch = [&](const std::string& destination) {
+        auto answer = std::async(std::launch::async, [&, destination] {
+            return b.node->answer_session(net.owner.public_key(), "owner",
+                                          encode(Value(Map{{"t", Value("dispatch")},
+                                                           {"paglet", Value(*id)},
+                                                           {"destination", Value(destination)},
+                                                           {"wait_ms", Value(std::int64_t{20000})}})));
+        });
+        REQUIRE(net.eventually([&] { return answer.wait_for(0ms) == std::future_status::ready; }));
+        auto v = decode(answer.get());
+        REQUIRE(v && v->as_map() != nullptr);
+        return *v->as_map();
+    };
+    auto flag = [](const Map& m, std::string_view k) -> std::optional<bool> {
+        const Value* v = Fields{m}.get(k);
+        if (v == nullptr || v->as_bool() == nullptr) return std::nullopt;
+        return *v->as_bool();
+    };
+    // a cannot answer b's offer: the move fails, and the session says why.
+    Map failed = dispatch("a");
+    CHECK(flag(failed, "ok").value_or(false));
+    CHECK(!flag(failed, "moved").value_or(true));
+    CHECK(Fields{failed}.str("reason").value_or("").find("no host took the paglet") != std::string::npos);
+    CHECK(b.f->runtime->info(*id).has_value());
+    // To c it moves; the answer names c.
+    Map moved = dispatch("c");
+    CHECK(flag(moved, "moved").value_or(false));
+    CHECK(Fields{moved}.str("host_name") == std::optional<std::string>("c"));
+    CHECK(Fields{moved}.fixed<32>("host") == std::optional<PublicKey>(c.node->host()));
+    REQUIRE(net.eventually([&] { return c.f->runtime->info(*id).has_value(); }));
+    fs::remove_all(dir);
 }
 
 PAGLETS_TEST("mesh: hosts on the local network find each other by multicast beacons") {

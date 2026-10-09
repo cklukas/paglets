@@ -40,7 +40,7 @@ struct WebConfig {
     std::vector<std::string> internal;  // URL prefixes of internal destinations allowed (admin choice)
     std::string proxy;                  // http://host:port; empty: direct
     std::string search_url;             // JSON search endpoint (SearXNG style), "{query}" is replaced
-    std::string ca_file;                // extra CA certificates (PEM) for HTTPS destinations
+    std::string ca_file;                // extra CA certificates (PEM) for HTTPS destinations, besides the system's
     std::int64_t max_bytes = 4 * 1024 * 1024;
     std::int64_t max_download_bytes = 64 * 1024 * 1024;
     std::chrono::milliseconds timeout{20000};

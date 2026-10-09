@@ -49,6 +49,9 @@ public:
     virtual std::vector<PublicKey> live_uplinks() const { return {}; }
     // The relays through which a host without an address is reached.
     virtual void set_relays(const PublicKey&, std::vector<PublicKey>) {}
+    // Why the last frames to a host could not be delivered; nullopt when
+    // they were, or when the transport does not know.
+    virtual std::optional<std::string> send_failure(const PublicKey&) const { return std::nullopt; }
 };
 
 // Forwards frames to a transport set later, for transports that need the
@@ -91,6 +94,10 @@ public:
     void set_relays(const PublicKey& peer, std::vector<PublicKey> relays) override {
         std::lock_guard lock(mu_);
         if (target_ != nullptr) target_->set_relays(peer, std::move(relays));
+    }
+    std::optional<std::string> send_failure(const PublicKey& peer) const override {
+        std::lock_guard lock(mu_);
+        return target_ == nullptr ? std::nullopt : target_->send_failure(peer);
     }
 
 private:

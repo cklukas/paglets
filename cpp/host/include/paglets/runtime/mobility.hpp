@@ -122,6 +122,11 @@ struct MobilityHooks {
     // with the runtime's lock held: queue it. Without it, requests are
     // answered with `not_found` at once.
     std::function<void(RemoteMessage)> unresolved;
+    // The outcome of a paglet's move (not of clones): the key ID of the host
+    // it went to, or nullopt and why it stays here. Called with the
+    // runtime's lock held: do not call the runtime.
+    std::function<void(const PagletId& paglet, const std::optional<std::string>& host, const std::string& reason)>
+        moved;
 };
 
 // On arrival: capabilities the runtime cannot re-create itself (resource

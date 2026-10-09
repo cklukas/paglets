@@ -372,6 +372,7 @@ struct Runtime::Impl {
     }
 
     void move_failed(PagletRec& rec, std::string destination, std::string reason, std::string clone) {
+        if (clone.empty() && mobility.moved) mobility.moved(rec.id, std::nullopt, reason);
         Envelope env;
         env.delivered.kind = abi::MessageKind::message;
         env.delivered.name = std::string(abi::move_failed_message);
@@ -2379,6 +2380,7 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
     rt.notify_ended(rec->id);
     rt.release_lane(*rec);
     rt.log(1, rec->id, "moved to host " + host->substr(0, 16));
+    if (rt.mobility.moved) rt.mobility.moved(rec->id, host, {});
     rt.erase_paglet(rec->id);
     rt.idle_cv.notify_all();
 }

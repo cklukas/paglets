@@ -154,6 +154,16 @@ void Node::Impl::install_mobility() {
         std::lock_guard lock(unresolved_mu);
         unresolved.push_back(std::move(m));
     };
+    // Called with the runtime's lock held: only sessions waiting for the
+    // move hear of it.
+    hooks.moved = [this](const runtime::PagletId& paglet, const std::optional<std::string>& host,
+                         const std::string& reason) {
+        std::lock_guard lock(move_waits_mu);
+        auto it = move_waits.find(paglet);
+        if (it == move_waits.end() || it->second.outcome) return;
+        it->second.outcome = MoveOutcome{host, reason};
+        move_waits_cv.notify_all();
+    };
     runtime.set_mobility(std::move(hooks));
 }
 

@@ -240,8 +240,8 @@ required. The host key must be unencrypted.
 | `--peer KEY-ID=URL` | | a seed host with its address; repeatable |
 | `--no-beacon` | beacons on | no multicast beacons on the local network |
 | `--beacon-port N` | 47471 | the UDP port of the beacons |
-| `--tls-cert FILE`, `--tls-key FILE` | a self-signed certificate | PEM certificate and key of the HTTPS server; give both |
-| `--tls-ca FILE` | not checked | CA certificates (PEM) that other hosts' certificates must chain to |
+| `--tls-cert FILE`, `--tls-key FILE` | a new self-signed certificate at each start | PEM certificate (optionally followed by its intermediate CA certificates) and unencrypted key of the HTTPS server; give both |
+| `--tls-ca FILE` | not checked | check the certificates of the hosts this one connects to against only these CA certificates (PEM), not the system's |
 | `--root NAME=DIR` | | a named root of the `files` service; repeatable |
 | `--module-source DIR` | | a directory whose `.wasm` files the host may load when it lacks a module; repeatable |
 | `--slots N` | | compute slots this host offers (`compute-slots`); a positive number |
@@ -259,7 +259,7 @@ Gateway options (see [System paglets](system-paglets.md#gateways-to-the-web-and-
 | `--web-no-internet` | internet allowed | only the `--web-internal` destinations |
 | `--web-proxy URL` | `HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY` or `http_proxy` | the proxy for `web` requests |
 | `--web-search URL` | none | a SearXNG-style JSON search endpoint for `search` (`{query}` is replaced) |
-| `--web-ca FILE` | the system's CA certificates | CA certificates (PEM) for checking the HTTPS sites that `web` fetches, for example of an internal CA |
+| `--web-ca FILE` | the system's CA certificates | more CA certificates (PEM), trusted besides the system's, for the HTTPS sites that `web` fetches, for example of an internal CA |
 | `--ai BACKEND` | off | offer the `ai` system paglet through `ollama`, or through the `test` backend with fixed answers |
 | `--ai-url URL` | `http://127.0.0.1:11434` | where Ollama listens |
 | `--ai-model NAME` | every model Ollama has | a model to offer; repeatable |
@@ -285,10 +285,10 @@ file. It accepts the host only if it is enrolled in the ledger copy
 | `push` | | sends every record of the ledger copy to the host |
 | `pull` | | adds the host's ledger records to the ledger copy |
 | `launch` | `MODULE.wasm [--args JSON] [--id PAGLET-ID] [--hours N]` | starts a paglet of the owner on the host. The passport is signed locally and is valid for `--hours` (default 24). The ID is random unless given. Prints the paglet ID. |
-| `call` | `PAGLET NAME [JSON] [--expect TEXT]` | sends a request to a paglet and prints the reply; status 1 for an error reply, or when the reply lacks `TEXT` |
-| `dispatch` | `PAGLET DESTINATION` | moves a paglet with a transfer ticket (see [Hosts and meshes](hosts-and-meshes.md#working-with-live-hosts)) |
+| `call` | `PAGLET NAME [JSON] [--expect TEXT]` | sends a request to a paglet and prints the reply; status 1 for an error reply, or when the reply lacks `TEXT`. The host waits up to 30 s for the reply (a paglet that is moving replies after the move), then prints `error: timeout` |
+| `dispatch` | `PAGLET DESTINATION` | moves a paglet with a transfer ticket (see [Hosts and meshes](hosts-and-meshes.md#working-with-live-hosts)) and waits until the move ended, at most 120 s: prints `moved to NAME KEY`, or exits with status 1 and `the move failed, the paglet stays: REASON` |
 | `dispose` | `PAGLET` | ends a paglet (its owner or an admin) |
-| `hosts` | | the hosts as this host knows them: name, key, online state, address, protocol and ABI, relays, and `INCOMPATIBLE` for hosts of another protocol or ABI |
+| `hosts` | | the hosts as this host knows them: name, key, state (`this host`, `online`, `one-way` or `offline`), address, protocol and ABI, relays, `INCOMPATIBLE` for hosts of another protocol or ABI, and `send failed: REASON` when this host's frames to it fail |
 | `landscape` | | `mesh-info`'s view of every host: CPUs, load, free memory, compute slots, queue, paglets, and its offers |
 | `slots` | | the host's compute slots: leases and queue |
 | `locate` | `PAGLET` | where a paglet is, from any host |
@@ -302,7 +302,8 @@ file. It accepts the host only if it is enrolled in the ledger copy
 | `modules` | | the host's modules: hash, size, paglets using it, pinned, signed names |
 | `push-module` | `MODULE.wasm` | stores a module on the host; prints its hash |
 
-`--passphrase-file` works here as for the ledger commands.
+`--passphrase-file` works here as for the ledger commands. The CLI waits
+up to 150 s for each answer of the host.
 
 ## paglets-worker
 

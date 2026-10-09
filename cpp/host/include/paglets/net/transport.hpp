@@ -48,16 +48,23 @@ struct TransportConfig {
     bool listen = true;  // CLI sessions only connect
     std::string listen_host = "127.0.0.1";
     int listen_port = 0;  // 0: any free port
-    // PEM files of the server's certificate and key; empty: a self-signed
-    // certificate made at start.
+    // PEM files of the server's certificate (followed by the CA
+    // certificates of its chain, which are sent along) and its unencrypted
+    // key; empty: a self-signed certificate made at start.
     std::filesystem::path tls_cert;
     std::filesystem::path tls_key;
-    // Checks peers' certificates against this CA file; empty: not checked.
+    // Checks peers' certificates (chain, dates, the host name of their URL)
+    // against only the CA certificates in this file, not the system's;
+    // empty: not checked. start() refuses a file without a certificate.
     std::filesystem::path tls_ca;
     // The address this host announces to the peers it opens channels to
     // (default: url()); peers use it to reach the host.
     std::string advertise_url;
     std::chrono::milliseconds timeout{15000};
+    // How long a client waits for an answer once its request is sent; 0:
+    // `timeout`. CLI sessions wait longer, for hosts that answer when a
+    // paglet replied or a move ended.
+    std::chrono::milliseconds read_timeout{0};
     std::size_t max_frame = channel_max_frame;
     std::size_t max_batch_bytes = 8u * 1024 * 1024;  // frames per request
     std::chrono::milliseconds session_idle{600000};  // unused server sessions end
@@ -67,6 +74,9 @@ struct TransportConfig {
     // host holds for a host that polls it.
     std::chrono::milliseconds poll_wait{10000};
     std::size_t max_downlink_bytes = 64u * 1024 * 1024;
+    // Frames that cannot be delivered to a peer: the first failure, a new
+    // reason and the recovery are logged, repeats at most this often.
+    std::chrono::milliseconds failure_log_interval{60000};
 };
 
 // A frame from a peer; returns the frames to answer with (CLI sessions).
@@ -130,6 +140,10 @@ public:
     void send(const mesh::PublicKey& to, Bytes frame) override;
     // Waits until every queued frame was sent or dropped.
     bool flush(std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+
+    // Why the last frames to a peer could not be delivered; nullopt when
+    // they were (or none were sent).
+    std::optional<std::string> send_failure(const mesh::PublicKey& peer) const override;
 
     TransportStats stats() const;
 

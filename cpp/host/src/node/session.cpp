@@ -13,6 +13,7 @@ namespace {
 
 constexpr auto session_wait = std::chrono::seconds(20);
 constexpr std::int64_t max_session_pin_ms = 24LL * 3600 * 1000;
+constexpr std::int64_t max_dispatch_wait_ms = 120'000;
 
 runtime::Bytes answer(mesh::Map m) {
     m.emplace_back("ok", mesh::Value(true));
@@ -88,6 +89,7 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                           {"url", mesh::Value(h.url)},
                           {"self", mesh::Value(h.self)},
                           {"online", mesh::Value(h.online)},
+                          {"send_error", mesh::Value(h.send_error)},
                           {"compatible", mesh::Value(h.compatible)},
                           {"seen", mesh::Value(h.last_seen_ms)},
                           {"proto", mesh::Value(h.protocol)},
@@ -172,8 +174,41 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         auto destination = f.str("destination");
         if (!paglet || !destination) return refusal("malformed request");
         if (auto ok = may_act(*paglet); !ok) return refusal(ok.error());
-        if (auto ok = dispatch(*paglet, *destination); !ok) return refusal(ok.error());
-        return answer({});
+        // With `wait_ms`, the answer tells where the paglet went, or why it
+        // stays; without, only that the move started.
+        const auto wait = std::chrono::milliseconds(
+            std::clamp<std::int64_t>(f.integer("wait_ms").value_or(0), 0, max_dispatch_wait_ms));
+        if (wait.count() == 0) {
+            if (auto ok = dispatch(*paglet, *destination); !ok) return refusal(ok.error());
+            return answer({});
+        }
+        {
+            std::lock_guard lock(impl_->move_waits_mu);
+            auto& w = impl_->move_waits[*paglet];
+            if (w.sessions++ == 0) w.outcome.reset();
+        }
+        auto outcome = [&]() -> std::expected<std::optional<Impl::MoveOutcome>, std::string> {
+            if (auto ok = dispatch(*paglet, *destination); !ok) return std::unexpected(ok.error());
+            std::unique_lock lock(impl_->move_waits_mu);
+            auto& w = impl_->move_waits[*paglet];
+            impl_->move_waits_cv.wait_for(lock, wait, [&] { return w.outcome.has_value(); });
+            return w.outcome;
+        }();
+        {
+            std::lock_guard lock(impl_->move_waits_mu);
+            if (--impl_->move_waits[*paglet].sessions == 0) impl_->move_waits.erase(*paglet);
+        }
+        if (!outcome) return refusal(outcome.error());
+        if (!*outcome) return answer(mesh::Map{{"pending", mesh::Value(true)}});
+        mesh::Map m{{"moved", mesh::Value((*outcome)->host.has_value())}, {"reason", mesh::Value((*outcome)->reason)}};
+        if (auto host = (*outcome)->host ? mesh::parse_key_id(*(*outcome)->host) : std::nullopt) {
+            std::lock_guard lock(impl_->mu);
+            const auto& hosts = impl_->ledger.state().hosts;
+            auto h = hosts.find(*host);
+            m.emplace_back("host", mesh::Value::bin(*host));
+            m.emplace_back("host_name", mesh::Value(h == hosts.end() ? std::string() : h->second.name));
+        }
+        return answer(std::move(m));
     }
 
     // Location and pins (planning/cpp-location.md): admins, and owners for

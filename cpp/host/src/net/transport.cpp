@@ -8,9 +8,11 @@
 #include <paglets/net/transport.hpp>
 
 #include <openssl/bio.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <openssl/ssl.h>
 #include <openssl/x509.h>
 
 #include <algorithm>
@@ -128,7 +130,10 @@ std::unique_ptr<httplib::Client> make_client(const std::string& url, const Trans
     auto http = std::make_unique<httplib::Client>(url);
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(config.timeout).count();
     http->set_connection_timeout(static_cast<time_t>(secs));
-    http->set_read_timeout(static_cast<time_t>(secs));
+    const auto read = config.read_timeout.count() > 0
+                          ? std::chrono::duration_cast<std::chrono::seconds>(config.read_timeout).count()
+                          : secs;
+    http->set_read_timeout(static_cast<time_t>(read));
     http->set_write_timeout(static_cast<time_t>(secs));
     http->set_keep_alive(true);
     if (!config.tls_ca.empty()) {
@@ -141,7 +146,15 @@ std::unique_ptr<httplib::Client> make_client(const std::string& url, const Trans
 }
 
 std::string describe(const httplib::Result& r) {
-    if (!r) return "HTTP error: " + httplib::to_string(r.error());
+    if (!r) {
+        std::string text = "HTTP error: " + httplib::to_string(r.error());
+        // Why the peer's certificate was refused (OpenSSL's verify result).
+        if (r.error() == httplib::Error::SSLServerVerification && r.ssl_backend_error() != 0 &&
+            r.ssl_backend_error() < 1000) {
+            text += std::string(" (") + X509_verify_cert_error_string(static_cast<long>(r.ssl_backend_error())) + ")";
+        }
+        return text;
+    }
     return "HTTP " + std::to_string(r->status) + (r->body.empty() ? "" : ": " + r->body.substr(0, 200));
 }
 
@@ -247,6 +260,83 @@ std::expected<Certificate, std::string> self_signed_certificate(std::string_view
     return c;
 }
 
+namespace {
+
+// -- certificates of the HTTPS server ------------------------------------------------
+
+std::optional<std::string> read_text(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    std::string text(std::istreambuf_iterator<char>(in), {});
+    if (in.bad()) return std::nullopt;
+    return text;
+}
+
+using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
+
+// The certificates of a PEM text, in order (other PEM blocks are skipped).
+std::vector<X509Ptr> read_certificates(const std::string& pem) {
+    std::vector<X509Ptr> out;
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (bio == nullptr) return out;
+    while (X509* x = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) out.emplace_back(x, X509_free);
+    BIO_free(bio);
+    ERR_clear_error();  // the end of the text
+    return out;
+}
+
+// The server's certificate, the CA certificates after it (sent along as its
+// chain) and its key.
+std::expected<void, std::string> use_certificate(SSL_CTX* ctx, const Certificate& c) {
+    auto certs = read_certificates(c.cert_pem);
+    if (certs.empty()) return std::unexpected(std::string("the TLS certificate file holds no PEM certificate"));
+    if (SSL_CTX_use_certificate(ctx, certs.front().get()) != 1) {
+        ERR_clear_error();
+        return std::unexpected(std::string("the TLS certificate cannot be used"));
+    }
+    for (std::size_t i = 1; i < certs.size(); ++i) {
+        if (SSL_CTX_add1_chain_cert(ctx, certs[i].get()) != 1) {
+            ERR_clear_error();
+            return std::unexpected(std::string("a CA certificate of the TLS certificate file cannot be used"));
+        }
+    }
+    BIO* bio = BIO_new_mem_buf(c.key_pem.data(), static_cast<int>(c.key_pem.size()));
+    EVP_PKEY* key = bio == nullptr ? nullptr : PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (key == nullptr) {
+        ERR_clear_error();
+        return std::unexpected(std::string("the TLS key file holds no PEM private key (or an encrypted one)"));
+    }
+    const bool used = SSL_CTX_use_PrivateKey(ctx, key) == 1 && SSL_CTX_check_private_key(ctx) == 1;
+    EVP_PKEY_free(key);
+    if (!used) {
+        ERR_clear_error();
+        return std::unexpected(std::string("the TLS key does not belong to the TLS certificate"));
+    }
+    return {};
+}
+
+// Why peers that check would refuse the server's certificate by its dates.
+std::optional<std::string> validity_warning(const std::string& pem) {
+    auto certs = read_certificates(pem);
+    if (certs.empty()) return std::nullopt;
+    auto date = [](const ASN1_TIME* t) {
+        BIO* bio = BIO_new(BIO_s_mem());
+        ASN1_TIME_print(bio, t);
+        char* data = nullptr;
+        const long n = BIO_get_mem_data(bio, &data);
+        std::string out(data, static_cast<std::size_t>(n));
+        BIO_free(bio);
+        return out;
+    };
+    const X509* x = certs.front().get();
+    if (X509_cmp_current_time(X509_get0_notAfter(x)) < 0) return "expired on " + date(X509_get0_notAfter(x));
+    if (X509_cmp_current_time(X509_get0_notBefore(x)) > 0) return "not valid before " + date(X509_get0_notBefore(x));
+    return std::nullopt;
+}
+
+}  // namespace
+
 // -- Transport ---------------------------------------------------------------------------
 
 struct Transport::Impl {
@@ -301,6 +391,58 @@ struct Transport::Impl {
     // Peers without an address and the relays they are reached through.
     std::map<mesh::PublicKey, std::vector<mesh::PublicKey>> relays;  // under mu
     std::map<mesh::PublicKey, Clock::time_point> failed;             // hosts whose frames were dropped
+    // Peers whose last frames could not be delivered (under mu): why, since
+    // when, and the failures not logged yet (the first failure, a change of
+    // reason and the recovery are logged; repeats at most every
+    // failure_log_interval).
+    struct SendFailure {
+        std::string why;
+        Clock::time_point since;
+        Clock::time_point logged;
+        std::uint64_t unlogged = 0;
+    };
+    std::map<mesh::PublicKey, SendFailure> send_failures;
+
+    void delivery_failed(const mesh::PublicKey& key, const std::string& why) {
+        const std::string peer = mesh::key_id(key).substr(0, 16);
+        std::string line;
+        {
+            std::lock_guard lock(mu);
+            const auto now = Clock::now();
+            auto [it, fresh] = send_failures.try_emplace(key);
+            SendFailure& f = it->second;
+            if (fresh || f.why != why) {
+                if (fresh) f.since = now;
+                f.why = why;
+                f.logged = now;
+                f.unlogged = 0;
+                line = "frames to " + peer + " dropped: " + why;
+            } else if (now - f.logged >= config.failure_log_interval) {
+                const auto secs = std::chrono::duration_cast<std::chrono::seconds>(now - f.since).count();
+                line = "frames to " + peer + " still dropped (" + std::to_string(f.unlogged + 1) +
+                       " more times, failing for " + std::to_string(secs) + " s): " + why;
+                f.logged = now;
+                f.unlogged = 0;
+            } else {
+                ++f.unlogged;
+            }
+        }
+        if (!line.empty()) log(line);
+    }
+
+    void delivery_succeeded(const mesh::PublicKey& key) {
+        std::string line;
+        {
+            std::lock_guard lock(mu);
+            auto it = send_failures.find(key);
+            if (it == send_failures.end()) return;
+            const auto secs = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - it->second.since).count();
+            line = "frames to " + mesh::key_id(key).substr(0, 16) + " delivered again (failing for " +
+                   std::to_string(secs) + " s)";
+            send_failures.erase(it);
+        }
+        log(line);
+    }
     // Tunnels this host opened (one per peer, used by that peer's sender).
     struct TunnelOut {
         mesh::PublicKey relay{};
@@ -584,7 +726,7 @@ struct Transport::Impl {
         auto t = tunnel_to(key);
         if (!t) {
             dropped += batch.size();
-            log("frames to " + mesh::key_id(key).substr(0, 16) + " dropped: " + t.error());
+            delivery_failed(key, t.error());
             return true;
         }
         std::vector<Bytes> messages;
@@ -600,6 +742,7 @@ struct Transport::Impl {
         }
         forward(relay, key, tunnel_message("data", sid, std::move(messages)));
         sent += batch.size();
+        delivery_succeeded(key);
         return true;
     }
 
@@ -920,12 +1063,12 @@ struct Transport::Impl {
                 failed[key] = Clock::now();
                 std::erase_if(tunnels_out, [&](const auto& e) { return e.second->relay == key; });
             }
-            log("frames to " + mesh::key_id(key).substr(0, 16) + " dropped: " + why);
+            delivery_failed(key, why);
         };
         if (!url) {
             // A host without an inbound port: it polls this host, or it is
             // reached through its relays.
-            if (deliver_downlink(key, batch)) return;
+            if (deliver_downlink(key, batch)) return delivery_succeeded(key);
             if (deliver_tunnel(key, batch)) return;
             return give_up("no address");
         }
@@ -946,6 +1089,7 @@ struct Transport::Impl {
             auto answers = exchange(*peer.connection, batch);
             if (answers) {
                 sent += batch.size();
+                delivery_succeeded(key);
                 for (auto& a : *answers) (void)ingest(peer.connection->server, std::move(a));
                 return;
             }
@@ -984,27 +1128,47 @@ Transport::~Transport() {
 
 std::expected<void, std::string> Transport::start() {
     Impl& t = *impl_;
+    // A CA file that cannot be used would refuse every peer later.
+    if (!t.config.tls_ca.empty()) {
+        auto ca = read_text(t.config.tls_ca);
+        if (!ca) return std::unexpected("cannot read the TLS CA file " + t.config.tls_ca.string());
+        if (read_certificates(*ca).empty()) {
+            return std::unexpected("the TLS CA file " + t.config.tls_ca.string() + " holds no PEM certificate");
+        }
+    }
     if (!t.config.listen) return {};
     if (!t.config.tls_cert.empty() || !t.config.tls_key.empty()) {
-        std::ifstream cert(t.config.tls_cert, std::ios::binary);
-        std::ifstream key(t.config.tls_key, std::ios::binary);
-        if (!cert || !key) return std::unexpected(std::string("cannot read the TLS certificate or key"));
-        t.certificate.cert_pem.assign(std::istreambuf_iterator<char>(cert), {});
-        t.certificate.key_pem.assign(std::istreambuf_iterator<char>(key), {});
+        if (t.config.tls_cert.empty() || t.config.tls_key.empty()) {
+            return std::unexpected(std::string("a TLS certificate needs both the certificate and the key file"));
+        }
+        auto cert = read_text(t.config.tls_cert);
+        if (!cert) return std::unexpected("cannot read the TLS certificate " + t.config.tls_cert.string());
+        auto key = read_text(t.config.tls_key);
+        if (!key) return std::unexpected("cannot read the TLS key " + t.config.tls_key.string());
+        t.certificate.cert_pem = std::move(*cert);
+        t.certificate.key_pem = std::move(*key);
     } else {
         auto c = self_signed_certificate("paglets host " + t.identity.id().substr(0, 16));
         if (!c) return std::unexpected(c.error());
         t.certificate = std::move(*c);
     }
-    httplib::SSLServer::PemMemory pem{t.certificate.cert_pem.data(),
-                                      t.certificate.cert_pem.size(),
-                                      t.certificate.key_pem.data(),
-                                      t.certificate.key_pem.size(),
-                                      nullptr,
-                                      0,
-                                      nullptr};
-    t.server = std::make_unique<httplib::SSLServer>(pem);
-    if (!t.server->is_valid()) return std::unexpected(std::string("invalid TLS certificate or key"));
+    // The whole chain: certificates after the first (intermediate CAs) are
+    // sent along, so peers that check need only the root CA.
+    std::string tls_error;
+    t.server = std::make_unique<httplib::SSLServer>([&t, &tls_error](httplib::tls::ctx_t ctx) {
+        auto ok = use_certificate(static_cast<SSL_CTX*>(ctx), t.certificate);
+        if (!ok) tls_error = ok.error();
+        return ok.has_value();
+    });
+    if (!t.server->is_valid()) {
+        return std::unexpected(tls_error.empty() ? std::string("cannot set up the TLS server") : tls_error);
+    }
+    if (!t.config.tls_cert.empty()) {
+        if (auto warning = validity_warning(t.certificate.cert_pem)) {
+            t.log("TLS certificate " + t.config.tls_cert.string() + ": " + *warning +
+                  "; hosts that check certificates (--tls-ca) refuse it");
+        }
+    }
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(t.config.timeout).count();
     t.server->set_read_timeout(static_cast<time_t>(secs));
     t.server->set_write_timeout(static_cast<time_t>(secs));
@@ -1174,6 +1338,13 @@ bool Transport::flush(std::chrono::milliseconds timeout) {
     return t.idle_cv.wait_for(lock, timeout, [&t] {
         return std::ranges::all_of(t.peers, [](const auto& e) { return e.second->queue.empty() && !e.second->busy; });
     });
+}
+
+std::optional<std::string> Transport::send_failure(const mesh::PublicKey& peer) const {
+    std::lock_guard lock(impl_->mu);
+    auto it = impl_->send_failures.find(peer);
+    if (it == impl_->send_failures.end()) return std::nullopt;
+    return it->second.why;
 }
 
 TransportStats Transport::stats() const {

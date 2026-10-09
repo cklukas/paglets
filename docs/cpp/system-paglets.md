@@ -77,6 +77,11 @@ $H ledger rule --ledger ledger --admin alice.key --name downloads --decision all
 - It checks every redirect again.
 - It uses the proxy from `HTTPS_PROXY`, or `--web-proxy`. `--web-search`
   names a SearXNG instance for `search`.
+- It checks the certificates of HTTPS sites against the system's CA
+  certificates. `--web-ca FILE` adds CA certificates, for example of an
+  internal CA; the system's CAs stay trusted. A refused certificate fails
+  the request with a reason, such as
+  `SSL server verification failed (unable to get local issuer certificate)`.
 
 `download` stores the file as an artifact.
 

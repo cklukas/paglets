@@ -213,7 +213,11 @@ public:
         std::vector<std::string> labels;
         std::string url;  // empty: not known yet
         bool self = false;
-        bool online = false;     // heard from recently (this host: always)
+        bool online = false;  // heard from recently (this host: always)
+        // Why this host's last frames to it could not be delivered; empty when
+        // they were. Online with a send error: it reaches this host, but this
+        // host does not reach it (one-way).
+        std::string send_error;
         bool compatible = true;  // same mesh protocol and paglet ABI
         std::int64_t last_seen_ms = 0;
         std::int64_t protocol = 0;  // 0: not announced yet

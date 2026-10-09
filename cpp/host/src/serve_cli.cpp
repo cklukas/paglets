@@ -379,6 +379,8 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     }
     std::thread joiner([&] {
         std::vector<std::string> pending = o.joins;
+        // Attempts are logged when their error changes, repeats once a minute.
+        std::map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> logged;
         while (!pending.empty() && !stop_requested) {
             for (auto it = pending.begin(); it != pending.end();) {
                 auto peer = transport.probe(*it);
@@ -388,7 +390,14 @@ int serve_command(int argc, char** argv, const fs::path& self) {
                     node.joined(*peer);
                     it = pending.erase(it);
                 } else {
-                    std::cerr << "[mesh] " << *it << ": " << peer.error() << "\n";
+                    const auto now = std::chrono::steady_clock::now();
+                    auto& [error, at] = logged[*it];
+                    if (error != peer.error() || now - at >= std::chrono::minutes(1)) {
+                        std::cerr << "[mesh] " << *it << ": " << peer.error()
+                                  << (error == peer.error() ? " (still; retried every 2 s)" : "") << "\n";
+                        error = peer.error();
+                        at = now;
+                    }
                     ++it;
                 }
             }

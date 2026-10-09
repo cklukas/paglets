@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <list>
@@ -344,6 +345,19 @@ struct Node::Impl {
     runtime::SystemContext* locator_ctx = nullptr;
     std::mutex unresolved_mu;  // taken under the runtime's lock
     std::deque<runtime::RemoteMessage> unresolved;
+    // Outcomes of moves that CLI sessions wait for (session.cpp): by
+    // paglet; nullopt while it is pending. Taken under the runtime's lock.
+    struct MoveOutcome {
+        std::optional<std::string> host;  // key ID; nullopt: it stays here
+        std::string reason;
+    };
+    std::mutex move_waits_mu;
+    std::condition_variable move_waits_cv;
+    struct MoveWait {
+        int sessions = 0;
+        std::optional<MoveOutcome> outcome;
+    };
+    std::map<runtime::PagletId, MoveWait> move_waits;
 
     void heard(const mesh::PublicKey& from);
     void location_tick();

@@ -104,8 +104,10 @@ int usage() {
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
-           "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket).\n"
-           "hosts lists the enrolled hosts as the host knows them (address, online, versions);\n"
+           "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket) and\n"
+           "waits until it arrived or failed (at most 120 s; exit status 1 on failure).\n"
+           "hosts lists the enrolled hosts as the host knows them (address, online, versions; one-way:\n"
+           "the host hears from it but cannot send to it, `send failed` says why);\n"
            "landscape shows mesh-info's view of every host (load, memory, compute slots), slots the\n"
            "compute slots of the host (leases, queue);\n"
            "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
@@ -915,7 +917,11 @@ struct Remote {
             }
             return {};
         };
-        auto session = net::ClientSession::open(*o.connect, *key, role, ledger->mesh(), accept);
+        // Hosts answer calls when the paglet replied (up to 30 s) and moves
+        // when they ended (up to 120 s): wait longer than that.
+        net::TransportConfig config;
+        config.read_timeout = std::chrono::seconds(150);
+        auto session = net::ClientSession::open(*o.connect, *key, role, ledger->mesh(), accept, config);
         if (!session) return std::unexpected(session.error());
         return Remote{std::move(*ledger), std::move(*key), std::move(*session)};
     }
@@ -1201,9 +1207,28 @@ int remote_dispatch(const Options& o) {
     if (o.positional.size() != 2) return usage();
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
-    auto a = r->ask(
-        Map{{"t", Value("dispatch")}, {"paglet", Value(o.positional[0])}, {"destination", Value(o.positional[1])}});
+    auto a = r->ask(Map{{"t", Value("dispatch")},
+                        {"paglet", Value(o.positional[0])},
+                        {"destination", Value(o.positional[1])},
+                        {"wait_ms", Value(static_cast<std::int64_t>(120'000))}});
     if (!a) return fail(a.error());
+    // The host answers when the move ended (hosts before this answer only
+    // that it started).
+    const Fields f{*a};
+    const Value* moved = f.get("moved");
+    if (f.get("pending") != nullptr) {
+        return fail("the move has not ended after 120 s; `remote locate` shows where the paglet is");
+    }
+    if (moved == nullptr || moved->as_bool() == nullptr) {
+        std::cout << "move started; `remote locate` shows where the paglet is\n";
+        return 0;
+    }
+    if (!*moved->as_bool()) return fail("the move failed, the paglet stays: " + f.str("reason").value_or(""));
+    if (auto host = f.fixed<32>("host")) {
+        std::cout << "moved to " << f.str("host_name").value_or("") << " " << key_id(*host).substr(0, 16) << "\n";
+    } else {
+        std::cout << "moved\n";
+    }
     return 0;
 }
 
@@ -1232,11 +1257,16 @@ int remote_hosts(const Options& o) {
                 const Value* v = f.get(k);
                 return v != nullptr && v->as_bool() != nullptr && *v->as_bool();
             };
+            // online: both ways; one-way: it reaches this host, this host's
+            // frames to it fail (send_error says why).
+            const std::string send_error = f.str("send_error").value_or("");
+            const char* state = flag("self")                           ? "this host"
+                                : flag("online") && send_error.empty() ? "online"
+                                : flag("online")                       ? "one-way"
+                                                                       : "offline";
             std::cout << f.str("name").value_or("") << "  " << key_id(*f.fixed<32>("key")).substr(0, 16) << "  "
-                      << (flag("self")     ? "this host"
-                          : flag("online") ? "online"
-                                           : "offline")
-                      << "  " << (f.str("url").value_or("").empty() ? "(no address)" : f.str("url").value_or(""));
+                      << state << "  "
+                      << (f.str("url").value_or("").empty() ? "(no address)" : f.str("url").value_or(""));
             if (f.integer("proto").value_or(0) != 0) {
                 std::cout << "  protocol " << f.integer("proto").value_or(0) << " abi " << f.str("abi").value_or("");
             }
@@ -1252,6 +1282,10 @@ int remote_hosts(const Options& o) {
             }
             if (!flag("compatible")) std::cout << "  INCOMPATIBLE";
             if (!f.str("via").value_or("").empty() && !flag("self")) std::cout << "  via " << f.str("via").value_or("");
+            // Why frames to it fail, for hosts this one should reach.
+            if (!send_error.empty() && (flag("online") || !f.str("url").value_or("").empty())) {
+                std::cout << "  send failed: " << send_error;
+            }
             std::cout << "\n";
         }
     }
