@@ -16,6 +16,7 @@
 #include <paglets/net/channel.hpp>
 #include <paglets/sha256.hpp>
 
+#include <iostream>
 #include <random>
 
 using namespace paglets::test;
@@ -271,6 +272,25 @@ std::vector<PublicKey> relays_of(NetHost& h) {
     return {};
 }
 
+// What every host knows of the others (printed when a relay test waits in
+// vain, to see which part of the picture is missing).
+void dump_relays(Trio& net) {
+    for (auto& h : net.hosts) {
+        std::string self;
+        for (const auto& info : h->node->hosts()) {
+            if (info.self) self = info.name;
+        }
+        std::cerr << "    host " << self << ": " << relays_of(*h).size() << " relays, "
+                  << h->transport->live_uplinks().size() << " live uplinks\n";
+        for (const auto& info : h->node->hosts()) {
+            if (info.self) continue;
+            std::cerr << "      " << info.name << ": online " << info.online << ", compatible " << info.compatible
+                      << ", address " << h->transport->address(info.key).has_value() << ", url '" << info.url
+                      << "', relays " << info.relays.size() << ", via " << info.via << "\n";
+        }
+    }
+}
+
 }  // namespace
 
 PAGLETS_TEST("relay: a host without an inbound port takes part in the mesh, also when a relay goes down (WP15 exit)") {
@@ -359,7 +379,9 @@ PAGLETS_TEST("relay: two hosts without inbound ports reach each other through re
         REQUIRE_OK(contact);
         net[i].node->joined(*contact);
     }
-    REQUIRE(net.eventually([&] { return relays_of(c).size() == 2u && relays_of(d).size() == 2u; }));
+    const bool relayed = net.eventually([&] { return relays_of(c).size() == 2u && relays_of(d).size() == 2u; });
+    if (!relayed) dump_relays(net);
+    REQUIRE(relayed);
     REQUIRE(net.eventually([&] { return net.discovered_except_addresses(); }));
     const std::string module = c.f->module("conformance.wasm");
     const std::int64_t now = unix_ms();
