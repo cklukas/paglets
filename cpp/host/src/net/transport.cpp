@@ -699,8 +699,10 @@ struct Transport::Impl {
         const auto now = Clock::now();
         std::lock_guard lock(sessions_mu);
         for (auto it = sessions.begin(); it != sessions.end();) {
-            const auto limit = it->second->channel ? config.session_idle : config.timeout;
+            // A session in use (its lock is held) stays; `channel` and
+            // `used` are read under the lock (on_finish sets them).
             std::unique_lock session_lock(it->second->mu, std::try_to_lock);
+            const auto limit = session_lock.owns_lock() && it->second->channel ? config.session_idle : config.timeout;
             if (session_lock.owns_lock() && now - it->second->used > limit) {
                 session_lock.unlock();
                 it = sessions.erase(it);
