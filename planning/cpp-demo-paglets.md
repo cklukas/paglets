@@ -26,24 +26,24 @@ pi example in `test_compute.cpp`).
 | 2 | Mesh File Finder | Files | Clone fan-out, `files.find`, grants follow the paglet | `finder/` |
 | 3 | Storage Analyzer | Files | Distributed aggregation, named roots | `finder/` (the analysis) |
 | 4 | Duplicate Finder | Files | Multi-phase coordination, hashing, artifacts | `dupes/` |
-| 5 | File Courier | Files | Grants on two hosts, artifacts, manifest preflight | |
-| 6 | Tree Compare | Files | Parallel scans, diff reports | |
-| 7 | Log Scout | Files | Range reads, time filters, live mode via pubsub | |
+| 5 | File Courier | Files | Grants on two hosts, artifacts, manifest preflight | `file_courier/` (carried in memory, checks before departure) |
+| 6 | Tree Compare | Files | Parallel scans, diff reports | `tree_compare/` |
+| 7 | Log Scout | Files | Range reads, time filters, live mode via pubsub | `log_scout/` (live batches go to the starting paglet: topics are host-local) |
 | 8 | Mesh Top | Monitoring | `server-info`, pubsub, long-lived paglets | `inventory/` (load and top processes) |
 | 9 | Volume Guard | Monitoring | Timers, inactive paglets, user-info alerts | `guard/` |
 | 10 | Inventory Collector | Monitoring | Uniform cross-platform schemas, reports | `inventory/` |
 | 11 | Process Finder | Monitoring | `server-info.processes`, fan-out | `inventory/` (with a process name) |
-| 12 | Mesh Benchmark | Performance | Dedicated workers, scratch storage, rankings | |
+| 12 | Mesh Benchmark | Performance | Dedicated workers, scratch storage, rankings | `benchmark/` (CPU, memory, storage; paglets/cpp numbers in `test_bench.cpp`) |
 | 13 | Latency Map | Performance | Paglet-to-paglet messaging, host pair matrix | `latency/` |
 | 14 | Pi Marathon | Compute | compute-slots, checkpoints, resume after host loss | `pi/` (chunks, slots, loss of a host) |
 | 15 | Hide and Seek | Mobility | `locate_and_pin`, continuous movement, stress test | `seek/` |
 | 16 | AI Document Digest | AI | Find anywhere, move to the AI host, deliver elsewhere | `digest/` |
 | 17 | Semantic Mesh Search | AI | Embeddings, index in paglet memory, natural-language queries | `semantic/` |
-| 18 | Image Describer | AI | Vision models, offers with requirements | |
-| 19 | Log Explainer | AI | Cooperation with Log Scout, grouping and explaining errors | |
+| 18 | Image Describer | AI | Vision models, offers with requirements | `describer/` |
+| 19 | Log Explainer | AI | Cooperation with Log Scout, grouping and explaining errors | `explainer/` (starts a Log Scout as its child) |
 | 20 | Download Courier | Web | Download through a gateway host, delivery to the starting host | `courier/` |
 | 21 | Web Researcher | Web + AI | Search and fetch on a web host, summarize on an AI host | `researcher/` |
-| 22 | Release Watcher | Web | Periodic checks from a web host, notifications, hand-off to Download Courier | |
+| 22 | Release Watcher | Web | Periodic checks from a web host, notifications, hand-off to Download Courier | `watcher/` |
 
 ## Getting started
 

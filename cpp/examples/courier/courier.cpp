@@ -15,6 +15,7 @@
 #include <paglets/services/artifacts.gen.hpp>
 #include <paglets/services/web.gen.hpp>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -88,8 +89,17 @@ private:
                 status_.state = "failed";
                 return (void)paglets::reply_to(*reply, Started{false, error_text("mesh-info", snap.error())});
             }
-            status_.home = snap->host;
+            here_ = snap->host;
+            status_.home = params_.deliver_to.empty() ? snap->host : params_.deliver_to;
             status_.hosts.push_back(snap->host_name.empty() ? snap->host.substr(0, 8) : snap->host_name);
+            // Started on a web host (by a paglet staying there): it downloads here.
+            const bool web_here = std::ranges::any_of(snap->offers, [](const svc::mesh_info::Offer& o) {
+                return o.service == "web" && std::ranges::find(o.ops, "download") != o.ops.end();
+            });
+            if (web_here && params_.via == "offer:web.download") {
+                (void)paglets::reply_to(*reply, Started{true, {}});
+                return download();
+            }
             if (auto moved = paglets::dispatch(params_.via); !moved) {
                 status_.state = "failed";
                 status_.error = error_text("dispatch", moved.error());

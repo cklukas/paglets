@@ -16,6 +16,7 @@
 // A clone (in on_cloned, with Started::caps[0], the parent's endpoint):
 //
 //     patterns::report(parent, encode(result));  // or report_error(parent, "why")
+//     patterns::report(parent, encode(result), {}, [] { (void)dispose(); });  // then ends
 //
 // Clones with a destination can only carry endpoints (ABI v1.1).
 
@@ -197,8 +198,11 @@ private:
 };
 
 // The clone's side: reports to the parent (with the host it ran on).
-inline void report(const Endpoint& parent, Bytes result, std::string error = {}) {
-    here([parent, result = std::move(result), error = std::move(error)](Result<services::mesh_info::Snapshot> s) {
+// The report goes out once mesh-info said where the clone is: a clone that
+// ends after reporting disposes itself in `sent`, not right away.
+inline void report(const Endpoint& parent, Bytes result, std::string error = {}, std::function<void()> sent = {}) {
+    here([parent, result = std::move(result), error = std::move(error),
+          sent = std::move(sent)](Result<services::mesh_info::Snapshot> s) {
         FanOutReport r;
         if (auto me = self_info()) r.clone = me->id;
         if (s) {
@@ -209,11 +213,12 @@ inline void report(const Endpoint& parent, Bytes result, std::string error = {})
         r.error = error;
         r.result = result;
         (void)parent.send(fanout_report, r);
+        if (sent) sent();
     });
 }
 
-inline void report_error(const Endpoint& parent, std::string error) {
-    report(parent, {}, std::move(error));
+inline void report_error(const Endpoint& parent, std::string error, std::function<void()> sent = {}) {
+    report(parent, {}, std::move(error), std::move(sent));
 }
 
 // Hosts mesh-info selects for work (their key IDs, the best first).

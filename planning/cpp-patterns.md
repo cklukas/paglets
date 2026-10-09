@@ -18,7 +18,7 @@ user-info, locator, files, grants).
 | `services.hpp` | `endpoint(name, next)`: the host's default endpoint, else one from the directory; `lookup`; `lending(cap)`; `here(next)`: this host as mesh-info sees it; `error_text` | service scopes of the context |
 | `task.hpp` | `Task<Request, Result>`: a paglet that runs one task; `start` (answered at once with the status), `status`, `wait` (answered when done or after `timeout_ms`); `complete(result)`, `fail(why)`; the result travels encoded in the status | `TaskPaglet` |
 | `operations.hpp` | `serve<Request, Reply>(router, name, fn)`: a handler that returns the reply or an error and answers itself; `call<Reply>(endpoint, op, request, next)` | `OperationPaglet`, `OperationClient` |
-| `fanout.hpp` | `FanOut`: clones of the paglet to a set of hosts, one report each (`report(parent, result)` in the clone), a deadline, failed clones; `select_hosts` through mesh-info | `MeshFanoutMixin` |
+| `fanout.hpp` | `FanOut`: clones of the paglet to a set of hosts, one report each (`report(parent, result)` in the clone; a clone that ends after it disposes in the `sent` callback, as the report goes out only after a mesh-info lookup), a deadline, failed clones; `select_hosts` through mesh-info | `MeshFanoutMixin` |
 | `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(target, duration, reason, work)`: pins, runs the work, releases when it says it is done | locator helpers |
 | `notify.hpp` | `notify(level, title, text)`: fire and forget through `user-info` | `NotificationMixin` |
 | `files.hpp` | single-file mobility: `granted_dir` (a directory by the mesh policy, through `grants`), `read_file`, `write_file` (in 1 MB chunks), `pick_up(root, path)` and `put_down(file, root, path)` | `file_mobility` |

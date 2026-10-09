@@ -11,6 +11,7 @@
 
 #include <paglets/patterns/locate.hpp>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -77,8 +78,20 @@ private:
         (void)paglets::after_raw(g.pause_ms, "next-round", {});
     }
 
+    // The next round starts once the hider has moved since the last catch,
+    // however slow the hosts are.
     void round() {
         if (static_cast<std::int64_t>(score_.catches.size()) >= game_.rounds) return finish();
+        hider_moves([this](std::int64_t n) {
+            if (!score_.catches.empty() && n >= 0 && n <= caught_at_moves_) {
+                (void)paglets::after_raw(game_.pause_ms, "next-round", {});
+                return;
+            }
+            seek();
+        });
+    }
+
+    void seek() {
         pt::with_pinned(hider_, 10'000, "hide and seek",
                         [this](paglets::Result<pt::Location> where, std::function<void()> done) {
                             Catch c;
@@ -89,9 +102,28 @@ private:
                                 c.error = std::string(paglets::abi::error_name(where.error()));
                             }
                             score_.catches.push_back(std::move(c));
-                            done();  // let it go
-                            (void)paglets::after_raw(game_.pause_ms, "next-round", {});
+                            // Pinned, it stays where it is while it counts.
+                            hider_moves([this, done](std::int64_t n) {
+                                caught_at_moves_ = n;
+                                done();  // let it go
+                                (void)paglets::after_raw(game_.pause_ms, "next-round", {});
+                            });
                         });
+    }
+
+    // How often the hider has moved (-1: no answer).
+    void hider_moves(std::function<void(std::int64_t)> next) {
+        paglets::RequestOptions o;
+        o.timeout_ms = 5000;
+        auto sent = hider_.request(
+            "moves",
+            [next](Message& reply) {
+                std::int64_t n = -1;
+                if (!reply.ok() || !reply.decode(n)) n = -1;
+                next(n);
+            },
+            std::move(o));
+        if (!sent) next(-1);
     }
 
     void finish() {
@@ -113,6 +145,7 @@ private:
     Game game_;
     Score score_{"idle", {}, 0};
     Endpoint hider_;
+    std::int64_t caught_at_moves_ = -1;
     // The hider.
     bool hiding_ = false;
     std::int64_t hop_ms_ = 0;

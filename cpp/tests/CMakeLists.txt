@@ -54,7 +54,7 @@ target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/
                            ${PROJECT_SOURCE_DIR}/examples/courier ${PROJECT_SOURCE_DIR}/examples/digest ${PROJECT_SOURCE_DIR}/examples/journey ${PROJECT_SOURCE_DIR}/examples/finder
                            ${PROJECT_SOURCE_DIR}/examples/latency ${PROJECT_SOURCE_DIR}/examples/inventory ${PROJECT_SOURCE_DIR}/examples/seek
                            ${PROJECT_SOURCE_DIR}/examples/guard ${PROJECT_SOURCE_DIR}/examples/dupes
-                           ${PROJECT_SOURCE_DIR}/examples/semantic ${PROJECT_SOURCE_DIR}/examples/researcher
+                           ${PROJECT_SOURCE_DIR}/examples/semantic ${PROJECT_SOURCE_DIR}/examples/researcher ${PROJECT_SOURCE_DIR}/examples/file_courier ${PROJECT_SOURCE_DIR}/examples/tree_compare ${PROJECT_SOURCE_DIR}/examples/log_scout ${PROJECT_SOURCE_DIR}/examples/describer ${PROJECT_SOURCE_DIR}/examples/watcher ${PROJECT_SOURCE_DIR}/examples/explainer ${PROJECT_SOURCE_DIR}/examples/benchmark
                            ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 # The gateway tests serve web pages (cpp-httplib, as the gateway uses it).
 target_include_directories(paglets_tests SYSTEM PRIVATE ${PAGLETS_HTTPLIB_INCLUDE_DIR})
@@ -64,7 +64,7 @@ if(WIN32)
     target_link_libraries(paglets_tests PRIVATE ws2_32 crypt32)
 endif()
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher conformance testbed forbidden calc_user explorer patterns_demo)
+foreach(guest counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher file_courier tree_compare log_scout describer watcher explainer benchmark conformance testbed forbidden calc_user explorer patterns_demo)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()

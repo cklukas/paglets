@@ -16,6 +16,7 @@ struct Start {
     std::string url;
     std::string sha256;                         // expected content (hex); empty: not checked
     std::string via = "offer:web.download";     // the transfer ticket to the web host
+    std::string deliver_to;                     // key ID of the host to deliver to; empty: the starting host
 };
 
 struct Started {

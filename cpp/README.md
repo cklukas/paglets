@@ -52,11 +52,13 @@ of the guest SDK ([design](../planning/cpp-patterns.md)); WP19 adds admin
 work against live hosts to the CLI (pull, requests, approve, deny, audit,
 modules, dispose, `module inspect`); WP20 adds demo paglets from the
 [catalogue](../planning/cpp-demo-paglets.md) (Mesh Journey, File Finder and
-Storage Analyzer, Duplicate Finder, Inventory and Process Finder, Volume
-Guard, Latency Map, Hide and Seek, Semantic Mesh Search, Web Researcher), tested on meshes of several hosts, and
-the first [benchmarks](../planning/cpp-benchmarks.md); WP21 fuzzes every
-decoder of data from outside (ledger records, frames between hosts, memory
-images, modules, the Noise handshake, contracts) in CI
+Storage Analyzer, Duplicate Finder, File Courier, Tree Compare, Log Scout,
+Inventory and Process Finder, Volume Guard, Mesh Benchmark, Latency Map,
+Hide and Seek, Semantic Mesh Search, Image Describer, Log Explainer, Web
+Researcher, Release Watcher), tested on meshes of several hosts, and the first
+[benchmarks](../planning/cpp-benchmarks.md); WP21 fuzzes every decoder of
+data from outside (ledger records, frames between hosts, memory images,
+modules, the Noise handshake, contracts) in CI
 ([design](../planning/cpp-hardening.md)).
 
 ## Layout
@@ -72,7 +74,9 @@ sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
 examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
                           and the demos: courier, digest, journey, finder, dupes, inventory, guard,
-                          latency, seek, semantic, researcher
+                          latency, seek, semantic, researcher, file_courier,
+                          tree_compare, log_scout, describer, watcher, explainer,
+                          benchmark
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```

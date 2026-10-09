@@ -20,6 +20,9 @@ lists the planned demos and which are done.
 | Demo | Directory | What it does | Shows |
 |---|---|---|---|
 | Mesh File Finder and Storage Analyzer | `finder/` | sends a clone to every host; each finds matching files in a named root and adds up what it found | fan-out of clones, `grants`, `files.find` |
+| File Courier | `file_courier/` | carries files from a root of one host to a root of another. It checks both hosts before leaving, verifies every file by SHA-256 after writing it, and comes home with a receipt. | grants on two hosts; data residency stops content that must stay on its host |
+| Tree Compare | `tree_compare/` | compares a directory tree on several hosts by size or by SHA-256, and reports the files missing on some hosts and the files that differ | parallel scans; content is hashed where it is and never travels |
+| Log Scout | `log_scout/` | searches log files on every host for patterns within a time window, with counts and excerpts. In live mode the scouts stay on their hosts and send new matches home. | range reads; read positions kept in memory while the scouts are inactive between checks |
 | Duplicate Finder | `dupes/` | finds files with the same content anywhere in the mesh. First every host reports file sizes. Then only files with a repeated size are hashed, on their own host. | multi-phase coordination; content never travels |
 
 ## Monitoring
@@ -33,6 +36,7 @@ lists the planned demos and which are done.
 
 | Demo | Directory | What it does | Shows |
 |---|---|---|---|
+| Mesh Benchmark | `benchmark/` | measures every host in a compute slot of its own: integer and floating-point speed and memory copying in the paglet, and writing and reading through its storage; ranks the hosts | compute slots, the paglet's own storage (its scratch directory) |
 | Latency Map | `latency/` | places a probe on every host; each probe pings the others and reports round-trip times, giving a matrix of host pairs | messaging between paglets across hosts |
 | Hide and Seek | `seek/` | a hider keeps moving between hosts; the seeker finds it, pins it, and releases it again | `locate_and_pin` while a paglet keeps moving |
 | Pi | `pi/` | computes hex digits of pi in chunks on the hosts of the mesh, and survives the loss of a host | `mesh-info`, `compute-slots`, redirects |
@@ -44,6 +48,9 @@ lists the planned demos and which are done.
 | Download Courier | `courier/` | starts on a host without internet access, downloads a file on a `web` host, and brings it home as an artifact | the web gateway, artifacts, `offer:` tickets |
 | AI Document Digest | `digest/` | reads documents on two hosts, summarizes them on an `ai` host, and writes the digest on a third | data residency: content that must stay on its host is never sent to the AI host |
 | Semantic Mesh Search | `semantic/` | reads documents on their hosts, embeds them on an `ai` host, and answers questions by meaning | the index is an ordinary vector in the paglet's memory and moves with it; no database |
+| Image Describer | `describer/` | reads images on their hosts, gets a caption and tags for each on an `ai` host whose offer can see (`vision=yes`), and writes a JSON catalogue on another host | offer requirements through `mesh-info`, `ai.describe_image`, data residency |
+| Release Watcher | `watcher/` | stays on a `web` host and checks release pages or feeds. It tells its owner about new versions and, on request, starts a Download Courier that brings the release file home. | a long-lived paglet, inactive between checks; paglets starting other paglets |
+| Log Explainer | `explainer/` | starts a Log Scout, groups the lines it found (numbers and IDs do not count), classifies and explains each group on an `ai` host, and tells its owner | paglets cooperating: a child from another module; `ai.classify` and `ai.generate` |
 | Web Researcher | `researcher/` | starts on a host without internet access, searches and reads pages on a `web` host, summarizes them on an `ai` host, and comes home with a report | one paglet using two gateway hosts |
 
 ## Running a demo

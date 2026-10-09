@@ -59,6 +59,45 @@ paglets_add_module(dupes
     SCHEMA_HEADER dupes/dupes_msgs.hpp
     SCHEMA_NAMESPACE dupes_msgs
     PATTERNS)
+paglets_add_module(file_courier
+    SOURCES file_courier/file_courier.cpp ../host/src/sha256.cpp
+    SCHEMA_HEADER file_courier/file_courier_msgs.hpp
+    SCHEMA_NAMESPACE file_courier_msgs
+    PATTERNS)
+paglets_add_module(tree_compare
+    SOURCES tree_compare/tree_compare.cpp ../host/src/sha256.cpp
+    SCHEMA_HEADER tree_compare/tree_compare_msgs.hpp
+    SCHEMA_NAMESPACE tree_compare_msgs
+    PATTERNS)
+paglets_add_module(log_scout
+    SOURCES log_scout/log_scout.cpp
+    SCHEMA_HEADER log_scout/log_scout_msgs.hpp
+    SCHEMA_NAMESPACE log_scout_msgs
+    PATTERNS)
+paglets_add_module(describer
+    SOURCES describer/describer.cpp
+    SCHEMA_HEADER describer/describer_msgs.hpp
+    SCHEMA_NAMESPACE describer_msgs
+    SERVICES ai
+    PATTERNS)
+paglets_add_module(watcher
+    SOURCES watcher/watcher.cpp
+    SCHEMA_HEADER watcher/watcher_msgs.hpp
+    SCHEMA_NAMESPACE watcher_msgs
+    SERVICES web
+    PATTERNS)
+paglets_add_module(explainer
+    SOURCES explainer/explainer.cpp
+    SCHEMA_HEADER explainer/explainer_msgs.hpp
+    SCHEMA_NAMESPACE explainer_msgs
+    SERVICES ai
+    PATTERNS)
+paglets_add_module(benchmark
+    SOURCES benchmark/benchmark.cpp
+    SCHEMA_HEADER benchmark/benchmark_msgs.hpp
+    SCHEMA_NAMESPACE benchmark_msgs
+    SERVICES compute_slots storage
+    PATTERNS)
 paglets_add_module(semantic
     SOURCES semantic/semantic.cpp
     SCHEMA_HEADER semantic/semantic_msgs.hpp

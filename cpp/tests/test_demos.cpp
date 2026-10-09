@@ -9,7 +9,11 @@
 #include "test.hpp"
 
 #include <finder_msgs.hpp>
+#include <benchmark_msgs.hpp>
 #include <dupes_msgs.hpp>
+#include <file_courier_msgs.hpp>
+#include <log_scout_msgs.hpp>
+#include <tree_compare_msgs.hpp>
 #include <guard_msgs.hpp>
 #include <inventory_msgs.hpp>
 #include <journey_msgs.hpp>
@@ -18,7 +22,9 @@
 #include <paglets/sha256.hpp>
 #include <paglets/wire/reflect.hpp>
 
+#include <chrono>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <random>
 #include <set>
@@ -322,13 +328,13 @@ PAGLETS_TEST("demo: Hide and Seek finds and pins a paglet that keeps moving") {
         },
         3000));
     REQUIRE(score.catches.size() == 4u);
-    std::set<std::string> where;
-    for (const auto& c : score.catches) {
+    for (std::size_t i = 0; i < score.catches.size(); ++i) {
+        const auto& c = score.catches[i];
         CHECK(c.error.empty());
         CHECK(!c.host_name.empty());
-        where.insert(c.host_name);
+        // It was caught again only after it had moved on.
+        if (i > 0) CHECK(c.moves > score.catches[i - 1].moves);
     }
-    CHECK(where.size() >= 2u);  // it was found on more than one host
     CHECK(score.hider_moves >= 3);
 }
 
@@ -423,4 +429,408 @@ PAGLETS_TEST("demo: Duplicate Finder finds the same content on different hosts")
     CHECK_EQ(g.sha256, paglets::to_hex(paglets::sha256(text(report))));
     std::error_code ec;
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("demo: File Courier carries files between hosts with checksums, within data residency") {
+    namespace fs = std::filesystem;
+    const fs::path data = temp_root("fc-data"), clinic = temp_root("fc-clinic"), inbox = temp_root("fc-inbox");
+    auto write_text = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    auto read_text = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    std::string table;
+    for (int i = 0; i < 400; ++i) table += std::to_string(i) + "," + std::to_string(i * i) + "\n";
+    write_text(data / "results" / "squares.csv", table);
+    write_text(data / "results" / "run-2" / "log.txt", "converged after 12 steps");
+    write_text(data / "notes.md", "not carried");
+    write_text(clinic / "results" / "patients.csv", "confidential");
+    ps::ServicesConfig lab_sc, archive_sc;
+    lab_sc.roots["data"] = data;
+    lab_sc.roots["clinic"] = clinic;
+    archive_sc.roots["inbox"] = inbox;
+    Mesh net;
+    auto& home = net.add_host("home");
+    auto& lab = net.add_host("lab", lab_sc);
+    auto& archive = net.add_host("archive", archive_sc);
+    net.enroll_all();
+    fast(net);
+    net.admin_record("policy-rule", data::policy_rule({"read results", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"data", "clinic"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    net.admin_record("policy-rule", data::policy_rule({"deliver", Decision::allow, "files", {"read", "write", "create"}, {},
+                                                       Scope{std::vector<std::string>{"inbox"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    net.admin_record("root-residency", data::root_residency("clinic", "host-only"));
+    REQUIRE(net.settle([&] { return net.converged() && home.node->landscape().size() == 3u; }));
+    const std::string module = home.f->module("file_courier.wasm");
+
+    // Runs a courier from the home host until it is delivered, refused or
+    // failed; returns its status and the host it ended on.
+    auto run = [&](char tag, const std::string& root) {
+        auto created = home.node->create(module, net.passport(module, paglet_id(tag)));
+        REQUIRE_OK(created);
+        const auto id = *created;
+        file_courier_msgs::Start start;
+        start.from_host = "lab";
+        start.from_root = root;
+        start.pattern = "results/**";
+        start.to_host = "archive";
+        start.to_root = "inbox";
+        start.to_path = "from-lab";
+        auto r = home.f->runtime->call(id, "start", wire::to_msgpack(start), 20s);
+        REQUIRE(r.status == 0);
+        file_courier_msgs::Started started;
+        REQUIRE(wire::from_msgpack(r.payload, started));
+        CHECK(started.accepted);
+        file_courier_msgs::Status st;
+        Mesh::Host* where = nullptr;
+        REQUIRE(net.settle(
+            [&] {
+                Mesh::Host* h = holder(net, id);
+                if (h == nullptr) return false;
+                auto x = h->f->runtime->call(id, "status", {}, 10s);
+                if (x.status != 0 || !wire::from_msgpack(x.payload, st)) return false;
+                where = h;
+                return st.state == "delivered" || st.state == "refused" || st.state == "failed";
+            },
+            3000));
+        return std::pair{st, where};
+    };
+
+    const auto [done, at] = run('c', "data");
+    if (done.state != "delivered") std::cerr << "    file courier: " << done.error << "\n";
+    CHECK_EQ(done.state, std::string("delivered"));
+    CHECK(at == &home);
+    CHECK(done.hosts == std::vector<std::string>({"home", "lab", "archive", "home"}));
+    REQUIRE(done.files.size() == 2u);
+    for (const auto& f : done.files) CHECK(f.verified);
+    CHECK_EQ(done.bytes, static_cast<std::int64_t>(table.size() + 24));
+    CHECK_EQ(read_text(inbox / "from-lab" / "results" / "squares.csv"), table);
+    CHECK_EQ(read_text(inbox / "from-lab" / "results" / "run-2" / "log.txt"), std::string("converged after 12 steps"));
+    CHECK(!fs::exists(inbox / "from-lab" / "notes.md"));
+    for (const auto& f : done.files) {
+        if (f.path == "results/squares.csv") CHECK_EQ(f.sha256, paglets::to_hex(paglets::sha256(text(table))));
+    }
+
+    // Content of a host-only root may not leave the lab: the courier stays
+    // there, and nothing reaches the archive.
+    const auto [refused, stayed] = run('d', "clinic");
+    CHECK_EQ(refused.state, std::string("refused"));
+    CHECK(refused.error.find("data residency") != std::string::npos);
+    CHECK(stayed == &lab);
+    CHECK(!fs::exists(inbox / "from-lab" / "results" / "patients.csv"));
+
+    // A host that is not in the mesh: the courier does not leave.
+    auto created = home.node->create(module, net.passport(module, paglet_id('e')));
+    REQUIRE_OK(created);
+    file_courier_msgs::Start nowhere;
+    nowhere.from_host = "lab";
+    nowhere.from_root = "data";
+    nowhere.to_host = "atlantis";
+    nowhere.to_root = "inbox";
+    auto r = home.f->runtime->call(*created, "start", wire::to_msgpack(nowhere), 20s);
+    REQUIRE(r.status == 0);
+    file_courier_msgs::Started started;
+    REQUIRE(wire::from_msgpack(r.payload, started));
+    CHECK(!started.accepted);
+    CHECK(started.reason.find("atlantis") != std::string::npos);
+    CHECK(home.f->runtime->info(*created).has_value());
+    (void)archive;
+    std::error_code ec;
+    for (const auto& p : {data, clinic, inbox}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("demo: Tree Compare finds missing and different files on several hosts") {
+    namespace fs = std::filesystem;
+    const fs::path ra = temp_root("ta"), rb = temp_root("tb"), rc = temp_root("tc");
+    auto write_text = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary) << text;
+    };
+    write_text(ra / "app.conf", "x=1");
+    write_text(rb / "app.conf", "x=1");
+    write_text(rc / "app.conf", "x=22");  // another size
+    for (const auto& r : {ra, rb, rc}) write_text(r / "shared" / "readme.txt", "the same everywhere");
+    write_text(ra / "data.bin", std::string(100, 'a'));
+    write_text(rb / "data.bin", std::string(100, 'b'));  // same size, other content; none on c
+    write_text(rb / "extra.txt", "only on b");
+    ps::ServicesConfig sa, sb, sc;
+    sa.roots["conf"] = ra;
+    sb.roots["conf"] = rb;
+    sc.roots["conf"] = rc;
+    Mesh net;
+    auto& a = net.add_host("a", sa);
+    net.add_host("b", sb);
+    net.add_host("c", sc);
+    net.enroll_all();
+    fast(net);
+    net.admin_record("policy-rule", data::policy_rule({"read conf", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"conf"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    REQUIRE(net.settle([&] { return net.converged() && a.node->landscape().size() == 3u; }));
+    const std::string module = a.f->module("tree_compare.wasm");
+    auto compare = [&](char tag, tree_compare_msgs::Compare q) {
+        auto created = a.node->create(module, net.passport(module, paglet_id(tag)));
+        REQUIRE_OK(created);
+        const auto id = *created;
+        auto r = a.f->runtime->call(id, "start", wire::to_msgpack(q), 20s);
+        REQUIRE(r.status == 0);
+        tree_compare_msgs::Started started;
+        REQUIRE(wire::from_msgpack(r.payload, started));
+        CHECK(started.accepted);
+        tree_compare_msgs::Report report;
+        REQUIRE(net.settle(
+            [&] {
+                auto x = a.f->runtime->call(id, "report", {}, 10s);
+                return x.status == 0 && wire::from_msgpack(x.payload, report) && report.state == "done";
+            },
+            3000));
+        return report;
+    };
+    auto find = [](const tree_compare_msgs::Report& r, const std::string& path) -> const tree_compare_msgs::Difference* {
+        for (const auto& d : r.differences) {
+            if (d.path == path) return &d;
+        }
+        return nullptr;
+    };
+
+    // Every host, sizes only.
+    tree_compare_msgs::Compare q;
+    q.root = "conf";
+    const auto sizes = compare('a', q);
+    CHECK(sizes.errors.empty());
+    CHECK_EQ(sizes.hosts.size(), 3u);
+    CHECK_EQ(sizes.files, 4);
+    CHECK_EQ(sizes.same, 1);  // shared/readme.txt; data.bin differs only in content
+    REQUIRE(sizes.differences.size() == 3u);
+    const auto* conf = find(sizes, "app.conf");
+    REQUIRE(conf != nullptr);
+    CHECK_EQ(conf->kind, std::string("size"));
+    CHECK_EQ(conf->copies.size(), 3u);
+    const auto* bin = find(sizes, "data.bin");
+    REQUIRE(bin != nullptr);
+    CHECK_EQ(bin->kind, std::string("missing"));
+    CHECK(bin->missing_on == std::vector<std::string>({"c"}));
+    const auto* extra = find(sizes, "extra.txt");
+    REQUIRE(extra != nullptr);
+    CHECK(extra->missing_on == std::vector<std::string>({"a", "c"}));
+
+    // This host and b, by content.
+    q.hosts = {"", "b"};
+    q.hashes = true;
+    const auto content = compare('b', q);
+    CHECK(content.errors.empty());
+    CHECK(content.hosts == std::vector<std::string>({"a", "b"}));
+    CHECK_EQ(content.same, 2);
+    REQUIRE(content.differences.size() == 2u);
+    const auto* bin2 = find(content, "data.bin");
+    REQUIRE(bin2 != nullptr);
+    CHECK_EQ(bin2->kind, std::string("content"));
+    REQUIRE(bin2->copies.size() == 2u);
+    CHECK_EQ(bin2->copies[0].sha256, paglets::to_hex(paglets::sha256(text(std::string(100, 'a')))));
+    std::error_code ec;
+    for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("demo: Log Scout searches logs in a time window and follows them live") {
+    namespace fs = std::filesystem;
+    using namespace std::chrono;
+    const fs::path r1 = temp_root("log1"), r2 = temp_root("log2");
+    auto stamp = [](minutes ago) {
+        return std::format("{:%FT%T}", floor<seconds>(system_clock::now() - ago));
+    };
+    auto write_text = [](const fs::path& p, const std::string& text, bool append = false) {
+        fs::create_directories(p.parent_path());
+        std::ofstream(p, std::ios::binary | (append ? std::ios::app : std::ios::trunc)) << text;
+    };
+    write_text(r1 / "app.log", stamp(120min) + " ERROR old failure\n" + stamp(5min) + " ERROR recent failure\n" +
+                                   stamp(4min) + " WARN disk almost full\n" + stamp(3min) + " INFO all good\n");
+    write_text(r1 / "old.log", "ERROR ancient\n");
+    fs::last_write_time(r1 / "old.log", fs::file_time_type::clock::now() - 3h);
+    write_text(r2 / "app.log", "error: connection refused\nwarning: slow response\nok\n");
+    write_text(r2 / "sub" / "worker.log", stamp(1min) + " Error in worker\n");
+    std::string noise;
+    for (int i = 0; i < 200'000; ++i) noise += "noise line\n";
+    write_text(r2 / "big.log", noise + "ERROR at the end\n");
+    ps::ServicesConfig s1, s2;
+    s1.roots["logs"] = r1;
+    s2.roots["logs"] = r2;
+    Mesh net;
+    auto& home = net.add_host("home");
+    net.add_host("web1", s1);
+    net.add_host("web2", s2);
+    net.enroll_all();
+    fast(net);
+    net.admin_record("policy-rule", data::policy_rule({"read logs", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"logs"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    REQUIRE(net.settle([&] { return net.converged() && home.node->landscape().size() == 3u; }));
+    const std::string module = home.f->module("log_scout.wasm");
+    auto report_of = [&](const rt::PagletId& id) {
+        log_scout_msgs::Report report;
+        auto x = home.f->runtime->call(id, "report", {}, 10s);
+        if (x.status != 0 || !wire::from_msgpack(x.payload, report)) report.state = "unknown";
+        return report;
+    };
+    auto count = [](const log_scout_msgs::Report& r, const std::string& host, const std::string& pattern) {
+        for (const auto& c : r.counts) {
+            if (c.host_name == host && c.pattern == pattern) return c.matches;
+        }
+        return std::int64_t{-1};
+    };
+    auto launch = [&](char tag, const log_scout_msgs::Scout& q) {
+        auto created = home.node->create(module, net.passport(module, paglet_id(tag)));
+        REQUIRE_OK(created);
+        auto r = home.f->runtime->call(*created, "start", wire::to_msgpack(q), 20s);
+        REQUIRE(r.status == 0);
+        log_scout_msgs::Started started;
+        REQUIRE(wire::from_msgpack(r.payload, started));
+        CHECK(started.accepted);
+        return *created;
+    };
+
+    // The last hour on both hosts; only the end of each file is read.
+    log_scout_msgs::Scout q;
+    q.hosts = {"web1", "web2"};
+    q.root = "logs";
+    q.patterns = {"error", "warn"};
+    q.tail_bytes = 64 * 1024;
+    const auto id = launch('a', q);
+    log_scout_msgs::Report report;
+    REQUIRE(net.settle([&] { return (report = report_of(id)).state == "done"; }, 3000));
+    CHECK(report.errors.empty());
+    CHECK_EQ(count(report, "web1", "error"), 1);  // not the old failure, not old.log
+    CHECK_EQ(count(report, "web1", "warn"), 1);
+    CHECK_EQ(count(report, "web2", "error"), 3);  // connection refused, worker, the end of big.log
+    CHECK_EQ(count(report, "web2", "warn"), 1);
+    CHECK(report.bytes_read < 200 * 1024);  // big.log is 2.2 MB
+    bool end_seen = false;
+    for (const auto& e : report.excerpts) end_seen = end_seen || (e.path == "big.log" && e.line == "ERROR at the end");
+    CHECK(end_seen);
+
+    // Live: the scout stays on web1 and reads only what is appended.
+    log_scout_msgs::Scout live;
+    live.hosts = {"web1"};
+    live.root = "logs";
+    live.patterns = {"error"};
+    live.live = true;
+    live.interval_ms = 100;
+    const auto lid = launch('b', live);
+    REQUIRE(net.settle([&] { return (report = report_of(lid)).state == "live"; }, 3000));
+    CHECK_EQ(count(report, "web1", "error"), 1);
+    write_text(r1 / "app.log", stamp(0min) + " ERROR new failure\n", true);
+    const bool got = net.settle([&] { return (report = report_of(lid)).live_matches == 1; }, 3000);
+    if (!got) {
+        std::cerr << "    live: state " << report.state << ", batches " << report.live_batches << ", matches "
+                  << report.live_matches << ", bytes " << report.bytes_read << "\n";
+        for (auto& h : net.hosts) {
+            for (const auto& p : h->f->runtime->list()) {
+                if (!p.module.empty()) std::cerr << "    " << h->name << ": " << rt::to_string(p.state) << "\n";
+            }
+        }
+    }
+    REQUIRE(got);
+    CHECK_EQ(count(report, "web1", "error"), 2);
+    CHECK(report.excerpts.back().line.find("ERROR new failure") != std::string::npos);
+    CHECK_EQ(report.excerpts.back().host_name, std::string("web1"));
+    // A line still being written counts once it is complete.
+    write_text(r1 / "app.log", "ERROR half", true);
+    const auto batches = report.live_batches;
+    REQUIRE(net.settle([&] { return (report = report_of(lid)).live_batches >= batches + 2; }, 3000));
+    CHECK_EQ(report.live_matches, 1);
+    write_text(r1 / "app.log", " written\n", true);
+    REQUIRE(net.settle([&] { return (report = report_of(lid)).live_matches == 2; }, 3000));
+    CHECK_EQ(report.excerpts.back().line, std::string("ERROR half written"));
+
+    // After `stop` the scout ends at its next check.
+    auto stopped = home.f->runtime->call(lid, "stop", {}, 10s);
+    REQUIRE(stopped.status == 0);
+    REQUIRE(net.settle([&] {
+        std::size_t user = 0;
+        for (auto& h : net.hosts) {
+            for (const auto& p : h->f->runtime->list()) user += p.module.empty() ? 0 : 1;
+        }
+        return user == 2;  // the two paglets at home
+    }, 3000));
+    std::error_code ec;
+    for (const auto& p : {r1, r2}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("demo: Mesh Benchmark measures every host in a compute slot and ranks them") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    net.add_host("b");
+    net.add_host("c");
+    net.enroll_all();
+    fast(net);
+    for (auto& h : net.hosts) h->node->set_compute_slots(1);
+    REQUIRE(net.settle([&] { return net.converged() && a.node->landscape().size() == 3u; }));
+    const std::string module = a.f->module("benchmark.wasm");
+    auto created = a.node->create(module, net.passport(module, paglet_id('b')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    benchmark_msgs::Bench q;
+    q.budget_ms = 30;
+    q.memory_mb = 2;
+    q.disk_mb = 2;
+    auto r = a.f->runtime->call(id, "start", wire::to_msgpack(q), 20s);
+    REQUIRE(r.status == 0);
+    benchmark_msgs::Started started;
+    REQUIRE(wire::from_msgpack(r.payload, started));
+    CHECK(started.accepted);
+    CHECK_EQ(started.hosts, 3);
+    benchmark_msgs::Ranking ranking;
+    const bool done = net.settle(
+        [&] {
+            auto x = a.f->runtime->call(id, "ranking", {}, 10s);
+            return x.status == 0 && wire::from_msgpack(x.payload, ranking) && ranking.state == "done";
+        },
+        3000);
+    if (!done) {
+        std::cerr << "    ranking: " << ranking.state << ", " << ranking.hosts.size() << " hosts, "
+                  << ranking.errors.size() << " errors\n";
+        for (const auto& h : ranking.hosts) std::cerr << "    reported: " << h.host_name << " slot " << h.slot << " " << h.error << "\n";
+        for (auto& h : net.hosts) {
+            const auto m = h->node->move_stats();
+            std::cerr << "    " << h->name << ": out " << m.moves_out << ", in " << m.moves_in << ", failed " << m.moves_failed << "\n";
+        }
+        for (auto& h : net.hosts) {
+            for (const auto& p : h->f->runtime->list()) {
+                if (!p.module.empty()) std::cerr << "    " << h->name << ": " << p.id.substr(0, 8) << " " << rt::to_string(p.state) << "\n";
+            }
+        }
+    }
+    REQUIRE(done);
+    for (const auto& e : ranking.errors) std::cerr << "    benchmark: " << e << "\n";
+    CHECK(ranking.errors.empty());
+    REQUIRE(ranking.hosts.size() == 3u);
+    std::set<std::string> names;
+    for (std::size_t i = 0; i < ranking.hosts.size(); ++i) {
+        const auto& h = ranking.hosts[i];
+        if (!h.error.empty()) std::cerr << "    benchmark " << h.host_name << ": " << h.error << "\n";
+        CHECK(h.error.empty());
+        names.insert(h.host_name);
+        CHECK(h.slot);  // in a compute slot of its own
+        CHECK(h.int_mops > 0);
+        CHECK(h.float_mflops > 0);
+        CHECK(h.memory_mbs > 0);
+        CHECK(h.disk_write_mbs > 0);
+        CHECK(h.disk_read_mbs > 0);
+        CHECK(h.bench_ms >= 3 * q.budget_ms);
+        CHECK(!h.os.empty());
+        if (i > 0) CHECK(h.int_mops <= ranking.hosts[i - 1].int_mops);
+    }
+    CHECK(names == std::set<std::string>({"a", "b", "c"}));
+    // The clones end after their report; their slots are free again.
+    REQUIRE(net.settle([&] {
+        std::size_t user = 0;
+        for (auto& h : net.hosts) {
+            for (const auto& p : h->f->runtime->list()) user += p.module.empty() ? 0 : 1;
+        }
+        return user == 1;
+    }, 3000));
 }

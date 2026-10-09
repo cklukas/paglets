@@ -15,8 +15,11 @@
 #include "test.hpp"
 
 #include <courier_msgs.hpp>
+#include <describer_msgs.hpp>
 #include <digest_msgs.hpp>
+#include <explainer_msgs.hpp>
 #include <researcher_msgs.hpp>
+#include <watcher_msgs.hpp>
 #include <semantic_msgs.hpp>
 #include <paglets/gateway/gateway.hpp>
 #include <paglets/services/ai.hpp>
@@ -24,8 +27,11 @@
 #include <paglets/sha256.hpp>
 #include <paglets/wire/reflect.hpp>
 
+#include <chrono>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <mutex>
 #include <random>
 #include <thread>
 
@@ -43,8 +49,25 @@ struct Site {
     std::thread thread;
     int port = 0;
     std::string report = "quarterly numbers: 42\n";
+    std::string tool = std::string(3000, 't');
+    std::mutex feed_mutex;
+    std::string feed;  // a release feed (Atom)
+
+    void release(const std::string& version) {
+        std::lock_guard lock(feed_mutex);
+        feed = "<?xml version=\"1.0\"?><feed><title>tool releases</title><updated>2026-10-09T12:00:00Z</updated>"
+               "<entry><title>" + version + "</title><link href=\"/files/tool-" + version + ".tar.gz\"/></entry>"
+               "<entry><title>v1.0.0</title></entry></feed>";
+    }
 
     Site() {
+        server.Get("/files/releases.atom", [this](const httplib::Request&, httplib::Response& r) {
+            std::lock_guard lock(feed_mutex);
+            r.set_content(feed, "application/atom+xml");
+        });
+        server.Get("/files/tool-1.5.0.tar.gz", [this](const httplib::Request&, httplib::Response& r) {
+            r.set_content(tool, "application/gzip");
+        });
         server.Get("/files/report.txt", [this](const httplib::Request&, httplib::Response& r) {
             r.set_content(report, "text/plain");
         });
@@ -664,4 +687,303 @@ PAGLETS_TEST("gateway: Web Researcher searches and reads on the web host, summar
     CHECK_EQ(report.sources[0].title, std::string("The report"));
     CHECK_EQ(report.sources[0].summary, std::string("quarterly numbers: 42"));  // three words: all of it
     CHECK_EQ(report.sources[1].summary, std::string("Hello First bold ..."));
+}
+
+PAGLETS_TEST("gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue") {
+    namespace fs = std::filesystem;
+    const fs::path pics = temp_root("pics"), priv = temp_root("private"), out = temp_root("catalogue");
+    write_file(pics / "a.png", std::string(1000, 'p'));
+    write_file(pics / "trip" / "b.JPG", std::string(2000, 'j'));
+    write_file(pics / "huge.png", std::string(5000, 'h'));
+    write_file(pics / "notes.txt", "not an image");
+    write_file(priv / "face.jpg", std::string(300, 'f'));
+    ps::ServicesConfig photos_sc, archive_sc;
+    photos_sc.roots["pics"] = pics;
+    photos_sc.roots["private"] = priv;
+    archive_sc.roots["out"] = out;
+
+    Mesh net;
+    auto& home = net.add_host("home");
+    auto& photos = net.add_host("photos", photos_sc);
+    auto& mac = net.add_host("mac");
+    auto& archive = net.add_host("archive", archive_sc);
+    net.enroll_all();
+    for (auto& h : net.hosts) {
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 2000ms, .redirect_after = 0ms});
+    }
+    // Only the mac host offers `ai` (the test backend has a vision model).
+    gw::GatewayConfig config;
+    config.ai.enabled = true;
+    config.ai.backend = "test";
+    config.offers = [&](const std::string& service, std::optional<paglets::services::mesh_info::Offer> o) {
+        if (o) {
+            mac.node->set_offer(std::move(*o));
+        } else {
+            mac.node->withdraw_offer(service);
+        }
+    };
+    config.authorize = [&](const abi::SenderRecord& caller, std::string_view service, std::string_view op,
+                           std::string_view root, std::string_view path) {
+        return mac.node->allows(caller, Item{std::string(service), {std::string(op)}, std::string(root), std::string(path)});
+    };
+    REQUIRE_OK(gw::install_gateway(*mac.f->runtime, mac.services, config));
+    net.admin_record("policy-rule", data::policy_rule({"read images", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"pics", "private"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    net.admin_record("policy-rule", data::policy_rule({"write catalogues", Decision::allow, "files", {"write", "create"}, {},
+                                                       Scope{std::vector<std::string>{"out"}, std::nullopt}, std::nullopt, 0}));
+    net.admin_record("policy-rule", data::policy_rule({"describe", Decision::allow, "ai", {"describe_image"}, {},
+                                                       std::nullopt, std::nullopt, 0}));
+    net.admin_record("root-residency", data::root_residency("private", "host-only"));
+    REQUIRE(net.settle([&] {
+        return net.converged() &&
+               home.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "ai"}).size() == 1u;
+    }));
+
+    const std::string module = home.f->module("describer.wasm");
+    auto run = [&](char tag, std::vector<describer_msgs::Source> sources) {
+        auto created = home.node->create(module, net.passport(module, paglet_id(tag)));
+        REQUIRE_OK(created);
+        const auto id = *created;
+        describer_msgs::Start start;
+        start.sources = std::move(sources);
+        start.output = {"archive", "out", "images.json"};
+        start.max_image_bytes = 4096;
+        auto started = home.f->runtime->call(id, "start", wire::to_msgpack(start), 20s);
+        REQUIRE(started.status == 0);
+        describer_msgs::Status st;
+        Mesh::Host* where = nullptr;
+        REQUIRE(net.settle(
+            [&] {
+                for (auto& h : net.hosts) {
+                    if (!h->f->runtime->info(id)) continue;
+                    auto r = h->f->runtime->call(id, "status", {}, 10s);
+                    if (r.status != 0 || !wire::from_msgpack(r.payload, st)) return false;
+                    where = h.get();
+                    return st.state == "written" || st.state == "refused" || st.state == "failed";
+                }
+                return false;
+            },
+            2000));
+        return std::pair{st, where};
+    };
+
+    const auto [written, at] = run('a', {{"photos", "pics", "**"}});
+    if (written.state != "written") std::cerr << "    describer: " << written.error << "\n";
+    CHECK_EQ(written.state, std::string("written"));
+    CHECK(at == &archive);
+    CHECK(written.hosts == std::vector<std::string>({"home", "photos", "mac", "archive"}));
+    CHECK_EQ(written.ai_host, std::string("mac"));
+    REQUIRE(written.images.size() == 2u);
+    CHECK_EQ(written.images[0].path, std::string("pics/a.png"));
+    CHECK_EQ(written.images[0].caption, std::string("an image of 1000 bytes"));
+    CHECK(written.images[0].tags == std::vector<std::string>({"an image of 1000 bytes"}));
+    CHECK_EQ(written.images[1].path, std::string("pics/trip/b.JPG"));
+    REQUIRE(written.skipped.size() == 1u);
+    CHECK(written.skipped[0].find("huge.png (too large)") != std::string::npos);
+    const std::string catalogue = read_file(out / "images.json");
+    CHECK(catalogue.find(R"({"host": "photos", "path": "pics/a.png", "size": 1000, "caption": "an image of 1000 bytes")") !=
+          std::string::npos);
+    CHECK(catalogue.find(R"("model": "test")") != std::string::npos);
+
+    // Images of a host-only root may not go to the AI host.
+    const auto [refused, stayed] = run('b', {{"photos", "private", "**"}});
+    CHECK_EQ(refused.state, std::string("refused"));
+    CHECK(refused.error.find("data residency") != std::string::npos);
+    CHECK(stayed == &photos);
+    std::error_code ec;
+    for (const auto& p : {pics, priv, out}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("gateway: Release Watcher stays on the web host, tells its owner about new versions, sends a courier") {
+    Site site;
+    site.release("v1.4.2");
+    Mesh net;
+    auto& home = net.add_host("home");
+    auto& gateway = net.add_host("gateway");
+    net.add_host("plain");
+    net.enroll_all();
+    for (auto& h : net.hosts) {
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 2000ms, .redirect_after = 0ms});
+    }
+    auto config = web_config(site);
+    config.offers = [&](const std::string&, std::optional<paglets::services::mesh_info::Offer> o) {
+        if (o) gateway.node->set_offer(std::move(*o));
+    };
+    config.authorize = [&](const abi::SenderRecord& caller, std::string_view service, std::string_view op,
+                           std::string_view root, std::string_view path) {
+        return gateway.node->allows(caller, Item{std::string(service), {std::string(op)}, std::string(root), std::string(path)});
+    };
+    REQUIRE_OK(gw::install_gateway(*gateway.f->runtime, gateway.services, config));
+    net.admin_record("policy-rule", data::policy_rule({"release pages", Decision::allow, "web", {"fetch", "download"}, {},
+                                                       std::nullopt, std::nullopt, 0}));
+    REQUIRE(net.settle([&] {
+        return net.converged() &&
+               home.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "web", .op = "fetch"}).size() == 1u;
+    }));
+
+    const std::string module = home.f->module("watcher.wasm");
+    const std::string courier = gateway.f->module("courier.wasm");  // on the web host, for `fetch`
+    auto created = home.node->create(module, net.passport(module, paglet_id('f')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    watcher_msgs::Watch w;
+    w.pages = {{"tool", site.url("/files/releases.atom"), site.url("/files/tool-{version}.tar.gz")}};
+    w.interval_ms = 100;
+    w.courier_module = courier;
+    auto started = home.f->runtime->call(id, "start", wire::to_msgpack(w), 20s);
+    REQUIRE(started.status == 0);
+    watcher_msgs::Started s;
+    REQUIRE(wire::from_msgpack(started.payload, s));
+    CHECK(s.accepted);
+
+    watcher_msgs::Status st;
+    auto status = [&] {
+        auto r = gateway.f->runtime->call(id, "status", {}, 10s);
+        return r.status == 0 && wire::from_msgpack(r.payload, st);
+    };
+    REQUIRE(net.settle([&] { return gateway.f->runtime->info(id).has_value() && status() && st.checks >= 1; }, 2000));
+    CHECK_EQ(st.state, std::string("watching"));
+    CHECK_EQ(st.host, std::string("gateway"));
+    REQUIRE(st.seen.size() == 1u);
+    CHECK_EQ(st.seen[0].version, std::string("v1.4.2"));
+    CHECK(st.updates.empty());
+
+    // A new release: the owner hears about it.
+    site.release("v1.5.0");
+    REQUIRE(net.settle([&] { return status() && !st.updates.empty(); }, 2000));
+    CHECK_EQ(st.updates[0].from, std::string("v1.4.2"));
+    CHECK_EQ(st.updates[0].to, std::string("v1.5.0"));
+    CHECK(st.sleeps >= 1);  // inactive between checks
+    const auto notes = gateway.services->notifications(net.owner.id());
+    CHECK(std::ranges::any_of(notes, [](const auto& n) { return n.title == "tool v1.5.0 is out"; }));
+
+    // A courier for the release file, delivered to the host the watcher started on.
+    auto fetched = gateway.f->runtime->call(id, "fetch", wire::to_msgpack(watcher_msgs::Fetch{"tool"}), 20s);
+    REQUIRE(fetched.status == 0);
+    watcher_msgs::Fetching f;
+    REQUIRE(wire::from_msgpack(fetched.payload, f));
+    if (!f.accepted) std::cerr << "    fetch: " << f.reason << "\n";
+    CHECK(f.accepted);
+    CHECK_EQ(f.url, site.url("/files/tool-1.5.0.tar.gz"));
+    courier_msgs::Status delivered;
+    REQUIRE(net.settle(
+        [&] {
+            for (const auto& p : home.f->runtime->list()) {
+                if (p.module != courier) continue;
+                auto r = home.f->runtime->call(p.id, "status", {}, 10s);
+                if (r.status == 0 && wire::from_msgpack(r.payload, delivered) && delivered.state == "delivered") return true;
+            }
+            return false;
+        },
+        2000));
+    CHECK_EQ(delivered.artifact, paglets::to_hex(paglets::sha256(text(site.tool))));
+    CHECK(delivered.hosts == std::vector<std::string>({"gateway", "home"}));
+
+    auto stopped = gateway.f->runtime->call(id, "stop", {}, 10s);
+    REQUIRE(stopped.status == 0);
+}
+
+PAGLETS_TEST("gateway: Log Explainer groups what a Log Scout found and explains it on the AI host") {
+    namespace fs = std::filesystem;
+    using namespace std::chrono;
+    const fs::path l1 = temp_root("explain1"), l2 = temp_root("explain2");
+    auto at = [](minutes ago) { return std::format("{:%FT%T}", floor<seconds>(system_clock::now() - ago)); };
+    write_file(l1 / "app.log", at(9min) + " ERROR disk full on /data (42 MB left)\n" + at(8min) +
+                                   " ERROR disk full on /data (17 MB left)\n" + at(7min) +
+                                   " ERROR disk full on /data (3 MB left)\n" + at(6min) +
+                                   " ERROR network: connection to 10.0.0.5:5432 refused\n" + at(5min) + " INFO fine\n");
+    write_file(l2 / "app.log", at(4min) + " ERROR disk full on /data (7 MB left)\n" + at(3min) +
+                                   " ERROR network: connection to 10.0.0.9:5432 refused\n" + at(2min) +
+                                   " ERROR permission denied for user \"bob\"\n");
+    ps::ServicesConfig s1, s2;
+    s1.roots["logs"] = l1;
+    s2.roots["logs"] = l2;
+    Mesh net;
+    auto& home = net.add_host("home");
+    net.add_host("web1", s1);
+    net.add_host("web2", s2);
+    auto& mac = net.add_host("mac");
+    net.enroll_all();
+    for (auto& h : net.hosts) {
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 2000ms, .redirect_after = 0ms});
+    }
+    gw::GatewayConfig config;
+    config.ai.enabled = true;
+    config.ai.backend = "test";
+    config.offers = [&](const std::string& service, std::optional<paglets::services::mesh_info::Offer> o) {
+        if (o) {
+            mac.node->set_offer(std::move(*o));
+        } else {
+            mac.node->withdraw_offer(service);
+        }
+    };
+    config.authorize = [&](const abi::SenderRecord& caller, std::string_view service, std::string_view op,
+                           std::string_view root, std::string_view path) {
+        return mac.node->allows(caller, Item{std::string(service), {std::string(op)}, std::string(root), std::string(path)});
+    };
+    REQUIRE_OK(gw::install_gateway(*mac.f->runtime, mac.services, config));
+    net.admin_record("policy-rule", data::policy_rule({"read logs", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"logs"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    net.admin_record("policy-rule", data::policy_rule({"explain", Decision::allow, "ai", {"classify", "generate"}, {},
+                                                       std::nullopt, std::nullopt, 0}));
+    REQUIRE(net.settle([&] {
+        return net.converged() && home.node->landscape().size() == 4u &&
+               home.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "ai"}).size() == 1u;
+    }));
+
+    const std::string module = home.f->module("explainer.wasm");
+    const std::string scout = home.f->module("log_scout.wasm");
+    auto created = home.node->create(module, net.passport(module, paglet_id('e')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    explainer_msgs::Explain q;
+    q.hosts = {"web1", "web2"};
+    q.root = "logs";
+    q.scout_module = scout;
+    auto started = home.f->runtime->call(id, "start", wire::to_msgpack(q), 20s);
+    REQUIRE(started.status == 0);
+    explainer_msgs::Started s;
+    REQUIRE(wire::from_msgpack(started.payload, s));
+    if (!s.accepted) std::cerr << "    explainer: " << s.reason << "\n";
+    CHECK(s.accepted);
+    bool away = false;
+    explainer_msgs::Status st;
+    REQUIRE(net.settle(
+        [&] {
+            away = away || mac.f->runtime->info(id).has_value();
+            if (!away || !home.f->runtime->info(id)) return false;
+            auto r = home.f->runtime->call(id, "status", {}, 10s);
+            return r.status == 0 && wire::from_msgpack(r.payload, st) && (st.state == "explained" || st.state == "failed");
+        },
+        3000));
+    if (st.state != "explained") std::cerr << "    explainer: " << st.error << "\n";
+    CHECK_EQ(st.state, std::string("explained"));
+    CHECK(st.hosts == std::vector<std::string>({"home", "mac", "home"}));
+    CHECK_EQ(st.ai_host, std::string("mac"));
+    CHECK_EQ(st.lines, 7);
+    REQUIRE(st.groups.size() == 3u);
+    CHECK_EQ(st.groups[0].count, 4);
+    CHECK_EQ(st.groups[0].shape, std::string("error disk full on /data (# mb left)"));
+    CHECK_EQ(st.groups[0].label, std::string("disk"));
+    CHECK(st.groups[0].hosts == std::vector<std::string>({"web1", "web2"}));
+    CHECK(st.groups[0].explanation.starts_with("[You explain log messages"));
+    CHECK_EQ(st.groups[1].count, 2);
+    CHECK_EQ(st.groups[1].label, std::string("network"));
+    CHECK_EQ(st.groups[1].shape, std::string("error network: connection to # refused"));
+    CHECK_EQ(st.groups[2].label, std::string("permission"));
+    CHECK_EQ(st.groups[2].shape, std::string("error permission denied for user #"));
+    const auto notes = home.services->notifications(net.owner.id());
+    CHECK(std::ranges::any_of(notes, [](const auto& n) { return n.title == "3 distinct problem(s) in 7 log line(s)"; }));
+    // The scout and its clones are gone; the explainer is home.
+    REQUIRE(net.settle([&] {
+        std::size_t user = 0;
+        for (auto& h : net.hosts) {
+            for (const auto& p : h->f->runtime->list()) user += p.module.empty() ? 0 : 1;
+        }
+        return user == 1;
+    }, 3000));
+    std::error_code ec;
+    for (const auto& p : {l1, l2}) fs::remove_all(p, ec);
 }
