@@ -10,11 +10,9 @@
 
 #include "courier.schema.gen.hpp"
 
-#include <paglets/paglet.hpp>
+#include <paglets/patterns/notify.hpp>
+#include <paglets/patterns/services.hpp>
 #include <paglets/services/artifacts.gen.hpp>
-#include <paglets/services/directory.gen.hpp>
-#include <paglets/services/mesh_info.gen.hpp>
-#include <paglets/services/user_info.gen.hpp>
 #include <paglets/services/web.gen.hpp>
 
 #include <functional>
@@ -30,39 +28,13 @@ namespace abi = paglets::abi;
 using paglets::Capability;
 using paglets::Endpoint;
 using paglets::Message;
+using paglets::patterns::endpoint;
+using paglets::patterns::error_text;
+using paglets::patterns::lending;
+using paglets::patterns::lookup;
 
 constexpr std::size_t max_carry = 16u * 1024 * 1024;  // what the courier carries in its memory
 constexpr std::uint64_t chunk = 1024 * 1024;
-
-// An endpoint to a system paglet the host does not give every paglet.
-void lookup(std::string name, std::function<void(paglets::Result<Endpoint>)> next) {
-    auto dir = paglets::service("directory");
-    if (!dir) return next(std::unexpected(dir.error()));
-    svc::directory::Client client{*dir};
-    auto sent = client.lookup(svc::directory::LookupRequest{std::move(name)},
-                              [next](paglets::Result<svc::directory::LookupReply> r, Message& m) {
-                                  if (!r) return next(std::unexpected(r.error()));
-                                  if (m.cap_count() == 0) return next(std::unexpected(abi::internal));
-                                  next(Endpoint(m.take_cap(0)));
-                              });
-    if (!sent) next(std::unexpected(sent.error()));
-}
-
-paglets::RequestOptions lending(const Capability& cap) {
-    paglets::RequestOptions o;
-    o.lend.push_back(cap);
-    return o;
-}
-
-// A default endpoint of the host, else one from the directory.
-void endpoint(std::string name, std::function<void(paglets::Result<Endpoint>)> next) {
-    if (auto ep = paglets::service(name)) return next(*ep);
-    lookup(std::move(name), std::move(next));
-}
-
-std::string error_text(std::string_view what, std::int32_t code) {
-    return std::string(what) + ": " + std::string(abi::error_name(code));
-}
 
 class Courier : public paglets::Paglet {
 public:
@@ -224,14 +196,8 @@ private:
         if (!sent) fail(error_text("store", sent.error()));
     }
 
-    void notify(svc::user_info::Level level, std::string title, std::string text) {
-        if (title.size() > 200) title.resize(200);
-        endpoint("user-info", [level, title = std::move(title), text = std::move(text)](paglets::Result<Endpoint> ui) {
-            if (!ui) return;
-            svc::user_info::Client client{*ui};
-            (void)client.notify(svc::user_info::NotifyRequest{title, text, level},
-                                [](paglets::Result<svc::user_info::NotifyReply>, Message&) {});
-        });
+    static void notify(svc::user_info::Level level, std::string title, std::string text) {
+        paglets::patterns::notify(level, std::move(title), std::move(text));
     }
 
     void fail(std::string why) {

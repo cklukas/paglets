@@ -116,7 +116,7 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
         if (k == "next_timer") return msgpack::read_value(r, p.next_timer);
         if (k == "caps") {
             std::uint32_t n = 0;
-            if (!r.read_array_header(n)) return false;
+            if (!r.read_array_header(n) || n > r.remaining()) return false;
             for (std::uint32_t i = 0; i < n; ++i) {
                 std::uint32_t pair = 0;
                 std::int32_t h = 0;
@@ -133,7 +133,7 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
         if (k == "marks") return msgpack::read_value(r, p.marks);
         if (k == "services") {
             std::uint32_t n = 0;
-            if (!r.read_array_header(n)) return false;
+            if (!r.read_array_header(n) || n > r.remaining()) return false;
             for (std::uint32_t i = 0; i < n; ++i) {
                 std::uint32_t pair = 0;
                 std::string name;
@@ -308,7 +308,7 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         if (k == "marks") return msgpack::read_value(r, s.marks);
         auto pairs = [&](auto&& one) {
             std::uint32_t n = 0;
-            if (!r.read_array_header(n)) return false;
+            if (!r.read_array_header(n) || n > r.remaining()) return false;
             for (std::uint32_t i = 0; i < n; ++i) {
                 std::uint32_t pair = 0;
                 if (!r.read_array_header(pair) || pair != 2 || !one()) return false;
@@ -360,10 +360,10 @@ Bytes encode_caps(const std::vector<Cap>& caps) {
 std::expected<std::vector<Cap>, std::string> decode_caps(std::span<const std::uint8_t> bytes) {
     msgpack::Reader r(bytes);
     std::uint32_t n = 0;
-    if (!r.read_array_header(n)) return std::unexpected(std::string("malformed capabilities"));
-    std::vector<Cap> out(n);
-    for (auto& c : out) {
-        if (!decode_cap(r, c)) return std::unexpected(std::string("malformed capabilities"));
+    if (!r.read_array_header(n) || n > r.remaining()) return std::unexpected(std::string("malformed capabilities"));
+    std::vector<Cap> out;
+    for (std::uint32_t i = 0; i < n; ++i) {
+        if (!decode_cap(r, out.emplace_back())) return std::unexpected(std::string("malformed capabilities"));
     }
     if (!r.at_end()) return std::unexpected(std::string("malformed capabilities"));
     return out;
@@ -419,10 +419,10 @@ std::expected<RemoteMessage, std::string> decode_remote(std::span<const std::uin
         if (k == "badge") return msgpack::read_value(r, m.badge);
         if (k == "caps") {
             std::uint32_t n = 0;
-            if (!r.read_array_header(n)) return false;
-            m.caps.resize(n);
-            for (auto& c : m.caps) {
-                if (!decode_cap(r, c)) return false;
+            if (!r.read_array_header(n) || n > r.remaining()) return false;
+            m.caps.clear();
+            for (std::uint32_t i = 0; i < n; ++i) {
+                if (!decode_cap(r, m.caps.emplace_back())) return false;
             }
             return true;
         }

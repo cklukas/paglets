@@ -45,7 +45,11 @@ paglets find them with `mesh-info` and move with tickets such as
 Download Courier and AI Document Digest demos
 ([design](../planning/cpp-web-ai.md)), and data residency: paglets that
 read a restricted root carry its mark and move only where its content may
-go ([design](../planning/cpp-residency.md)).
+go ([design](../planning/cpp-residency.md)). WP18 adds the patterns library
+of the guest SDK ([design](../planning/cpp-patterns.md)); WP21 fuzzes every
+decoder of data from outside (ledger records, frames between hosts, memory
+images, modules, the Noise handshake, contracts) in CI
+([design](../planning/cpp-hardening.md)).
 
 ## Layout
 
@@ -148,6 +152,20 @@ clones and lifecycle operations (see `examples/ping_pong` and the
 asynchronous (`SendOptions::async`, `Message::reply_async`): they return at
 once, and a message that cannot be delivered reaches
 `Paglet::on_undelivered`.
+
+The patterns library ([design](../planning/cpp-patterns.md);
+`#include <paglets/patterns.hpp>`, `paglets_add_module(... PATTERNS)`)
+covers the common shapes: a task paglet with `start`, `status` and `wait`,
+typed operations, mesh fan-out of clones, locate and pin, notifications to
+the owner, and carrying a file between hosts:
+
+```cpp
+#include <paglets/patterns.hpp>
+
+struct Count : paglets::patterns::Task<CountRequest, CountResult> {
+    void run(const CountRequest& q) override { complete(CountResult{q.n * (q.n + 1) / 2}); }
+};
+```
 
 ## Tools
 

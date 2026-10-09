@@ -12,12 +12,9 @@
 
 #include "digest.schema.gen.hpp"
 
-#include <paglets/paglet.hpp>
+#include <paglets/patterns/files.hpp>
+#include <paglets/patterns/services.hpp>
 #include <paglets/services/ai.gen.hpp>
-#include <paglets/services/directory.gen.hpp>
-#include <paglets/services/files.gen.hpp>
-#include <paglets/services/grants.gen.hpp>
-#include <paglets/services/mesh_info.gen.hpp>
 
 #include <functional>
 #include <memory>
@@ -32,36 +29,12 @@ namespace abi = paglets::abi;
 using paglets::Capability;
 using paglets::Endpoint;
 using paglets::Message;
+using paglets::patterns::endpoint;
+using paglets::patterns::error_text;
+using paglets::patterns::lending;
+using paglets::patterns::lookup;
 
 constexpr std::uint64_t max_document = 64 * 1024;
-
-void lookup(std::string name, std::function<void(paglets::Result<Endpoint>)> next) {
-    auto dir = paglets::service("directory");
-    if (!dir) return next(std::unexpected(dir.error()));
-    svc::directory::Client client{*dir};
-    auto sent = client.lookup(svc::directory::LookupRequest{std::move(name)},
-                              [next](paglets::Result<svc::directory::LookupReply> r, Message& m) {
-                                  if (!r) return next(std::unexpected(r.error()));
-                                  if (m.cap_count() == 0) return next(std::unexpected(abi::internal));
-                                  next(Endpoint(m.take_cap(0)));
-                              });
-    if (!sent) next(std::unexpected(sent.error()));
-}
-
-void endpoint(std::string name, std::function<void(paglets::Result<Endpoint>)> next) {
-    if (auto ep = paglets::service(name)) return next(*ep);
-    lookup(std::move(name), std::move(next));
-}
-
-paglets::RequestOptions lending(const Capability& cap) {
-    paglets::RequestOptions o;
-    o.lend.push_back(cap);
-    return o;
-}
-
-std::string error_text(std::string_view what, std::int32_t code) {
-    return std::string(what) + ": " + std::string(abi::error_name(code));
-}
 
 class Digest : public paglets::Paglet {
 public:
@@ -141,23 +114,14 @@ private:
         go(s.host);
     }
 
-    // A directory of the source's root, granted by the mesh policy.
-    void with_dir(const std::string& root, const std::vector<std::string>& rights,
-                  std::function<void(paglets::Result<std::shared_ptr<Capability>>)> next) {
-        endpoint("grants", [root, rights, next](paglets::Result<Endpoint> grants) {
-            if (!grants) return next(std::unexpected(grants.error()));
-            svc::grants::Client client{*grants};
-            svc::grants::Request q;
-            q.item = svc::grants::Item{"files", rights, root, ""};
-            q.reason = "document digest";
-            auto sent = client.request(q, [next](paglets::Result<svc::grants::Answer> a, Message& m) {
-                if (!a) return next(std::unexpected(a.error()));
-                if (a->status != svc::grants::Status::granted || m.cap_count() == 0)
-                    return next(std::unexpected(abi::denied));
-                next(std::make_shared<Capability>(m.take_cap(0)));
-            });
-            if (!sent) next(std::unexpected(sent.error()));
-        });
+    // A directory of a root, granted by the mesh policy.
+    static void with_dir(const std::string& root, const std::vector<std::string>& rights,
+                         std::function<void(paglets::Result<std::shared_ptr<Capability>>)> next) {
+        paglets::patterns::granted_dir(root, "", rights, "document digest",
+                                       [next](paglets::Result<Capability> dir) {
+                                           if (!dir) return next(std::unexpected(dir.error()));
+                                           next(std::make_shared<Capability>(*dir));
+                                       });
     }
 
     void collect() {

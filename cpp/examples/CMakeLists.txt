@@ -16,9 +16,11 @@ paglets_add_module(courier
     SOURCES courier/courier.cpp
     SCHEMA_HEADER courier/courier_msgs.hpp
     SCHEMA_NAMESPACE courier_msgs
-    SERVICES artifacts directory mesh_info user_info web)
+    SERVICES artifacts web
+    PATTERNS)
 paglets_add_module(digest
     SOURCES digest/digest.cpp
     SCHEMA_HEADER digest/digest_msgs.hpp
     SCHEMA_NAMESPACE digest_msgs
-    SERVICES ai directory files grants mesh_info)
+    SERVICES ai
+    PATTERNS)

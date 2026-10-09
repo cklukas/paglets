@@ -167,10 +167,12 @@ bool decode(msgpack::Reader& r, T& value) {
         if (!r.read_array_header(n)) {
             return false;
         }
+        // Every item takes at least a byte (see msgpack::read_value).
+        if (n > r.remaining()) return false;
         value.clear();
-        value.resize(n);
-        for (auto& item : value) {
-            if (!decode(r, item)) {
+        value.reserve(std::min<std::uint32_t>(n, 64));
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (!decode(r, value.emplace_back())) {
                 return false;
             }
         }

@@ -10,14 +10,15 @@
 # paglets_add_module(<name>
 #     SOURCES <files...>
 #     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>]
-#     [SERVICES <service>...])
+#     [SERVICES <service>...] [PATTERNS])
 #
 # Builds a paglet module in C++ with the guest SDK (paglet ABI v1). Produces
 # ${PAGLETS_GUEST_OUTPUT_DIR}/<name>.wasm and, with a schema, the generated
 # <name>.schema.gen.hpp and <name>.schema.json. SERVICES names standard
 # system services (files, server_info, directory, storage, artifacts, pubsub,
 # user_info); the module can then include <paglets/services/<service>.gen.hpp>
-# with their codecs and typed clients.
+# with their codecs and typed clients. PATTERNS adds the services the
+# patterns library needs (<paglets/patterns.hpp>, planning/cpp-patterns.md).
 #
 # paglets_add_guest(<name> SOURCES <files...> [LANGUAGE C|CXX] [NO_SDK] ...)
 #
@@ -116,7 +117,11 @@ function(paglets_add_guest name)
     if(NOT PAGLETS_GUESTS_AVAILABLE)
         return()
     endif()
-    cmake_parse_arguments(G "NO_SDK" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE" "SOURCES;SERVICES" ${ARGN})
+    cmake_parse_arguments(G "NO_SDK;PATTERNS" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE" "SOURCES;SERVICES" ${ARGN})
+    if(G_PATTERNS)
+        list(APPEND G_SERVICES directory files grants locator mesh_info user_info)
+        list(REMOVE_DUPLICATES G_SERVICES)
+    endif()
     if(NOT G_LANGUAGE)
         set(G_LANGUAGE CXX)
     endif()
@@ -137,8 +142,10 @@ function(paglets_add_guest name)
         if(NOT G_NO_SDK)
             list(APPEND sources "${PROJECT_SOURCE_DIR}/sdk/src/paglet.cpp")
             list(APPEND include_flags "-I${PROJECT_SOURCE_DIR}/sdk/include")
+            file(GLOB pattern_headers "${PROJECT_SOURCE_DIR}/sdk/include/paglets/patterns/*.hpp")
             list(APPEND depends "${PROJECT_SOURCE_DIR}/sdk/src/paglet.cpp"
                  "${PROJECT_SOURCE_DIR}/sdk/include/paglets/paglet.hpp"
+                 "${PROJECT_SOURCE_DIR}/sdk/include/paglets/patterns.hpp" ${pattern_headers}
                  "${PROJECT_SOURCE_DIR}/common/include/paglets/abi.hpp")
         endif()
     else()

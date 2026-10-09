@@ -47,6 +47,7 @@ public:
         return true;
     }
     bool at_end() const { return pos_ == in_.size(); }
+    std::size_t remaining() const { return in_.size() - pos_; }
 
 private:
     std::span<const std::uint8_t> in_;
@@ -155,6 +156,11 @@ std::expected<Snapshot, std::string> deserialize(std::span<const std::uint8_t> b
     if (!r.raw(snap.module_hash.data(), snap.module_hash.size()) || !r.le(snap.page_count) || !r.le(global_count)) {
         return std::unexpected("truncated image header");
     }
+    // Counts are checked against what is left before anything is allocated:
+    // a page entry takes a byte, a global at least 11 (wasm32: 65536 pages).
+    if (snap.page_count > 65536 || snap.page_count > r.remaining() || global_count > r.remaining() / 11) {
+        return std::unexpected("image counts exceed its size");
+    }
     for (std::uint32_t i = 0; i < global_count; ++i) {
         GlobalValue g;
         std::uint16_t len = 0;
@@ -174,6 +180,7 @@ std::expected<Snapshot, std::string> deserialize(std::span<const std::uint8_t> b
             ++data_pages;
         }
     }
+    if (data_pages * page_size != r.remaining()) return std::unexpected("image data size mismatch");
     snap.data.resize(data_pages * page_size);
     if (!r.raw(snap.data.data(), snap.data.size()) || !r.at_end()) {
         return std::unexpected("image data size mismatch");

@@ -462,9 +462,10 @@ PAGLETS_TEST(
         REQUIRE(at != nullptr);
         CHECK(key_id(at->key) == host);
         CHECK(at->f->runtime->pinned_until(roamer) > unix_ms());
-        net.settle([] { return false; }, 60);
+        // It tries to move on, is refused, and stays (waits for the try:
+        // its timer runs late on a loaded machine).
+        CHECK(net.settle([&] { return contains(at->f->journal(roamer), "roam:pinned"); }, 400));
         CHECK(holder(net, roamer) == at);
-        CHECK(contains(at->f->journal(roamer), "roam:pinned"));
         hops_seen = dec<std::int64_t>(at->f->call(roamer, "hops").payload);
         // The pin ends; it moves on.
         if (through_seeker) {

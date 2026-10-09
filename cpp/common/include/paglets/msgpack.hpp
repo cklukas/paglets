@@ -166,6 +166,7 @@ public:
     bool ok() const { return ok_; }
     bool at_end() const { return pos_ >= data_.size(); }
     std::size_t position() const { return pos_; }
+    std::size_t remaining() const { return pos_ >= data_.size() ? 0 : data_.size() - pos_; }
 
     Kind peek() const {
         if (!ok_ || at_end()) {
@@ -574,10 +575,13 @@ bool read_value(Reader& r, T& v) {
         if (!r.read_array_header(n)) {
             return false;
         }
+        // Every item takes at least a byte: a count beyond the input is a
+        // lie, and nothing is allocated for it up front.
+        if (n > r.remaining()) return false;
         v.clear();
-        v.resize(n);
-        for (auto& item : v) {
-            if (!read_value(r, item)) {
+        v.reserve(std::min<std::uint32_t>(n, 64));
+        for (std::uint32_t i = 0; i < n; ++i) {
+            if (!read_value(r, v.emplace_back())) {
                 return false;
             }
         }
