@@ -11,3 +11,10 @@ Current intentional limitations:
 - Flat root imports are intentionally unsupported.
 
 Use API-key authentication for shared networks and relay deployments.
+
+The [C++ edition, paglets/cpp](../cpp/index.md), addresses the first two
+limitations: its paglets are WebAssembly modules that travel with their
+code, run in a sandbox, and reach host resources only through the mesh
+policy. It is a separate implementation in progress (milestone M4) and does
+not interoperate with this package; see its
+[status](../cpp/index.md#status).

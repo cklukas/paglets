@@ -1,7 +1,8 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
-// paglets-host: the paglets/cpp host binary (milestone M1: single host).
+// paglets-host: the paglets/cpp host binary: single-host runs, keys and the
+// mesh ledger, hosts of a mesh on the network, and CLI sessions with them.
 //
 //   paglets-host --version | --info
 //   paglets-host run <module.wasm> [--args JSON] [--call NAME [JSON]]...
@@ -25,6 +26,7 @@
 #include "serve_cli.hpp"
 
 #include <paglets/abi.hpp>
+#include <paglets/net/channel.hpp>
 #include <paglets/runtime/runtime.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/json_msgpack.hpp>
@@ -106,7 +108,7 @@ int fail(const std::string& message) {
 
 int info() {
     paglets::wasm::ensure_runtime();
-    std::cout << "paglets-host " << PAGLETS_VERSION << " (milestone M1)\n"
+    std::cout << "paglets-host " << PAGLETS_VERSION << "\n"
               << "  platform:   " << platform() << " " << architecture() << "\n"
               << "  compiler:   " << compiler() << "\n"
               << "  reflection: "
@@ -117,7 +119,8 @@ int info() {
 #endif
               << "\n"
               << "  runtime:    " << PAGLETS_WAMR_TAG << " (" << PAGLETS_WAMR_MODE << ")\n"
-              << "  paglet ABI: v" << abi::version << "\n";
+              << "  paglet ABI: v" << abi::version << "\n"
+              << "  protocol:   mesh v" << paglets::net::mesh_protocol << "\n";
     return 0;
 }
 

@@ -7,8 +7,17 @@ Status: milestone M0 (WP0–WP2) done, results in
 identity ([cpp-ledger.md](cpp-ledger.md)), policy and grants
 ([cpp-policy.md](cpp-policy.md)), system paglets
 ([cpp-system-paglets.md](cpp-system-paglets.md)); results in
-[cpp-m2-results.md](cpp-m2-results.md). Milestone M3: WP11 (module store,
-module trust, code mobility) done ([cpp-modules.md](cpp-modules.md)).
+[cpp-m2-results.md](cpp-m2-results.md). Milestone M3 (WP11–WP15) closed:
+module store, module trust and code mobility ([cpp-modules.md](cpp-modules.md)),
+networking and movement ([cpp-networking.md](cpp-networking.md)), location
+and pinning ([cpp-location.md](cpp-location.md)), the mesh
+([cpp-mesh.md](cpp-mesh.md)) and relaying ([cpp-relay.md](cpp-relay.md));
+M3 has no separate results document. Milestone M4 (WP16–WP22) in progress:
+WP16 ([cpp-compute.md](cpp-compute.md)), WP17 ([cpp-web-ai.md](cpp-web-ai.md),
+[cpp-residency.md](cpp-residency.md)), WP18 ([cpp-patterns.md](cpp-patterns.md)),
+WP19 (admin work against live hosts), WP20 (demo paglets and
+[benchmarks](cpp-benchmarks.md)), WP21 ([cpp-hardening.md](cpp-hardening.md))
+and WP22 (the documentation site) have started.
 
 This document plans **paglets/cpp**, a new implementation of paglets in C++.
 It keeps the concepts that proved useful in the Python edition (hosts, mobile

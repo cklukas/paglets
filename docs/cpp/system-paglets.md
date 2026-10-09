@@ -54,7 +54,9 @@ size limit. `mesh-info` spreads the offers with each host's snapshot:
 ## Gateways to the web and to AI
 
 Gateway hosts offer `web` or `ai`. Paglets use them within the policy
-rules for the services `web` and `ai`.
+rules for the services `web` and `ai`. In this example, `gw.key` and
+`mac.key` are host keys enrolled, and their ledger copies made, as for
+`lab-2` in [Running hosts](hosts-and-meshes.md#running-hosts).
 
 ```bash
 H=build/linux-gcc16/host/paglets-host

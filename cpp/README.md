@@ -5,7 +5,10 @@ the embedded [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime)
 runtime, moving between hosts as **memory images**. The design and work
 packages are in [`../planning/`](../planning/cpp-edition-plan.md); the user
 documentation is the `paglets/cpp` section of the documentation site
-([`../docs/cpp/`](../docs/cpp/index.md)).
+([`../docs/cpp/`](../docs/cpp/index.md)), with a
+[command-line reference](../docs/cpp/cli-reference.md), a
+[guest SDK reference](../docs/cpp/sdk-reference.md) and
+[configuration and troubleshooting](../docs/cpp/configuration.md).
 
 Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
@@ -16,7 +19,7 @@ worker processes on Linux, macOS and Windows. Milestone M2 (mesh identity,
 policy and system paglets) is closed ([results](../planning/cpp-m2-results.md)):
 keys, the signed ledger with gossip, enrollment and passports; allow/ask/deny
 policy with grants and an audit log; and the system paglets. Milestone M3
-(movement between hosts) has started: WP11 gives hosts a module store with
+(movement between hosts) is closed: WP11 gives hosts a module store with
 a cache of compiled modules and garbage collection, module trust in the
 ledger, and code mobility: a host fetches modules it lacks from its sources
 or other hosts, verified by hash, and runs paglets launched from another
@@ -127,6 +130,7 @@ Build options:
 |---|---|---|
 | `PAGLETS_ENABLE_REFLECTION` | on if the compiler supports it | reflection codecs and guest schema generation |
 | `PAGLETS_BUILD_GUESTS` | `ON` | build guest `.wasm` modules (needs the WASI toolchain) |
+| `PAGLETS_BUILD_TESTS` | `ON` | build `paglets_tests` and register the CTest tests |
 | `PAGLETS_WAMR_FAST_INTERP` | `ON` | WAMR fast interpreter (`OFF`: classic interpreter) |
 | `PAGLETS_WAMR_HW_BOUND_CHECK` | `ON` (`OFF` with MinGW-w64) | guard-page bound checks; turn `OFF` on kernels with a 39-bit address space (Raspberry Pi OS) to run more than ~60 instances per process. MinGW-w64 GCC cannot build them (WAMR catches the faults with MSVC `__try`/`__except`) |
 | `PAGLETS_SANITIZE` | `OFF` | AddressSanitizer and UndefinedBehaviorSanitizer |
@@ -241,7 +245,8 @@ $H ledger revoke --ledger ledger --admin alice.key <key-id> --reason retired
 
 `ledger enroll`, `remove`, `deny`, `admins` (add or remove admins, change the
 quorum) and `sign` (co-sign a record that needs several admins) complete the
-set; `paglets-host ledger` prints the full usage.
+set; the [command-line reference](../docs/cpp/cli-reference.md#ledger)
+lists every command and option.
 
 Access to host resources follows the mesh policy
 ([design](../planning/cpp-policy.md)): rules decide allow, ask or deny;
@@ -281,18 +286,22 @@ $H ledger residency --ledger ledger --admin alice.key vault host-only
 
 Hosts on the network ([design](../planning/cpp-networking.md)):
 `paglets-host serve` runs a host of the mesh with its own copy of the
-ledger; `paglets-host remote` opens an end-to-end channel to a host as an
-admin or owner, to show its status, push ledger records, launch a paglet
+ledger (its state directory is `--state`, unlike `--state-dir` of `run`,
+`list` and `call`; TLS uses a self-signed certificate unless `--tls-cert`
+and `--tls-key` are given); `paglets-host remote` opens an end-to-end
+channel to a host as an admin or owner, to show its status, push ledger records, launch a paglet
 (the module travels with the request), call it or move it with a transfer
 ticket (a host name, a key ID, `label:<label>`, `offer:<service>[.<op>]` or
 `any`, with `?retries=N&arrival=active|inactive`):
 
 ```bash
-$H keys init --role owner --name olga --out olga.key
-$H keys init --role host --name lab-2 --out lab-2.key
+$H keys init --role owner --name olga --out olga.key          # prints <olga-key-id>
+$H keys init --role host --name lab-2 --out lab-2.key         # prints <lab-2-key-id>
+$H keys init --role host --name laptop --out laptop.key       # prints <laptop-key-id>
 $H ledger enroll --ledger ledger --admin alice.key host <lab-2-key-id> lab-2   # lab-1 is enrolled above
+$H ledger enroll --ledger ledger --admin alice.key host <laptop-key-id> laptop
 $H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga
-cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2
+cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2 && cp -r ledger ledger-laptop
 $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
     --advertise https://lab-1:7443 &
 $H serve --key lab-2.key --ledger ledger-lab-2 --state state-2 --listen 0.0.0.0:7443 \

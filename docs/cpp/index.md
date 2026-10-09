@@ -44,11 +44,47 @@ serialized fields.
 
 | Page | Contents |
 |---|---|
-| [Building and testing](building.md) | toolchains, presets, build options, tests and sanitizers |
+| [Building and testing](building.md) | toolchains, presets, build options, guest modules, tests and sanitizers |
 | [Writing paglets](writing-paglets.md) | the guest SDK, messages, capabilities, services and the patterns library |
-| [Hosts and meshes](hosts-and-meshes.md) | running hosts, the ledger, policy, module trust, residency, the remote CLI |
+| [Guest SDK reference](sdk-reference.md) | every class, function and lifecycle hook of `<paglets/paglet.hpp>`, and your own typed service contracts |
+| [Hosts and meshes](hosts-and-meshes.md) | running hosts, the ledger, policy, module trust, residency, TLS, the remote CLI |
+| [Command-line reference](cli-reference.md) | every command and option of `paglets-host`, `paglets-worker` and `paglets-spike` |
+| [Configuration and troubleshooting](configuration.md) | state directories, keys and passphrases, ports and firewalls, limits, error codes, common problems |
 | [System paglets](system-paglets.md) | the services hosts offer to paglets, and the web and AI gateways |
 | [Demos and benchmarks](demos.md) | the demo paglets, what each shows, and the first benchmark numbers |
+
+## Wire formats and interoperability
+
+paglets/cpp shares concepts with the Python edition (hosts, paglets,
+messages, a mesh, services, compute slots), but none of its formats. A
+Python host and a C++ host cannot talk to each other, and a paglet of one
+edition cannot run on the other.
+
+| Layer | paglets/cpp | Python edition |
+|---|---|---|
+| Transport | HTTPS; every host runs an HTTPS server with the endpoints `/paglets/v1/open`, `/paglets/v1/finish/<session>`, `/paglets/v1/frames/<session>` and `/paglets/v1/poll/<session>` | HTTP with a JSON control API, HTTPS through a reverse proxy |
+| Authentication | a Noise channel inside HTTPS: `Noise_XX_25519_ChaChaPoly_SHA256` between the Ed25519 keys of hosts, admins and owners, bound to the mesh ID | an optional shared API key (`PAGLETS_API_KEY`) |
+| Framing | request bodies are sequences of `[u32 big-endian length][Noise message]`; a frame is split into Noise messages of at most 65 535 bytes | JSON bodies, chunked binary payloads for movement |
+| Frames between hosts | canonical MessagePack values (sorted string keys, shortest encodings, no floats), the same encoding as ledger records | JSON control calls |
+| Messages to paglets | MessagePack payloads; the CLI converts JSON to MessagePack and back | Python values |
+| Moving a paglet | a signed move offer with a page manifest, then the missing 64 KB pages of the memory image, compressed with zstd | pickled dataclass state, streamed over HTTP |
+| Paglet code | WebAssembly modules (paglet ABI v1), fetched by SHA-256 hash | Python classes importable on every host |
+
+Channels also check the mesh protocol version (`paglets-host --info`
+prints it) and the paglet ABI. Hosts refuse peers of another mesh, another
+protocol version or another ABI.
+
+The full protocol is in the planning documents:
+
+- [networking and movement](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-networking.md)
+  (channels, transport, frames, moves, CLI sessions);
+- [mesh discovery](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-mesh.md)
+  (announcements, gossip, beacons, the compatibility gate);
+- [security and communication](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-security-and-communication.md);
+- [paglet ABI v1](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-abi-v1.md)
+  (the interface between host and guest);
+- [ledger](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-ledger.md)
+  (records and their canonical encoding).
 
 ## Status
 
@@ -61,10 +97,19 @@ Milestone M4 (applications) is in progress. Its parts so far:
 - the patterns library;
 - admin work against live hosts from the CLI;
 - the demo paglets and benchmarks;
-- fuzzing of every decoder that reads data from outside.
+- fuzzing of every decoder that reads data from outside;
+- this documentation.
 
 The
 [results of M0](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m0-results.md),
 [M1](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m1-results.md) and
 [M2](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m2-results.md)
-record the measurements and decisions of the closed milestones.
+record the measurements and decisions of those milestones. M3 has no
+results document of its own. Its parts are described in the designs of
+[code mobility](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-modules.md),
+[networking](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-networking.md),
+[location](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-location.md),
+[the mesh](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-mesh.md) and
+[relays](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-relay.md).
+The [plan](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-edition-plan.md)
+lists every work package.

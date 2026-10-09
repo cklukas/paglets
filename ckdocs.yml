@@ -75,7 +75,10 @@ nav:
       - docs/cpp/index.md
       - docs/cpp/building.md
       - docs/cpp/writing-paglets.md
+      - docs/cpp/sdk-reference.md
       - docs/cpp/hosts-and-meshes.md
+      - docs/cpp/cli-reference.md
+      - docs/cpp/configuration.md
       - docs/cpp/system-paglets.md
       - docs/cpp/demos.md
   - title: Project

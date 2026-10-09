@@ -70,11 +70,13 @@ Sends and replies can be asynchronous (`SendOptions::async`,
 delivered reaches `Paglet::on_undelivered`.
 
 Lifecycle events arrive as virtual functions: `on_arrived`,
-`on_move_failed`, `on_activated` and more.
+`on_move_failed`, `on_activated` and more. The
+[guest SDK reference](sdk-reference.md) lists every class, function and
+hook with its signature, and shows how to define a typed service contract
+of your own.
 [`examples/ping_pong`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/ping_pong)
-and the
-[ABI specification](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-abi-v1.md)
-describe the whole interface.
+shows them in use. The binary interface between host and guest is in the
+[ABI specification](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-abi-v1.md).
 
 ## System services
 
@@ -134,7 +136,7 @@ has the details. The [demos](demos.md) show the patterns in use.
 ## Running paglets locally
 
 Paglets run in sandboxed worker processes (`paglets-worker`, found next to
-`paglets-host`), one per scheduler lane (`--threads`). Use `--in-process`
+`paglets-host`), one per scheduler lane (`--threads`, default 2). Use `--in-process`
 to run them inside the host process instead, and `--no-sandbox` while
 debugging. Anything a paglet writes to stdout or stderr goes to the host
 log.
@@ -156,3 +158,6 @@ built for:
 ```bash
 $H module inspect build/linux-gcc16/guests/counter.wasm
 ```
+
+The [command-line reference](cli-reference.md#run-list-and-call) lists
+every option of `run`, `list` and `call`.

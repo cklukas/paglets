@@ -174,6 +174,10 @@ uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
   [Remote](technical/remote.md): package-level implementation notes and
   generated API references for the main runtime subsystems.
 - [Glossary](glossary.md): terminology used by the project.
+- [paglets/cpp](cpp/index.md): the C++ edition, a separate implementation
+  whose paglets are sandboxed WebAssembly modules that move between hosts as
+  memory images, with code mobility and a signed mesh ledger. It does not
+  interoperate with this Python package.
 
 ## Build The Docs Locally
 

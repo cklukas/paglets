@@ -18,9 +18,13 @@ H=build/linux-gcc16/host/paglets-host
 
 ## Keys and the ledger
 
-Admin and owner keys are encrypted with a passphrase. The passphrase is
-read from the terminal, or from `--passphrase-file`. The ledger commands
-work on a local ledger directory, either a host's copy or an admin's.
+Admin, owner and signer keys are encrypted with a passphrase. The
+passphrase is read from the terminal, or from `--passphrase-file`. Host
+keys are stored unencrypted and readable only by their owner, because
+`serve` opens its key without a passphrase. (`keys init` encrypts a host key
+too when you give `--passphrase-file`, but `serve` cannot use such a key.)
+`keys init` prints the new key's ID. The ledger commands work on a local ledger directory, either
+a host's copy or an admin's.
 
 ```bash
 $H keys init --role admin --name alice --out alice.key
@@ -39,7 +43,8 @@ More ledger commands:
 - `admins` adds or removes admins and changes the quorum;
 - `sign` co-signs a record that needs several admins.
 
-Run `paglets-host ledger` to print the full usage. The
+The [command-line reference](cli-reference.md#ledger) lists every ledger
+command and option. The
 [ledger design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-ledger.md)
 describes the records and their signatures.
 
@@ -105,11 +110,13 @@ addresses, online state and versions, and refuses hosts that speak another
 mesh protocol or paglet ABI.
 
 ```bash
-$H keys init --role owner --name olga --out olga.key
-$H keys init --role host --name lab-2 --out lab-2.key
+$H keys init --role owner --name olga --out olga.key          # prints <olga-key-id>
+$H keys init --role host --name lab-2 --out lab-2.key         # prints <lab-2-key-id>
+$H keys init --role host --name laptop --out laptop.key       # prints <laptop-key-id>
 $H ledger enroll --ledger ledger --admin alice.key host <lab-2-key-id> lab-2   # lab-1 is enrolled above
+$H ledger enroll --ledger ledger --admin alice.key host <laptop-key-id> laptop
 $H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga
-cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2
+cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2 && cp -r ledger ledger-laptop
 $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
     --advertise https://lab-1:7443 &
 $H serve --key lab-2.key --ledger ledger-lab-2 --state state-2 --listen 0.0.0.0:7443 \
@@ -118,10 +125,67 @@ $H serve --key laptop.key --ledger ledger-laptop --state state-3 --no-listen \
     --join https://lab-1:7443 &                                    # behind NAT: reached through relays
 ```
 
+Each host gets its own copy of the ledger. In practice the hosts run on
+different machines, and each copy is made there from the admin's ledger.
+Records an admin adds to a local ledger later reach a live host with
+`remote push` (`remote approve` and `remote deny` push their decision
+themselves). The hosts then spread them by gossip.
+
+> [!NOTE]
+> `serve` names its state directory with `--state`, while `run`, `list`
+> and `call` use `--state-dir`. The two layouts differ as well, so do not
+> point both at the same directory. See
+> [Configuration and troubleshooting](configuration.md#state-directories).
+
+A host listens on `127.0.0.1` and a free port unless `--listen` says
+otherwise, so hosts on other machines need `--listen 0.0.0.0:PORT` (or a
+specific address). `--advertise` sets the URL that other hosts use to reach
+it; give it whenever the listening address is not reachable as it is.
+
+A host whose key is not enrolled yet still starts. It treats the hosts it
+joins or knows as seeds, and waits for an admin's enrollment record to
+arrive by gossip. See
+[enrollment-pending hosts](configuration.md#a-host-is-not-enrolled-yet).
+
 Hosts talk over HTTPS. Inside it they use end-to-end encrypted, mutually
 authenticated Noise channels. A host without inbound ports (`--no-listen`)
 polls a few reachable hosts that relay for it. Everybody else reaches it
 through channels tunneled through those relays, still encrypted end to end.
+
+## TLS certificates
+
+TLS keeps reverse proxies and firewalls working. It does not authenticate
+hosts: the Noise channel inside it proves every host's key against the
+ledger. Therefore the defaults are:
+
+- Without `--tls-cert` and `--tls-key`, a host makes a self-signed
+  certificate when it starts: a new P-256 key, the subject
+  `CN=paglets host <first 16 digits of the key ID>`, valid for ten years.
+  It is kept in memory only, so each start makes a new one.
+- Without `--tls-ca`, a host does not check the certificates of the hosts
+  it connects to.
+
+To use your own certificate, give both PEM files:
+
+```bash
+$H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
+    --advertise https://lab-1.example.org:7443 \
+    --tls-cert lab-1.crt.pem --tls-key lab-1.key.pem --tls-ca lab-ca.pem
+```
+
+`--tls-ca FILE` makes the host check the certificates of every host it
+connects to against the CA certificates in `FILE`. Use it only when every
+host of the mesh has a certificate from that CA, for the name in its URL:
+connections to hosts with self-signed certificates fail then. Relays and
+gossip use the same connections, so one host without a matching
+certificate is unreachable for the hosts that check.
+
+> [!NOTE]
+> `paglets-host remote` does not check TLS certificates. It relies on the
+> Noise channel: it accepts only a host that is enrolled in its ledger copy
+> (or the key given with `--host-key`). `--web-ca` is unrelated to the mesh:
+> it names CA certificates for the HTTPS sites that the `web` gateway
+> fetches.
 
 Design documents:
 
@@ -195,6 +259,9 @@ A host keeps one owner's paglets from taking it over:
 - messages of at most 1 MB.
 
 A clone bomb therefore stops at the owner's limit, and other owners'
-paglets keep running. The
+paglets keep running. These limits are compiled-in defaults: no
+`paglets-host` option changes them.
+[Configuration and troubleshooting](configuration.md#limits) names where
+each one is defined. The
 [hardening design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-hardening.md)
 lists every limit.
