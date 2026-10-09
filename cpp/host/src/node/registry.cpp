@@ -13,6 +13,8 @@
 #include <paglets/net/channel.hpp>
 #include <paglets/sha256.hpp>
 
+#include <algorithm>
+
 namespace paglets::node {
 
 namespace {
@@ -68,7 +70,10 @@ void Node::Impl::announce_self() {
     HostEntry e;
     e.url = url;
     e.relays = relays;
-    e.announced = mesh::unix_ms();
+    // Strictly later than the previous one: two announcements within one
+    // millisecond (no relays yet, then the first relay) must not look the
+    // same age, or hosts keep the first and cannot reach this one.
+    e.announced = std::max(mesh::unix_ms(), own_entry ? own_entry->announced + 1 : std::int64_t{0});
     e.protocol = net::mesh_protocol;
     e.abi_major = abi::version;
     e.abi_minor = abi::minor_version;
