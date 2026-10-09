@@ -132,3 +132,17 @@ endif()
 add_test(NAME host_cli_ledger
          COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-ledger
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_ledger.cmake)
+
+# The installed package from outside the repository: cmake --install to a
+# temporary prefix, find_package(paglets) in examples/out-of-tree, modules
+# run by the installed paglets-host.
+option(PAGLETS_TEST_INSTALL "Test the installed CMake package with an out-of-tree project" ON)
+if(PAGLETS_TEST_INSTALL AND PAGLETS_GUESTS_AVAILABLE AND PAGLETS_ENABLE_REFLECTION)
+    add_test(NAME package_out_of_tree
+             COMMAND ${CMAKE_COMMAND} -DBUILD=${PROJECT_BINARY_DIR} -DCONFIG=$<CONFIG> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/package
+                     -DSOURCE=${PROJECT_SOURCE_DIR}/examples/out-of-tree "-DGENERATOR=${CMAKE_GENERATOR}"
+                     -DCXX=${CMAKE_CXX_COMPILER} -DMAKE=${CMAKE_MAKE_PROGRAM}
+                     -DWASI_CLANG=${PAGLETS_WASI_CLANG} -DWASI_SYSROOT=${PAGLETS_WASI_SYSROOT}
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_install.cmake)
+    set_tests_properties(package_out_of_tree PROPERTIES TIMEOUT 600)
+endif()

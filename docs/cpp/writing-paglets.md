@@ -31,6 +31,11 @@ Build it from CMake with `paglets_add_module`, then run it with the host:
 paglets_add_module(hello SOURCES hello.cpp)
 ```
 
+Inside the repository, add the call to `cpp/examples/CMakeLists.txt`. In a
+project of your own, install paglets/cpp and call
+`find_package(paglets REQUIRED)` first; see
+[Modules outside the repository](building.md#modules-outside-the-repository).
+
 ```bash
 H=build/linux-gcc16/host/paglets-host
 $H run build/linux-gcc16/guests/hello.wasm --call greet '"world"'

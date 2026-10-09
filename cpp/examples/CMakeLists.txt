@@ -43,6 +43,7 @@ paglets_add_module(inventory
     SOURCES inventory/inventory.cpp
     SCHEMA_HEADER inventory/inventory_msgs.hpp
     SCHEMA_NAMESPACE inventory_msgs
+    SERVICES server_info
     PATTERNS)
 paglets_add_module(seek
     SOURCES seek/seek.cpp
@@ -53,19 +54,23 @@ paglets_add_module(guard
     SOURCES guard/guard.cpp
     SCHEMA_HEADER guard/guard_msgs.hpp
     SCHEMA_NAMESPACE guard_msgs
+    SERVICES server_info
     PATTERNS)
 paglets_add_module(dupes
-    SOURCES dupes/dupes.cpp ../host/src/sha256.cpp
+    SOURCES dupes/dupes.cpp
+    SHA256
     SCHEMA_HEADER dupes/dupes_msgs.hpp
     SCHEMA_NAMESPACE dupes_msgs
     PATTERNS)
 paglets_add_module(file_courier
-    SOURCES file_courier/file_courier.cpp ../host/src/sha256.cpp
+    SOURCES file_courier/file_courier.cpp
+    SHA256
     SCHEMA_HEADER file_courier/file_courier_msgs.hpp
     SCHEMA_NAMESPACE file_courier_msgs
     PATTERNS)
 paglets_add_module(tree_compare
-    SOURCES tree_compare/tree_compare.cpp ../host/src/sha256.cpp
+    SOURCES tree_compare/tree_compare.cpp
+    SHA256
     SCHEMA_HEADER tree_compare/tree_compare_msgs.hpp
     SCHEMA_NAMESPACE tree_compare_msgs
     PATTERNS)

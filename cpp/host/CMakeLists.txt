@@ -1,8 +1,22 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 
+# The JSON value type of the wire layer. The schema generator links only this
+# library, so it is installed (as paglets::wire) for projects that build
+# guest paglets against an installed paglets package.
+add_library(paglets_wire STATIC src/json.cpp)
+add_library(paglets::wire ALIAS paglets_wire)
+set_target_properties(paglets_wire PROPERTIES EXPORT_NAME wire)
+target_include_directories(paglets_wire PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/common/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_compile_options(paglets_wire PRIVATE ${PAGLETS_WARNINGS})
+if(PAGLETS_ENABLE_REFLECTION)
+    target_compile_options(paglets_wire PRIVATE -freflection)
+endif()
+
 add_library(paglets_host STATIC
-    src/json.cpp
     src/json_msgpack.cpp
     src/ipc.cpp
     src/runtime.cpp
@@ -19,7 +33,7 @@ add_library(paglets_host STATIC
 target_include_directories(paglets_host PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/common/include)
-target_link_libraries(paglets_host PUBLIC paglets_vmlib)
+target_link_libraries(paglets_host PUBLIC paglets_wire paglets_vmlib)
 target_compile_options(paglets_host PRIVATE ${PAGLETS_WARNINGS})
 target_compile_definitions(paglets_host PUBLIC
     PAGLETS_VERSION="${PROJECT_VERSION}"
@@ -114,6 +128,7 @@ if(TARGET paglets_node)
     target_link_libraries(paglets-host PRIVATE paglets_node paglets_gateway)
 endif()
 target_compile_options(paglets-host PRIVATE ${PAGLETS_WARNINGS})
+add_executable(paglets::paglets-host ALIAS paglets-host)
 add_executable(paglets-worker src/worker_main.cpp)
 target_link_libraries(paglets-worker PRIVATE paglets_host)
 target_compile_options(paglets-worker PRIVATE ${PAGLETS_WARNINGS})

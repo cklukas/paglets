@@ -2,7 +2,9 @@
 
 The guest SDK is one header, `<paglets/paglet.hpp>` (`cpp/sdk/include/`),
 and one source file, `cpp/sdk/src/paglet.cpp`, that `paglets_add_module`
-compiles into every module. Everything is in the namespace `paglets`. The
+compiles into every module. An installed package has them in
+`include/paglets/` and `share/paglets/sdk/` (see
+[Modules outside the repository](building.md#modules-outside-the-repository)). Everything is in the namespace `paglets`. The
 types of the binary interface (`paglets::abi::...`) come from
 `cpp/common/include/paglets/abi.hpp`, which the header includes.
 
@@ -391,8 +393,8 @@ paglets_add_module(calc_user
 ```
 
 The guest compiler has no C++26 reflection, so the build compiles the
-schema generator (`cpp/tools/schema_gen/`) with GCC 16 for this header
-and runs it. It writes:
+schema generator (`cpp/tools/schema_gen/`, or `share/paglets/schema_gen/`
+of an installed package) with GCC 16 for this header and runs it. It writes:
 
 - `calc_user.schema.gen.hpp`, included by the guest as
   `#include "calc_user.schema.gen.hpp"`: the encoders and decoders of every

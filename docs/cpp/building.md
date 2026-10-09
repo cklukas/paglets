@@ -60,6 +60,7 @@ platform-independent, so guests built on any machine work there.
 | `PAGLETS_ENABLE_REFLECTION` | on if the compiler supports it | reflection codecs and guest schema generation |
 | `PAGLETS_BUILD_GUESTS` | `ON` | build the guest `.wasm` modules (needs the WASI toolchain) |
 | `PAGLETS_BUILD_TESTS` | `ON` | build `paglets_tests` and register the CTest tests |
+| `PAGLETS_TEST_INSTALL` | `ON` | register the `package_out_of_tree` test of the installed package |
 | `PAGLETS_PREBUILT_GUEST_DIR` | empty | directory of prebuilt guest `.wasm` files, used by the tests when guests are not built here |
 | `PAGLETS_WASI_CLANG`, `PAGLETS_WASI_SYSROOT` | found automatically | the guest compiler and its WASI sysroot (see [Guest modules](#guest-modules)) |
 | `PAGLETS_WAMR_FAST_INTERP` | `ON` | WAMR fast interpreter (`OFF`: the classic interpreter) |
@@ -103,8 +104,13 @@ Two functions add guests:
 
 | Function | Builds |
 |---|---|
-| `paglets_add_module(NAME SOURCES ... [SCHEMA_HEADER H SCHEMA_NAMESPACE NS] [SERVICES ...] [PATTERNS])` | a C++ paglet with the guest SDK |
+| `paglets_add_module(NAME SOURCES ... [SCHEMA_HEADER H SCHEMA_NAMESPACE NS] [SERVICES ...] [PATTERNS] [SHA256])` | a C++ paglet with the guest SDK |
 | `paglets_add_guest(NAME SOURCES ... [LANGUAGE L] [NO_SDK] ...)` | the general form, with `L` either `C` or `CXX` (the default); `paglets_add_module` calls it with `LANGUAGE CXX` |
+
+`SHA256` compiles the SHA-256 implementation of `<paglets/sha256.hpp>`
+(`paglets::sha256`, `paglets::Sha256`, `paglets::to_hex`) into the module.
+It is the code the host uses, so guests and hosts compute the same digests.
+The examples `dupes`, `file_courier` and `tree_compare` use it.
 
 Every module ends up in `build/<preset>/guests/NAME.wasm`. With a schema
 header, the build also writes `NAME.schema.json` there and the generated
@@ -129,23 +135,112 @@ imports, and whether it is a paglet.
 
 ### Modules outside the repository
 
-The guest functions are not installed or exported. They use the paglets/cpp
-source tree (`PROJECT_SOURCE_DIR`) and its targets: the schema generator is
-built from `cpp/tools/schema_gen/` and linked against `paglets_host`. So
-they work only inside the paglets/cpp CMake project. To build your own
-paglets with them, add their sources and a `paglets_add_module(...)` call
-to `cpp/examples/CMakeLists.txt`, as the demos do.
-
-A module that needs no generated code (no `SCHEMA_HEADER`, `SERVICES` or
-`PATTERNS`) can also be built outside CMake. These are the flags that
-`PagletsGuest.cmake` passes:
+`cmake --install` turns a paglets/cpp build into a CMake package. Other
+projects then build their own paglets with `find_package(paglets)` and the
+same `paglets_add_module` and `paglets_add_guest` functions:
 
 ```bash
-P=path/to/paglets/cpp
+cd cpp
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64
+cmake --install build/macos-arm64 --prefix $HOME/opt/paglets
+```
+
+The package contains:
+
+| Path below the prefix | Contents |
+|---|---|
+| `bin/` | `paglets-host` and `paglets-worker` |
+| `include/paglets/` | the guest SDK, the ABI and MessagePack headers, the service contracts with their generated clients (`services/*.gen.hpp`), and the wire headers the schema generator includes |
+| `lib/` | `libpaglets_wire.a`, which the schema generator links |
+| `lib/cmake/paglets/` | `pagletsConfig.cmake`, `pagletsConfigVersion.cmake`, the imported targets and `PagletsGuest.cmake` |
+| `share/paglets/` | `sdk/paglet.cpp` (the SDK, compiled into every module), `sdk/sha256.cpp` (compiled in with `SHA256`), `schema_gen/schema_gen.cpp` and the JSON schemas of the system services |
+
+A project that uses it calls `find_package` in its top-level
+`CMakeLists.txt`, after `project()`:
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(my_paglets LANGUAGES CXX)
+
+find_package(paglets 0.1 REQUIRED CONFIG)
+
+# A plain paglet: the guest SDK and SHA-256 (<paglets/sha256.hpp>).
+paglets_add_module(greeter SOURCES greeter.cpp SHA256)
+
+# A paglet with a typed service contract that also calls a system service.
+paglets_add_module(adder
+    SOURCES adder.cpp
+    SCHEMA_HEADER adder_contract.hpp
+    SCHEMA_NAMESPACE adder
+    SERVICES server_info
+    PATTERNS)
+```
+
+Configure it with the package on `CMAKE_PREFIX_PATH`, and with GCC 16 as the
+C++ compiler if it has schema headers:
+
+```bash
+cmake -S my-paglets -B my-paglets/build -G Ninja \
+    -DCMAKE_PREFIX_PATH=$HOME/opt/paglets -DCMAKE_CXX_COMPILER=g++-16
+cmake --build my-paglets/build
+$HOME/opt/paglets/bin/paglets-host run my-paglets/build/guests/greeter.wasm --call greet '"world"'
+```
+
+The functions behave as inside the repository:
+
+- The guest toolchain is found the same way, and `PAGLETS_WASI_CLANG`,
+  `PAGLETS_WASI_SYSROOT` and `PAGLETS_BUILD_GUESTS` work the same.
+- Modules end up in `<build>/guests/NAME.wasm`. Set `PAGLETS_GUEST_OUTPUT_DIR`
+  before `find_package` to write them elsewhere.
+- `SCHEMA_HEADER` compiles the schema generator for that header with the
+  project's C++ compiler, so it needs C++26 reflection (GCC 16). The package
+  checks the compiler; set `PAGLETS_ENABLE_REFLECTION` to skip the check.
+  Without reflection, modules with a schema header are skipped with a
+  warning.
+- `SERVICES` and `PATTERNS` use the clients generated when the package was
+  built, and need no reflection in the project.
+- `SHA256` compiles in the installed `share/paglets/sdk/sha256.cpp`
+  (`PAGLETS_SHA256_SOURCE`); no paths are needed in the project.
+
+The package also defines the imported targets `paglets::paglets-host` (for
+example for tests: `$<TARGET_FILE:paglets::paglets-host>`) and
+`paglets::wire`. The repository has a complete example in
+`cpp/examples/out-of-tree/`: a plain paglet and one with a service contract
+that also calls a system service. The `package_out_of_tree` test builds and
+runs it against a fresh installation.
+
+> [!NOTE]
+> The installed package was built for one platform: `paglets-host`,
+> `paglets-worker` and `libpaglets_wire.a` are native code, and a project's
+> C++ compiler must be able to link `libpaglets_wire.a`. The `.wasm`
+> modules it builds run on every host.
+
+Limits of the package:
+
+- `find_package(paglets)` belongs in the top-level `CMakeLists.txt`: the
+  locations and toolchain settings it defines are directory-scoped
+  variables, so calls in a sibling directory do not see them.
+- `SCHEMA_HEADER` needs GCC 16 (C++26 reflection) as the project's C++
+  compiler.
+- Install from a regular build. A package from a sanitizer preset carries
+  sanitizer-instrumented `libpaglets_wire.a` and binaries.
+- The package builds guest modules and runs them with `paglets-host`. It
+  does not export the host runtime as a library to embed in other programs.
+
+A module that needs no generated code (no `SCHEMA_HEADER`, `SERVICES` or
+`PATTERNS`) can also be built without CMake. These are the flags that
+`PagletsGuest.cmake` passes; `P` is the installation prefix:
+
+```bash
+P=$HOME/opt/paglets
 clang++ --target=wasm32-wasip1 --sysroot=$WASI_SYSROOT -O2 -mexec-model=reactor \
     -Wl,--export=__stack_pointer -Wl,--strip-debug -std=c++23 -fno-exceptions -fno-rtti \
-    -I$P/common/include -I$P/sdk/include $P/sdk/src/paglet.cpp hello.cpp -o hello.wasm
+    -I$P/include $P/share/paglets/sdk/paglet.cpp hello.cpp -o hello.wasm
 ```
+
+From a source checkout, use `-Icpp/common/include -Icpp/sdk/include` and
+`cpp/sdk/src/paglet.cpp` instead.
 
 ## The test suite
 
@@ -162,10 +257,13 @@ clang++ --target=wasm32-wasip1 --sysroot=$WASI_SYSROOT -O2 -mexec-model=reactor 
 | `host_serve_move` | two `paglets-host serve` processes; a paglet is launched with `remote launch` and moved back and forth |
 | `host_mesh_discovery` | several `serve` processes that each know one contact find each other, including a host without an inbound port |
 | `host_cli_ledger` | keys, mesh creation, enrollment requests and admin decisions with the CLI |
+| `package_out_of_tree` | `cmake --install` into a temporary prefix, then `cpp/examples/out-of-tree` is configured with `find_package(paglets)`, built, and its modules are run by the installed `paglets-host` |
 
 The image, `host_run_*` and `host_state_*` tests need guest modules (built
 or from `PAGLETS_PREBUILT_GUEST_DIR`). `host_serve_move` and
-`host_mesh_discovery` also need reflection.
+`host_mesh_discovery` also need reflection. `package_out_of_tree` needs
+the guest toolchain and reflection; turn it off with
+`-DPAGLETS_TEST_INSTALL=OFF`.
 
 The multi-host tests inside `paglets_tests` run several hosts in one
 process. They cover the mesh, moves, location, relays, the demos and the

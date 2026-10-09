@@ -51,6 +51,7 @@ if(PAGLETS_SANITIZE_THREAD)
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+include(GNUInstallDirs)
 include(PagletsWamr)
 include(PagletsGuest)
 include(PagletsHttplib)
@@ -70,6 +71,7 @@ find_package(Zstd 1.4 REQUIRED)
 
 add_subdirectory(host)
 add_subdirectory(examples)
+include(PagletsInstall)
 
 if(PAGLETS_BUILD_TESTS)
     enable_testing()

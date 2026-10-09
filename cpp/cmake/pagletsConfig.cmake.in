@@ -1,0 +1,55 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+# CMake package of paglets/cpp (installed by cmake/PagletsInstall.cmake).
+#
+#   find_package(paglets REQUIRED)
+#   paglets_add_module(<name> SOURCES <files...>
+#       [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>] [SERVICES <service>...] [PATTERNS] [SHA256])
+#
+# Call find_package in the top-level CMakeLists.txt after project(): the
+# settings below are directory-scoped variables. Imported targets:
+#   paglets::paglets-host    the host binary (paglets-worker next to it)
+#   paglets::wire            library of the schema generator
+# Guest modules are written to PAGLETS_GUEST_OUTPUT_DIR (default
+# <build>/guests). The WASI toolchain is found as in the paglets/cpp build
+# (PAGLETS_WASI_CLANG, PAGLETS_WASI_SYSROOT, WASI_SDK_PATH); SCHEMA_HEADER
+# needs a host C++ compiler with C++26 reflection (GCC 16).
+
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/pagletsTargets.cmake")
+
+set_and_check(PAGLETS_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+set_and_check(_paglets_data_dir "@PACKAGE_PAGLETS_INSTALL_DATADIR@")
+set(PAGLETS_COMMON_INCLUDE_DIR "${PAGLETS_INCLUDE_DIR}")
+set(PAGLETS_SDK_INCLUDE_DIR "${PAGLETS_INCLUDE_DIR}")
+set(PAGLETS_SDK_SOURCE "${_paglets_data_dir}/sdk/paglet.cpp")
+set(PAGLETS_SHA256_SOURCE "${_paglets_data_dir}/sdk/sha256.cpp")
+set(PAGLETS_SCHEMA_GEN_SOURCE "${_paglets_data_dir}/schema_gen/schema_gen.cpp")
+set(PAGLETS_SERVICE_SCHEMAS_PREBUILT @_paglets_services_prebuilt@)
+set(PAGLETS_VERSION "@PROJECT_VERSION@")
+set(PAGLETS_HOST_EXECUTABLE paglets::paglets-host)
+
+# The schema generator is compiled with the project's C++ compiler.
+if(NOT DEFINED PAGLETS_ENABLE_REFLECTION)
+    get_property(_paglets_languages GLOBAL PROPERTY ENABLED_LANGUAGES)
+    if("CXX" IN_LIST _paglets_languages)
+        include(CheckCXXSourceCompiles)
+        set(_paglets_required_flags "${CMAKE_REQUIRED_FLAGS}")
+        set(CMAKE_REQUIRED_FLAGS "-std=c++26 -freflection")
+        check_cxx_source_compiles("
+#include <meta>
+struct S { int a; };
+static_assert(std::meta::nonstatic_data_members_of(^^S, std::meta::access_context::unchecked()).size() == 1);
+int main() {}" PAGLETS_COMPILER_HAS_REFLECTION)
+        set(CMAKE_REQUIRED_FLAGS "${_paglets_required_flags}")
+        set(PAGLETS_ENABLE_REFLECTION ${PAGLETS_COMPILER_HAS_REFLECTION})
+    else()
+        set(PAGLETS_ENABLE_REFLECTION OFF)
+    endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/PagletsGuest.cmake")
+
+check_required_components(paglets)
