@@ -16,6 +16,8 @@
 
 #include <courier_msgs.hpp>
 #include <digest_msgs.hpp>
+#include <researcher_msgs.hpp>
+#include <semantic_msgs.hpp>
 #include <paglets/gateway/gateway.hpp>
 #include <paglets/services/ai.hpp>
 #include <paglets/services/web.hpp>
@@ -60,6 +62,14 @@ struct Site {
         });
         server.Get("/files/big", [](const httplib::Request&, httplib::Response& r) {
             r.set_content(std::string(200 * 1024, 'x'), "application/octet-stream");
+        });
+        // A search backend (SearXNG's JSON format) that finds the site's pages.
+        server.Get("/search", [this](const httplib::Request& q, httplib::Response& r) {
+            const std::string query = q.get_param_value("q");
+            r.set_content("{\"query\":\"" + query + "\",\"results\":[{\"title\":\"The report\",\"url\":\"" +
+                              url("/files/report.txt") + "\",\"content\":\"numbers\"},{\"title\":\"\",\"url\":\"" +
+                              url("/files/page.html") + "\",\"content\":\"a page\"}]}",
+                          "application/json");
         });
         server.Get("/admin/secret", [](const httplib::Request&, httplib::Response& r) {
             r.set_content("intranet only", "text/plain");
@@ -492,4 +502,161 @@ PAGLETS_TEST("gateway: AI Document Digest reads on two hosts, summarizes on the 
 
     std::error_code ec;
     for (const auto& p : {linux_docs, windows_docs, windows_secret, archive}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("gateway: Semantic Mesh Search indexes documents on the AI host and answers by meaning") {
+    namespace fs = std::filesystem;
+    const fs::path ra = temp_root("sa"), rb = temp_root("sb");
+    write_file(ra / "rockets.txt", "The rocket engines fired and the launch went to orbit.");
+    write_file(ra / "soup.txt", "Simmer the vegetable soup with onions and garlic for an hour.");
+    write_file(rb / "garden.txt", "Plant the tomatoes in spring and water the garden every morning.");
+    ps::ServicesConfig sa, sb;
+    sa.roots["docs"] = ra;
+    sb.roots["docs"] = rb;
+    Mesh net;
+    auto& a = net.add_host("a", sa);
+    net.add_host("b", sb);
+    auto& mac = net.add_host("mac");
+    net.enroll_all();
+    for (auto& h : net.hosts) {
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 2000ms, .redirect_after = 0ms});
+    }
+    gw::GatewayConfig config;
+    config.ai.enabled = true;
+    config.ai.backend = "test";
+    config.offers = [&](const std::string& service, std::optional<paglets::services::mesh_info::Offer> o) {
+        if (o) {
+            mac.node->set_offer(std::move(*o));
+        } else {
+            mac.node->withdraw_offer(service);
+        }
+    };
+    config.authorize = [&](const abi::SenderRecord& caller, std::string_view service, std::string_view op,
+                           std::string_view root, std::string_view path) {
+        return mac.node->allows(caller, Item{std::string(service), {std::string(op)}, std::string(root), std::string(path)});
+    };
+    REQUIRE_OK(gw::install_gateway(*mac.f->runtime, mac.services, config));
+    net.admin_record("policy-rule", data::policy_rule({"read docs", Decision::allow, "files", {"read"}, {},
+                                                       Scope{std::vector<std::string>{"docs"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    net.admin_record("policy-rule",
+                     data::policy_rule({"embeddings", Decision::allow, "ai", {"embed"}, {}, std::nullopt, std::nullopt, 0}));
+    REQUIRE(net.settle([&] {
+        return net.converged() &&
+               a.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "ai", .op = "embed"}).size() == 1u;
+    }));
+    const std::string module = a.f->module("semantic.wasm");
+    auto created = a.node->create(module, net.passport(module, paglet_id('8')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    semantic_msgs::Index index;
+    index.sources = {{"a", "docs", "**/*.txt"}, {"b", "docs", "**/*.txt"}};
+    REQUIRE(a.f->runtime->call(id, "index", wire::to_msgpack(index), 20s).status == 0);
+    semantic_msgs::Status st;
+    REQUIRE(net.settle(
+        [&] {
+            if (!mac.f->runtime->info(id)) return false;  // the index is built on the AI host
+            auto x = mac.f->runtime->call(id, "status", {}, 10s);
+            return x.status == 0 && wire::from_msgpack(x.payload, st) && (st.state == "ready" || st.state == "failed");
+        },
+        3000));
+    if (st.state != "ready") std::cerr << "    semantic: " << st.error << "\n";
+    REQUIRE(st.state == "ready");
+    CHECK_EQ(st.documents, 3);
+    CHECK_EQ(st.host_name, std::string("mac"));
+    auto ask = [&](const std::string& text) {
+        auto x = mac.f->runtime->call(id, "query", wire::to_msgpack(semantic_msgs::Query{text, 2}), 20s);
+        REQUIRE(x.status == 0);
+        semantic_msgs::Hits hits;
+        REQUIRE(wire::from_msgpack(x.payload, hits));
+        REQUIRE(hits.error.empty());
+        REQUIRE(hits.hits.size() == 2u);
+        return hits;
+    };
+    auto hits = ask("rocket engines launch");
+    CHECK_EQ(hits.hits[0].path, std::string("docs/rockets.txt"));
+    CHECK_EQ(hits.hits[0].host_name, std::string("a"));
+    CHECK(hits.hits[0].score > hits.hits[1].score);
+    hits = ask("water the tomatoes in the garden");
+    CHECK_EQ(hits.hits[0].path, std::string("docs/garden.txt"));
+    CHECK_EQ(hits.hits[0].host_name, std::string("b"));
+    std::error_code ec;
+    for (const auto& p : {ra, rb}) fs::remove_all(p, ec);
+}
+
+PAGLETS_TEST("gateway: Web Researcher searches and reads on the web host, summarizes on the AI host, comes home") {
+    Site site;
+    Mesh net;
+    auto& home = net.add_host("home");
+    auto& gateway = net.add_host("gateway");
+    auto& mac = net.add_host("mac");
+    net.enroll_all();
+    for (auto& h : net.hosts) {
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 2000ms, .redirect_after = 0ms});
+    }
+    auto offers_of = [](Mesh::Host& h) {
+        return [&h](const std::string& service, std::optional<paglets::services::mesh_info::Offer> o) {
+            if (o) {
+                h.node->set_offer(std::move(*o));
+            } else {
+                h.node->withdraw_offer(service);
+            }
+        };
+    };
+    auto authorize_on = [](Mesh::Host& h) {
+        return [&h](const abi::SenderRecord& caller, std::string_view service, std::string_view op, std::string_view root,
+                    std::string_view path) {
+            return h.node->allows(caller, Item{std::string(service), {std::string(op)}, std::string(root), std::string(path)});
+        };
+    };
+    auto web = web_config(site);
+    web.web.search_url = site.url("/search?q={query}");
+    web.offers = offers_of(gateway);
+    web.authorize = authorize_on(gateway);
+    REQUIRE_OK(gw::install_gateway(*gateway.f->runtime, gateway.services, web));
+    gw::GatewayConfig ai;
+    ai.ai.enabled = true;
+    ai.ai.backend = "test";
+    ai.offers = offers_of(mac);
+    ai.authorize = authorize_on(mac);
+    REQUIRE_OK(gw::install_gateway(*mac.f->runtime, mac.services, ai));
+    net.admin_record("policy-rule", data::policy_rule({"web research", Decision::allow, "web", {"search", "extract_text"},
+                                                       {}, std::nullopt, std::nullopt, 0}));
+    net.admin_record("policy-rule",
+                     data::policy_rule({"summaries", Decision::allow, "ai", {"summarize"}, {}, std::nullopt, std::nullopt, 0}));
+    REQUIRE(net.settle([&] {
+        return net.converged() &&
+               home.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "web", .op = "search"}).size() == 1u &&
+               home.node->find_offers(paglets::services::mesh_info::OffersRequest{.service = "ai"}).size() == 1u;
+    }));
+    const std::string module = home.f->module("researcher.wasm");
+    auto created = home.node->create(module, net.passport(module, paglet_id('9')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    researcher_msgs::Question q;
+    q.question = "quarterly numbers";
+    q.pages = 2;
+    q.max_words = 3;
+    REQUIRE(home.f->runtime->call(id, "start", wire::to_msgpack(q), 20s).status == 0);
+    researcher_msgs::Report report;
+    bool away = false;
+    REQUIRE(net.settle(
+        [&] {
+            if (!home.f->runtime->info(id)) {
+                away = true;
+                return false;
+            }
+            if (!away) return false;
+            auto x = home.f->runtime->call(id, "report", {}, 10s);
+            return x.status == 0 && wire::from_msgpack(x.payload, report) &&
+                   (report.state == "done" || report.state == "failed");
+        },
+        3000));
+    if (report.state != "done") std::cerr << "    researcher: " << report.error << "\n";
+    CHECK_EQ(report.state, std::string("done"));
+    CHECK(report.hosts == std::vector<std::string>({"home", "gateway", "mac", "home"}));
+    REQUIRE(report.sources.size() == 2u);
+    CHECK_EQ(report.sources[0].title, std::string("The report"));
+    CHECK_EQ(report.sources[0].summary, std::string("quarterly numbers: 42"));  // three words: all of it
+    CHECK_EQ(report.sources[1].summary, std::string("Hello First bold ..."));
 }

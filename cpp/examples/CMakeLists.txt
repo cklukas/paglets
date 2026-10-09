@@ -59,3 +59,15 @@ paglets_add_module(dupes
     SCHEMA_HEADER dupes/dupes_msgs.hpp
     SCHEMA_NAMESPACE dupes_msgs
     PATTERNS)
+paglets_add_module(semantic
+    SOURCES semantic/semantic.cpp
+    SCHEMA_HEADER semantic/semantic_msgs.hpp
+    SCHEMA_NAMESPACE semantic_msgs
+    SERVICES ai
+    PATTERNS)
+paglets_add_module(researcher
+    SOURCES researcher/researcher.cpp
+    SCHEMA_HEADER researcher/researcher_msgs.hpp
+    SCHEMA_NAMESPACE researcher_msgs
+    SERVICES ai web
+    PATTERNS)

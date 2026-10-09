@@ -38,11 +38,11 @@ pi example in `test_compute.cpp`).
 | 14 | Pi Marathon | Compute | compute-slots, checkpoints, resume after host loss | `pi/` (chunks, slots, loss of a host) |
 | 15 | Hide and Seek | Mobility | `locate_and_pin`, continuous movement, stress test | `seek/` |
 | 16 | AI Document Digest | AI | Find anywhere, move to the AI host, deliver elsewhere | `digest/` |
-| 17 | Semantic Mesh Search | AI | Embeddings, index in paglet memory, natural-language queries | |
+| 17 | Semantic Mesh Search | AI | Embeddings, index in paglet memory, natural-language queries | `semantic/` |
 | 18 | Image Describer | AI | Vision models, offers with requirements | |
 | 19 | Log Explainer | AI | Cooperation with Log Scout, grouping and explaining errors | |
 | 20 | Download Courier | Web | Download through a gateway host, delivery to the starting host | `courier/` |
-| 21 | Web Researcher | Web + AI | Search and fetch on a web host, summarize on an AI host | |
+| 21 | Web Researcher | Web + AI | Search and fetch on a web host, summarize on an AI host | `researcher/` |
 | 22 | Release Watcher | Web | Periodic checks from a web host, notifications, hand-off to Download Courier | |
 
 ## Getting started
