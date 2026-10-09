@@ -158,6 +158,11 @@ PAGLETS_TEST("gateway: internal addresses, URLs and readable text") {
     CHECK(gw::resolve_url("http://example.com/", "javascript:alert(1)").empty());
     CHECK(gw::resolve_url("http://example.com/", "ftp://example.com/x").empty());
     CHECK(gw::resolve_url("http://example.com/", "http://user:secret@example.com/").empty());  // no credentials
+    CHECK(gw::resolve_url("http://example.com/", "http://[::1]:8080/x") == "http://[::1]:8080/x");
+    // Brackets and colons only in IPv6 addresses (found by the URL fuzzer).
+    CHECK(gw::resolve_url("http://example.com/", "http://nrg:8[::/").empty());
+    CHECK(gw::resolve_url("http://example.com/", "http://a:b:80/").empty());
+    CHECK(gw::resolve_url("http://example.com/", "http://a]b/").empty());
 
     const auto e = gw::extract_html(
         "<html><head><title>A &amp; B</title><script>ignored()</script></head><body><h1>Head</h1>"

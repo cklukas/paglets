@@ -153,17 +153,15 @@ std::optional<Url> parse_url(std::string_view text) {
         }
         if (!parse_ipv6(std::string_view(u.host).substr(1, u.host.size() - 2))) return std::nullopt;
     } else {
-        const auto c = authority.rfind(':');
+        const auto c = authority.find(':');
         u.host = lower(authority.substr(0, c));
         if (c != std::string_view::npos) port = authority.substr(c + 1);
-    }
-    if (u.host.empty() || u.host.size() > 253) return std::nullopt;
-    for (char c : u.host) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_' || c == '[' || c == ']' ||
-              c == ':')) {
-            return std::nullopt;
+        // Brackets and colons belong only to IPv6 addresses in brackets.
+        for (char ch : u.host) {
+            if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '.' || ch == '-' || ch == '_')) return std::nullopt;
         }
     }
+    if (u.host.empty() || u.host.size() > 253) return std::nullopt;
     u.port = u.scheme == "https" ? 443 : 80;
     if (!port.empty()) {
         int p = 0;

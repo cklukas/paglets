@@ -53,6 +53,9 @@ jobs:
       - name: Test
         working-directory: cpp
         run: ctest --preset linux-gcc16
+      - name: Report failed tests
+        if: failure()
+        run: bash cpp/tools/ci_failures.sh cpp/build/linux-gcc16
       - name: Measurements
         working-directory: cpp/build/linux-gcc16
         run: ./host/paglets-spike bench guests/testbed.wasm guests/counter.wasm --instances 1000
@@ -91,6 +94,9 @@ jobs:
           cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build --preset ${{ matrix.preset }}
           ctest --preset ${{ matrix.preset }}
+      - name: Report failed tests
+        if: failure()
+        run: bash cpp/tools/ci_failures.sh cpp/build/${{ matrix.preset }}
 
   macos:
     name: macOS arm64 (Homebrew GCC 16)
@@ -108,6 +114,9 @@ jobs:
       - name: Test
         working-directory: cpp
         run: ctest --preset macos-arm64
+      - name: Report failed tests
+        if: failure()
+        run: bash cpp/tools/ci_failures.sh cpp/build/macos-arm64
 
   windows:
     name: Windows x86_64 (MinGW-w64 GCC, experimental)
@@ -144,3 +153,6 @@ jobs:
             -DPAGLETS_PREBUILT_GUEST_DIR="$(cygpath -m "$GITHUB_WORKSPACE/prebuilt-guests")"
           cmake --build --preset windows-mingw-gcc16
           ctest --preset windows-mingw-gcc16
+      - name: Report failed tests
+        if: failure()
+        run: bash cpp/tools/ci_failures.sh cpp/build/windows-mingw-gcc16
