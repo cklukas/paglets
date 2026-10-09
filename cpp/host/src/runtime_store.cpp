@@ -76,7 +76,7 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
 namespace {
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
-    w.write_map_header(12);
+    w.write_map_header(13);
     put(w, "id", p.id);
     put(w, "module", p.module);
     put(w, "trust", p.trust);
@@ -101,6 +101,7 @@ void encode_record(msgpack::Writer& w, const PagletRecord& p) {
         w.write_str(name);
         w.write_int(h);
     }
+    put(w, "marks", p.marks);
 }
 
 bool decode_record(msgpack::Reader& r, PagletRecord& p) {
@@ -129,6 +130,7 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
         }
         if (k == "pending_requests") return msgpack::read_value(r, p.pending_requests);
         if (k == "checkpoint_ms") return msgpack::read_value(r, p.checkpoint_ms);
+        if (k == "marks") return msgpack::read_value(r, p.marks);
         if (k == "services") {
             std::uint32_t n = 0;
             if (!r.read_array_header(n)) return false;
@@ -254,7 +256,7 @@ constexpr std::int32_t state_version = 1;
 
 Bytes encode_state(const TravelState& s) {
     msgpack::Writer w;
-    w.write_map_header(12);
+    w.write_map_header(13);
     put(w, "v", state_version);
     put(w, "id", s.id);
     put(w, "module", s.module);
@@ -285,6 +287,7 @@ Bytes encode_state(const TravelState& s) {
         w.write_uint(correlation);
         w.write_int(ms);
     }
+    put(w, "marks", s.marks);
     return w.bytes();
 }
 
@@ -302,6 +305,7 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         if (k == "next_correlation") return msgpack::read_value(r, s.next_correlation);
         if (k == "next_timer") return msgpack::read_value(r, s.next_timer);
         if (k == "checkpoint_ms") return msgpack::read_value(r, s.checkpoint_ms);
+        if (k == "marks") return msgpack::read_value(r, s.marks);
         auto pairs = [&](auto&& one) {
             std::uint32_t n = 0;
             if (!r.read_array_header(n)) return false;

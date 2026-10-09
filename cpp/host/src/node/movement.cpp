@@ -194,6 +194,7 @@ void Node::Impl::take_spawns() {
 
 std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const mesh::Principal& principal,
                                                     const std::optional<std::vector<mesh::Item>>& manifest,
+                                                    const std::vector<std::string>& marks,
                                                     std::vector<std::string>& why_not) {
     const mesh::LedgerState& st = ledger.state();
     std::vector<mesh::PublicKey> matches;
@@ -239,6 +240,16 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
                                       " access is denied there");
                 }
             }
+        }
+        // Data residency: the roots the paglet read whose content may go
+        // only to some hosts.
+        for (const auto& mark : marks) {
+            if (!ok || !mark.starts_with("root:")) continue;
+            auto rule = st.residency.find(mark.substr(5));
+            if (rule == st.residency.end() || mesh::selects(st, rule->second.hosts, k)) continue;
+            ok = false;
+            why_not.push_back("host " + st.hosts.at(k).name + ": the content of root " + rule->first +
+                              " may not go there");
         }
         if (ok) out.push_back(k);
     }
@@ -287,7 +298,15 @@ void Node::Impl::start_move(runtime::Departure d) {
     if (!o.passport->root().manifest.is_nil()) manifest = mesh::parse_manifest(o.passport->root().manifest);
     const mesh::Principal principal{d.state.id, d.state.owner, d.state.module, "roaming"};
     std::vector<std::string> why_not;
-    auto hosts = candidates(*ticket, principal, manifest, why_not);
+    // Data residency (planning/cpp-residency.md): a paglet that read a root
+    // whose content stays on this host does not leave.
+    for (const auto& mark : d.state.marks) {
+        if (!mark.starts_with("root:")) continue;
+        auto rule = ledger.state().residency.find(mark.substr(5));
+        if (rule != ledger.state().residency.end() && rule->second.host_only)
+            return fail("data residency: the content of root " + rule->first + " stays on this host");
+    }
+    auto hosts = candidates(*ticket, principal, manifest, d.state.marks, why_not);
     if (hosts.empty()) {
         std::string why = "no host matches " + ticket->target;
         for (const auto& w : why_not) why += "; " + w;

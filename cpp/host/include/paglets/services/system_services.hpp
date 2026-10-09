@@ -30,6 +30,10 @@ namespace paglets::services {
 using ServicePolicy = std::function<std::vector<std::string>(const abi::SenderRecord& caller, std::string_view service,
                                                              const std::vector<std::string>& offered)>;
 
+// Called when a paglet reads (lists, finds, reads) content of a named root,
+// for data residency marks (planning/cpp-residency.md).
+using AccessObserver = std::function<void(const abi::SenderRecord& caller, std::string_view root)>;
+
 struct Notification {
     std::uint64_t id = 0;
     std::string owner;
@@ -70,6 +74,8 @@ public:
 
     // Replaces the policy of directory lookups (WP9 installs the ledger's).
     virtual void set_policy(ServicePolicy policy) = 0;
+    // Hears which roots paglets read from (the mesh node marks them).
+    virtual void set_access_observer(AccessObserver observer) = 0;
 };
 
 // Registers the standard system paglets with `runtime` (before paglets are

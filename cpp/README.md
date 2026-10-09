@@ -230,6 +230,16 @@ $H ledger module-policy --ledger ledger --admin alice.key trusted
 $H ledger revoke --ledger ledger --admin alice.key --module calc.wasm --reason vulnerable
 ```
 
+Data residency ([design](../planning/cpp-residency.md)): a paglet that
+reads from a named root carries the root's mark for good; a residency rule
+keeps it on the host it read on (`host-only`) or lets it move only to some
+hosts (by name, key ID or `--host-label`):
+
+```bash
+$H ledger residency --ledger ledger --admin alice.key clinic hosts --host-label site
+$H ledger residency --ledger ledger --admin alice.key vault host-only
+```
+
 Hosts on the network ([design](../planning/cpp-networking.md)):
 `paglets-host serve` runs a host of the mesh with its own copy of the
 ledger; `paglets-host remote` opens an end-to-end channel to a host as an

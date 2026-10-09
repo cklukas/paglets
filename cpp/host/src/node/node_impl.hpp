@@ -254,7 +254,7 @@ struct Node::Impl {
     void fail_move(Outgoing& o, const std::string& why);
     std::vector<mesh::PublicKey> candidates(const Ticket& ticket, const mesh::Principal& principal,
                                             const std::optional<std::vector<mesh::Item>>& manifest,
-                                            std::vector<std::string>& why_not);
+                                            const std::vector<std::string>& marks, std::vector<std::string>& why_not);
     std::optional<runtime::Cap> recreate(const runtime::PagletId& paglet, const runtime::Cap& cap);
     void take_spawns();
     void check_move_deadlines();

@@ -68,6 +68,7 @@ Record types:
 | `module-sign` | the signer key it names | `module`, `signer`, `name`, `version`? |
 | `module-trust` | `quorum.default` admins | `name`, `signers`?, `modules`?, `classes` |
 | `module-policy` | `quorum.default` admins | `roaming` (`any`, `trusted`) |
+| `root-residency` | `quorum.default` admins | `root`, `rule` (`host-only`, `hosts`, `none`), `hosts` (a host selector, for `hosts`); see [cpp-residency.md](cpp-residency.md) |
 
 Records of other types are stored and replicated but have no effect, so
 newer record types (policy rules and grants in WP9) pass through older hosts.

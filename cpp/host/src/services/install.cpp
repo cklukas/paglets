@@ -38,6 +38,7 @@ public:
     }
 
     void set_policy(ServicePolicy policy) override { directory->set_policy(std::move(policy)); }
+    void set_access_observer(AccessObserver observer) override { files->set_observer(std::move(observer)); }
 };
 
 }  // namespace

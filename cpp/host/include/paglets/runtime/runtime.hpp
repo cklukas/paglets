@@ -196,6 +196,11 @@ public:
     bool unpin(const PagletId& id, const std::string& pin);
     // The end of the paglet's last pin, or 0 when it is not pinned.
     std::int64_t pinned_until(const PagletId& id) const;
+    // Data residency (planning/cpp-residency.md): marks a paglet carries for
+    // good, for example the named roots whose content it read. Children and
+    // clones inherit them; they travel with it and are stored with it.
+    void mark(const PagletId& id, std::string mark);
+    std::vector<std::string> marks(const PagletId& id) const;
     // Children and local clones created since the last call, for passport
     // links (the mesh takes them regularly; at most 10 000 are kept).
     std::vector<Spawn> take_spawns();

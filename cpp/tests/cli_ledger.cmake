@@ -105,7 +105,13 @@ host(ARGS ledger module-policy --ledger "${L}" --admin "${DIR}/alice.key" ${P} t
 host(ARGS ledger revoke --ledger "${L}" --admin "${DIR}/alice.key" ${P} --module ${bad_module} --reason vulnerable)
 host(ARGS ledger rule --ledger "${L}" --admin "${DIR}/alice.key" ${P} --name "signed tools" --decision allow
           --service server-info --op summary --signer ${sam})
+host(ARGS ledger residency --ledger "${L}" --admin "${DIR}/alice.key" ${P} clinic hosts --host-label site)
+host(ARGS ledger residency --ledger "${L}" --admin "${DIR}/alice.key" ${P} vault host-only)
+host(EXPECT_FAIL ARGS ledger residency --ledger "${L}" --admin "${DIR}/alice.key" ${P} vault hosts)
+host(EXPECT_FAIL ARGS ledger residency --ledger "${L}" --admin "${DIR}/alice.key" ${P} vault elsewhere)
 host(ARGS ledger show --ledger "${L}")
+expect("root clinic  hosts  label site")
+expect("root vault  host-only")
 expect("module trust (roaming modules: trusted)")
 expect("roaming,resident  lab apps  signer ")
 expect("calc 1.0  signer ")

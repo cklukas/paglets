@@ -10,6 +10,9 @@
 #include "runtime_fixture.hpp"
 #include "test.hpp"
 
+#include <explorer_msgs.hpp>
+#include <paglets/wire/reflect.hpp>
+
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -341,4 +344,63 @@ PAGLETS_TEST("movement over HTTPS channels: dispatch there and back") {
     REQUIRE(eventually([&] { return a.f->runtime->info(*id).has_value() && !b.f->runtime->info(*id); }));
     CHECK_EQ(count(*a.f, *id), 3);
     CHECK(b.node->move_stats().pages_sent < a.node->move_stats().pages_sent);
+}
+
+PAGLETS_TEST("movement: data residency keeps paglets that read a root where its content may go") {
+    const fs::path root = fs::temp_directory_path() / ("paglets-residency-" + std::to_string(std::random_device{}()));
+    fs::create_directories(root);
+    std::ofstream(root / "patients.txt") << "confidential";
+    ps::ServicesConfig sc;
+    sc.roots["clinic"] = root;
+    Mesh net;
+    auto& a = net.add_host("a", sc);
+    auto& b = net.add_host("b", sc);
+    auto& c = net.add_host("c", sc);
+    net.enroll_all();
+    net.admin_record("host-enroll", data::host_enroll(a.key, "a", {"site"}));
+    net.admin_record("host-enroll", data::host_enroll(b.key, "b", {"site"}));
+    // The content of `clinic` goes only to hosts labelled `site`.
+    net.admin_record("root-residency", data::root_residency("clinic", "hosts", HostSelector{{}, {"site"}}));
+    REQUIRE(net.settle([&] { return net.converged(); }));
+    REQUIRE(a.node->state().residency.contains("clinic"));
+
+    const std::string module = a.f->module("explorer.wasm");
+    const auto reader = start(net, a, module, '6');
+    const auto idle = start(net, a, module, '7');
+    // The reader reads a file of the root: it carries the root's mark.
+    auto cap = a.services->directory_capability("clinic", "", {"read"});
+    REQUIRE_OK(cap);
+    auto dir = a.f->runtime->add_capability(reader, std::move(*cap));
+    REQUIRE_OK(dir);
+    auto r = a.f->runtime->call(reader, "read_file", paglets::wire::to_msgpack(explorer::Explore{*dir, "patients.txt"}), 20s);
+    REQUIRE(r.status == 0);
+    CHECK(dec<std::string>(r.payload) == "content:confidential");
+    CHECK(a.f->runtime->marks(reader) == std::vector<std::string>{"root:clinic"});
+    CHECK(a.f->runtime->marks(idle).empty());
+
+    // Not to c (no label); the paglet that read nothing goes anywhere.
+    REQUIRE_OK(a.node->dispatch(reader, "c"));
+    REQUIRE(net.settle([&] { return a.node->move_stats().moves_failed == 1u; }, 400));
+    CHECK(a.f->runtime->info(reader).has_value());
+    REQUIRE_OK(a.node->dispatch(idle, "c"));
+    REQUIRE(on(net, c, idle, a));
+    // To b (labelled): the mark travels along.
+    REQUIRE_OK(a.node->dispatch(reader, "label:site?retries=3"));
+    REQUIRE(on(net, b, reader, a));
+    CHECK(b.f->runtime->marks(reader) == std::vector<std::string>{"root:clinic"});
+
+    // host-only: the content stays where it was read; the reader stays on b.
+    net.admin_record("root-residency", data::root_residency("clinic", "host-only"));
+    REQUIRE(net.settle([&] { return net.converged(); }));
+    REQUIRE_OK(b.node->dispatch(reader, "a"));
+    REQUIRE(net.settle([&] { return b.node->move_stats().moves_failed == 1u; }, 400));
+    CHECK(b.f->runtime->info(reader).has_value());
+    // none lifts the rule.
+    net.admin_record("root-residency", data::root_residency("clinic", "none"));
+    REQUIRE(net.settle([&] { return net.converged(); }));
+    CHECK(!b.node->state().residency.contains("clinic"));
+    REQUIRE_OK(b.node->dispatch(reader, "c"));
+    REQUIRE(on(net, c, reader, b));
+    std::error_code ec;
+    fs::remove_all(root, ec);
 }

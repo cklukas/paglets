@@ -68,6 +68,10 @@ public:
     explicit Files(std::map<std::string, fs::path> roots);
 
     const std::map<std::string, fs::path>& roots() const { return roots_; }
+    void set_observer(AccessObserver observer) {
+        std::lock_guard lock(observer_mu_);
+        observer_ = std::move(observer);
+    }
 
     Result<files::ListReply> list(const files::ListRequest&, Operation&);
     Result<files::Entry> stat(const files::StatRequest&, Operation&);
@@ -91,6 +95,8 @@ private:
     Result<Resolved> resolve(Operation& op, std::initializer_list<std::string_view> rights, std::string_view rel) const;
 
     std::map<std::string, fs::path> roots_;
+    mutable std::mutex observer_mu_;
+    AccessObserver observer_;
 };
 
 // -- storage --------------------------------------------------------------------

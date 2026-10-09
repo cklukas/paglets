@@ -319,6 +319,7 @@ PAGLETS_TEST("mobility: travelling state round trip") {
     c.host = "host-b";
     s.caps = {{2, c}};
     s.pending = {{4, 1500}};
+    s.marks = {"root:clinic"};
     auto back = rt::decode_state(rt::encode_state(s));
     REQUIRE_OK(back);
     CHECK_EQ(back->id, s.id);
@@ -328,5 +329,6 @@ PAGLETS_TEST("mobility: travelling state round trip") {
     REQUIRE(back->caps.size() == 1u);
     CHECK_EQ(back->caps[0].second.host, std::string("host-b"));
     CHECK(back->pending == s.pending);
+    CHECK(back->marks == s.marks);
     CHECK(!rt::decode_state(Bytes{1, 2, 3}).has_value());
 }

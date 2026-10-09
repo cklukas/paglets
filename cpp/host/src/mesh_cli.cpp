@@ -74,6 +74,8 @@ int usage() {
            "       paglets-host ledger trust --ledger DIR --admin KEY... --name NAME --class C...\n"
            "                                 [--signer KEY-ID]... [--module MODULE]...\n"
            "       paglets-host ledger module-policy --ledger DIR --admin KEY... any|trusted\n"
+           "       paglets-host ledger residency --ledger DIR --admin KEY... ROOT host-only|none\n"
+           "       paglets-host ledger residency --ledger DIR --admin KEY... ROOT hosts [HOST]... [--host-label L]...\n"
            "       paglets-host remote status --connect URL --key KEY --ledger DIR [--host-key KEY-ID]\n"
            "       paglets-host remote push --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE.wasm\n"
@@ -87,7 +89,9 @@ int usage() {
            "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote unpin --connect URL --key ADMIN-KEY --ledger DIR PAGLET [--pin ID]\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
-           "system; 'module-policy trusted' makes roaming modules need trust as well.\n"
+           "system; 'module-policy trusted' makes roaming modules need trust as well. residency keeps\n"
+           "the content of a named root on the host it was read on (host-only) or on some hosts: a paglet\n"
+           "that read the root moves only there (none lifts the rule).\n"
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
@@ -494,6 +498,18 @@ int ledger_show(const Options& o) {
                   << (m.version.empty() ? "" : " " + m.version) << "  signer " << key_id(m.signer).substr(0, 16)
                   << "\n";
     }
+    if (!st.residency.empty()) {
+        std::cout << "data residency:\n";
+        for (const auto& [root, res] : st.residency) {
+            std::cout << "  root " << root << "  " << (res.host_only ? "host-only" : "hosts");
+            for (const auto& k : res.hosts.keys) {
+                auto h = st.hosts.find(k);
+                std::cout << "  " << (h == st.hosts.end() ? key_id(k).substr(0, 16) : h->second.name);
+            }
+            for (const auto& l : res.hosts.labels) std::cout << "  label " << l;
+            std::cout << "\n";
+        }
+    }
     if (!st.revoked_keys.empty() || !st.revoked_records.empty() || !st.revoked_modules.empty()) {
         std::cout << "revoked:\n";
         for (const auto& k : st.revoked_keys) std::cout << "  key    " << key_id(k) << "\n";
@@ -793,6 +809,29 @@ int ledger_module_policy(const Options& o) {
     auto s = AdminSession::open(o);
     if (!s) return fail(s.error());
     return s->issue("module-policy", data::module_policy(*roaming));
+}
+
+// ledger residency ROOT host-only|none, or ROOT hosts [HOST]... [--host-label L]...
+int ledger_residency(const Options& o) {
+    if (o.positional.size() < 2) return usage();
+    const std::string& root = o.positional[0];
+    const std::string& rule = o.positional[1];
+    if (rule != "host-only" && rule != "hosts" && rule != "none") return fail("the rule is host-only, hosts or none");
+    auto s = AdminSession::open(o);
+    if (!s) return fail(s.error());
+    HostSelector hosts{{}, o.host_labels};
+    for (std::size_t i = 2; i < o.positional.size(); ++i) {
+        const std::string& name = o.positional[i];
+        std::optional<PublicKey> found;
+        for (const auto& [k, h] : s->ledger.state().hosts) {
+            if (h.name == name || key_id(k) == name) found = k;
+        }
+        if (!found) return fail("no enrolled host " + name);
+        hosts.keys.push_back(*found);
+    }
+    if (rule == "hosts" && hosts.all()) return fail("the rule 'hosts' needs hosts or --host-label");
+    if (rule != "hosts" && !hosts.all()) return usage();
+    return s->issue("root-residency", data::root_residency(root, rule, hosts));
 }
 
 int ledger_audit(const Options& o) {
@@ -1186,6 +1225,7 @@ int mesh_command(int argc, char** argv) {
             if (action == "sign-module") return ledger_sign_module(o);
             if (action == "trust") return ledger_trust(o);
             if (action == "module-policy") return ledger_module_policy(o);
+            if (action == "residency") return ledger_residency(o);
         }
         if (group == "remote") {
             if (action == "status") return remote_status(o);

@@ -193,6 +193,9 @@ struct PagletRec {
     // Pins (the mesh's locator): pin ID -> end (Unix milliseconds). While
     // one has not ended the paglet stays on this host.
     std::map<std::string, std::int64_t> pins;
+    // Data residency marks: kept for good, inherited by children and clones,
+    // carried along when it moves (planning/cpp-residency.md).
+    std::set<std::string> marks;
 
     // The end of the last pin, or 0 when the paglet is not pinned.
     std::int64_t pinned_until() {
@@ -390,6 +393,7 @@ struct Runtime::Impl {
         st.next_timer = rec.next_timer;
         st.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         st.services = rec.services;
+        st.marks.assign(rec.marks.begin(), rec.marks.end());
         for (const auto& [h, c] : rec.caps) st.caps.emplace_back(h, portable(c));
         const auto now = SteadyClock::now();
         for (const auto& [at, d] : deadlines) {
@@ -718,6 +722,7 @@ struct Runtime::Impl {
         r.pending_requests.assign(rec.pending_requests.begin(), rec.pending_requests.end());
         r.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         r.services = rec.services;
+        r.marks.assign(rec.marks.begin(), rec.marks.end());
         if (auto ok = store->save_paglet(r, snap); !ok) {
             log(3, rec.id, "persisting the paglet failed: " + ok.error());
         } else {
@@ -1094,6 +1099,7 @@ public:
         }
         const PagletId id = new_paglet_id();
         PagletRec* created = rt_.new_paglet(id, std::move(module), TrustClass::roaming, rec_.owner);
+        if (created != nullptr) created->marks = rec_.marks;  // what it was given may be marked content
         if (created == nullptr) return abi::not_found;  // collected since the check
         auto caps = rt_.take_caps(rec_, spec.caps);
         if (!caps) {
@@ -1156,6 +1162,7 @@ public:
                 // The module has a user (this paglet), so it is in the store.
                 PagletRec* created = rt_.new_paglet(id, rec_.module, trust, rec_.owner);
                 if (created == nullptr) return abi::internal;
+                created->marks = rec_.marks;
                 auto caps = rt_.take_caps(rec_, arg.caps);
                 if (!caps) {
                     rt_.erase_paglet(id);
@@ -1894,6 +1901,7 @@ void Runtime::Impl::recover() {
         rec.next_timer = r.next_timer;
         if (r.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(r.checkpoint_ms);
         rec.services = r.services;
+        rec.marks.insert(r.marks.begin(), r.marks.end());
         rec.caps.clear();
         for (auto& [h, cap] : r.caps) {
             if (cap.kind == Cap::Kind::timer) {
@@ -2426,6 +2434,7 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     rec.next_correlation = st.next_correlation;
     rec.next_timer = st.next_timer;
     if (st.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(st.checkpoint_ms);
+    rec.marks.insert(st.marks.begin(), st.marks.end());
     for (const auto& [correlation, ms] : st.pending) {
         rec.pending_requests.insert(correlation);
         rt.schedule(SteadyClock::now() + std::chrono::milliseconds(ms),
@@ -2515,6 +2524,21 @@ bool Runtime::unpin(const PagletId& id, const std::string& pin) {
     std::lock_guard lock(impl_->mu);
     PagletRec* rec = impl_->find(id);
     return rec != nullptr && rec->pins.erase(pin) > 0;
+}
+
+void Runtime::mark(const PagletId& id, std::string mark) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    if (rec == nullptr || rec->native || rec->marks.contains(mark)) return;
+    rec->marks.insert(std::move(mark));
+    rec->checkpoint_due = true;  // stored with the next checkpoint
+}
+
+std::vector<std::string> Runtime::marks(const PagletId& id) const {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(id);
+    if (rec == nullptr) return {};
+    return {rec->marks.begin(), rec->marks.end()};
 }
 
 std::int64_t Runtime::pinned_until(const PagletId& id) const {

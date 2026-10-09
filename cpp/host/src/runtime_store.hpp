@@ -37,6 +37,7 @@ struct PagletRecord {
     std::vector<std::uint64_t> pending_requests;
     std::int64_t checkpoint_ms = -1;                             // per-paglet checkpoint interval; -1: host default
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints: name, handle
+    std::vector<std::string> marks;                              // data residency marks
 };
 
 using Warn = std::function<void(const std::string&)>;

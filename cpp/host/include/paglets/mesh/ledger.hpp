@@ -86,6 +86,14 @@ struct IgnoredRecord {
     std::string reason;
 };
 
+// Data residency of a named root (planning/cpp-residency.md): content read
+// from it stays on the host it was read on (`host_only`), or goes only to
+// the hosts `hosts` selects.
+struct Residency {
+    bool host_only = false;
+    HostSelector hosts;
+};
+
 // The state all hosts derive from the same records.
 struct LedgerState {
     RecordId mesh{};
@@ -112,6 +120,9 @@ struct LedgerState {
     std::vector<ModuleSignature> module_signatures;  // valid, in ledger order
     std::set<Digest> revoked_modules;
     RoamingModules roaming_modules = RoamingModules::any;
+
+    // Data residency rules by named root (record `root-residency`).
+    std::map<std::string, Residency> residency;
 
     std::int64_t clock = 0;  // largest clock of any record
     std::size_t records = 0;
@@ -195,6 +206,9 @@ Map key_removal(const PublicKey& key);
 Map request_deny(const RecordId& request, std::string_view reason);
 Map revoke_key(const PublicKey& key, std::string_view reason);
 Map revoke_record(const RecordId& record, std::string_view reason);
+// A residency rule for a named root: `rule` is host-only, hosts (with
+// `hosts`), or none (the root's content may go anywhere again).
+Map root_residency(std::string_view root, std::string_view rule, const HostSelector& hosts = {});
 }  // namespace data
 
 // Derives the state from a set of records (the ledger's own derivation;

@@ -205,6 +205,10 @@ std::expected<void, std::string> Node::start() {
         }
         return allowed;
     });
+    // Data residency: a paglet that reads a root carries its mark.
+    impl_->services->set_access_observer([impl = impl_.get()](const abi::SenderRecord& caller, std::string_view root) {
+        impl->runtime.mark(caller.id, "root:" + std::string(root));
+    });
     sync();
     impl_->runtime.set_module_admission([impl = impl_.get()](const std::string& module, runtime::TrustClass trust) {
         return impl->admit(module, trust);

@@ -562,6 +562,29 @@ struct Deriver {
                     continue;
                 }
                 st.roaming_modules = *parsed;
+            } else if (type == "root-residency") {
+                auto root = f.str("root");
+                auto rule = f.str("rule");
+                const Value* hosts = f.get("hosts");
+                if (!root || root->empty() || !rule || (*rule != "host-only" && *rule != "hosts" && *rule != "none")) {
+                    ignore(*r, "malformed residency rule");
+                    continue;
+                }
+                if (*rule == "none") {
+                    st.residency.erase(*root);
+                    continue;
+                }
+                Residency res;
+                res.host_only = *rule == "host-only";
+                if (!res.host_only) {
+                    auto selector = hosts == nullptr ? std::nullopt : parse_hosts(*hosts);
+                    if (!selector || selector->all()) {
+                        ignore(*r, "a residency rule names the hosts");
+                        continue;
+                    }
+                    res.hosts = std::move(*selector);
+                }
+                st.residency[*root] = std::move(res);
             } else if (type == "request-deny") {
                 const Value* request = f.get("request");
                 auto request_id = request == nullptr ? std::nullopt : as_key(*request);
@@ -668,6 +691,13 @@ Value LedgerState::to_value() const {
                      {"module_signatures", ids(module_signatures)},
                      {"revoked_modules", keys(revoked_modules)},
                      {"roaming_modules", Value(to_string(roaming_modules))},
+                     {"residency", [&] {
+                          Array a;
+                          for (const auto& [root, res] : residency) {
+                              a.push_back(Value(Array{Value(root), Value(res.host_only), mesh::to_value(res.hosts)}));
+                          }
+                          return Value(std::move(a));
+                      }()},
                      {"clock", Value(clock)},
                      {"records", Value(static_cast<std::int64_t>(records))}});
 }
@@ -917,6 +947,12 @@ Map revoke_key(const PublicKey& key, std::string_view reason) {
 
 Map revoke_record(const RecordId& record, std::string_view reason) {
     return Map{{"record", Value::bin(record)}, {"reason", Value(reason)}};
+}
+
+Map root_residency(std::string_view root, std::string_view rule, const HostSelector& hosts) {
+    Map m{{"root", Value(root)}, {"rule", Value(rule)}};
+    if (rule == "hosts") m.emplace_back("hosts", to_value(hosts));
+    return m;
 }
 
 }  // namespace data
