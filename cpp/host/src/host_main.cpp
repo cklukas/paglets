@@ -92,8 +92,10 @@ int usage() {
            "       paglets-host list --state-dir DIR\n"
            "       paglets-host call --state-dir DIR <paglet-id|all> NAME [JSON] [--expect TEXT]\n"
            "       paglets-host keys|mesh|ledger ...   (keys and the mesh ledger; no arguments for help)\n"
+           "       paglets-host module inspect MODULE.wasm   (hash, ABI, imports, exports)\n"
            "       paglets-host serve ...              (a host of a mesh on the network)\n"
-           "       paglets-host remote ...             (sessions with a host: status, push, launch, call, dispatch)\n";
+           "       paglets-host remote ...             (sessions with a host: status, push, launch, call, dispatch,\n"
+           "                                            pull, requests, approve, modules, ...)\n";
     return 2;
 }
 

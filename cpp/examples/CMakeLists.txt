@@ -24,3 +24,38 @@ paglets_add_module(digest
     SCHEMA_NAMESPACE digest_msgs
     SERVICES ai
     PATTERNS)
+paglets_add_module(journey
+    SOURCES journey/journey.cpp
+    SCHEMA_HEADER journey/journey_msgs.hpp
+    SCHEMA_NAMESPACE journey_msgs
+    PATTERNS)
+paglets_add_module(finder
+    SOURCES finder/finder.cpp
+    SCHEMA_HEADER finder/finder_msgs.hpp
+    SCHEMA_NAMESPACE finder_msgs
+    PATTERNS)
+paglets_add_module(latency
+    SOURCES latency/latency.cpp
+    SCHEMA_HEADER latency/latency_msgs.hpp
+    SCHEMA_NAMESPACE latency_msgs
+    PATTERNS)
+paglets_add_module(inventory
+    SOURCES inventory/inventory.cpp
+    SCHEMA_HEADER inventory/inventory_msgs.hpp
+    SCHEMA_NAMESPACE inventory_msgs
+    PATTERNS)
+paglets_add_module(seek
+    SOURCES seek/seek.cpp
+    SCHEMA_HEADER seek/seek_msgs.hpp
+    SCHEMA_NAMESPACE seek_msgs
+    PATTERNS)
+paglets_add_module(guard
+    SOURCES guard/guard.cpp
+    SCHEMA_HEADER guard/guard_msgs.hpp
+    SCHEMA_NAMESPACE guard_msgs
+    PATTERNS)
+paglets_add_module(dupes
+    SOURCES dupes/dupes.cpp ../host/src/sha256.cpp
+    SCHEMA_HEADER dupes/dupes_msgs.hpp
+    SCHEMA_NAMESPACE dupes_msgs
+    PATTERNS)

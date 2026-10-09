@@ -243,6 +243,54 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         return answer(std::move(m));
     }
 
+    // Tooling (WP19): the ledger's records (an admin's copy catches up with
+    // them), the modules here, a module to keep here, a paglet to end.
+    if (*type == "records") {
+        mesh::Array list;
+        std::lock_guard lock(impl_->mu);
+        for (const mesh::Record* r : impl_->ledger.records()) list.emplace_back(r->encode());
+        return answer(mesh::Map{{"records", mesh::Value(std::move(list))}});
+    }
+
+    if (*type == "modules") {
+        mesh::Array list;
+        std::vector<std::pair<std::string, std::string>> names;  // hash, "name version"
+        {
+            std::lock_guard lock(impl_->mu);
+            for (const auto& s : impl_->ledger.state().module_signatures) {
+                names.emplace_back(to_hex(s.module), s.name + (s.version.empty() ? "" : " " + s.version));
+            }
+        }
+        for (const auto& e : impl_->runtime.modules().list()) {
+            mesh::Array signed_as;
+            for (const auto& [hash, name] : names) {
+                if (hash == e.hash) signed_as.emplace_back(name);
+            }
+            list.emplace_back(mesh::Map{{"hash", mesh::Value(e.hash)},
+                                        {"size", mesh::Value(static_cast<std::int64_t>(e.size))},
+                                        {"users", mesh::Value(static_cast<std::int64_t>(e.users))},
+                                        {"pinned", mesh::Value(e.pinned)},
+                                        {"names", mesh::Value(std::move(signed_as))}});
+        }
+        return answer(mesh::Map{{"modules", mesh::Value(std::move(list))}});
+    }
+
+    if (*type == "push-module") {
+        auto bytes = f.bin("module");
+        if (!bytes) return refusal("malformed request");
+        auto hash = impl_->runtime.modules().add(std::move(*bytes));
+        if (!hash) return refusal(hash.error());
+        return answer(mesh::Map{{"hash", mesh::Value(*hash)}});
+    }
+
+    if (*type == "dispose") {
+        auto paglet = f.str("paglet");
+        if (!paglet) return refusal("malformed request");
+        if (auto ok = may_act(*paglet); !ok) return refusal(ok.error());
+        if (auto ok = impl_->runtime.dispose(*paglet); !ok) return refusal(std::string(abi::error_name(ok.error())));
+        return answer({});
+    }
+
     return refusal("unknown request " + *type);
 }
 

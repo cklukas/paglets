@@ -68,5 +68,33 @@ message(STATUS "landscape:\n${OUT}")
 until(TRIES 80 ARGS remote landscape --connect ${A} ${OLGA} EXPECT "offers ai summarize,classify")
 until(ARGS remote slots --connect ${B} ${OLGA} EXPECT "slots [0-9]+/[0-9]+ free")
 
+# Tooling (WP19): modules on a host, admin decisions against live hosts,
+# disposing a paglet.
+until(ARGS remote modules --connect ${A} ${OLGA} EXPECT "[0-9a-f]+  [0-9]+ KB  [0-9]+ paglets")
+until(ARGS remote push-module --connect ${B} ${OLGA} "${GUEST}" EXPECT "^[0-9a-f]+$")
+set(ALICE --key "${DIR}/alice.key" ${P})
+# A new owner asks to join; the request reaches a from the requester's copy.
+file(COPY "${DIR}/ledger/" DESTINATION "${DIR}/ledger-otto")
+until(ARGS keys init --role owner --name otto --out "${DIR}/otto.key" ${P} --kdf interactive)
+until(ARGS ledger request --ledger "${DIR}/ledger-otto" --key "${DIR}/otto.key" ${P})
+string(SUBSTRING "${OUT}" 0 16 request)
+until(ARGS remote push --connect ${A} ${ALICE} --ledger "${DIR}/ledger-otto")
+# An admin copy that has not seen it: requests pulls it in, approve decides
+# (through b) and every host learns the enrollment by gossip.
+file(COPY "${DIR}/ledger/" DESTINATION "${DIR}/ledger-admin")
+until(TRIES 40 ARGS remote requests --connect ${B} ${ALICE} --ledger "${DIR}/ledger-admin" EXPECT "owner  otto")
+until(ARGS remote approve --connect ${B} ${ALICE} --ledger "${DIR}/ledger-admin" ${request})
+until(TRIES 80 ARGS remote status --connect ${C} --key "${DIR}/otto.key" ${P} --ledger "${DIR}/ledger-admin"
+      EXPECT "host: +c ")
+until(ARGS remote audit --connect ${A} ${ALICE} --ledger "${DIR}/ledger-admin")
+until(ARGS remote launch --connect ${A} ${OLGA} "${GUEST}")
+set(short_lived "${OUT}")
+until(ARGS remote dispose --connect ${A} ${OLGA} ${short_lived} EXPECT "disposed")
+until(ARGS remote status --connect ${A} ${OLGA})
+string(FIND "${OUT}" "${short_lived}" still_there)
+if(NOT still_there EQUAL -1)
+    stop_and_fail("the disposed paglet is still listed:\n${OUT}")
+endif()
+
 file(WRITE "${DIR}/stop" "")
 message(STATUS "four hosts found each other; paglet ${paglet} went a -> c -> b -> d (relayed)")

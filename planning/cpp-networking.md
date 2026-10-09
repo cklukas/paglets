@@ -237,6 +237,8 @@ serves channels over HTTPS until SIGINT, SIGTERM or a stop file.
 | `--module-source DIR` | a directory of modules the host may load (repeatable) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | PEM certificate and key (default: self-signed), CA for peers |
 | `--threads N`, `--in-process`, `--no-sandbox`, `--stop-file FILE` | runtime lanes, workers, stopping |
+| `--slots N` | compute slots (planning/cpp-compute.md) |
+| `--web ...`, `--ai ...` | gateway system paglets (planning/cpp-web-ai.md) |
 
 It prints its key ID, the mesh ID and its URL. Host channels carry the
 frames of sections 6 and 7 and of WP11; channels of admins and owners are
@@ -253,6 +255,11 @@ frames of sections 6 and 7 and of WP11; channels of admins and owners are
 | `dispatch` | `paglet`, `destination` | the paglet's owner, admins | the move started (a transfer ticket, section 6) |
 | `locate`, `pin`, `pins`, `unpin` | | | location and pins (planning/cpp-location.md, section 7) |
 | `hosts` | | admins, owners | the host registry (planning/cpp-mesh.md, section 5) |
+| `landscape`, `slots` | | admins, owners | mesh-info snapshots with offers, compute slots (planning/cpp-compute.md) |
+| `records` | | admins, owners | every ledger record the host has (WP19) |
+| `modules` | | admins, owners | the modules on the host: hash, size, paglets using it, pinned, the names it is signed as |
+| `push-module` | `module` | admins, owners | the module's hash; it is checked and kept like a fetched module |
+| `dispose` | `paglet` | the paglet's owner, admins | the paglet ended |
 
 The client side is the `remote` command group of `paglets-host`
 (`status`, `push`, `launch`, `call`, `dispatch`, and the location commands
@@ -261,6 +268,14 @@ The client side is the `remote` command group of `paglets-host`
 or owner); the client accepts the server only if it is a host enrolled in
 its ledger copy, or the key given with `--host-key`. `launch` signs the
 passport with the owner key on the client and sends the module with it.
+
+Admin work against live hosts (WP19): `remote pull` brings the host's
+records into the ledger copy; `remote requests`, `approve`, `deny` and
+`audit` pull first, so the admin decides on what the mesh knows, then sign
+the decision with the admin key and push it (the host gossips it on).
+`remote modules`, `push-module` and `dispose` act on the host's modules and
+paglets; `paglets-host module inspect FILE` shows a module's hash, whether
+it can run as a roaming paglet, its imports and exports.
 
 ## 9. Exit
 

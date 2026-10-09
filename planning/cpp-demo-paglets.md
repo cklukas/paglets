@@ -15,30 +15,35 @@ manifest).
 
 ## Overview
 
-| # | Demo | Category | Main features shown |
-|---|---|---|---|
-| 1 | Mesh Journey | Getting started | Memory-image mobility, itinerary |
-| 2 | Mesh File Finder | Files | Clone fan-out, `files.find`, grants follow the paglet |
-| 3 | Storage Analyzer | Files | Distributed aggregation, named roots |
-| 4 | Duplicate Finder | Files | Multi-phase coordination, hashing, artifacts |
-| 5 | File Courier | Files | Grants on two hosts, artifacts, manifest preflight |
-| 6 | Tree Compare | Files | Parallel scans, diff reports |
-| 7 | Log Scout | Files | Range reads, time filters, live mode via pubsub |
-| 8 | Mesh Top | Monitoring | `server-info`, pubsub, long-lived paglets |
-| 9 | Volume Guard | Monitoring | Timers, inactive paglets, user-info alerts |
-| 10 | Inventory Collector | Monitoring | Uniform cross-platform schemas, reports |
-| 11 | Process Finder | Monitoring | `server-info.processes`, fan-out |
-| 12 | Mesh Benchmark | Performance | Dedicated workers, scratch storage, rankings |
-| 13 | Latency Map | Performance | Paglet-to-paglet messaging, host pair matrix |
-| 14 | Pi Marathon | Compute | compute-slots, checkpoints, resume after host loss |
-| 15 | Hide and Seek | Mobility | `locate_and_pin`, continuous movement, stress test |
-| 16 | AI Document Digest | AI | Find anywhere, move to the AI host, deliver elsewhere |
-| 17 | Semantic Mesh Search | AI | Embeddings, index in paglet memory, natural-language queries |
-| 18 | Image Describer | AI | Vision models, offers with requirements |
-| 19 | Log Explainer | AI | Cooperation with Log Scout, grouping and explaining errors |
-| 20 | Download Courier | Web | Download through a gateway host, delivery to the starting host |
-| 21 | Web Researcher | Web + AI | Search and fetch on a web host, summarize on an AI host |
-| 22 | Release Watcher | Web | Periodic checks from a web host, notifications, hand-off to Download Courier |
+Status (WP20): demos marked with a directory are implemented in
+`cpp/examples/` and tested on meshes of several hosts in
+`cpp/tests/test_demos.cpp` (the AI and web demos in `test_gateway.cpp`, the
+pi example in `test_compute.cpp`).
+
+| # | Demo | Category | Main features shown | Status |
+|---|---|---|---|---|
+| 1 | Mesh Journey | Getting started | Memory-image mobility, itinerary | `journey/` |
+| 2 | Mesh File Finder | Files | Clone fan-out, `files.find`, grants follow the paglet | `finder/` |
+| 3 | Storage Analyzer | Files | Distributed aggregation, named roots | `finder/` (the analysis) |
+| 4 | Duplicate Finder | Files | Multi-phase coordination, hashing, artifacts | `dupes/` |
+| 5 | File Courier | Files | Grants on two hosts, artifacts, manifest preflight | |
+| 6 | Tree Compare | Files | Parallel scans, diff reports | |
+| 7 | Log Scout | Files | Range reads, time filters, live mode via pubsub | |
+| 8 | Mesh Top | Monitoring | `server-info`, pubsub, long-lived paglets | `inventory/` (load and top processes) |
+| 9 | Volume Guard | Monitoring | Timers, inactive paglets, user-info alerts | `guard/` |
+| 10 | Inventory Collector | Monitoring | Uniform cross-platform schemas, reports | `inventory/` |
+| 11 | Process Finder | Monitoring | `server-info.processes`, fan-out | `inventory/` (with a process name) |
+| 12 | Mesh Benchmark | Performance | Dedicated workers, scratch storage, rankings | |
+| 13 | Latency Map | Performance | Paglet-to-paglet messaging, host pair matrix | `latency/` |
+| 14 | Pi Marathon | Compute | compute-slots, checkpoints, resume after host loss | `pi/` (chunks, slots, loss of a host) |
+| 15 | Hide and Seek | Mobility | `locate_and_pin`, continuous movement, stress test | `seek/` |
+| 16 | AI Document Digest | AI | Find anywhere, move to the AI host, deliver elsewhere | `digest/` |
+| 17 | Semantic Mesh Search | AI | Embeddings, index in paglet memory, natural-language queries | |
+| 18 | Image Describer | AI | Vision models, offers with requirements | |
+| 19 | Log Explainer | AI | Cooperation with Log Scout, grouping and explaining errors | |
+| 20 | Download Courier | Web | Download through a gateway host, delivery to the starting host | `courier/` |
+| 21 | Web Researcher | Web + AI | Search and fetch on a web host, summarize on an AI host | |
+| 22 | Release Watcher | Web | Periodic checks from a web host, notifications, hand-off to Download Courier | |
 
 ## Getting started
 

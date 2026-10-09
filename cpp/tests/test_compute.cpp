@@ -277,7 +277,9 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     const auto before = status();
     CHECK(!before.finished);
 
-    // c goes away mid-run, with chunks of its own in flight.
+    // c goes away mid-run, with chunks of its own in flight (a worker holds
+    // one of its slots: each chunk takes at least 250 ms).
+    REQUIRE(eventually([&] { return !hosts[2]->node->compute_status().leases.empty(); }));
     hosts[2]->f->runtime->shutdown(false);
     hosts[2]->transport->stop();
     hosts.pop_back();

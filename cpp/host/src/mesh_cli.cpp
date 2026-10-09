@@ -18,6 +18,7 @@
 #include <paglets/wire/reflect.hpp>
 #endif
 #include <paglets/sha256.hpp>
+#include <paglets/wasm/binary.hpp>
 #include <paglets/wasm/engine.hpp>
 
 #include <algorithm>
@@ -52,6 +53,7 @@ int usage() {
            "                             [--passphrase-file FILE] [--kdf moderate|interactive]\n"
            "       paglets-host keys show FILE\n"
            "       paglets-host mesh create --name NAME --ledger DIR --admin KEY... [--admin-quorum N] [--quorum N]\n"
+           "       paglets-host module inspect MODULE.wasm\n"
            "       paglets-host ledger show --ledger DIR [--ignored]\n"
            "       paglets-host ledger request --ledger DIR --key KEY [--label L]...\n"
            "       paglets-host ledger approve --ledger DIR --admin KEY... REQUEST [--label L | --group G]...\n"
@@ -88,6 +90,13 @@ int usage() {
            "       paglets-host remote pin --connect URL --key KEY --ledger DIR PAGLET [--minutes N] [--reason TEXT]\n"
            "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote unpin --connect URL --key ADMIN-KEY --ledger DIR PAGLET [--pin ID]\n"
+           "       paglets-host remote pull|requests|audit --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote approve --connect URL --key ADMIN-KEY --ledger DIR REQUEST\n"
+           "                                   [--label L | --group G]... [--host-only] [--admin KEY]...\n"
+           "       paglets-host remote deny --connect URL --key ADMIN-KEY --ledger DIR REQUEST [--reason TEXT]\n"
+           "       paglets-host remote modules --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote push-module --connect URL --key KEY --ledger DIR MODULE.wasm\n"
+           "       paglets-host remote dispose --connect URL --key KEY --ledger DIR PAGLET\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
            "system; 'module-policy trusted' makes roaming modules need trust as well. residency keeps\n"
            "the content of a named root on the host it was read on (host-only) or on some hosts: a paglet\n"
@@ -101,6 +110,10 @@ int usage() {
            "compute slots of the host (leases, queue);\n"
            "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
            "pins lists the pins on the host, unpin ends pins wherever the paglet is (admins).\n"
+           "pull brings the host's ledger records into the ledger copy; requests, approve, deny and audit\n"
+           "pull first, so admins decide on what the mesh knows (approve and deny sign with --admin, or\n"
+           "--key, and push the decision); modules lists the modules on the host, push-module stores\n"
+           "one there, dispose ends a paglet (its owner or an admin).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
            "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
@@ -967,6 +980,170 @@ int remote_push(const Options& o) {
     return 0;
 }
 
+// What a module file is: its hash, the paglet ABI it was built for, its
+// imports (and whether a roaming paglet may have them), exports and memory.
+int module_inspect(const Options& o) {
+    namespace pw = paglets::wasm;
+    if (o.positional.size() != 1) return usage();
+    auto bytes = pw::read_file(o.positional[0]);
+    if (!bytes) return fail(bytes.error());
+    auto info = pw::parse_module(*bytes);
+    if (!info) return fail("not a Wasm module: " + info.error());
+    std::cout << "module:  " << paglets::to_hex(paglets::sha256(*bytes)) << "\n"
+              << "size:    " << bytes->size() / 1024 << " KB\n";
+    if (info->memory) {
+        std::cout << "memory:  " << info->memory->min_pages << " pages at the start"
+                  << (info->memory->max_pages ? ", at most " + std::to_string(*info->memory->max_pages) : std::string())
+                  << (info->memory->memory64 ? " (memory64)" : "") << "\n";
+    }
+    const auto standard = pw::ImportPolicy::standard();
+    const auto system = pw::ImportPolicy::system();
+    const bool paglet = info->find_export("paglets_on_message") != nullptr;
+    std::cout << "paglet:  " << (paglet ? "yes" : "no (no paglets_on_message export)") << "\n";
+    if (auto ok = standard.check(*info); ok) {
+        std::cout << "trust:   runs as a roaming or resident paglet\n";
+    } else if (system.check(*info)) {
+        std::cout << "trust:   runs as a system paglet only\n";
+    } else {
+        std::cout << "trust:   refused (" << ok.error() << ")\n";
+    }
+    if (auto ready = pw::check_snapshot_ready(*info); !ready) std::cout << "images:  " << ready.error() << "\n";
+    std::cout << "imports:\n";
+    for (const auto& i : info->imports) {
+        std::cout << "  " << i.module << "." << i.name << "  " << pw::to_string(i.kind)
+                  << (standard.allows(i) ? "" : system.allows(i) ? "  (system)" : "  (not allowed)") << "\n";
+    }
+    std::cout << "exports:\n";
+    for (const auto& e : info->exports) std::cout << "  " << e.name << "  " << pw::to_string(e.kind) << "\n";
+    return 0;
+}
+
+// The host's ledger records into the ledger copy (an admin's copy catches
+// up before it decides); returns how many were new here.
+std::expected<std::int64_t, std::string> pull_records(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return std::unexpected(r.error());
+    auto a = r->ask(Map{{"t", Value("records")}});
+    if (!a) return std::unexpected(a.error());
+    std::int64_t added = 0;
+    if (const Array* records = Fields{*a}.array("records")) {
+        // Records arrive in any order; dependent ones wait for a second pass.
+        std::vector<Bytes> left;
+        for (const auto& v : *records) {
+            if (const Bytes* b = v.as_bin()) left.push_back(*b);
+        }
+        for (int pass = 0; pass < 4 && !left.empty(); ++pass) {
+            std::vector<Bytes> again;
+            for (auto& b : left) {
+                auto result = r->ledger.add_encoded(b);
+                if (!result) {
+                    again.push_back(std::move(b));
+                } else if (*result != AddResult::known) {
+                    ++added;
+                }
+            }
+            left = std::move(again);
+        }
+        for (const auto& b : left) {
+            auto result = r->ledger.add_encoded(b);
+            if (!result) std::cerr << "paglets-host: a record of the host: " << result.error() << "\n";
+        }
+    }
+    return added;
+}
+
+int remote_pull(const Options& o) {
+    auto added = pull_records(o);
+    if (!added) return fail(added.error());
+    std::cout << *added << " records new to the ledger copy\n";
+    return 0;
+}
+
+// Admin decisions against a live host: the copy catches up, the decision is
+// signed here, and the host gets it (and gossips it on).
+Options as_admin(const Options& o) {
+    Options a = o;
+    if (a.admins.empty() && a.key) a.admins.push_back(*a.key);
+    return a;
+}
+
+int remote_requests(const Options& o) {
+    if (auto added = pull_records(o); !added) return fail(added.error());
+    auto ledger = open_ledger(o);
+    if (!ledger) return fail(ledger.error());
+    const LedgerState& st = ledger->state();
+    std::cout << "enrollment requests:\n";
+    for (const auto& p : st.pending) {
+        std::cout << "  " << short_id(p.id) << "  " << (p.kind == RequestKind::host ? "host " : "owner") << "  "
+                  << p.name << "  " << key_id(p.key) << "\n";
+    }
+    std::cout << "grant requests:\n";
+    for (const auto& g : st.grant_requests) {
+        for (const auto& item : g.items) {
+            std::cout << "  " << short_id(g.id) << "  paglet " << g.principal.paglet.substr(0, 8) << "  "
+                      << describe(item) << "  " << g.reason << "\n";
+        }
+    }
+    return 0;
+}
+
+int remote_decide(const Options& o, bool approve) {
+    if (o.positional.size() != 1) return usage();
+    if (auto added = pull_records(o); !added) return fail(added.error());
+    const Options a = as_admin(o);
+    if (int rc = approve ? ledger_approve(a) : ledger_deny(a); rc != 0) return rc;
+    return remote_push(o);
+}
+
+int remote_audit(const Options& o) {
+    if (auto added = pull_records(o); !added) return fail(added.error());
+    return ledger_audit(o);
+}
+
+int remote_modules(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("modules")}});
+    if (!a) return fail(a.error());
+    if (const Array* modules = Fields{*a}.array("modules")) {
+        for (const auto& m : *modules) {
+            if (m.as_map() == nullptr) continue;
+            const Fields e{*m.as_map()};
+            const Value* pinned = e.get("pinned");
+            const bool is_pinned = pinned != nullptr && pinned->as_bool() != nullptr && *pinned->as_bool();
+            std::cout << e.str("hash").value_or("").substr(0, 16) << "  " << e.integer("size").value_or(0) / 1024
+                      << " KB  " << e.integer("users").value_or(0) << " paglets" << (is_pinned ? "  pinned" : "");
+            if (const Array* names = e.array("names")) {
+                for (const auto& n : *names) std::cout << "  " << *n.as_str();
+            }
+            std::cout << "\n";
+        }
+    }
+    return 0;
+}
+
+int remote_push_module(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto module = paglets::wasm::read_file(o.positional[0]);
+    if (!module) return fail(module.error());
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("push-module")}, {"module", Value(std::move(*module))}});
+    if (!a) return fail(a.error());
+    std::cout << Fields{*a}.str("hash").value_or("") << "\n";
+    return 0;
+}
+
+int remote_dispose(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("dispose")}, {"paglet", Value(o.positional[0])}});
+    if (!a) return fail(a.error());
+    std::cout << "disposed " << o.positional[0] << "\n";
+    return 0;
+}
+
 int remote_launch(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
@@ -1205,7 +1382,7 @@ int remote_unpin(const Options& o) {
 }  // namespace
 
 bool is_mesh_command(std::string_view command) {
-    return command == "keys" || command == "mesh" || command == "ledger" || command == "remote";
+    return command == "keys" || command == "mesh" || command == "ledger" || command == "remote" || command == "module";
 }
 
 int mesh_command(int argc, char** argv) {
@@ -1219,6 +1396,7 @@ int mesh_command(int argc, char** argv) {
         if (group == "keys" && action == "init") return keys_init(o);
         if (group == "keys" && action == "show") return keys_show(o);
         if (group == "mesh" && action == "create") return mesh_create(o);
+        if (group == "module" && action == "inspect") return module_inspect(o);
         if (group == "ledger") {
             if (action == "show") return ledger_show(o);
             if (action == "request") return ledger_request(o);
@@ -1249,6 +1427,14 @@ int mesh_command(int argc, char** argv) {
             if (action == "pin") return remote_pin(o);
             if (action == "pins") return remote_pins(o);
             if (action == "unpin") return remote_unpin(o);
+            if (action == "pull") return remote_pull(o);
+            if (action == "requests") return remote_requests(o);
+            if (action == "approve") return remote_decide(o, true);
+            if (action == "deny") return remote_decide(o, false);
+            if (action == "audit") return remote_audit(o);
+            if (action == "modules") return remote_modules(o);
+            if (action == "push-module") return remote_push_module(o);
+            if (action == "dispose") return remote_dispose(o);
         }
     } catch (const std::exception& e) {
         return fail(e.what());

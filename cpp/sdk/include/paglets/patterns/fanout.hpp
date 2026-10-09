@@ -91,6 +91,7 @@ public:
     // many clones went out; the others count as failed at once.
     std::size_t start(const std::vector<std::string>& destinations, const Bytes& args, std::int64_t timeout_ms) {
         children_.clear();
+        const std::uint64_t generation = ++generation_;
         std::size_t sent = 0;
         for (const auto& d : destinations) {
             Child c;
@@ -107,8 +108,14 @@ public:
         }
         deadline_ = unix_ms() + timeout_ms;
         if (sent > 0) (void)after_raw(timeout_ms, fanout_timeout, {});
+        // Callbacks get copies: one may start the next fan-out.
+        std::vector<Child> failed;
         for (const auto& c : children_) {
-            if (c.done && on_child_) on_child_(c);
+            if (c.done) failed.push_back(c);
+        }
+        for (const auto& c : failed) {
+            if (generation_ != generation) break;  // a callback started the next fan-out
+            if (on_child_) on_child_(c);
         }
         return sent;
     }
@@ -121,7 +128,8 @@ public:
             c.done = true;
             c.clone = f.clone;
             c.error = "clone did not arrive: " + f.reason;
-            if (on_child_) on_child_(c);
+            const Child copy = c;
+            if (on_child_) on_child_(copy);
             return;
         }
     }
@@ -162,20 +170,28 @@ private:
         match->host_name = r.host_name;
         match->error = r.error;
         match->result = r.result;
-        if (on_child_) on_child_(*match);
+        const Child copy = *match;
+        if (on_child_) on_child_(copy);
     }
 
     void expire() {
         if (unix_ms() < deadline_) return;
+        std::vector<Child> late;
         for (auto& c : children_) {
             if (c.done) continue;
             c.done = true;
             c.error = "no report in time";
+            late.push_back(c);
+        }
+        const std::uint64_t generation = generation_;
+        for (const auto& c : late) {
+            if (generation_ != generation) break;  // a callback started the next fan-out
             if (on_child_) on_child_(c);
         }
     }
 
     std::vector<Child> children_;
+    std::uint64_t generation_ = 0;
     std::int64_t deadline_ = 0;
     std::function<void(const Child&)> on_child_;
 };

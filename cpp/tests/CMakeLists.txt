@@ -42,7 +42,7 @@ set(test_sources
     test_network.cpp
     test_mobility.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_demos.cpp test_bench.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -51,7 +51,10 @@ if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway)
 endif()
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${PROJECT_SOURCE_DIR}/examples/pi
-                           ${PROJECT_SOURCE_DIR}/examples/courier ${PROJECT_SOURCE_DIR}/examples/digest ${CMAKE_CURRENT_SOURCE_DIR}/guests)
+                           ${PROJECT_SOURCE_DIR}/examples/courier ${PROJECT_SOURCE_DIR}/examples/digest ${PROJECT_SOURCE_DIR}/examples/journey ${PROJECT_SOURCE_DIR}/examples/finder
+                           ${PROJECT_SOURCE_DIR}/examples/latency ${PROJECT_SOURCE_DIR}/examples/inventory ${PROJECT_SOURCE_DIR}/examples/seek
+                           ${PROJECT_SOURCE_DIR}/examples/guard ${PROJECT_SOURCE_DIR}/examples/dupes
+                           ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 # The gateway tests serve web pages (cpp-httplib, as the gateway uses it).
 target_include_directories(paglets_tests SYSTEM PRIVATE ${PAGLETS_HTTPLIB_INCLUDE_DIR})
 target_link_libraries(paglets_tests PRIVATE OpenSSL::SSL OpenSSL::Crypto)
@@ -60,7 +63,7 @@ if(WIN32)
     target_link_libraries(paglets_tests PRIVATE ws2_32 crypt32)
 endif()
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter hello ping_pong pi courier digest conformance testbed forbidden calc_user explorer patterns_demo)
+foreach(guest counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes conformance testbed forbidden calc_user explorer patterns_demo)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()

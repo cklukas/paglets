@@ -46,7 +46,13 @@ Download Courier and AI Document Digest demos
 ([design](../planning/cpp-web-ai.md)), and data residency: paglets that
 read a restricted root carry its mark and move only where its content may
 go ([design](../planning/cpp-residency.md)). WP18 adds the patterns library
-of the guest SDK ([design](../planning/cpp-patterns.md)); WP21 fuzzes every
+of the guest SDK ([design](../planning/cpp-patterns.md)); WP19 adds admin
+work against live hosts to the CLI (pull, requests, approve, deny, audit,
+modules, dispose, `module inspect`); WP20 adds demo paglets from the
+[catalogue](../planning/cpp-demo-paglets.md) (Mesh Journey, File Finder and
+Storage Analyzer, Duplicate Finder, Inventory and Process Finder, Volume
+Guard, Latency Map, Hide and Seek), tested on meshes of several hosts, and
+the first [benchmarks](../planning/cpp-benchmarks.md); WP21 fuzzes every
 decoder of data from outside (ledger records, frames between hosts, memory
 images, modules, the Noise handshake, contracts) in CI
 ([design](../planning/cpp-hardening.md)).
@@ -62,7 +68,9 @@ host/                     host library: Wasm engine, memory images, runtime, wir
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
-examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh)
+examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
+                          and the demos: courier, digest, journey, finder, dupes, inventory, guard,
+                          latency, seek
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```
@@ -297,6 +305,10 @@ $H remote status --connect https://lab-2:7443 --key alice.key --ledger ledger
 $H remote locate --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id>   # from any host
 $H remote pin --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> --minutes 30
 $H remote unpin --connect https://lab-1:7443 --key alice.key --ledger ledger <paglet-id>   # admins
+$H remote requests --connect https://lab-1:7443 --key alice.key --ledger ledger   # pulls the host's records
+$H remote approve --connect https://lab-1:7443 --key alice.key --ledger ledger <request-id>
+$H remote modules --connect https://lab-2:7443 --key olga.key --ledger ledger
+$H module inspect build/macos-arm64/guests/counter.wasm
 ```
 
 Paglets locate and pin each other through the `locator` system paglet;
