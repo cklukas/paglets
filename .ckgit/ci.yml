@@ -1,0 +1,27 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+#
+# Self-hosted CI on the ck-git server (rpi4). Publish this repository there
+# with `ckgit publish`; afterwards `git push ckgit <branch>` triggers a run.
+#
+# The runner has no network by default, so this workflow only builds the
+# documentation site with the server's own `ckdocs` (strict: a broken link
+# or heading fragment fails the run). A push to the default branch (main)
+# publishes the site on ck-git Pages; GitHub Pages gets the same site from
+# .github/workflows/docs.yml. Tests and the C++ build run in GitHub Actions
+# (.github/workflows/ci.yml and cpp.yml).
+version: 1
+on:
+  branches: [main, cpp]
+jobs:
+  - name: docs
+    steps:
+      - name: site
+        script: |
+          if ! command -v ckdocs >/dev/null 2>&1; then
+            echo "ckdocs is not installed on the CI server (it comes with ck-git-hosting)" >&2
+            exit 1
+          fi
+          ckdocs build --root "$PWD" --out "$PWD/public" --strict
+pages:
+  path: public

@@ -154,6 +154,11 @@ ckdocs check --root .
 ckdocs serve --root .
 ```
 
+The repository is also hosted on a self-hosted ck-git server, where
+`.ckgit/ci.yml` builds the same site on every push to `main` or `cpp` and
+publishes it on ck-git Pages from `main`. Publish a checkout there once with
+`ckgit publish`, then push with `git push ckgit <branch>`.
+
 ## Project Layout
 
 ```text
