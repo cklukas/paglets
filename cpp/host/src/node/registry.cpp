@@ -43,6 +43,7 @@ std::string url_host(std::string_view url) {
 // An URL whose host means "any interface" says nothing about where the
 // host is: the address it was seen from stands in.
 std::string reachable(const std::string& url, const std::string& seen_from) {
+    if (url.find("://") == std::string::npos) return url;  // none (no inbound port)
     const std::string host = url_host(url);
     if (!seen_from.empty() && (host == "0.0.0.0" || host == "[::]" || host.empty())) {
         const auto scheme = url.find("://");
@@ -62,9 +63,11 @@ mesh::Value entry_value(const Node::Impl::HostEntry& e) {
 
 void Node::Impl::announce_self() {
     const std::string url = transport.own_address();
-    if (own_entry && own_entry->url == url) return;
+    const std::vector<mesh::PublicKey> relays = url.empty() ? own_relays : std::vector<mesh::PublicKey>{};
+    if (own_entry && own_entry->url == url && own_entry->relays == relays) return;
     HostEntry e;
     e.url = url;
+    e.relays = relays;
     e.announced = mesh::unix_ms();
     e.protocol = net::mesh_protocol;
     e.abi_major = abi::version;
@@ -78,7 +81,12 @@ void Node::Impl::announce_self() {
                               {"proto", mesh::Value(e.protocol)},
                               {"abi", mesh::Value(mesh::Array{mesh::Value(static_cast<std::int64_t>(e.abi_major)),
                                                               mesh::Value(static_cast<std::int64_t>(e.abi_minor))})},
-                              {"time", mesh::Value(e.announced)}}));
+                              {"time", mesh::Value(e.announced)},
+                              {"relays", mesh::Value([&] {
+                                   mesh::Array a;
+                                   for (const auto& k : e.relays) a.push_back(mesh::Value::bin(k));
+                                   return a;
+                               }())}}));
     e.signature = key.sign(announcement_message(e.body));
     own_entry = std::move(e);
     // The hosts that know this one hear about the change.
@@ -127,6 +135,22 @@ std::optional<Node::Impl::HostEntry> Node::Impl::verify_announcement(const mesh:
         return std::nullopt;
     }
     HostEntry e;
+    if (const mesh::Array* relays = f.array("relays")) {
+        if (relays->size() > 8) {
+            why = "malformed announcement";
+            return std::nullopt;
+        }
+        for (const auto& r : *relays) {
+            const mesh::Bytes* k = r.as_bin();
+            if (k == nullptr || k->size() != 32) {
+                why = "malformed announcement";
+                return std::nullopt;
+            }
+            mesh::PublicKey relay{};
+            std::copy(k->begin(), k->end(), relay.begin());
+            e.relays.push_back(relay);
+        }
+    }
     e.body = body;
     e.signature = signature;
     e.url = *url;
@@ -155,7 +179,11 @@ bool Node::Impl::learn(const mesh::PublicKey& host, HostEntry entry, const std::
         registry[host] = std::move(entry);
         it = registry.find(host);
     }
-    if (!it->second.url.empty()) transport.set_address(host, it->second.url);
+    if (!it->second.url.empty()) {
+        transport.set_address(host, it->second.url);
+    } else {
+        transport.set_relays(host, it->second.relays);  // no inbound port: through its relays
+    }
     registry_dirty = true;
     return true;
 }
@@ -216,12 +244,17 @@ bool Node::Impl::compatible(const mesh::PublicKey& host) const {
 void Node::Impl::registry_tick() {
     announce_self();
     // Addresses known before the transport was attached (from the state).
-    if (!addresses_applied && !transport.own_address().empty()) {
+    if (!addresses_applied) {
         addresses_applied = true;
         for (const auto& [host, e] : registry) {
-            if (!e.url.empty()) transport.set_address(host, e.url);
+            if (!e.url.empty()) {
+                transport.set_address(host, e.url);
+            } else {
+                transport.set_relays(host, e.relays);
+            }
         }
     }
+    if (!transport.inbound()) choose_relays();
     const mesh::LedgerState& st = ledger.state();
     // Hosts that left the ledger leave the registry.
     const auto before = registry.size();
@@ -233,13 +266,54 @@ void Node::Impl::registry_tick() {
         next_exchange = now + discovery.exchange;
         std::vector<mesh::PublicKey> reachable_hosts;
         for (const auto& [k, h] : st.hosts) {
-            if (k != key.public_key() && transport.address(k)) reachable_hosts.push_back(k);
+            if (k == key.public_key()) continue;
+            auto r = registry.find(k);
+            if (transport.address(k) || (r != registry.end() && !r->second.relays.empty())) {
+                reachable_hosts.push_back(k);
+            }
         }
         if (!reachable_hosts.empty()) {
             send_registry(reachable_hosts[next_exchange_peer++ % reachable_hosts.size()]);
         }
     }
     if (registry_dirty) save_registry();
+}
+
+// A host without an inbound port keeps a few relays: hosts it can reach
+// that are up; one that stops answering is replaced.
+void Node::Impl::choose_relays() {
+    const auto now = Clock::now();
+    const auto live = transport.live_uplinks();
+    for (const auto& k : live) relay_ok[k] = now;
+    const mesh::LedgerState& st = ledger.state();
+    std::vector<mesh::PublicKey> keep;
+    for (const auto& k : own_relays) {
+        auto ok = relay_ok.find(k);
+        if (st.is_host(k) && ok != relay_ok.end() && now - ok->second < discovery.relay_timeout) keep.push_back(k);
+    }
+    std::vector<mesh::PublicKey> candidates;
+    for (const auto& [k, h] : st.hosts) {
+        if (k == key.public_key() || std::ranges::find(keep, k) != keep.end() || !transport.address(k)) continue;
+        if (!std::ranges::binary_search(view, k) || !compatible(k)) continue;
+        candidates.push_back(k);
+    }
+    // Hosts heard from most recently first.
+    std::ranges::sort(candidates, [&](const auto& a, const auto& b) {
+        auto sa = last_seen.find(a);
+        auto sb = last_seen.find(b);
+        return (sa == last_seen.end() ? 0 : sa->second) > (sb == last_seen.end() ? 0 : sb->second);
+    });
+    for (const auto& k : candidates) {
+        if (keep.size() >= discovery.relays) break;
+        keep.push_back(k);
+        relay_ok[k] = now;  // a new relay gets its time to answer
+    }
+    if (keep == own_relays) return;
+    own_relays = keep;
+    std::vector<std::pair<mesh::PublicKey, std::string>> uplinks;
+    for (const auto& k : own_relays) uplinks.emplace_back(k, *transport.address(k));
+    transport.set_uplinks(std::move(uplinks));
+    announce_self();  // the others learn the new relays
 }
 
 void Node::Impl::load_registry() {
@@ -305,6 +379,7 @@ std::vector<Node::HostInfo> Node::hosts() const {
             info.abi_minor = abi::minor_version;
             info.last_seen_ms = mesh::unix_ms();
             info.via = "self";
+            info.relays = impl_->own_relays;
         } else {
             if (auto it = impl_->registry.find(k); it != impl_->registry.end()) {
                 info.url = it->second.url;
@@ -312,6 +387,7 @@ std::vector<Node::HostInfo> Node::hosts() const {
                 info.abi_major = it->second.abi_major;
                 info.abi_minor = it->second.abi_minor;
                 info.via = it->second.via;
+                info.relays = it->second.relays;
             }
             if (info.url.empty()) info.url = impl_->transport.address(k).value_or("");
             if (auto s = impl_->last_seen.find(k); s != impl_->last_seen.end()) info.last_seen_ms = s->second;

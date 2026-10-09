@@ -49,10 +49,11 @@ int usage() {
                  "                          [--advertise URL] [--peer KEY-ID=URL]... [--root NAME=DIR]...\n"
                  "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
                  "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
-                 "                          [--join URL]... [--no-beacon] [--beacon-port N]\n"
+                 "                          [--join URL]... [--no-beacon] [--beacon-port N] [--no-listen]\n"
                  "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
                  "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
                  "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
+                 "--no-listen: no inbound port (behind NAT); other hosts relay for this one.\n"
                  "Stops on SIGINT/SIGTERM, or when the stop file appears.\n";
     return 2;
 }
@@ -74,6 +75,7 @@ struct Options {
     bool no_sandbox = false;
     bool beacon = true;
     int beacon_port = 0;
+    bool inbound = true;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -144,6 +146,8 @@ std::optional<Options> parse(int argc, char** argv) {
             auto v = next();
             ok = v.has_value();
             if (ok) o.joins.push_back(*v);
+        } else if (a == "--no-listen") {
+            o.inbound = false;
         } else if (a == "--no-beacon") {
             o.beacon = false;
         } else if (a == "--beacon-port") {
@@ -197,6 +201,7 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     if (o.tls_key) tc.tls_key = *o.tls_key;
     if (o.tls_ca) tc.tls_ca = *o.tls_ca;
     if (o.advertise) tc.advertise_url = *o.advertise;
+    tc.listen = o.inbound;
     tc.log = [](const std::string& text) { std::cerr << "[net] " << text << "\n"; };
 
     rt::Config rc;
@@ -264,7 +269,7 @@ int serve_command(int argc, char** argv, const fs::path& self) {
 
     std::cout << "host " << key_id << "\n"
               << "mesh " << mesh::record_id_hex(mesh_id) << "\n"
-              << "url  " << transport.url() << "\n"
+              << "url  " << (o.inbound ? transport.url() : std::string("(none: reached through relays)")) << "\n"
               << std::flush;
 
     // Discovery (planning/cpp-mesh.md): multicast beacons on the local

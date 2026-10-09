@@ -1016,6 +1016,16 @@ int remote_hosts(const Options& o) {
             if (f.integer("proto").value_or(0) != 0) {
                 std::cout << "  protocol " << f.integer("proto").value_or(0) << " abi " << f.str("abi").value_or("");
             }
+            if (const Array* relays = f.array("relays"); relays != nullptr && !relays->empty()) {
+                std::cout << "  relays";
+                for (const auto& k : *relays) {
+                    if (const Bytes* b = k.as_bin(); b != nullptr && b->size() == 32) {
+                        PublicKey key{};
+                        std::copy(b->begin(), b->end(), key.begin());
+                        std::cout << " " << key_id(key).substr(0, 8);
+                    }
+                }
+            }
             if (!flag("compatible")) std::cout << "  INCOMPATIBLE";
             if (!f.str("via").value_or("").empty() && !flag("self")) std::cout << "  via " << f.str("via").value_or("");
             std::cout << "\n";

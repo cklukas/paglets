@@ -194,6 +194,10 @@ public:
 
     struct DiscoveryTiming {
         std::chrono::milliseconds exchange{2000};  // registry exchange with the next host
+        // Without an inbound port (planning/cpp-relay.md): relays kept, and
+        // how long one may fail to answer before another replaces it.
+        std::size_t relays = 2;
+        std::chrono::milliseconds relay_timeout{10000};
     };
     void set_discovery_timing(DiscoveryTiming timing);
     struct HostInfo {
@@ -208,7 +212,8 @@ public:
         std::int64_t protocol = 0;  // 0: not announced yet
         std::uint32_t abi_major = 0;
         std::uint32_t abi_minor = 0;
-        std::string via;  // how its address was learned: gossip, beacon, join
+        std::string via;                      // how its address was learned: gossip, beacon, join
+        std::vector<mesh::PublicKey> relays;  // no inbound port: reached through these hosts
     };
     // The enrolled hosts of the mesh, with what this host knows about them.
     std::vector<HostInfo> hosts() const;

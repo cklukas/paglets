@@ -9,12 +9,18 @@
 //   POST /paglets/v1/open         Noise message 1   -> {s: session, m: message 2}
 //   POST /paglets/v1/finish/<s>   Noise message 3   -> 204
 //   POST /paglets/v1/frames/<s>   Noise messages    -> Noise messages
+//   POST /paglets/v1/poll/<s>     (empty)           -> Noise messages (held for the peer)
 //
 // Frame bodies are sequences of [u32 big-endian length][Noise message]. The
 // response to a frames request carries the frames the server answers (CLI
 // sessions); frames between hosts are one-way, each host sending through
 // its own channel. Every peer has an ordered queue and a sender thread;
 // frames that cannot be delivered are dropped (protocols above retry).
+//
+// Hosts without an inbound port (planning/cpp-relay.md) poll a few hosts
+// that can be reached for the frames held for them; other hosts reach them
+// through Noise channels tunneled through those relays, so relayed frames
+// stay end-to-end encrypted.
 //
 // TLS keeps proxies and firewalls working; it does not authenticate hosts
 // (the channels do), so a host uses a self-signed certificate unless one is
@@ -57,6 +63,10 @@ struct TransportConfig {
     std::chrono::milliseconds session_idle{600000};  // unused server sessions end
     std::function<void(const std::string&)> log;     // default: none
     std::int64_t protocol = mesh_protocol;           // announced in handshakes (other values: tests)
+    // Relaying: how long a poll waits for frames, and how many bytes this
+    // host holds for a host that polls it.
+    std::chrono::milliseconds poll_wait{10000};
+    std::size_t max_downlink_bytes = 64u * 1024 * 1024;
 };
 
 // A frame from a peer; returns the frames to answer with (CLI sessions).
@@ -76,6 +86,8 @@ struct TransportStats {
     std::uint64_t channels_opened = 0;
     std::uint64_t channels_accepted = 0;
     std::uint64_t handshakes_refused = 0;
+    std::uint64_t frames_relayed = 0;  // forwarded for other hosts
+    std::uint64_t tunnels_opened = 0;  // channels through relays
 };
 
 class Transport final : public mesh::GossipTransport {
@@ -103,6 +115,16 @@ public:
     // contact, planning/cpp-mesh.md): the server must pass `accept` as a
     // host. Returns its key; its address is then known.
     std::expected<mesh::PublicKey, std::string> probe(const std::string& url);
+
+    // -- relaying (planning/cpp-relay.md) --
+    // The hosts this one polls for its frames (its relays, when it has no
+    // inbound port): key and address; replaces the previous set.
+    void set_uplinks(std::vector<std::pair<mesh::PublicKey, std::string>> uplinks) override;
+    // Uplinks whose last poll succeeded.
+    std::vector<mesh::PublicKey> live_uplinks() const override;
+    // The relays through which a peer without an address is reached.
+    void set_relays(const mesh::PublicKey& peer, std::vector<mesh::PublicKey> relays) override;
+    bool inbound() const override;
 
     // Queues a frame for a peer (a host); returns at once.
     void send(const mesh::PublicKey& to, Bytes frame) override;

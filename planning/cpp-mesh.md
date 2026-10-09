@@ -11,9 +11,11 @@ Status: implemented. Companion to the plan (WP14) and to
 ## 1. Host announcements
 
 Every host signs an **announcement** of itself: a canonical map `{v: 1,
-mesh, key, url, proto, abi: [major, minor], time}`, signed with the host key
+mesh, key, url, proto, abi: [major, minor], time, relays}`, signed with the host key
 over `"paglets host announcement v1" 0x00 SHA-256(body)`. `url` is where the
-host can be reached (its advertised address, or its listening address);
+host can be reached (its advertised address, or its listening address;
+empty for a host without an inbound port, which lists its `relays`
+instead, planning/cpp-relay.md);
 `proto` the mesh protocol and `abi` the paglet ABI it runs. A host makes a
 new announcement when its address changes.
 

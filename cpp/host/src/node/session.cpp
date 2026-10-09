@@ -92,7 +92,12 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                           {"seen", mesh::Value(h.last_seen_ms)},
                           {"proto", mesh::Value(h.protocol)},
                           {"abi", mesh::Value(std::to_string(h.abi_major) + "." + std::to_string(h.abi_minor))},
-                          {"via", mesh::Value(h.via)}});
+                          {"via", mesh::Value(h.via)},
+                          {"relays", mesh::Value([&] {
+                               mesh::Array a;
+                               for (const auto& k : h.relays) a.push_back(mesh::Value::bin(k));
+                               return a;
+                           }())}});
         }
         return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
     }

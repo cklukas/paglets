@@ -30,7 +30,11 @@ hosts a mesh: they find each other through any enrolled host, by gossip of
 signed host announcements and by multicast beacons on the local network,
 keep a registry of the hosts with their addresses, online state and
 versions, and refuse hosts of another mesh protocol or paglet ABI
-([design](../planning/cpp-mesh.md)).
+([design](../planning/cpp-mesh.md)). WP15 brings in hosts without inbound
+ports (behind NAT): they poll a few reachable hosts that relay for them, and
+everybody else reaches them through end-to-end encrypted channels tunneled
+through those relays ([design](../planning/cpp-relay.md)). This completes
+milestone M3.
 
 ## Layout
 
@@ -240,6 +244,8 @@ $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:
     --advertise https://lab-1:7443 &
 $H serve --key lab-2.key --ledger ledger-lab-2 --state state-2 --listen 0.0.0.0:7443 \
     --advertise https://lab-2:7443 --join https://lab-1:7443 &     # any enrolled host; beacons find the rest
+$H serve --key laptop.key --ledger ledger-laptop --state state-3 --no-listen \
+    --join https://lab-1:7443 &                                    # behind NAT: reached through relays
 $H remote hosts --connect https://lab-2:7443 --key alice.key --ledger ledger
 $H remote launch --connect https://lab-1:7443 --key olga.key --ledger ledger \
     build/macos-arm64/guests/counter.wasm                          # prints the paglet ID

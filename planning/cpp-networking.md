@@ -59,6 +59,7 @@ server; each direction uses the channel of its sender:
 | `POST /paglets/v1/open` | Noise message 1 | `{s: session ID, m: Noise message 2}` |
 | `POST /paglets/v1/finish/<session>` | Noise message 3 | 204, or 403 if the peer is refused |
 | `POST /paglets/v1/frames/<session>` | Noise messages | Noise messages (answers of CLI sessions) |
+| `POST /paglets/v1/poll/<session>` | (empty) | Noise messages held for a host without an inbound port (planning/cpp-relay.md) |
 
 - Frame bodies are sequences of `[u32 big-endian length][Noise message]`.
   A server handles the requests of a session one at a time, so frames arrive
@@ -231,6 +232,7 @@ serves channels over HTTPS until SIGINT, SIGTERM or a stop file.
 | `--advertise URL` | the address announced to peers (default: the listening address) |
 | `--peer KEY-ID=URL` | a seed host and its address (repeatable) |
 | `--join URL`, `--no-beacon`, `--beacon-port N` | discovery: a bootstrap contact (any enrolled host), multicast beacons (planning/cpp-mesh.md) |
+| `--no-listen` | no inbound port: the host is reached through relays (planning/cpp-relay.md) |
 | `--root NAME=DIR` | a named root of the files service (repeatable) |
 | `--module-source DIR` | a directory of modules the host may load (repeatable) |
 | `--tls-cert`, `--tls-key`, `--tls-ca` | PEM certificate and key (default: self-signed), CA for peers |

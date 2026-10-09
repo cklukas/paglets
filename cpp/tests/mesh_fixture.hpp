@@ -223,7 +223,8 @@ struct NetHost {
     std::unique_ptr<paglets::node::Node> node;
     std::unique_ptr<paglets::net::Transport> transport;
 
-    explicit NetHost(const Record& genesis, ps::ServicesConfig services_config = {}) {
+    explicit NetHost(const Record& genesis, ps::ServicesConfig services_config = {},
+                     paglets::net::TransportConfig transport_config = {}) {
         f = std::make_unique<Fixture>();
         auto installed = ps::install_system_services(*f->runtime, services_config);
         REQUIRE_OK(installed);
@@ -235,7 +236,7 @@ struct NetHost {
         REQUIRE_OK(node->start());
         namespace net = paglets::net;
         transport = std::make_unique<net::Transport>(
-            node->host_key(), genesis.id(), net::TransportConfig{},
+            node->host_key(), genesis.id(), std::move(transport_config),
             [this](const net::Identity& peer) -> std::expected<void, std::string> {
                 const auto peers = node->peers();
                 if (peer.role != net::PeerRole::host || std::ranges::find(peers, peer.key) == peers.end()) {

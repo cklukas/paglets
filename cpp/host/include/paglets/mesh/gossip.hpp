@@ -42,6 +42,13 @@ public:
     virtual void set_address(const PublicKey&, std::string) {}
     // Where this host can be reached; empty if the transport has no address.
     virtual std::string own_address() const { return {}; }
+    // Relaying (planning/cpp-relay.md): false if other hosts cannot open
+    // connections to this one; it then polls `uplinks` for its frames.
+    virtual bool inbound() const { return true; }
+    virtual void set_uplinks(std::vector<std::pair<PublicKey, std::string>>) {}
+    virtual std::vector<PublicKey> live_uplinks() const { return {}; }
+    // The relays through which a host without an address is reached.
+    virtual void set_relays(const PublicKey&, std::vector<PublicKey>) {}
 };
 
 // Forwards frames to a transport set later, for transports that need the
@@ -68,6 +75,22 @@ public:
     std::string own_address() const override {
         std::lock_guard lock(mu_);
         return target_ == nullptr ? std::string() : target_->own_address();
+    }
+    bool inbound() const override {
+        std::lock_guard lock(mu_);
+        return target_ == nullptr || target_->inbound();
+    }
+    void set_uplinks(std::vector<std::pair<PublicKey, std::string>> uplinks) override {
+        std::lock_guard lock(mu_);
+        if (target_ != nullptr) target_->set_uplinks(std::move(uplinks));
+    }
+    std::vector<PublicKey> live_uplinks() const override {
+        std::lock_guard lock(mu_);
+        return target_ == nullptr ? std::vector<PublicKey>{} : target_->live_uplinks();
+    }
+    void set_relays(const PublicKey& peer, std::vector<PublicKey> relays) override {
+        std::lock_guard lock(mu_);
+        if (target_ != nullptr) target_->set_relays(peer, std::move(relays));
     }
 
 private:

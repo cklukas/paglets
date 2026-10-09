@@ -381,7 +381,8 @@ struct Node::Impl {
         std::int64_t protocol = 0;
         std::uint32_t abi_major = 0;
         std::uint32_t abi_minor = 0;
-        std::string via;  // gossip, beacon, join
+        std::string via;                      // gossip, beacon, join
+        std::vector<mesh::PublicKey> relays;  // a host without an inbound port: reached through these
     };
     std::map<mesh::PublicKey, HostEntry> registry;
     std::map<mesh::PublicKey, std::int64_t> last_seen;  // Unix milliseconds of the last frame
@@ -392,6 +393,11 @@ struct Node::Impl {
     bool registry_dirty = false;
     bool addresses_applied = false;
     DiscoveryTiming discovery;
+    // Relaying (planning/cpp-relay.md): the relays of this host when it has
+    // no inbound port, and since when each answered (or was chosen).
+    std::vector<mesh::PublicKey> own_relays;
+    std::map<mesh::PublicKey, Clock::time_point> relay_ok;
+    void choose_relays();
 
     void registry_tick();
     void announce_self();

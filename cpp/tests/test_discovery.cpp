@@ -36,11 +36,17 @@ struct Trio {
     std::optional<Record> genesis;
     std::vector<std::unique_ptr<NetHost>> hosts;
 
-    explicit Trio(std::size_t n = 3) {
+    // The last `without_inbound` hosts have no inbound port (WP15).
+    explicit Trio(std::size_t n = 3, std::size_t without_inbound = 0) {
         auto g = make_genesis("discovery", {&admin}, {}, 1);
         REQUIRE_OK(g);
         genesis = *g;
-        for (std::size_t i = 0; i < n; ++i) hosts.push_back(std::make_unique<NetHost>(*genesis));
+        for (std::size_t i = 0; i < n; ++i) {
+            paglets::net::TransportConfig tc;
+            tc.poll_wait = 1000ms;
+            tc.listen = i + without_inbound < n;
+            hosts.push_back(std::make_unique<NetHost>(*genesis, ps::ServicesConfig{}, tc));
+        }
         // Every host has the ledger with the enrollments (an admin handed
         // it out), but no addresses.
         std::vector<Record> records;
@@ -56,7 +62,7 @@ struct Trio {
             record("host-enroll", data::host_enroll(hosts[i]->node->host(), names[i], {}));
         record("owner-enroll", data::owner_enroll(owner.public_key(), "olga", {}));
         for (auto& h : hosts) {
-            h->node->set_discovery_timing({.exchange = 200ms});
+            h->node->set_discovery_timing({.exchange = 200ms, .relays = 2, .relay_timeout = 2000ms});
             h->node->set_location_timing({.heartbeat = 100ms,
                                           .host_timeout = 3000ms,
                                           .refresh = std::chrono::minutes(5),
@@ -74,6 +80,18 @@ struct Trio {
             std::this_thread::sleep_for(10ms);
         }
         return done();
+    }
+
+    // Every host has heard from every other host, and can reach it (an
+    // address, or the relays of a host without an inbound port).
+    bool discovered_except_addresses() {
+        for (auto& h : hosts) {
+            for (const auto& info : h->node->hosts()) {
+                if (info.self) continue;
+                if (!info.online || (info.url.empty() && info.relays.empty())) return false;
+            }
+        }
+        return true;
     }
 
     // Every host knows every other host's address and has heard from it.
@@ -151,8 +169,8 @@ PAGLETS_TEST("mesh: three hosts discover each other through one contact each and
     net.hosts[2]->transport->stop();
     net.hosts.pop_back();
     REQUIRE(net.eventually([&] {
-        const auto now = a.node->hosts();
-        const HostInfo* h = info_of(now, seen_c->key);
+        const auto current = a.node->hosts();
+        const HostInfo* h = info_of(current, seen_c->key);
         return h != nullptr && !h->online;
     }));
 }
@@ -236,4 +254,124 @@ PAGLETS_TEST("mesh: the registry keeps hosts of another ABI out of moves and res
     CHECK(journal_eventually(*a.f, *id, "move_failed:b:no host matches b; host b: runs an incompatible paglet ABI:"));
     REQUIRE_OK(a.node->dispatch(*id, "any"));
     REQUIRE(net.settle([&] { return c.f->runtime->info(*id).has_value(); }, 400));
+}
+
+namespace {
+
+// Moves a paglet to the host named `to` and waits until it is there.
+void move_to(Trio& net, NetHost& from, NetHost& to, const rt::PagletId& id, const std::string& name) {
+    REQUIRE_OK(from.node->dispatch(id, name));
+    REQUIRE(net.eventually([&] { return to.f->runtime->info(id).has_value() && !from.f->runtime->info(id); }));
+}
+
+std::vector<PublicKey> relays_of(NetHost& h) {
+    for (const auto& info : h.node->hosts()) {
+        if (info.self) return info.relays;
+    }
+    return {};
+}
+
+}  // namespace
+
+PAGLETS_TEST("relay: a host without an inbound port takes part in the mesh, also when a relay goes down (WP15 exit)") {
+    Trio net(4, 1);  // a, b, c can be reached; d cannot
+    auto& a = net[0];
+    auto& d = net[3];
+    CHECK(!d.transport->inbound());
+    CHECK(d.transport->own_address().empty());
+    for (std::size_t i = 1; i < 4; ++i) {
+        auto contact = net[i].transport->probe(a.transport->url());
+        REQUIRE_OK(contact);
+        net[i].node->joined(*contact);
+    }
+    // d keeps two relays; every host reaches d through them.
+    REQUIRE(net.eventually([&] { return relays_of(d).size() == 2u && d.transport->live_uplinks().size() == 2u; }));
+    REQUIRE(net.eventually([&] { return net.discovered_except_addresses(); }));
+    const auto relays = relays_of(d);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto hosts = net[i].node->hosts();
+        const HostInfo* seen = info_of(hosts, d.node->host());
+        REQUIRE(seen != nullptr);
+        CHECK(seen->url.empty());
+        CHECK(seen->relays == relays);
+    }
+
+    // The ledger reaches d (an admin record made on a).
+    auto r = a.node->draft("owner-enroll", data::owner_enroll(SigningKey::generate().public_key(), "otto", {}));
+    REQUIRE_OK(r);
+    r->sign(net.admin);
+    REQUIRE_OK(a.node->submit(*r));
+    REQUIRE(net.eventually([&] { return d.node->ledger_digest() == a.node->ledger_digest(); }));
+
+    // A paglet moves to d and on, by host name; frames to d went through relays.
+    const std::string module = a.f->module("conformance.wasm");
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(net.owner, net.genesis->id(), *parse_key_id(module), paglet_id('a'), Value(),
+                                    now - 1000, now + 600'000);
+    REQUIRE_OK(passport);
+    auto id = a.node->create(module, *passport);
+    REQUIRE_OK(id);
+    CHECK_EQ(count(*a.f, *id), 1);
+    move_to(net, a, d, *id, "d");
+    CHECK_EQ(count(*d.f, *id), 2);
+    move_to(net, d, net[1], *id, "b");
+    CHECK_EQ(count(*net[1].f, *id), 3);
+    std::uint64_t relayed = 0;
+    for (std::size_t i = 0; i < 3; ++i) relayed += net[i].transport->stats().frames_relayed;
+    CHECK(relayed > 0);
+
+    // One of d's relays goes down: d takes another, the others follow, and
+    // d keeps taking part.
+    std::size_t down = 0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        if (net[i].node->host() == relays.front()) down = i;
+    }
+    net.hosts[down]->f->runtime->shutdown();
+    net.hosts[down]->transport->stop();
+    net.hosts.erase(net.hosts.begin() + static_cast<std::ptrdiff_t>(down));
+    auto& d2 = *net.hosts.back();
+    REQUIRE(net.eventually([&] {
+        const auto now_relays = relays_of(d2);
+        return now_relays.size() == 2u && std::ranges::find(now_relays, relays.front()) == now_relays.end() &&
+               d2.transport->live_uplinks().size() == 2u;
+    }));
+    // The reachable host that holds the paglet sends it to d again; d sends
+    // it to the other one.
+    NetHost& source = net.hosts[0]->f->runtime->info(*id) ? *net.hosts[0] : *net.hosts[1];
+    NetHost& back = &source == net.hosts[0].get() ? *net.hosts[1] : *net.hosts[0];
+    REQUIRE(source.f->runtime->info(*id).has_value());
+    move_to(net, source, d2, *id, "d");
+    CHECK_EQ(count(*d2.f, *id), 4);
+    const auto d_view = d2.node->hosts();
+    move_to(net, d2, back, *id, info_of(d_view, back.node->host())->name);
+    CHECK_EQ(count(*back.f, *id), 5);
+}
+
+PAGLETS_TEST("relay: two hosts without inbound ports reach each other through relays") {
+    Trio net(4, 2);  // a and b can be reached; c and d cannot
+    auto& a = net[0];
+    auto& c = net[2];
+    auto& d = net[3];
+    for (std::size_t i = 1; i < 4; ++i) {
+        auto contact = net[i].transport->probe(a.transport->url());
+        REQUIRE_OK(contact);
+        net[i].node->joined(*contact);
+    }
+    REQUIRE(net.eventually([&] { return relays_of(c).size() == 2u && relays_of(d).size() == 2u; }));
+    REQUIRE(net.eventually([&] { return net.discovered_except_addresses(); }));
+    const std::string module = c.f->module("conformance.wasm");
+    const std::int64_t now = unix_ms();
+    auto passport = Passport::issue(net.owner, net.genesis->id(), *parse_key_id(module), paglet_id('b'), Value(),
+                                    now - 1000, now + 600'000);
+    REQUIRE_OK(passport);
+    auto id = c.node->create(module, *passport);
+    REQUIRE_OK(id);
+    CHECK_EQ(count(*c.f, *id), 1);
+    move_to(net, c, d, *id, "d");
+    CHECK_EQ(count(*d.f, *id), 2);
+    move_to(net, d, c, *id, "c");
+    CHECK_EQ(count(*c.f, *id), 3);
+    // Neither has an address; tunnels carried the moves end to end.
+    CHECK(c.transport->stats().tunnels_opened > 0);
+    CHECK(d.transport->stats().tunnels_opened > 0);
 }
