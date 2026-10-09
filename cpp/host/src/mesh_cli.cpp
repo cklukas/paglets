@@ -1097,6 +1097,15 @@ int remote_landscape(const Options& o) {
                 "queued {}  paglets {}\n",
                 s.host_name.empty() ? s.host.substr(0, 12) : s.host_name, s.cpus, s.load_per_cpu,
                 s.memory_available / (1024 * 1024), s.slots_free, s.slots, s.queued, s.paglets);
+            for (const auto& offer : s.offers) {
+                std::cout << "  offers " << offer.service;
+                for (std::size_t i = 0; i < offer.ops.size(); ++i) std::cout << (i == 0 ? " " : ",") << offer.ops[i];
+                for (const auto& attr : offer.attributes) {
+                    std::cout << "  " << attr.name << "="
+                              << (attr.numeric ? std::format("{}", attr.number) : attr.text);
+                }
+                std::cout << "\n";
+            }
         }
     }
     return 0;

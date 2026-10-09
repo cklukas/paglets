@@ -19,6 +19,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,10 +30,6 @@ namespace paglets::services {
 // directory; `offered` lists all of them. The default allows every one.
 using ServicePolicy = std::function<std::vector<std::string>(const abi::SenderRecord& caller, std::string_view service,
                                                              const std::vector<std::string>& offered)>;
-
-// Called when a paglet reads (lists, finds, reads) content of a named root,
-// for data residency marks (planning/cpp-residency.md).
-using AccessObserver = std::function<void(const abi::SenderRecord& caller, std::string_view root)>;
 
 struct Notification {
     std::uint64_t id = 0;
@@ -74,8 +71,13 @@ public:
 
     // Replaces the policy of directory lookups (WP9 installs the ledger's).
     virtual void set_policy(ServicePolicy policy) = 0;
-    // Hears which roots paglets read from (the mesh node marks them).
-    virtual void set_access_observer(AccessObserver observer) = 0;
+
+    // Stores `data` as an artifact for other system paglets (web downloads,
+    // AI results): an `artifact` capability (rights `read`), its content
+    // carrying `marks` (data residency).
+    virtual std::expected<runtime::Cap, std::int32_t> store_artifact(std::span<const std::uint8_t> data,
+                                                                     std::string media_type,
+                                                                     std::vector<std::string> marks) = 0;
 };
 
 // Registers the standard system paglets with `runtime` (before paglets are

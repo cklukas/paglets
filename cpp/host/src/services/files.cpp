@@ -12,6 +12,7 @@
 #include "services.hpp"
 
 #include <paglets/glob.hpp>
+#include <paglets/runtime/runtime.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -102,14 +103,10 @@ Result<Files::Resolved> Files::resolve(Operation& op, std::initializer_list<std:
     if (ec) return std::unexpected(abi::not_found);
     const fs::path base = fs::weakly_canonical(root_path / to_path(cap_rel), ec);
     if (ec || !(base == root_path || within(root_path, base))) return std::unexpected(abi::denied);
-    // Reading content of a root may mark the paglet (data residency).
+    // A paglet that reads content of a root carries its mark for good (data
+    // residency, planning/cpp-residency.md).
     if (op.sender() && std::ranges::find(rights, std::string_view("read")) != rights.end()) {
-        AccessObserver observer;
-        {
-            std::lock_guard lock(observer_mu_);
-            observer = observer_;
-        }
-        if (observer) observer(*op.sender(), root);
+        op.ctx.runtime().mark(op.sender()->id, "root:" + std::string(root));
     }
     return Resolved{base, rel.empty() ? base : base / to_path(rel), std::string(rel)};
 }

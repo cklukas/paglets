@@ -3,6 +3,8 @@
 
 #include "node_impl.hpp"
 
+#include <paglets/glob.hpp>
+
 namespace paglets::node {
 
 class GrantsService;
@@ -205,10 +207,6 @@ std::expected<void, std::string> Node::start() {
         }
         return allowed;
     });
-    // Data residency: a paglet that reads a root carries its mark.
-    impl_->services->set_access_observer([impl = impl_.get()](const abi::SenderRecord& caller, std::string_view root) {
-        impl->runtime.mark(caller.id, "root:" + std::string(root));
-    });
     sync();
     impl_->runtime.set_module_admission([impl = impl_.get()](const std::string& module, runtime::TrustClass trust) {
         return impl->admit(module, trust);
@@ -227,6 +225,24 @@ const mesh::RecordId& Node::mesh() const {
 
 const mesh::SigningKey& Node::host_key() const {
     return impl_->key;
+}
+
+bool Node::allows(const abi::SenderRecord& caller, const mesh::Item& item) const {
+    std::lock_guard lock(impl_->mu);
+    const mesh::LedgerState& st = impl_->ledger.state();
+    const mesh::Principal principal = Impl::principal_of(caller);
+    const mesh::PublicKey& self = impl_->key.public_key();
+    if (mesh::evaluate(st, principal, self, item).decision == mesh::Decision::allow) return true;
+    const std::int64_t now = mesh::unix_ms();
+    return std::ranges::any_of(st.grants, [&](const auto& e) {
+        const mesh::Grant& g = e.second;
+        return g.principal.paglet == principal.paglet && g.expires > now && mesh::selects(st, g.hosts, self) &&
+               g.item.service == item.service &&
+               std::ranges::all_of(item.ops,
+                                   [&](const std::string& op) { return std::ranges::find(g.item.ops, op) != g.item.ops.end(); }) &&
+               (g.item.root.empty() || g.item.root == item.root) &&
+               (g.item.path.empty() || glob::match(g.item.path, item.path));
+    });
 }
 
 std::vector<mesh::PublicKey> Node::peers() const {

@@ -64,6 +64,8 @@ until(TRIES 80 ARGS remote locate --connect ${A} ${OLGA} ${paglet} EXPECT "host:
 # mesh-info knows all four hosts; compute-slots answers (WP16).
 until(TRIES 80 ARGS remote landscape --connect ${A} ${OLGA} EXPECT "d +[0-9]+ cpus")
 message(STATUS "landscape:\n${OUT}")
+# c offers `ai` (the test backend); every host knows (WP17).
+until(TRIES 80 ARGS remote landscape --connect ${A} ${OLGA} EXPECT "offers ai summarize,classify")
 until(ARGS remote slots --connect ${B} ${OLGA} EXPECT "slots [0-9]+/[0-9]+ free")
 
 file(WRITE "${DIR}/stop" "")

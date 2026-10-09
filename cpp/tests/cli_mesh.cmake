@@ -50,7 +50,7 @@ execute_process(
     COMMAND "${HOST}" serve --key "${DIR}/b.key" --ledger "${DIR}/ledger-b" --state "${DIR}/state-b"
             --listen 127.0.0.1:${pb} --join https://127.0.0.1:${pa} ${common}
     COMMAND "${HOST}" serve --key "${DIR}/c.key" --ledger "${DIR}/ledger-c" --state "${DIR}/state-c"
-            --listen 127.0.0.1:${pc} --join https://127.0.0.1:${pb} ${common}
+            --listen 127.0.0.1:${pc} --join https://127.0.0.1:${pb} --ai test ${common}
     COMMAND "${HOST}" serve --key "${DIR}/d.key" --ledger "${DIR}/ledger-d" --state "${DIR}/state-d"
             --no-listen --join https://127.0.0.1:${pc} ${common}
     COMMAND "${CMAKE_COMMAND}" -DHOST=${HOST} -DDIR=${DIR} -DGUEST=${GUEST} -DA=https://127.0.0.1:${pa}

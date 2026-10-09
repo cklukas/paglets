@@ -11,6 +11,7 @@
 
 #if PAGLETS_HAVE_REFLECTION
 
+#include <paglets/gateway/gateway.hpp>
 #include <paglets/mesh/crypto.hpp>
 #include <paglets/mesh/ledger.hpp>
 #include <paglets/net/beacon.hpp>
@@ -22,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -50,11 +52,15 @@ int usage() {
                  "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
                  "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
                  "                          [--join URL]... [--no-beacon] [--beacon-port N] [--no-listen]\n"
-                 "                          [--slots N]\n"
+                 "                          [--slots N] [--web [--web-internal URL-PREFIX]... [--web-no-internet]\n"
+                 "                          [--web-proxy URL] [--web-search URL] [--web-ca FILE]]\n"
+                 "                          [--ai ollama|test [--ai-url URL] [--ai-model NAME]...]\n"
                  "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
                  "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
                  "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
                  "--no-listen: no inbound port (behind NAT); other hosts relay for this one.\n"
+                 "--web: offer the `web` system paglet (internal destinations only with --web-internal; the\n"
+                 "proxy defaults to HTTPS_PROXY); --ai: offer the `ai` system paglet through Ollama (or `test`).\n"
                  "Stops on SIGINT/SIGTERM, or when the stop file appears.\n";
     return 2;
 }
@@ -78,6 +84,11 @@ struct Options {
     int beacon_port = 0;
     bool inbound = true;
     std::int64_t slots = 0;
+    bool web = false;
+    bool web_internet = true;
+    std::vector<std::string> web_internal;
+    std::optional<std::string> web_proxy, web_search, web_ca, ai, ai_url;
+    std::vector<std::string> ai_models;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -159,6 +170,28 @@ std::optional<Options> parse(int argc, char** argv) {
                 }
                 ok = ok && o.slots > 0;
             }
+        } else if (a == "--web") {
+            o.web = true;
+        } else if (a == "--web-no-internet") {
+            o.web_internet = false;
+        } else if (a == "--web-internal") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) o.web_internal.push_back(*v);
+        } else if (a == "--web-proxy") {
+            ok = set(o.web_proxy);
+        } else if (a == "--web-search") {
+            ok = set(o.web_search);
+        } else if (a == "--web-ca") {
+            ok = set(o.web_ca);
+        } else if (a == "--ai") {
+            ok = set(o.ai);
+        } else if (a == "--ai-url") {
+            ok = set(o.ai_url);
+        } else if (a == "--ai-model") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) o.ai_models.push_back(*v);
         } else if (a == "--no-listen") {
             o.inbound = false;
         } else if (a == "--no-beacon") {
@@ -246,6 +279,50 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     if (auto ok = node.start(); !ok) return fail(ok.error());
     if (o.slots > 0) node.set_compute_slots(o.slots);
     for (const auto& dir : o.sources) node.add_module_source(std::make_shared<rt::DirectorySource>(dir));
+
+    // Gateway system paglets (planning/cpp-web-ai.md): offered to the mesh,
+    // used within the mesh policy.
+    std::shared_ptr<gateway::Gateway> gateways;
+    if (o.web || o.ai) {
+        gateway::GatewayConfig gc;
+        gc.web.enabled = o.web;
+        gc.web.internet = o.web_internet;
+        gc.web.internal = o.web_internal;
+        if (o.web_proxy) {
+            gc.web.proxy = *o.web_proxy;
+        } else {
+            // The host's proxy settings.
+            for (const char* name : {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}) {
+                if (const char* v = std::getenv(name); v != nullptr && *v != '\0') {
+                    gc.web.proxy = v;
+                    break;
+                }
+            }
+        }
+        if (o.web_search) gc.web.search_url = *o.web_search;
+        if (o.web_ca) gc.web.ca_file = *o.web_ca;
+        if (o.ai) {
+            gc.ai.enabled = true;
+            gc.ai.backend = *o.ai;
+            if (o.ai_url) gc.ai.url = *o.ai_url;
+            gc.ai.models = o.ai_models;
+        }
+        gc.offers = [&node](const std::string& service, std::optional<services::mesh_info::Offer> offer) {
+            if (offer) {
+                node.set_offer(std::move(*offer));
+            } else {
+                node.withdraw_offer(service);
+            }
+        };
+        gc.authorize = [&node](const abi::SenderRecord& caller, std::string_view service, std::string_view op,
+                               std::string_view root, std::string_view path) {
+            return node.allows(caller, mesh::Item{std::string(service), {std::string(op)}, std::string(root),
+                                                  std::string(path)});
+        };
+        auto installed = gateway::install_gateway(runtime, *services, std::move(gc));
+        if (!installed) return fail(installed.error());
+        gateways = *installed;
+    }
 
     net::Transport transport(
         node.host_key(), mesh_id, tc,

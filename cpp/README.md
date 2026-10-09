@@ -39,6 +39,13 @@ by gossip) and `compute-slots` (admission of compute work per host, with
 queues and redirects to hosts with free slots; no central scheduler), and
 the pi example: hex digits of pi computed in chunks on the hosts of the
 mesh, surviving the loss of a host ([design](../planning/cpp-compute.md)).
+WP17 adds service offers (hosts announce what their system paglets can do;
+paglets find them with `mesh-info` and move with tickets such as
+`offer:ai.summarize`), the `web` and `ai` gateway system paglets, the
+Download Courier and AI Document Digest demos
+([design](../planning/cpp-web-ai.md)), and data residency: paglets that
+read a restricted root carry its mark and move only where its content may
+go ([design](../planning/cpp-residency.md)).
 
 ## Layout
 
@@ -245,8 +252,8 @@ Hosts on the network ([design](../planning/cpp-networking.md)):
 ledger; `paglets-host remote` opens an end-to-end channel to a host as an
 admin or owner, to show its status, push ledger records, launch a paglet
 (the module travels with the request), call it or move it with a transfer
-ticket (a host name, a key ID, `label:<label>` or `any`, with
-`?retries=N&arrival=active|inactive`):
+ticket (a host name, a key ID, `label:<label>`, `offer:<service>[.<op>]` or
+`any`, with `?retries=N&arrival=active|inactive`):
 
 ```bash
 $H keys init --role owner --name olga --out olga.key
@@ -276,6 +283,20 @@ $H remote unpin --connect https://lab-1:7443 --key alice.key --ledger ledger <pa
 
 Paglets locate and pin each other through the `locator` system paglet;
 pinning needs a policy rule for service `locator`, operation `pin`.
+
+Gateway hosts ([design](../planning/cpp-web-ai.md)) offer `web` (mediated
+web access; internal addresses are refused unless allowed) or `ai` (local
+inference through Ollama); `remote landscape` lists every host's offers.
+Paglets use them within policy rules for the services `web` and `ai`:
+
+```bash
+$H serve --key gw.key --ledger ledger-gw --state state-gw --web --join https://lab-1:7443 &
+$H serve --key mac.key --ledger ledger-mac --state state-mac --ai ollama --ai-model llama3.2 \
+    --join https://lab-1:7443 &
+$H ledger rule --ledger ledger --admin alice.key --name downloads --decision allow \
+    --service web --op download --root example.org --path "files/**"
+$H remote landscape --connect https://lab-1:7443 --key alice.key --ledger ledger
+```
 
 Moving a paglet as a memory image between processes or hosts (the module
 must be the same file on both sides; images are independent of CPU

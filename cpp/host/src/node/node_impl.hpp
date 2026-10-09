@@ -443,6 +443,7 @@ struct Node::Impl {
         Clock::time_point next_sample{};
         Clock::time_point next_gossip{};
         std::uint64_t redirects = 0;
+        std::map<std::string, services::mesh_info::Offer> offers;  // this host's, by service
         std::int64_t used() const;
     };
     ComputeState compute;
@@ -457,6 +458,8 @@ struct Node::Impl {
                                                                  std::map<std::string, std::int64_t>& shadow,
                                                                  const std::string& not_to);
     void redirect_queued();
+    // Hosts with fresh snapshots whose offers match (planning/cpp-offers.md).
+    std::vector<services::mesh_info::OfferMatch> find_offers(const services::mesh_info::OffersRequest& q);
     services::compute_slots::Status compute_status();
 
     std::expected<void, std::string> admit(const std::string& module, runtime::TrustClass trust_class) {

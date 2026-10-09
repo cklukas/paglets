@@ -77,6 +77,7 @@ void Node::Impl::sample_self() {
     s.slots = c.slots;
     s.slots_free = c.slots - c.used();
     s.queued = static_cast<std::int64_t>(c.queue.size());
+    for (const auto& [service, offer] : c.offers) s.offers.push_back(offer);
     c.own = std::move(s);
 }
 
@@ -127,6 +128,68 @@ std::vector<services::mesh_info::Snapshot> Node::Impl::fresh_snapshots(std::int6
     const std::int64_t oldest = now_ms() - max_age_ms;
     for (const auto& [k, s] : compute.snapshots) {
         if (s.observed_ms >= oldest && std::ranges::binary_search(view, k) && compatible(k)) out.push_back(s);
+    }
+    return out;
+}
+
+// -- service offers ---------------------------------------------------------------------------
+
+namespace {
+
+const mi::Attribute* attribute(const mi::Offer& o, std::string_view name) {
+    auto it = std::ranges::find_if(o.attributes, [&](const mi::Attribute& a) { return a.name == name; });
+    return it == o.attributes.end() ? nullptr : &*it;
+}
+
+bool listed(std::string_view list, std::string_view item) {
+    while (!list.empty()) {
+        const auto comma = list.find(',');
+        std::string_view entry = list.substr(0, comma);
+        while (!entry.empty() && entry.front() == ' ') entry.remove_prefix(1);
+        while (!entry.empty() && entry.back() == ' ') entry.remove_suffix(1);
+        if (entry == item) return true;
+        if (comma == std::string_view::npos) break;
+        list.remove_prefix(comma + 1);
+    }
+    return false;
+}
+
+bool satisfies(const mi::Offer& o, const mi::Requirement& r) {
+    const mi::Attribute* a = attribute(o, r.name);
+    if (a == nullptr) return false;
+    if (r.is == "=") return a->text == r.text;
+    if (r.is == "has") return listed(a->text, r.text);
+    if (r.is == ">=") return a->numeric && a->number >= r.number;
+    if (r.is == "<=") return a->numeric && a->number <= r.number;
+    return false;
+}
+
+}  // namespace
+
+std::vector<services::mesh_info::OfferMatch> Node::Impl::find_offers(const mi::OffersRequest& q) {
+    std::vector<std::pair<double, mi::OfferMatch>> found;  // order key, match
+    const bool largest = q.prefer.starts_with('-');
+    const std::string prefer = largest ? q.prefer.substr(1) : q.prefer;
+    for (const auto& s : fresh_snapshots(std::max<std::int64_t>(q.max_age_ms, 1000), q.include_self)) {
+        for (const auto& o : s.offers) {
+            if (o.service != q.service) continue;
+            if (!q.op.empty() && std::ranges::find(o.ops, q.op) == o.ops.end()) continue;
+            if (!std::ranges::all_of(q.require, [&](const mi::Requirement& r) { return satisfies(o, r); })) continue;
+            double order = score(s);
+            if (!prefer.empty()) {
+                const mi::Attribute* a = attribute(o, prefer);
+                if (a == nullptr || !a->numeric) continue;
+                order = largest ? -a->number : a->number;
+            }
+            found.emplace_back(order, mi::OfferMatch{s.host, s.host_name, s.labels, s.load_per_cpu, o});
+        }
+    }
+    std::ranges::stable_sort(found, [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<mi::OfferMatch> out;
+    const auto limit = static_cast<std::size_t>(std::clamp<std::int64_t>(q.limit, 1, 256));
+    for (auto& [order, m] : found) {
+        if (out.size() >= limit) break;
+        out.push_back(std::move(m));
     }
     return out;
 }
@@ -264,6 +327,11 @@ public:
             }
         }
         return out;
+    }
+
+    services::Result<mi::Offers> find_offers(const mi::OffersRequest& q, services::Operation&) {
+        std::lock_guard lock(node_.mu);
+        return mi::Offers{node_.find_offers(q)};
     }
 
 private:
@@ -420,6 +488,27 @@ services::compute_slots::Status Node::compute_status() const {
 std::vector<services::mesh_info::Snapshot> Node::landscape() const {
     std::lock_guard lock(impl_->mu);
     return impl_->fresh_snapshots(impl_->compute.timing.ttl.count(), true);
+}
+
+// A changed offer is sampled and sent at once.
+void Node::set_offer(services::mesh_info::Offer offer) {
+    std::lock_guard lock(impl_->mu);
+    if (offer.service.empty()) return;
+    impl_->compute.offers[offer.service] = std::move(offer);
+    impl_->sample_self();
+    impl_->compute.next_gossip = {};
+}
+
+void Node::withdraw_offer(const std::string& service) {
+    std::lock_guard lock(impl_->mu);
+    if (impl_->compute.offers.erase(service) == 0) return;
+    impl_->sample_self();
+    impl_->compute.next_gossip = {};
+}
+
+std::vector<services::mesh_info::OfferMatch> Node::find_offers(const services::mesh_info::OffersRequest& q) const {
+    std::lock_guard lock(impl_->mu);
+    return impl_->find_offers(q);
 }
 
 }  // namespace paglets::node

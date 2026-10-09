@@ -112,6 +112,10 @@ public:
 
     // Called once when the runtime registers it.
     virtual void start(SystemContext&) {}
+    // Called once when the runtime shuts down, after the last message: work
+    // it does on threads of its own ends here (the context stays valid
+    // until then).
+    virtual void stop() {}
     // One message at a time, on a scheduler lane.
     virtual void handle(SystemContext& ctx, ServiceCall& call) = 0;
     // A paglet ended (disposed or failed), in order with messages.

@@ -290,3 +290,56 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     CHECK(done.hex.starts_with("3.243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89"));
     CHECK(done.hex == "3." + pi_bbp::hex_digits(0, 1200));
 }
+
+PAGLETS_TEST("offers: hosts announce features; paglets find them and move to them by offer") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    auto& c = net.add_host("c");
+    net.enroll_all();
+    fast(net);
+    auto attr = [](std::string name, std::string text) { return mi::Attribute{std::move(name), std::move(text), 0, false}; };
+    auto number = [](std::string name, double n) { return mi::Attribute{std::move(name), {}, n, true}; };
+    b.node->set_offer(mi::Offer{"ai",
+                                {"summarize", "classify"},
+                                {attr("backend", "test"), attr("tasks", "summarize, classify"), number("context", 32000)}});
+    c.node->set_offer(mi::Offer{"ai", {"summarize"}, {attr("backend", "test"), number("context", 8000)}});
+    c.node->set_offer(mi::Offer{"web", {"fetch"}, {}});
+    REQUIRE(net.settle([&] {
+        return a.node->find_offers(mi::OffersRequest{.service = "ai"}).size() == 2u &&
+               a.node->find_offers(mi::OffersRequest{.service = "web"}).size() == 1u;
+    }));
+
+    // A paglet on a asks mesh-info.
+    const std::string module = a.f->module("conformance.wasm");
+    const auto id = start(net, a, module, 'e');
+    auto found = ask<mi::Offers>(net, *a.f, id, "mesh-info", "find_offers",
+                                 mi::OffersRequest{.service = "ai", .op = "summarize", .prefer = "-context"});
+    REQUIRE(found.matches.size() == 2u);
+    CHECK(found.matches[0].host_name == "b");
+    CHECK(found.matches[1].host_name == "c");
+    CHECK((found.matches[0].offer.ops == std::vector<std::string>{"summarize", "classify"}));
+    found = ask<mi::Offers>(net, *a.f, id, "mesh-info", "find_offers",
+                            mi::OffersRequest{.service = "ai", .require = {{"context", ">=", {}, 16000}}});
+    REQUIRE(found.matches.size() == 1u);
+    CHECK(found.matches[0].host_name == "b");
+    found = ask<mi::Offers>(net, *a.f, id, "mesh-info", "find_offers",
+                            mi::OffersRequest{.service = "ai", .require = {{"tasks", "has", "classify", 0}}});
+    REQUIRE(found.matches.size() == 1u);
+    CHECK(found.matches[0].host_name == "b");
+    CHECK(a.node->find_offers(mi::OffersRequest{.service = "ai", .op = "embed"}).empty());
+
+    // A ticket names an offer: the paglet goes to the host offering it.
+    REQUIRE_OK(a.node->dispatch(id, "offer:ai.classify"));
+    REQUIRE(net.settle([&] { return b.f->runtime->info(id).has_value(); }, 400));
+
+    // b withdraws its offer: nothing offers `classify` any more.
+    b.node->withdraw_offer("ai");
+    REQUIRE(net.settle([&] { return a.node->find_offers(mi::OffersRequest{.service = "ai"}).size() == 1u; }));
+    CHECK(c.node->find_offers(mi::OffersRequest{.service = "ai", .op = "classify"}).empty());
+    const auto failed = b.node->move_stats().moves_failed;
+    REQUIRE_OK(b.node->dispatch(id, "offer:ai.classify"));
+    REQUIRE(net.settle([&] { return b.node->move_stats().moves_failed == failed + 1; }, 400));
+    REQUIRE_OK(b.node->dispatch(id, "offer:web"));
+    REQUIRE(net.settle([&] { return c.f->runtime->info(id).has_value(); }, 400));
+}

@@ -68,10 +68,6 @@ public:
     explicit Files(std::map<std::string, fs::path> roots);
 
     const std::map<std::string, fs::path>& roots() const { return roots_; }
-    void set_observer(AccessObserver observer) {
-        std::lock_guard lock(observer_mu_);
-        observer_ = std::move(observer);
-    }
 
     Result<files::ListReply> list(const files::ListRequest&, Operation&);
     Result<files::Entry> stat(const files::StatRequest&, Operation&);
@@ -95,8 +91,6 @@ private:
     Result<Resolved> resolve(Operation& op, std::initializer_list<std::string_view> rights, std::string_view rel) const;
 
     std::map<std::string, fs::path> roots_;
-    mutable std::mutex observer_mu_;
-    AccessObserver observer_;
 };
 
 // -- storage --------------------------------------------------------------------
@@ -160,6 +154,10 @@ public:
     Result<artifacts::Info> put(const artifacts::PutRequest&, Operation&);
     Result<artifacts::GetReply> get(const artifacts::GetRequest&, Operation&);
     Result<artifacts::Info> stat(const artifacts::StatRequest&, Operation&);
+    // Stores content (deduplicated by hash; marks are added to an existing
+    // artifact's); returns its hash.
+    Result<std::string> store(std::span<const std::uint8_t> data, std::string_view media_type,
+                              const std::vector<std::string>& marks);
 
 private:
     Result<artifacts::Info> info_of(std::string_view hash) const;

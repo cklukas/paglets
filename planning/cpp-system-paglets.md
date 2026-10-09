@@ -116,8 +116,10 @@ and `#include <paglets/services/<service>.gen.hpp>`.
 | `server-info` | via directory | summary, load, volumes, processes | Platform layer; CPU use since the previous `load` |
 | `artifacts` | via directory | put, get, stat | Content-addressed (SHA-256); `put` replies with an `artifact` capability |
 | `pubsub` | via directory | create, publish, subscribe, unsubscribe | Topics reached only through `topic` capabilities; publications are messages named by the subscriber, badge = topic name; host-local until WP14 |
-| `mesh-info` | yes | snapshot, landscape, select | Registered by the mesh node (WP16, planning/cpp-compute.md): snapshots of every host (load, memory, compute slots) by gossip |
+| `mesh-info` | yes | snapshot, landscape, select, find_offers | Registered by the mesh node (WP16, planning/cpp-compute.md): snapshots of every host (load, memory, compute slots, service offers) by gossip |
 | `compute-slots` | yes | request_slot, release_slot, status, candidates | Registered by the mesh node (WP16): admission of compute work on this host; queue, grants (`compute.granted`) and redirects (`compute.redirect`) to hosts with free slots |
+| `web` | via directory | capabilities, fetch, extract_text, download, search | Gateway hosts only (WP17, planning/cpp-web-ai.md): GET/HEAD for paglets; internal destinations refused unless allowed; the policy decides per URL (root: the URL's host, path: its path); downloads become artifacts |
+| `ai` | via directory | capabilities, summarize, classify, extract, generate, embed, describe_image | Hosts with an inference backend (WP17): Ollama or `test`; replies when done; quotas per owner; the policy decides per operation and model |
 | `locator` | yes | locate, locate_and_pin, release | Registered by the mesh node (WP13, planning/cpp-location.md): finds paglets anywhere in the mesh through a lent endpoint; pins are `pin` capabilities; the policy decides who may pin, and for how long |
 
 Every system paglet also answers `describe` with its schema descriptor.

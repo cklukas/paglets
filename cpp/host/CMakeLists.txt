@@ -83,6 +83,22 @@ if(PAGLETS_ENABLE_REFLECTION)
         target_link_libraries(paglets_services PRIVATE psapi)
     endif()
 
+    # Gateway system paglets (WP17): `web` and `ai`, on hosts configured
+    # for them (cpp-httplib with OpenSSL).
+    add_library(paglets_gateway STATIC
+        src/gateway/ai.cpp
+        src/gateway/html.cpp
+        src/gateway/install.cpp
+        src/gateway/url.cpp
+        src/gateway/web.cpp)
+    target_link_libraries(paglets_gateway PUBLIC paglets_services PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_include_directories(paglets_gateway SYSTEM PRIVATE ${PAGLETS_HTTPLIB_INCLUDE_DIR})
+    target_compile_options(paglets_gateway PRIVATE ${PAGLETS_WARNINGS})
+    if(WIN32)
+        target_compile_definitions(paglets_gateway PRIVATE _WIN32_WINNT=0x0A00)
+        target_link_libraries(paglets_gateway PRIVATE ws2_32 crypt32)
+    endif()
+
     # A host in a mesh: ledger and gossip tied to the runtime, the grants
     # system paglet (WP9).
     add_library(paglets_node STATIC src/node/compute.cpp src/node/location.cpp src/node/movement.cpp src/node/node.cpp src/node/registry.cpp
@@ -95,7 +111,7 @@ endif()
 add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp src/serve_cli.cpp)
 target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh paglets_net)
 if(TARGET paglets_node)
-    target_link_libraries(paglets-host PRIVATE paglets_node)
+    target_link_libraries(paglets-host PRIVATE paglets_node paglets_gateway)
 endif()
 target_compile_options(paglets-host PRIVATE ${PAGLETS_WARNINGS})
 add_executable(paglets-worker src/worker_main.cpp)

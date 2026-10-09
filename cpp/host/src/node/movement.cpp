@@ -199,11 +199,28 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
     const mesh::LedgerState& st = ledger.state();
     std::vector<mesh::PublicKey> matches;
     const std::string& t = ticket.target;
+    // `offer:<service>[.<op>]`: hosts offering it (planning/cpp-offers.md),
+    // the least loaded first.
+    std::vector<std::string> offering;
+    if (t.starts_with("offer:")) {
+        services::mesh_info::OffersRequest q;
+        const std::string what = t.substr(6);
+        const auto dot = what.find('.');
+        q.service = what.substr(0, dot);
+        if (dot != std::string::npos) q.op = what.substr(dot + 1);
+        q.include_self = false;
+        q.limit = 256;
+        for (const auto& m : find_offers(q)) {
+            if (std::ranges::find(offering, m.host) == offering.end()) offering.push_back(m.host);
+        }
+    }
     for (const auto& [k, h] : st.hosts) {
         if (k == key.public_key()) continue;
         bool match = false;
         if (t == "any") {
             match = true;
+        } else if (t.starts_with("offer:")) {
+            match = std::ranges::find(offering, mesh::key_id(k)) != offering.end();
         } else if (t.starts_with("label:")) {
             match = std::ranges::find(h.labels, t.substr(6)) != h.labels.end();
         } else {
@@ -253,10 +270,14 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
         }
         if (ok) out.push_back(k);
     }
-    // Several hosts match `any` and labels: spread paglets over them.
+    // Several hosts match `any` and labels: spread paglets over them;
+    // offers keep their order.
     if (t == "any" || t.starts_with("label:")) {
         static thread_local std::mt19937_64 random{std::random_device{}()};
         std::ranges::shuffle(out, random);
+    } else if (t.starts_with("offer:")) {
+        auto rank = [&](const mesh::PublicKey& k) { return std::ranges::find(offering, mesh::key_id(k)) - offering.begin(); };
+        std::ranges::stable_sort(out, [&](const auto& a, const auto& b) { return rank(a) < rank(b); });
     }
     // Hosts that are up first (location.cpp keeps the view).
     update_view();

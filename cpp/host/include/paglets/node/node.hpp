@@ -63,6 +63,11 @@ public:
     const mesh::SigningKey& host_key() const;
     // The hosts this node talks to: enrolled hosts and seeds.
     std::vector<mesh::PublicKey> peers() const;
+    // True if the mesh policy lets `caller` use `item` on this host: a rule
+    // that allows it, or a grant of the paglet that covers it (its path a
+    // pattern). Gateway system paglets ask this per request (web: the URL's
+    // host as the root, its path as the path).
+    bool allows(const abi::SenderRecord& caller, const mesh::Item& item) const;
 
     // Gossip and node frames.
     void add_seed(const mesh::PublicKey& peer);
@@ -241,6 +246,13 @@ public:
     services::compute_slots::Status compute_status() const;
     // Fresh snapshots of the hosts (this one first).
     std::vector<services::mesh_info::Snapshot> landscape() const;
+    // Service offers of this host (planning/cpp-offers.md): set (replaces
+    // the offer of the same service) or withdraw; they spread with the
+    // host's snapshots.
+    void set_offer(services::mesh_info::Offer offer);
+    void withdraw_offer(const std::string& service);
+    // Hosts offering a feature, the best first.
+    std::vector<services::mesh_info::OfferMatch> find_offers(const services::mesh_info::OffersRequest& q) const;
 
     // -- CLI sessions (planning/cpp-networking.md, section 8) --
 

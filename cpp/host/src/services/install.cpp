@@ -12,7 +12,9 @@ public:
     std::shared_ptr<impl::Files> files;
     std::shared_ptr<impl::Directory> directory;
     std::shared_ptr<impl::UserInfo> user_info;
+    std::shared_ptr<impl::Artifacts> artifacts;
     runtime::PagletId files_id;
+    runtime::PagletId artifacts_id;
 
     std::expected<runtime::Cap, std::string> directory_capability(std::string_view root, std::string_view path,
                                                                   std::vector<std::string> rights,
@@ -38,7 +40,22 @@ public:
     }
 
     void set_policy(ServicePolicy policy) override { directory->set_policy(std::move(policy)); }
-    void set_access_observer(AccessObserver observer) override { files->set_observer(std::move(observer)); }
+
+    std::expected<runtime::Cap, std::int32_t> store_artifact(std::span<const std::uint8_t> data,
+                                                             std::string media_type,
+                                                             std::vector<std::string> marks) override {
+        auto hash = artifacts->store(data, media_type, marks);
+        if (!hash) return std::unexpected(hash.error());
+        runtime::Cap c;
+        c.kind = runtime::Cap::Kind::resource;
+        c.target = artifacts_id;
+        c.resource_type = "artifact";
+        c.resource = *hash;
+        c.ops = {"read"};
+        c.transferable = true;
+        c.id = impl::random_hex(16);
+        return c;
+    }
 };
 
 }  // namespace
@@ -69,13 +86,14 @@ std::expected<std::shared_ptr<SystemServices>, std::string> install_system_servi
     installed->directory =
         std::make_shared<impl::Directory>(state.empty() ? fs::path() : state / "directory.state", config.policy);
     installed->user_info = std::make_shared<impl::UserInfo>(config.notifications_per_owner, config.notify);
+    installed->artifacts = std::make_shared<impl::Artifacts>(artifacts_root, artifacts_temporary, config.artifacts_limit);
 
     std::vector<std::shared_ptr<runtime::SystemPaglet>> all{
         installed->directory,
         installed->files,
         std::make_shared<impl::ServerInfo>(),
         std::make_shared<impl::Storage>(config.storage_quota),
-        std::make_shared<impl::Artifacts>(artifacts_root, artifacts_temporary, config.artifacts_limit),
+        installed->artifacts,
         std::make_shared<impl::PubSub>(state.empty() ? fs::path() : state / "pubsub.state"),
         installed->user_info,
     };
@@ -83,6 +101,7 @@ std::expected<std::shared_ptr<SystemServices>, std::string> install_system_servi
         auto id = runtime.add_system_paglet(paglet);
         if (!id) return std::unexpected(id.error());
         if (paglet == installed->files) installed->files_id = *id;
+        if (paglet == installed->artifacts) installed->artifacts_id = *id;
     }
     return installed;
 }

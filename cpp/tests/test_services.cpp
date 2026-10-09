@@ -228,6 +228,15 @@ PAGLETS_TEST("services: artifacts, pubsub and user-info") {
         const std::string hash = paglets::to_hex(paglets::sha256(text("stored content")));
         // The guest reads the artifact from offset 7.
         CHECK(s.ask<std::string>(id, "artifact", explorer::Text{"stored content"}) == hash + ":content");
+        // Data residency: an artifact keeps the marks of the paglets that
+        // stored it, and whoever reads it carries them.
+        const auto marked = s.explorer();
+        s.f->runtime->mark(marked, "root:clinic");
+        CHECK(s.ask<std::string>(marked, "artifact", explorer::Text{"from the clinic"}).ends_with(":e clinic"));
+        const auto reader = s.explorer();
+        CHECK(s.ask<std::string>(reader, "artifact", explorer::Text{"from the clinic"}).ends_with(":e clinic"));
+        CHECK(s.f->runtime->marks(reader) == std::vector<std::string>{"root:clinic"});
+        CHECK(s.f->runtime->marks(id).empty());
 
         CHECK(s.ask<std::string>(id, "topic", explorer::Text{"rain"}) == "delivered:1");
         REQUIRE(s.f->runtime->wait_idle());

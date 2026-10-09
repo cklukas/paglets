@@ -1994,6 +1994,15 @@ void Runtime::shutdown(bool save_state) {
     impl_->clock_cv.notify_all();
     for (auto& lane : impl_->lanes) lane->thread.join();
     if (impl_->clock.joinable()) impl_->clock.join();
+    // System paglets end the work they do on threads of their own.
+    std::vector<std::shared_ptr<SystemPaglet>> natives;
+    {
+        std::lock_guard lock(impl_->mu);
+        for (auto& [id, rec] : impl_->paglets) {
+            if (rec->native) natives.push_back(rec->native);
+        }
+    }
+    for (auto& n : natives) n->stop();
 
     std::vector<PagletRec*> recs;
     {
