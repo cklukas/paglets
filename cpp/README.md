@@ -3,7 +3,9 @@
 C++ implementation of paglets: mobile agents as WebAssembly modules, run by
 the embedded [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime)
 runtime, moving between hosts as **memory images**. The design and work
-packages are in [`../planning/`](../planning/cpp-edition-plan.md).
+packages are in [`../planning/`](../planning/cpp-edition-plan.md); the user
+documentation is the `paglets/cpp` section of the documentation site
+([`../docs/cpp/`](../docs/cpp/index.md)).
 
 Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
@@ -51,7 +53,7 @@ work against live hosts to the CLI (pull, requests, approve, deny, audit,
 modules, dispose, `module inspect`); WP20 adds demo paglets from the
 [catalogue](../planning/cpp-demo-paglets.md) (Mesh Journey, File Finder and
 Storage Analyzer, Duplicate Finder, Inventory and Process Finder, Volume
-Guard, Latency Map, Hide and Seek), tested on meshes of several hosts, and
+Guard, Latency Map, Hide and Seek, Semantic Mesh Search, Web Researcher), tested on meshes of several hosts, and
 the first [benchmarks](../planning/cpp-benchmarks.md); WP21 fuzzes every
 decoder of data from outside (ledger records, frames between hosts, memory
 images, modules, the Noise handshake, contracts) in CI
@@ -70,7 +72,7 @@ sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
 examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
                           and the demos: courier, digest, journey, finder, dupes, inventory, guard,
-                          latency, seek
+                          latency, seek, semantic, researcher
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```

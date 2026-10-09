@@ -70,6 +70,14 @@ nav:
       - docs/technical/serialization.md
       - docs/technical/configuration.md
       - docs/technical/tooling.md
+  - title: paglets/cpp
+    pages:
+      - docs/cpp/index.md
+      - docs/cpp/building.md
+      - docs/cpp/writing-paglets.md
+      - docs/cpp/hosts-and-meshes.md
+      - docs/cpp/system-paglets.md
+      - docs/cpp/demos.md
   - title: Project
     pages:
       - docs/project/status.md

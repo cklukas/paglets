@@ -142,6 +142,8 @@ Useful entry points:
 - [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts.html)
 - [Technical Reference](https://cklukas.github.io/paglets/technical/overview.html)
 - [Status And Limitations](https://cklukas.github.io/paglets/project/status.html)
+- [paglets/cpp](https://github.com/cklukas/paglets/tree/cpp/docs/cpp), the C++/Wasm
+  edition (section `paglets/cpp` of the site; on the `cpp` branch for now)
 
 Build docs locally with [ckdocs](https://github.com/cklukas/ck-git-hosting)
 (regenerate the API reference and snippets first when the code changed):
