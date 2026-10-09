@@ -102,6 +102,16 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
     }
 
+    if (*type == "landscape" || *type == "slots") {
+        // mesh-info and compute-slots (planning/cpp-compute.md): admins and owners.
+        if (*type == "landscape") {
+            mesh::Array list;
+            for (const auto& s : landscape()) list.emplace_back(wire::to_msgpack(s));
+            return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
+        }
+        return answer(mesh::Map{{"status", mesh::Value(wire::to_msgpack(compute_status()))}});
+    }
+
     if (*type == "push") {
         // Records are signed; the ledger decides what they mean.
         const mesh::Array* records = f.array("records");

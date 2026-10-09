@@ -9,9 +9,13 @@
 
 #include <paglets/node/node.hpp>
 
+#include "../platform/platform.hpp"
+
+#include <paglets/services/compute_slots.hpp>
 #include <paglets/services/contract.hpp>
 #include <paglets/services/grants.hpp>
 #include <paglets/services/locator.hpp>
+#include <paglets/services/mesh_info.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/reflect.hpp>
 
@@ -140,6 +144,7 @@ using namespace detail;
 class GrantsService;
 class LocatorService;
 std::shared_ptr<runtime::SystemPaglet> make_locator(Node::Impl& impl);
+std::vector<std::shared_ptr<runtime::SystemPaglet>> make_compute_services(Node::Impl& impl);
 
 struct Node::Impl {
     Impl(runtime::Runtime& rt, std::shared_ptr<services::SystemServices> svc, mesh::Ledger l, mesh::SigningKey k,
@@ -409,6 +414,50 @@ struct Node::Impl {
     bool compatible(const mesh::PublicKey& host) const;
     void load_registry();
     void save_registry();
+
+    // mesh-info and compute-slots (compute.cpp, planning/cpp-compute.md).
+    struct ComputeState {
+        ComputeTiming timing;
+        services::mesh_info::Snapshot own;                                   // this host, as last sampled
+        std::map<mesh::PublicKey, services::mesh_info::Snapshot> snapshots;  // the others
+        std::optional<platform::CpuSample> cpu_before;
+        std::int64_t slots = 0;  // 0: the number of CPUs
+        struct Lease {
+            std::string id;
+            runtime::PagletId paglet;
+            std::string job;
+            std::int64_t cores = 1;
+            std::int64_t granted = 0;
+        };
+        std::map<std::string, Lease> leases;
+        struct Waiter {
+            runtime::PagletId paglet;
+            std::string job;
+            std::int64_t cores = 1;
+            std::int64_t since = 0;
+            Clock::time_point queued_at{};
+            std::string came_from;
+        };
+        std::list<Waiter> queue;
+        runtime::SystemContext* ctx = nullptr;
+        Clock::time_point next_sample{};
+        Clock::time_point next_gossip{};
+        std::uint64_t redirects = 0;
+        std::int64_t used() const;
+    };
+    ComputeState compute;
+    void sample_self();
+    void compute_tick();
+    void on_mesh_info(const mesh::PublicKey& from, const mesh::Fields& f);
+    std::vector<services::mesh_info::Snapshot> fresh_snapshots(std::int64_t max_age_ms, bool include_self);
+    void end_stale_leases();
+    std::string grant(const runtime::PagletId& paglet, const std::string& job, std::int64_t cores);
+    void grant_queued();
+    std::optional<services::mesh_info::Snapshot> peer_with_slots(std::int64_t cores,
+                                                                 std::map<std::string, std::int64_t>& shadow,
+                                                                 const std::string& not_to);
+    void redirect_queued();
+    services::compute_slots::Status compute_status();
 
     std::expected<void, std::string> admit(const std::string& module, runtime::TrustClass trust_class) {
         std::shared_ptr<const mesh::LedgerState> st;
@@ -744,6 +793,8 @@ struct Node::Impl {
             on_move_query(from, f);
         } else if (*type == "hosts") {
             on_hosts(from, f);
+        } else if (*type == "mi-sync") {
+            on_mesh_info(from, f);
         } else if (!on_location_frame(*type, from, f)) {
             return false;
         }

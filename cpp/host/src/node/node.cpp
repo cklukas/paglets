@@ -187,6 +187,9 @@ std::expected<void, std::string> Node::start() {
     auto grants = std::make_shared<GrantsService>(*impl_);
     if (auto id = impl_->runtime.add_system_paglet(grants); !id) return std::unexpected(id.error());
     if (auto id = impl_->runtime.add_system_paglet(make_locator(*impl_)); !id) return std::unexpected(id.error());
+    for (auto& service : make_compute_services(*impl_)) {
+        if (auto id = impl_->runtime.add_system_paglet(service); !id) return std::unexpected(id.error());
+    }
     // Services with ambient authority: only the operations the rules allow.
     impl_->services->set_policy([impl = impl_.get()](const abi::SenderRecord& caller, std::string_view service,
                                                      const std::vector<std::string>& offered) {
@@ -248,6 +251,7 @@ void Node::tick() {
     impl_->check_move_deadlines();
     impl_->location_tick();
     impl_->registry_tick();
+    impl_->compute_tick();
 }
 
 std::expected<mesh::AddResult, std::string> Node::submit(const mesh::Record& record) {

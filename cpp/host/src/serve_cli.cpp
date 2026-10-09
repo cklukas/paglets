@@ -50,6 +50,7 @@ int usage() {
                  "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
                  "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
                  "                          [--join URL]... [--no-beacon] [--beacon-port N] [--no-listen]\n"
+                 "                          [--slots N]\n"
                  "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
                  "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
                  "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
@@ -76,6 +77,7 @@ struct Options {
     bool beacon = true;
     int beacon_port = 0;
     bool inbound = true;
+    std::int64_t slots = 0;
 };
 
 std::optional<Options> parse(int argc, char** argv) {
@@ -146,6 +148,17 @@ std::optional<Options> parse(int argc, char** argv) {
             auto v = next();
             ok = v.has_value();
             if (ok) o.joins.push_back(*v);
+        } else if (a == "--slots") {
+            auto v = next();
+            ok = v.has_value();
+            if (ok) {
+                try {
+                    o.slots = std::stoll(*v);
+                } catch (const std::exception&) {
+                    ok = false;
+                }
+                ok = ok && o.slots > 0;
+            }
         } else if (a == "--no-listen") {
             o.inbound = false;
         } else if (a == "--no-beacon") {
@@ -231,6 +244,7 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     mesh::ForwardingTransport forward;
     node::Node node(runtime, *services, std::move(*ledger), std::move(*key), forward, fs::path(*o.state) / "node");
     if (auto ok = node.start(); !ok) return fail(ok.error());
+    if (o.slots > 0) node.set_compute_slots(o.slots);
     for (const auto& dir : o.sources) node.add_module_source(std::make_shared<rt::DirectorySource>(dir));
 
     net::Transport transport(

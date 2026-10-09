@@ -116,6 +116,8 @@ and `#include <paglets/services/<service>.gen.hpp>`.
 | `server-info` | via directory | summary, load, volumes, processes | Platform layer; CPU use since the previous `load` |
 | `artifacts` | via directory | put, get, stat | Content-addressed (SHA-256); `put` replies with an `artifact` capability |
 | `pubsub` | via directory | create, publish, subscribe, unsubscribe | Topics reached only through `topic` capabilities; publications are messages named by the subscriber, badge = topic name; host-local until WP14 |
+| `mesh-info` | yes | snapshot, landscape, select | Registered by the mesh node (WP16, planning/cpp-compute.md): snapshots of every host (load, memory, compute slots) by gossip |
+| `compute-slots` | yes | request_slot, release_slot, status, candidates | Registered by the mesh node (WP16): admission of compute work on this host; queue, grants (`compute.granted`) and redirects (`compute.redirect`) to hosts with free slots |
 | `locator` | yes | locate, locate_and_pin, release | Registered by the mesh node (WP13, planning/cpp-location.md): finds paglets anywhere in the mesh through a lent endpoint; pins are `pin` capabilities; the policy decides who may pin, and for how long |
 
 Every system paglet also answers `describe` with its schema descriptor.

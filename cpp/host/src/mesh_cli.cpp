@@ -12,6 +12,11 @@
 #include <paglets/mesh/passport.hpp>
 #include <paglets/net/transport.hpp>
 #include <paglets/wire/json_msgpack.hpp>
+#if PAGLETS_HAVE_REFLECTION
+#include <paglets/services/compute_slots.hpp>
+#include <paglets/services/mesh_info.hpp>
+#include <paglets/wire/reflect.hpp>
+#endif
 #include <paglets/sha256.hpp>
 #include <paglets/wasm/engine.hpp>
 
@@ -76,6 +81,7 @@ int usage() {
            "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
            "       paglets-host remote hosts --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote landscape|slots --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote locate --connect URL --key KEY --ledger DIR PAGLET\n"
            "       paglets-host remote pin --connect URL --key KEY --ledger DIR PAGLET [--minutes N] [--reason TEXT]\n"
            "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
@@ -87,6 +93,8 @@ int usage() {
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
            "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket).\n"
            "hosts lists the enrolled hosts as the host knows them (address, online, versions);\n"
+           "landscape shows mesh-info's view of every host (load, memory, compute slots), slots the\n"
+           "compute slots of the host (leases, queue);\n"
            "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
            "pins lists the pins on the host, unpin ends pins wherever the paglet is (admins).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
@@ -1034,6 +1042,60 @@ int remote_hosts(const Options& o) {
     return 0;
 }
 
+#if PAGLETS_HAVE_REFLECTION
+int remote_landscape(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("landscape")}});
+    if (!a) return fail(a.error());
+    if (const Array* hosts = Fields{*a}.array("hosts")) {
+        for (const auto& h : *hosts) {
+            const Bytes* b = h.as_bin();
+            paglets::services::mesh_info::Snapshot s;
+            if (b == nullptr || !paglets::wire::from_msgpack(*b, s)) continue;
+            std::cout << std::format(
+                "{:<12} {:>3} cpus  load {:5.2f}/cpu  mem {:>6} MB free  slots {}/{} free  "
+                "queued {}  paglets {}\n",
+                s.host_name.empty() ? s.host.substr(0, 12) : s.host_name, s.cpus, s.load_per_cpu,
+                s.memory_available / (1024 * 1024), s.slots_free, s.slots, s.queued, s.paglets);
+        }
+    }
+    return 0;
+}
+
+int remote_slots(const Options& o) {
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(Map{{"t", Value("slots")}});
+    if (!a) return fail(a.error());
+    paglets::services::compute_slots::Status s;
+    auto bytes = Fields{*a}.bin("status");
+    if (!bytes || !paglets::wire::from_msgpack(*bytes, s)) return fail("malformed answer");
+    std::cout << "slots " << s.self.free << "/" << s.self.slots << " free, " << s.self.queued << " waiting\n";
+    for (const auto& l : s.leases) {
+        std::cout << "  lease " << l.lease << "  paglet " << l.paglet << "  job " << l.job << "  cores " << l.cores
+                  << "\n";
+    }
+    for (const auto& w : s.queue) {
+        std::cout << "  waiting  paglet " << w.paglet << "  job " << w.job << "  cores " << w.cores << "\n";
+    }
+    for (const auto& p : s.peers) {
+        std::cout << "  peer " << (p.host_name.empty() ? p.host.substr(0, 12) : p.host_name) << "  " << p.free << "/"
+                  << p.slots << " free, " << p.queued << " waiting\n";
+    }
+    return 0;
+}
+
+#else
+int remote_landscape(const Options&) {
+    return fail("this build has no mesh-info codecs (no reflection)");
+}
+
+int remote_slots(const Options&) {
+    return fail("this build has no compute-slots codecs (no reflection)");
+}
+#endif
+
 int remote_locate(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
@@ -1132,6 +1194,8 @@ int mesh_command(int argc, char** argv) {
             if (action == "call") return remote_call(o);
             if (action == "dispatch") return remote_dispatch(o);
             if (action == "hosts") return remote_hosts(o);
+            if (action == "landscape") return remote_landscape(o);
+            if (action == "slots") return remote_slots(o);
             if (action == "locate") return remote_locate(o);
             if (action == "pin") return remote_pin(o);
             if (action == "pins") return remote_pins(o);

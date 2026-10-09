@@ -7,3 +7,8 @@ paglets_add_module(counter
     SOURCES counter/counter.cpp
     SCHEMA_HEADER counter/messages.hpp
     SCHEMA_NAMESPACE counter_msgs)
+paglets_add_module(pi
+    SOURCES pi/pi.cpp
+    SCHEMA_HEADER pi/pi_msgs.hpp
+    SCHEMA_NAMESPACE pi_msgs
+    SERVICES mesh_info compute_slots)

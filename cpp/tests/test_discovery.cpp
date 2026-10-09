@@ -288,13 +288,15 @@ PAGLETS_TEST("relay: a host without an inbound port takes part in the mesh, also
     REQUIRE(net.eventually([&] { return relays_of(d).size() == 2u && d.transport->live_uplinks().size() == 2u; }));
     REQUIRE(net.eventually([&] { return net.discovered_except_addresses(); }));
     const auto relays = relays_of(d);
-    for (std::size_t i = 0; i < 3; ++i) {
-        const auto hosts = net[i].node->hosts();
-        const HostInfo* seen = info_of(hosts, d.node->host());
-        REQUIRE(seen != nullptr);
-        CHECK(seen->url.empty());
-        CHECK(seen->relays == relays);
-    }
+    // Every host learns d's announcement with them.
+    REQUIRE(net.eventually([&] {
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto hosts = net[i].node->hosts();
+            const HostInfo* seen = info_of(hosts, d.node->host());
+            if (seen == nullptr || !seen->url.empty() || seen->relays != relays) return false;
+        }
+        return true;
+    }));
 
     // The ledger reaches d (an admin record made on a).
     auto r = a.node->draft("owner-enroll", data::owner_enroll(SigningKey::generate().public_key(), "otto", {}));

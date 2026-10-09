@@ -85,7 +85,7 @@ if(PAGLETS_ENABLE_REFLECTION)
 
     # A host in a mesh: ledger and gossip tied to the runtime, the grants
     # system paglet (WP9).
-    add_library(paglets_node STATIC src/node/location.cpp src/node/movement.cpp src/node/node.cpp src/node/registry.cpp
+    add_library(paglets_node STATIC src/node/compute.cpp src/node/location.cpp src/node/movement.cpp src/node/node.cpp src/node/registry.cpp
                                     src/node/session.cpp)
     target_link_libraries(paglets_node PUBLIC paglets_services paglets_mesh PRIVATE Zstd::Zstd)
     target_compile_options(paglets_node PRIVATE ${PAGLETS_WARNINGS})

@@ -37,7 +37,7 @@ set(test_sources
     test_network.cpp
     test_mobility.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -45,9 +45,9 @@ target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_ne
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node)
 endif()
-target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${CMAKE_CURRENT_SOURCE_DIR}/guests)
+target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${PROJECT_SOURCE_DIR}/examples/pi ${CMAKE_CURRENT_SOURCE_DIR}/guests)
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest counter hello ping_pong conformance testbed forbidden calc_user explorer)
+foreach(guest counter hello ping_pong pi conformance testbed forbidden calc_user explorer)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()

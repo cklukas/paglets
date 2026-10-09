@@ -27,6 +27,8 @@
 #include <paglets/mesh/ledger.hpp>
 #include <paglets/mesh/passport.hpp>
 #include <paglets/runtime/runtime.hpp>
+#include <paglets/services/compute_slots.hpp>
+#include <paglets/services/mesh_info.hpp>
 #include <paglets/services/system_services.hpp>
 
 #include <chrono>
@@ -224,6 +226,21 @@ public:
     // heard from `sender_ip`.
     std::vector<std::uint8_t> beacon() const;
     void receive_beacon(std::span<const std::uint8_t> beacon, const std::string& sender_ip);
+
+    // -- mesh-info and compute-slots (planning/cpp-compute.md) --
+
+    struct ComputeTiming {
+        std::chrono::milliseconds sample{2000};          // this host samples itself
+        std::chrono::milliseconds gossip{2000};          // and sends its snapshot to the live hosts
+        std::chrono::milliseconds ttl{20000};            // snapshots older than this are not fresh
+        std::chrono::milliseconds redirect_after{1000};  // a waiter may go to a host with free slots
+    };
+    void set_compute_timing(ComputeTiming timing);
+    // Compute slots of this host (default: its number of CPUs).
+    void set_compute_slots(std::int64_t slots);
+    services::compute_slots::Status compute_status() const;
+    // Fresh snapshots of the hosts (this one first).
+    std::vector<services::mesh_info::Snapshot> landscape() const;
 
     // -- CLI sessions (planning/cpp-networking.md, section 8) --
 

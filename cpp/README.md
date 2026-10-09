@@ -34,7 +34,11 @@ versions, and refuse hosts of another mesh protocol or paglet ABI
 ports (behind NAT): they poll a few reachable hosts that relay for them, and
 everybody else reaches them through end-to-end encrypted channels tunneled
 through those relays ([design](../planning/cpp-relay.md)). This completes
-milestone M3.
+milestone M3. In milestone M4, WP16 adds `mesh-info` (snapshots of every host
+by gossip) and `compute-slots` (admission of compute work per host, with
+queues and redirects to hosts with free slots; no central scheduler), and
+the pi example: hex digits of pi computed in chunks on the hosts of the
+mesh, surviving the loss of a host ([design](../planning/cpp-compute.md)).
 
 ## Layout
 
@@ -47,7 +51,7 @@ host/                     host library: Wasm engine, memory images, runtime, wir
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
-examples/                 sample paglets: hello, counter, ping_pong
+examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh)
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```

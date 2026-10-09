@@ -61,5 +61,10 @@ message(STATUS "a sees:\n${OUT}")
 until(ARGS remote dispatch --connect ${B} ${OLGA} ${paglet} d)
 until(TRIES 80 ARGS remote locate --connect ${A} ${OLGA} ${paglet} EXPECT "host:  d ")
 
+# mesh-info knows all four hosts; compute-slots answers (WP16).
+until(TRIES 80 ARGS remote landscape --connect ${A} ${OLGA} EXPECT "d +[0-9]+ cpus")
+message(STATUS "landscape:\n${OUT}")
+until(ARGS remote slots --connect ${B} ${OLGA} EXPECT "slots [0-9]+/[0-9]+ free")
+
 file(WRITE "${DIR}/stop" "")
 message(STATUS "four hosts found each other; paglet ${paglet} went a -> c -> b -> d (relayed)")
