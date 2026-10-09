@@ -305,7 +305,10 @@ PAGLETS_TEST("relay: a host without an inbound port takes part in the mesh, also
         net[i].node->joined(*contact);
     }
     // d keeps two relays; every host reaches d through them.
-    REQUIRE(net.eventually([&] { return relays_of(d).size() == 2u && d.transport->live_uplinks().size() == 2u; }));
+    const bool two_relays =
+        net.eventually([&] { return relays_of(d).size() == 2u && d.transport->live_uplinks().size() == 2u; });
+    if (!two_relays) dump_relays(net);
+    REQUIRE(two_relays);
     REQUIRE(net.eventually([&] { return net.discovered_except_addresses(); }));
     const auto relays = relays_of(d);
     // Every host learns d's announcement with them.
