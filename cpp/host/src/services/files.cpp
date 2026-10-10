@@ -13,6 +13,7 @@
 
 #include <paglets/glob.hpp>
 #include <paglets/runtime/runtime.hpp>
+#include <paglets/wire/reflect.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -85,7 +86,7 @@ Result<files::Entry> entry_of(const fs::path& p, std::string rel) {
 Files::Files(std::map<std::string, fs::path> roots) : roots_(std::move(roots)) {}
 
 Result<Files::Resolved> Files::resolve(Operation& op, std::initializer_list<std::string_view> rights,
-                                       std::string_view rel) const {
+                                       std::string_view rel, bool mark) const {
     if (op.lent().empty()) return std::unexpected(abi::invalid_argument);
     const runtime::Cap& cap = op.lent().front();
     if (auto c = op.ctx.check(cap, "dir", ""); c != abi::ok) return std::unexpected(c);
@@ -105,10 +106,10 @@ Result<Files::Resolved> Files::resolve(Operation& op, std::initializer_list<std:
     if (ec || !(base == root_path || within(root_path, base))) return std::unexpected(abi::denied);
     // A paglet that reads content of a root carries its mark for good (data
     // residency, planning/cpp-residency.md).
-    if (op.sender() && std::ranges::find(rights, std::string_view("read")) != rights.end()) {
+    if (mark && op.sender() && std::ranges::find(rights, std::string_view("read")) != rights.end()) {
         op.ctx.runtime().mark(op.sender()->id, "root:" + std::string(root));
     }
-    return Resolved{base, rel.empty() ? base : base / to_path(rel), std::string(rel)};
+    return Resolved{base, rel.empty() ? base : base / to_path(rel), std::string(rel), root};
 }
 
 Result<Files::Resolved> Files::resolve(Operation& op, std::string_view right, std::string_view rel) const {
@@ -305,6 +306,87 @@ Result<files::DeleteReply> Files::remove(const files::DeleteRequest& q, Operatio
         reply.removed = 1;
     }
     return reply;
+}
+
+// -- content for other hosts (planning/cpp-content-exchange.md) ---------------
+
+Result<files::Shared> Files::share(const files::ShareRequest& q, Operation& op) {
+    if (!artifacts_) return std::unexpected(abi::unsupported);
+    // Nothing is read into the paglet: the content carries the root's mark
+    // instead, and leaves this host only where the root's content may go.
+    auto r = resolve(op, {"read"}, q.path, false);
+    if (!r) return std::unexpected(r.error());
+    auto file = content_path(r->base, r->path);
+    if (!file) return std::unexpected(file.error());
+    std::error_code ec;
+    if (!fs::is_regular_file(*file, ec)) return std::unexpected(ec ? error_of(ec) : abi::invalid_argument);
+    auto reply = op.call.defer();
+    if (!reply) return std::unexpected(abi::internal);
+    runtime::SystemContext* ctx = &op.ctx;
+    // Hashing a large file blocks: not on a scheduler lane.
+    artifacts_->jobs().post([artifacts = artifacts_, ctx, cap = std::move(*reply), file = *file, media = q.media_type,
+                             root = r->root](bool stopping) {
+        if (stopping) {
+            (void)ctx->reply(cap, abi::failed);
+            return;
+        }
+        auto shared = artifacts->share_file(file, media, {"root:" + root});
+        if (!shared) {
+            (void)ctx->reply(cap, shared.error());
+            return;
+        }
+        (void)ctx->reply(cap, abi::ok, wire::to_msgpack(*shared), {artifacts->capability(shared->hash)});
+    });
+    return files::Shared{};
+}
+
+Result<files::Entry> Files::save(const files::SaveRequest& q, Operation& op) {
+    if (!artifacts_) return std::unexpected(abi::unsupported);
+    if (q.path.empty() || op.lent().size() < 2) return std::unexpected(abi::invalid_argument);
+    const runtime::Cap& content = op.lent()[1];
+    if (!Artifacts::readable(content)) return std::unexpected(abi::bad_handle);
+    auto ref = Artifacts::parse_resource(content.resource);
+    auto r = resolve(op, {}, q.path);
+    if (!r) return std::unexpected(r.error());
+    auto target = content_path(r->base, r->path);
+    if (!target) return std::unexpected(target.error());
+    std::error_code ec;
+    const auto st = fs::status(*target, ec);
+    const bool exists = fs::exists(st);
+    if (exists && !fs::is_regular_file(st)) return std::unexpected(abi::invalid_argument);
+    if (exists && !q.replace) return std::unexpected(abi::bad_state);
+    if (!fs::is_directory(target->parent_path(), ec)) return std::unexpected(abi::not_found);
+    if (auto c = op.ctx.check(op.lent().front(), "dir", exists ? "write" : "create"); c != abi::ok) {
+        return std::unexpected(c);
+    }
+    auto reply = op.call.defer();
+    if (!reply) return std::unexpected(abi::internal);
+    runtime::SystemContext* ctx = &op.ctx;
+    // Written beside the target and renamed when complete and verified: the
+    // file appears whole or not at all.
+    const fs::path tmp = target->parent_path() / (".paglets-save-" + random_hex(8));
+    artifacts_->copy_to(*ref, tmp,
+                        [ctx, cap = std::move(*reply), tmp, target = *target, rel = r->rel,
+                         replace = q.replace](std::int32_t status) {
+                            std::error_code err;
+                            if (status == abi::ok && !replace && fs::exists(target, err)) status = abi::bad_state;
+                            if (status == abi::ok) {
+                                fs::rename(tmp, target, err);
+                                if (err) status = error_of(err);
+                            }
+                            if (status != abi::ok) {
+                                fs::remove(tmp, err);
+                                (void)ctx->reply(cap, status);
+                                return;
+                            }
+                            auto entry = entry_of(target, rel);
+                            if (entry) {
+                                (void)ctx->reply(cap, abi::ok, wire::to_msgpack(*entry));
+                            } else {
+                                (void)ctx->reply(cap, entry.error());
+                            }
+                        });
+    return files::Entry{};
 }
 
 }  // namespace paglets::services::impl

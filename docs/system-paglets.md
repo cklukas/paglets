@@ -20,12 +20,12 @@ admin approves the request.
 
 | Service | Operations | Purpose |
 |---|---|---|
-| `files` | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove` | files inside a directory capability; the capability's rights limit what is possible |
+| `files` | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove`, `share`, `save` | files inside a directory capability; the capability's rights limit what is possible. `share` and `save` move files of any size between hosts |
 | `grants` | `request`, `status`, `release`, `list` | ask the mesh policy for a resource, such as a directory of a named root |
 | `server-info` | `summary`, `load`, `volumes`, `processes` | the host's system, load, volumes and processes, in one schema on every platform |
 | `directory` | `lookup`, `publish`, `unpublish`, `list` | finds system services and paglets that published themselves under a name |
 | `storage` | `get`, `put`, `remove`, `list` | persistent key-value storage of each paglet, within a quota |
-| `artifacts` | `put`, `get`, `stat` | content-addressed blobs (SHA-256), for results larger than a message |
+| `artifacts` | `put`, `get`, `stat` | content-addressed blobs (SHA-256), for results larger than a message; artifact capabilities work on every host |
 | `pubsub` | `create`, `publish`, `subscribe`, `unsubscribe` | topics on a host |
 | `user-info` | `notify` | notifications to the owner of a paglet |
 | `locator` | `locate`, `locate_and_pin`, `release` | find a paglet anywhere in the mesh and pin it |
@@ -39,6 +39,71 @@ The
 and the
 [compute design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-compute.md)
 describe the services in detail.
+
+## Moving content between hosts
+
+A paglet moves as a memory image of at most 16 MB, so it should not carry
+large data in its memory. Instead, it carries **artifact capabilities**: a
+capability names its content by SHA-256 and names the host that holds it,
+together with a token that this host made. The capability is a few bytes.
+It moves with the paglet and travels in messages to paglets on other
+hosts. The content goes directly from host to host, and only when a host
+needs it.
+
+- `files.share` makes a file of a directory capability (right `read`)
+  available to the mesh. The host hashes the file and replies with an
+  artifact capability. Nothing is copied and nothing is read into the
+  paglet. The host serves the file from where it is, as long as the file
+  keeps its size and modification time.
+- `files.save` writes the content of an artifact capability to a file
+  (rights `create`, and `write` to replace a file). The host fetches the
+  content from the host that holds it, in parts of 1 MB, writes it beside
+  the target, checks its SHA-256, and only then renames it into place. A
+  file appears whole or not at all. The parent directory must exist.
+- `artifacts.get` and `artifacts.stat` work on every host. A host that
+  lacks the content first fetches it into its own `artifacts` store.
+- Artifacts that `artifacts.put` and the `web` gateway's `download` create
+  work the same way.
+
+The guest SDK wraps the two file operations in `share_file` and
+`save_file` (see [Writing paglets](writing-paglets.md#the-patterns-library)):
+
+```cpp
+namespace pt = paglets::patterns;
+
+// On the source host, with a `dir` capability that has the right `read`:
+pt::share_file(dir, "results/run-7.h5", [this](paglets::Result<pt::SharedFile> f) {
+    if (f) shared_ = std::move(*f);  // name, sha256, size and the capability
+});
+
+// Later, on the destination host, with a `dir` capability that has `create`:
+pt::save_file(dir, "inbox/run-7.h5", shared_.content,
+              [](paglets::Result<paglets::services::files::Entry> e) { /* ... */ });
+```
+
+The host that holds the content serves it only:
+
+- to enrolled hosts of the mesh;
+- with the token it made for that content;
+- within the data residency of the content. A shared file carries the mark
+  of its root (`root:<name>`), and an artifact carries the marks of the
+  paglets that stored it. A host that the residency rule does not allow
+  gets `denied`, and the destination host writes nothing.
+
+The paglet that shares a file is not marked, because it reads nothing. A
+paglet that reads content with `artifacts.get` takes the content's marks,
+as it does when it reads a file. Listing or finding files of a root still
+marks the paglet, because file names are content of the root as well.
+
+> [!NOTE]
+> Hosts keep fetched artifacts in their `artifacts` store, within its limit
+> (1 GB by default). `save` writes directly into the destination
+> directory, so it needs no space in the store. Hosts remember shared files
+> across restarts. A shared file that changes is no longer served; share
+> it again to give out its new content.
+
+See the
+[content exchange design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-content-exchange.md).
 
 ## Service offers
 
@@ -83,7 +148,9 @@ $H ledger rule --ledger ledger --admin alice.key --name downloads --decision all
   the request with a reason, such as
   `SSL server verification failed (unable to get local issuer certificate)`.
 
-`download` stores the file as an artifact.
+`download` stores the file as an artifact. The artifact capability works
+on every host, so a paglet can carry it home, where its home host fetches
+the content (see [Moving content between hosts](#moving-content-between-hosts)).
 
 `ai` answers through Ollama (`--ai-url`, `--ai-model`). The `test` backend
 gives fixed answers, which the test suite uses. Both gateways run their

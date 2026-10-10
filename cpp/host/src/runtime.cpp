@@ -347,18 +347,20 @@ struct Runtime::Impl {
         return c;
     }
 
-    // Capabilities a message to another host may carry: endpoints to paglets.
+    // Capabilities a message to another host may carry: endpoints to
+    // paglets, and artifacts that name the host holding their content.
     bool portable_handles(const PagletRec& rec, const std::vector<std::int32_t>& handles) const {
         return std::ranges::all_of(handles, [&](std::int32_t h) {
             auto it = rec.caps.find(h);
-            return it == rec.caps.end() || (it->second.kind == Cap::Kind::endpoint && !is_system(it->second.target));
+            return it == rec.caps.end() || (it->second.kind == Cap::Kind::endpoint && !is_system(it->second.target)) ||
+                   mesh_artifact(it->second);
         });
     }
 
     std::vector<Cap> portable_caps(std::vector<Cap> caps) {
         std::vector<Cap> out;
         for (auto& c : caps) {
-            if (c.kind == Cap::Kind::endpoint && !is_system(c.target)) {
+            if ((c.kind == Cap::Kind::endpoint && !is_system(c.target)) || mesh_artifact(c)) {
                 out.push_back(portable(std::move(c)));
             } else {
                 drop_cap(std::move(c), abi::gone);
@@ -2289,9 +2291,12 @@ std::int32_t Runtime::deliver_remote(RemoteMessage m) {
     env.delivered.sender = std::move(m.sender);
     env.delivered.badge = std::move(m.badge);
     for (auto& c : m.caps) {
-        // Endpoints to paglets only; a host's system paglets are its own.
+        // Endpoints to paglets and artifacts that name their host; a host's
+        // other system paglets are its own.
         if (c.kind == Cap::Kind::endpoint && !c.target.starts_with("system.")) {
             if (c.host == rt.mobility.host_id) c.host.clear();
+            env.caps.push_back(std::move(c));
+        } else if (mesh_artifact(c) && rt.paglets.contains(c.target)) {
             env.caps.push_back(std::move(c));
         }
     }

@@ -97,7 +97,9 @@ $H ledger residency --ledger ledger --admin alice.key vault host-only
 
 Hosts enforce the rule when a move starts, and again when they choose the
 candidates for a transfer ticket. Artifacts made from marked data carry the
-mark as well. See the
+mark as well, and so do files shared with `files.share`: the host that holds
+such content gives it only to hosts the rule allows (see
+[Moving content between hosts](system-paglets.md#moving-content-between-hosts)). See the
 [residency design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-residency.md).
 
 ## Running hosts

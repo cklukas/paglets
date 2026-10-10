@@ -10,6 +10,8 @@
 #include <paglets/services/contract.hpp>
 #include <paglets/services/web.hpp>
 
+#include "../services/jobs.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -39,28 +41,9 @@ std::string url_encode(std::string_view s);
 // Why a CA file (PEM) for HTTPS destinations cannot be used; nullopt: usable.
 std::optional<std::string> ca_file_problem(const std::string& path);
 
-// Work that blocks (network, inference) runs here, not on scheduler lanes:
-// at most `threads` jobs at a time, the rest wait. stop() ends the threads
-// after the jobs that run; waiting jobs run with `stopping` set.
-class Jobs {
-public:
-    explicit Jobs(int threads) : threads_(std::max(1, threads)) {}
-    ~Jobs() { stop(); }
-    void post(std::function<void(bool stopping)> job);
-    void stop();
-    std::size_t pending() const;
-
-private:
-    void run();
-
-    int threads_;
-    mutable std::mutex mu_;
-    std::condition_variable cv_;
-    std::deque<std::function<void(bool)>> queue_;
-    std::vector<std::thread> workers_;
-    int busy_ = 0;
-    bool stopping_ = false;
-};
+// Work that blocks (network, inference) runs on services::impl::Jobs, not on
+// scheduler lanes.
+using services::impl::Jobs;
 
 // An HTTP(S) response as far as it was read.
 struct HttpResult {

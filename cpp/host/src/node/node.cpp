@@ -183,6 +183,11 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
 Node::~Node() {
     impl_->runtime.set_module_admission({});
     impl_->runtime.set_mobility({});
+    impl_->services->set_content_exchange({});
+    std::lock_guard lock(impl_->mu);
+    while (!impl_->pulls.empty()) {
+        impl_->finish_pull(impl_->pulls.begin()->first, {abi::failed, "the host stops", 0, {}});
+    }
 }
 
 std::expected<void, std::string> Node::start() {
@@ -192,6 +197,8 @@ std::expected<void, std::string> Node::start() {
     for (auto& service : make_compute_services(*impl_)) {
         if (auto id = impl_->runtime.add_system_paglet(service); !id) return std::unexpected(id.error());
     }
+    // Artifact capabilities name this host; content moves between hosts.
+    impl_->install_exchange();
     // Services with ambient authority: only the operations the rules allow.
     impl_->services->set_policy([impl = impl_.get()](const abi::SenderRecord& caller, std::string_view service,
                                                      const std::vector<std::string>& offered) {
@@ -267,6 +274,7 @@ void Node::tick() {
     std::lock_guard lock(impl_->mu);
     impl_->replica->tick();
     impl_->check_fetch_deadlines();
+    impl_->check_pull_deadlines();
     impl_->take_spawns();
     impl_->check_move_deadlines();
     impl_->location_tick();

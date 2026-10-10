@@ -3,10 +3,13 @@
 
 // Download Courier demo (planning/cpp-web-ai.md, section 5): a paglet
 // started on a host without internet access moves to a host that offers
-// `web`, downloads a file there into an artifact, carries the content home
-// in its memory, stores it as an artifact on its home host and tells the
-// owner. Paglets never get sockets: the web host fetches on their behalf,
-// checks the destination and asks the mesh policy.
+// `web`, downloads a file there into an artifact and comes home with the
+// artifact capability. At home, the home host fetches the content from the
+// web host into its own store (planning/cpp-content-exchange.md), and the
+// owner hears. The content never passes through the paglet's memory, so
+// its size is limited by the web host's download limit, not by the
+// paglet's. Paglets never get sockets: the web host fetches on their
+// behalf, checks the destination and asks the mesh policy.
 
 #include "courier.schema.gen.hpp"
 
@@ -33,9 +36,6 @@ using paglets::patterns::endpoint;
 using paglets::patterns::error_text;
 using paglets::patterns::lending;
 using paglets::patterns::lookup;
-
-constexpr std::size_t max_carry = 16u * 1024 * 1024;  // what the courier carries in its memory
-constexpr std::uint64_t chunk = 1024 * 1024;
 
 class Courier : public paglets::Paglet {
 public:
@@ -137,40 +137,13 @@ private:
                                             if (r->status < 200 || r->status >= 300 || m.cap_count() == 0) {
                                                 return fail_and_return("HTTP status " + std::to_string(r->status));
                                             }
-                                            if (static_cast<std::uint64_t>(r->size) > max_carry) {
-                                                return fail_and_return("too large to carry");
-                                            }
                                             blob_ = std::make_shared<Capability>(m.take_cap(0));
-                                            content_.clear();
-                                            read_more();
+                                            status_.size = r->size;
+                                            status_.state = "returning";
+                                            go_home();
                                         });
             if (!sent) fail_and_return(error_text("download", sent.error()));
         });
-    }
-
-    // Reads the artifact into memory, chunk by chunk.
-    void read_more() {
-        endpoint("artifacts", [this](paglets::Result<Endpoint> store) {
-            if (!store) return fail_and_return(error_text("artifacts", store.error()));
-            read_from(*store);
-        });
-    }
-
-    void read_from(Endpoint store) {
-        svc::artifacts::Client client{store};
-        auto sent = client.get(
-            svc::artifacts::GetRequest{content_.size(), chunk},
-            [this](paglets::Result<svc::artifacts::GetReply> r, Message&) {
-                if (!r) return fail_and_return(error_text("artifact", r.error()));
-                content_.insert(content_.end(), r->data.begin(), r->data.end());
-                if (!r->eof && !r->data.empty()) return read_more();
-                blob_.reset();
-                status_.size = static_cast<std::int64_t>(content_.size());
-                status_.state = "returning";
-                go_home();
-            },
-            lending(*blob_));
-        if (!sent) fail_and_return(error_text("artifact", sent.error()));
     }
 
     void go_home() {
@@ -181,7 +154,8 @@ private:
         }
     }
 
-    // Home again: the content becomes an artifact here, the owner hears.
+    // Home again: the home host fetches the content into its store, the
+    // owner hears.
     void deliver() {
         if (status_.state == "failed") return notify(svc::user_info::Level::error, "courier failed", status_.error);
         endpoint("artifacts", [this](paglets::Result<Endpoint> store) {
@@ -192,18 +166,20 @@ private:
 
     void store_at_home(Endpoint store) {
         svc::artifacts::Client client{store};
-        auto sent = client.put(svc::artifacts::PutRequest{content_, "application/octet-stream"},
-                               [this](paglets::Result<svc::artifacts::Info> info, Message&) {
-                                   if (!info) return fail(error_text("store", info.error()));
-                                   status_.artifact = info->hash;
-                                   status_.state = "delivered";
-                                   status_.error.clear();
-                                   content_.clear();
-                                   content_.shrink_to_fit();
-                                   notify(svc::user_info::Level::success, "courier delivered " + status_.url,
-                                          "artifact " + info->hash + ", " + std::to_string(status_.size) + " bytes");
-                               });
-        if (!sent) fail(error_text("store", sent.error()));
+        paglets::RequestOptions options = lending(*blob_);
+        options.timeout_ms = 3600 * 1000;  // a large download takes a while to arrive
+        auto sent = client.stat(
+            svc::artifacts::StatRequest{},
+            [this](paglets::Result<svc::artifacts::Info> info, Message&) {
+                if (!info) return fail(error_text("fetch home", info.error()));
+                status_.artifact = info->hash;
+                status_.state = "delivered";
+                status_.error.clear();
+                notify(svc::user_info::Level::success, "courier delivered " + status_.url,
+                       "artifact " + info->hash + ", " + std::to_string(status_.size) + " bytes");
+            },
+            options);
+        if (!sent) fail(error_text("fetch home", sent.error()));
     }
 
     static void notify(svc::user_info::Level level, std::string title, std::string text) {
@@ -219,7 +195,6 @@ private:
     // The errand failed away from home: the courier comes back to report.
     void fail_and_return(std::string why) {
         fail(std::move(why));
-        content_.clear();
         if (here_ != status_.home) {
             if (!paglets::dispatch(status_.home)) notify(svc::user_info::Level::error, "courier failed", status_.error);
         } else {
@@ -231,7 +206,6 @@ private:
     Status status_{"idle"};
     std::string here_;
     std::shared_ptr<Capability> blob_;
-    std::vector<std::uint8_t> content_;
 };
 
 }  // namespace

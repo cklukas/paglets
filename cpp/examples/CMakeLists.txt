@@ -64,7 +64,6 @@ paglets_add_module(dupes
     PATTERNS)
 paglets_add_module(file_courier
     SOURCES file_courier/file_courier.cpp
-    SHA256
     SCHEMA_HEADER file_courier/file_courier_msgs.hpp
     SCHEMA_NAMESPACE file_courier_msgs
     PATTERNS)

@@ -705,6 +705,10 @@ std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet
         if (!runtime.system_paglet("locator")) return std::nullopt;
         return kept;
     }
+    // Artifacts that name the host holding their content work everywhere
+    // (planning/cpp-content-exchange.md). Called under the runtime's lock:
+    // no runtime calls here.
+    if (runtime::mesh_artifact(kept)) return kept;
     if (!kept.grant) return std::nullopt;
     auto id = parse_hex_id(*kept.grant);
     if (!id) return std::nullopt;

@@ -22,7 +22,7 @@ struct Start {
     std::string to_root;
     std::string to_path;  // "" : the root itself
     std::int64_t max_files = 100;
-    std::int64_t max_bytes = 16 * 1024 * 1024;  // all files together
+    std::int64_t max_bytes = 0;  // all files together; 0: no limit
 };
 
 struct Started {
@@ -34,8 +34,8 @@ struct Started {
 struct Item {
     std::string path;  // below the source root; the same below `to_path`
     std::int64_t size = 0;
-    std::string sha256;     // hex, of the content read on the source host
-    bool verified = false;  // read back on the destination host with the same hash
+    std::string sha256;     // hex, of the file on the source host
+    bool verified = false;  // written on the destination host with the same hash
 };
 
 // `status`: the errand and, once delivered, the receipt.

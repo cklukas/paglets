@@ -16,11 +16,15 @@
 #include <paglets/services/user_info.hpp>
 
 #include "../platform/platform.hpp"
+#include "jobs.hpp"
 
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -63,11 +67,15 @@ private:
 
 // -- files ----------------------------------------------------------------------
 
+class Artifacts;
+
 class Files final : public ContractPaglet<files::Contract, Files> {
 public:
     explicit Files(std::map<std::string, fs::path> roots);
 
     const std::map<std::string, fs::path>& roots() const { return roots_; }
+    // `share` and `save` work with the artifacts of this host.
+    void set_artifacts(std::shared_ptr<Artifacts> artifacts) { artifacts_ = std::move(artifacts); }
 
     Result<files::ListReply> list(const files::ListRequest&, Operation&);
     Result<files::Entry> stat(const files::StatRequest&, Operation&);
@@ -77,20 +85,27 @@ public:
     Result<files::Entry> mkdir(const files::MkdirRequest&, Operation&);
     Result<files::Entry> move(const files::MoveRequest&, Operation&);
     Result<files::DeleteReply> remove(const files::DeleteRequest&, Operation&);
+    Result<files::Shared> share(const files::ShareRequest&, Operation&);
+    Result<files::Entry> save(const files::SaveRequest&, Operation&);
 
     static constexpr std::uint64_t max_transfer = 4u * 1024 * 1024;
 
 private:
     struct Resolved {
-        fs::path base;    // the directory of the capability (canonical)
-        fs::path path;    // the requested path below it
-        std::string rel;  // the requested path, relative to the capability
+        fs::path base;     // the directory of the capability (canonical)
+        fs::path path;     // the requested path below it
+        std::string rel;   // the requested path, relative to the capability
+        std::string root;  // the named root
     };
     // Checks the lent capability for `right` and resolves `rel` below it.
+    // Using `read` marks the caller with the root (data residency) unless
+    // `mark` is false (`share` reads nothing into the paglet).
     Result<Resolved> resolve(Operation& op, std::string_view right, std::string_view rel) const;
-    Result<Resolved> resolve(Operation& op, std::initializer_list<std::string_view> rights, std::string_view rel) const;
+    Result<Resolved> resolve(Operation& op, std::initializer_list<std::string_view> rights, std::string_view rel,
+                             bool mark = true) const;
 
     std::map<std::string, fs::path> roots_;
+    std::shared_ptr<Artifacts> artifacts_;
 };
 
 // -- storage --------------------------------------------------------------------
@@ -148,8 +163,11 @@ private:
 
 class Artifacts final : public ContractPaglet<artifacts::Contract, Artifacts> {
 public:
-    Artifacts(fs::path root, bool temporary, std::uint64_t limit);
+    // `shares_file`: where shared files are remembered ("": in memory).
+    Artifacts(fs::path root, bool temporary, std::uint64_t limit, fs::path shares_file);
     ~Artifacts() override;
+    void start(runtime::SystemContext& ctx) override;
+    void stop() override;
 
     Result<artifacts::Info> put(const artifacts::PutRequest&, Operation&);
     Result<artifacts::GetReply> get(const artifacts::GetRequest&, Operation&);
@@ -159,14 +177,58 @@ public:
     Result<std::string> store(std::span<const std::uint8_t> data, std::string_view media_type,
                               const std::vector<std::string>& marks);
 
-private:
-    Result<artifacts::Info> info_of(std::string_view hash) const;
-    Result<std::string> lent_hash(Operation& op) const;
+    // Content exchange between hosts (planning/cpp-content-exchange.md).
+    struct Ref {
+        std::string hash;
+        std::string host;  // empty: content of this host only
+        std::string token;
+    };
+    static std::optional<Ref> parse_resource(std::string_view resource);
+    // True for a usable artifact capability with the right `read`.
+    static bool readable(const runtime::Cap& cap);
+    void set_exchange(ContentExchange exchange);
+    // An artifact capability (rights `read`) to content `hash` of this host.
+    runtime::Cap capability(std::string_view hash) const;
+    // Hashes `file` and serves it as content (files.share), without a
+    // copy; it is served while its size and modification time stay. Blocks.
+    Result<files::Shared> share_file(const fs::path& file, std::string media_type, std::vector<std::string> marks);
+    // Writes the content of `ref` to `into`: a copy of content here, else
+    // fetched from its host. `done` is called once, on another thread.
+    void copy_to(const Ref& ref, fs::path into, std::function<void(std::int32_t)> done);
+    std::optional<ServedContent> served(std::string_view hash) const;
+    Jobs& jobs() { return jobs_; }
 
-    std::mutex mu_;
+private:
+    struct Share {
+        std::string path;  // UTF-8
+        std::uint64_t size = 0;
+        std::int64_t modified_ns = 0;
+        std::string media_type;
+        std::vector<std::string> marks;
+        std::int64_t created_ms = 0;
+    };
+    Result<artifacts::Info> info_of(std::string_view hash) const;
+    Result<Ref> lent_ref(Operation& op) const;
+    std::string resource_of(std::string_view hash) const;
+    std::optional<ServedContent> served_locked(std::string_view hash) const;  // mu_ held
+    // Makes content `ref` available here; `done(status)` at once or later.
+    void obtain(const Ref& ref, std::function<void(std::int32_t)> done);
+    void fetched(const std::string& hash, const fs::path& tmp, const ContentFetched& result);
+    Result<artifacts::GetReply> read_range(std::string_view hash, const artifacts::GetRequest& q,
+                                           const std::optional<abi::SenderRecord>& reader);
+    std::uint64_t used() const;
+    void save_shares() const;  // mu_ held
+
+    mutable std::mutex mu_;
     fs::path root_;
     bool temporary_;
     std::uint64_t limit_;
+    fs::path shares_file_;
+    std::map<std::string, Share, std::less<>> shares_;  // by hash
+    std::map<std::string, std::vector<std::function<void(std::int32_t)>>, std::less<>> waiting_;  // fetches, by hash
+    std::shared_ptr<const ContentExchange> exchange_;
+    runtime::SystemContext* ctx_ = nullptr;
+    Jobs jobs_{2};
 };
 
 // -- pubsub ---------------------------------------------------------------------

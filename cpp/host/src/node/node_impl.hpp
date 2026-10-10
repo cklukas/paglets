@@ -16,6 +16,8 @@
 #include <paglets/services/grants.hpp>
 #include <paglets/services/locator.hpp>
 #include <paglets/services/mesh_info.hpp>
+#include <paglets/services/system_services.hpp>
+#include <paglets/sha256.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/reflect.hpp>
 
@@ -23,6 +25,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <list>
 #include <map>
@@ -99,6 +102,12 @@ constexpr std::string_view frame_module_missing = "module-missing";  // m, r, e
 constexpr std::string_view frame_launch = "launch";                  // r, p, a
 constexpr std::string_view frame_launch_result = "launch-result";    // r, id | e
 constexpr std::size_t module_part_bytes = 1024 * 1024;
+// Content exchange frames (planning/cpp-content-exchange.md).
+constexpr std::string_view frame_content_want = "content-want";        // r, h, k, o
+constexpr std::string_view frame_content_part = "content-part";        // r, o, n, d, s (first part)
+constexpr std::string_view frame_content_missing = "content-missing";  // r, e
+constexpr std::size_t content_part_bytes = 1024 * 1024;
+constexpr std::size_t content_window = 4;  // parts asked for ahead
 constexpr std::size_t max_module_bytes = 64u * 1024 * 1024;
 
 inline std::string hex(const mesh::RecordId& id) {
@@ -390,6 +399,37 @@ struct Node::Impl {
     bool on_location_frame(std::string_view type, const mesh::PublicKey& from, const mesh::Fields& f);
     void load_locations();
     void save_locations();
+
+    // Content exchange (exchange.cpp, planning/cpp-content-exchange.md):
+    // content another host holds, pulled in parts into a file.
+    struct ContentPull {
+        mesh::PublicKey peer{};
+        std::string hash;
+        std::string token;
+        fs::path into;
+        std::ofstream out;
+        paglets::Sha256 digest;
+        std::uint64_t received = 0;
+        std::uint64_t asked = 0;  // bytes asked for so far
+        std::int64_t total = -1;
+        std::uint64_t max_bytes = 0;
+        std::vector<std::string> marks;
+        Clock::time_point deadline{};
+        std::function<void(services::ContentFetched)> done;
+    };
+    std::map<std::uint64_t, ContentPull> pulls;  // by request
+    std::chrono::milliseconds pull_timeout{30000};
+    void install_exchange();
+    std::string content_token(std::string_view hash) const;  // without locks
+    void start_pull(services::ContentFetch q, std::function<void(services::ContentFetched)> done);
+    void ask_parts(std::uint64_t request);
+    void finish_pull(std::uint64_t request, services::ContentFetched result);
+    void check_pull_deadlines();
+    std::optional<std::string> residency_refusal(const std::vector<std::string>& marks,
+                                                 const mesh::PublicKey& to) const;
+    void on_content_want(const mesh::PublicKey& from, const mesh::Fields& f);
+    void on_content_part(const mesh::PublicKey& from, const mesh::Fields& f);
+    void on_content_missing(const mesh::PublicKey& from, const mesh::Fields& f);
 
     // Host registry and discovery (registry.cpp, planning/cpp-mesh.md).
     struct HostEntry {
@@ -812,6 +852,12 @@ struct Node::Impl {
             on_hosts(from, f);
         } else if (*type == "mi-sync") {
             on_mesh_info(from, f);
+        } else if (*type == frame_content_want) {
+            on_content_want(from, f);
+        } else if (*type == frame_content_part) {
+            on_content_part(from, f);
+        } else if (*type == frame_content_missing) {
+            on_content_missing(from, f);
         } else if (!on_location_frame(*type, from, f)) {
             return false;
         }

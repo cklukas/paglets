@@ -52,4 +52,14 @@ struct Cap {
     std::string host;
 };
 
+// An `artifact` capability that names the host holding the content
+// (`<hash>@<host key ID>/<token>`, planning/cpp-content-exchange.md): it
+// stays valid on every host, which fetches the content from there when it
+// lacks it. Such capabilities move with paglets and travel in messages to
+// paglets on other hosts.
+inline bool mesh_artifact(const Cap& c) {
+    return c.kind == Cap::Kind::resource && c.target == "system.artifacts" && c.resource_type == "artifact" &&
+           c.resource.find('@') != std::string::npos;
+}
+
 }  // namespace paglets::runtime

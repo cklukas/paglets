@@ -1,12 +1,19 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
-// Patterns (WP18): single-file mobility. A paglet asks the host for a
-// directory of a named root (the mesh policy decides, through `grants`),
-// reads a file into its memory, moves, and writes it below a directory
-// granted on the other host. Reads mark the paglet with the root (data
-// residency, planning/cpp-residency.md), so a file from a restricted root
-// only goes where its content may go.
+// Patterns (WP18): file mobility. A paglet asks the host for a directory of
+// a named root (the mesh policy decides, through `grants`) and then either
+//
+// - shares a file: the host hashes it and gives an artifact capability,
+//   a few bytes that move with the paglet; below a directory granted on
+//   another host, `save_file` writes the content there, fetched directly
+//   from host to host (planning/cpp-content-exchange.md). Files of any size
+//   travel this way, and the content leaves its host only where the root's
+//   content may go; or
+// - reads a small file into its memory (at most what fits, a few MB),
+//   moves, and writes it there. Reads mark the paglet with the root (data
+//   residency, planning/cpp-residency.md), so the paglet only goes where
+//   its content may go.
 
 #pragma once
 
@@ -194,6 +201,56 @@ inline void put_down(const CarriedFile& file, std::string root, std::string path
                                   });
                               });
                 });
+}
+
+// A file shared for other hosts: its content stays where it is until a
+// host that saves or reads it fetches it.
+struct SharedFile {
+    std::string name;  // the path below the directory
+    std::string sha256;
+    std::uint64_t size = 0;
+    Capability content;  // artifact capability (rights `read`); it moves with the paglet
+};
+
+// Shares `path` below the lent directory `dir` (right `read`): the host
+// hashes the file and answers with an artifact capability to it. Nothing is
+// read into the paglet.
+inline void share_file(const Capability& dir, std::string path, std::function<void(Result<SharedFile>)> next) {
+    endpoint("files", [dir, path = std::move(path), next](Result<Endpoint> files) {
+        if (!files) return next(std::unexpected(files.error()));
+        services::files::Client client{*files};
+        RequestOptions options = lending(dir);
+        // Hashing a large file takes time.
+        options.timeout_ms = 3600 * 1000;
+        auto sent = client.share(
+            services::files::ShareRequest{path, {}},
+            [path, next](Result<services::files::Shared> r, Message& m) {
+                if (!r) return next(std::unexpected(r.error()));
+                if (m.cap_count() == 0) return next(std::unexpected(abi::internal));
+                next(SharedFile{path, r->hash, r->size, m.take_cap(0)});
+            },
+            options);
+        if (!sent) next(std::unexpected(sent.error()));
+    });
+}
+
+// Writes the content of an artifact capability (from `share_file`, or any
+// artifact) to `path` below the lent directory `dir` (rights `create`, and
+// `write` to replace a file). The host fetches the content from the host
+// that holds it and checks its SHA-256 before the file appears.
+inline void save_file(const Capability& dir, std::string path, const Capability& content,
+                      std::function<void(Result<services::files::Entry>)> next, bool replace = true) {
+    endpoint("files", [dir, path = std::move(path), content, replace, next](Result<Endpoint> files) {
+        if (!files) return next(std::unexpected(files.error()));
+        services::files::Client client{*files};
+        RequestOptions options = lending(content, lending(dir));
+        // Fetching a large file takes time.
+        options.timeout_ms = 3600 * 1000;
+        auto sent = client.save(
+            services::files::SaveRequest{path, replace},
+            [next](Result<services::files::Entry> r, Message&) { next(std::move(r)); }, options);
+        if (!sent) next(std::unexpected(sent.error()));
+    });
 }
 
 }  // namespace paglets::patterns

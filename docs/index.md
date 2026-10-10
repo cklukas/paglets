@@ -10,9 +10,9 @@ serialized fields.
 
 > [!NOTE]
 > paglets/cpp lives on the `cpp` branch, in the `cpp/` directory of the
-> repository. It is a separate implementation from the Python package
-> described in the rest of this site: the two editions do not exchange
-> paglets. The design and the work packages are in the
+> repository. It is a separate implementation from the Python edition
+> (choose it in the site selector in the header): the two editions do not
+> exchange paglets. The design and the work packages are in the
 > [planning documents](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-edition-plan.md).
 
 ## What it offers
@@ -31,6 +31,10 @@ serialized fields.
   Hosts talk over HTTPS, inside end-to-end encrypted, mutually
   authenticated Noise channels. Hosts behind NAT are reached through
   relays.
+- **Content that moves between hosts.** Files and artifacts of any size go
+  directly from host to host. Paglets carry artifact capabilities of a few
+  bytes instead of the data, and hosts give content only where its data
+  residency allows.
 - **Movement with guarantees.** Paglets move with their grants and
   capabilities. Transfer tickets name the destination by host, label,
   service offer or `any`. Location records find a paglet anywhere, and
@@ -84,7 +88,10 @@ The full protocol is in the planning documents:
 - [paglet ABI v1](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-abi-v1.md)
   (the interface between host and guest);
 - [ledger](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-ledger.md)
-  (records and their canonical encoding).
+  (records and their canonical encoding);
+- [content exchange](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-content-exchange.md)
+  (artifact capabilities that work on every host, and the frames that move
+  content between hosts).
 
 ## Status
 
@@ -96,7 +103,8 @@ Milestone M4 (applications) is in progress. Its parts so far:
 - service offers, the gateways and data residency;
 - the patterns library;
 - admin work against live hosts from the CLI;
-- the demo paglets and benchmarks;
+- the example paglets and benchmarks;
+- the content exchange between hosts (files and artifacts of any size);
 - fuzzing of every decoder that reads data from outside;
 - this documentation.
 

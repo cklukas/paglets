@@ -5,19 +5,24 @@
 // one host to another without shared drives. Before it leaves home it
 // checks that both hosts are in the mesh. On the source host it asks for a
 // directory of the source root (the mesh policy decides through `grants`),
-// finds the files and reads them into its memory with their SHA-256; on
-// the destination host it writes them below the destination root, reads
-// them back and compares the hashes; then it comes home with a receipt.
+// finds the files and shares them: the host hashes each file and gives the
+// courier an artifact capability, a few bytes. The courier carries only
+// these capabilities. On the destination host it saves each file below the
+// destination root: that host fetches the content directly from the source
+// host and checks its SHA-256 before the file appears. Then the courier
+// comes home with a receipt. Files of any size travel this way
+// (planning/cpp-content-exchange.md).
 //
-// Reading marks the paglet with the source root (data residency): when the
-// content may not go to the destination host, the move is refused and the
-// courier stays where it read the files.
+// Data residency: listing a root marks the courier, so it does not leave a
+// host-only root's host (it stays there, refused). For roots whose content
+// may go to some hosts, the source host gives the content only to those;
+// for others, the delivery is refused and the courier comes home with that
+// answer.
 
 #include "file_courier.schema.gen.hpp"
 
 #include <paglets/patterns/files.hpp>
 #include <paglets/patterns/services.hpp>
-#include <paglets/sha256.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -45,12 +50,13 @@ public:
         where([this] {
             if (status_.state == "picking-up") return pick_up();
             if (status_.state == "delivering") return deliver();
-            if (status_.state == "returning") status_.state = "delivered";
+            if (status_.state == "returning") status_.state = refused_ ? "refused" : "delivered";
         });
     }
 
     void on_move_failed(const abi::MoveFailed& f) override {
-        // Refused by data residency, or the host is gone: it stays here.
+        // Refused by data residency (the courier listed a root whose names
+        // stay on its host), or the host is gone: it stays here.
         status_.state = f.reason.find("data residency") != std::string::npos ? "refused" : "failed";
         status_.error = f.reason;
         paglets::log("file courier: " + f.reason);
@@ -86,8 +92,23 @@ private:
     void fail(std::string why) {
         status_.state = "failed";
         status_.error = std::move(why);
-        carried_.clear();
+        drop_carried();
         paglets::log("file courier: " + status_.error);
+    }
+
+    void drop_carried() {
+        for (auto& f : carried_) (void)f.content.drop();
+        carried_.clear();
+    }
+
+    void go_home() {
+        drop_carried();
+        status_.state = "returning";
+        if (is_here(home_)) {
+            status_.state = refused_ ? "refused" : "delivered";
+            return;
+        }
+        go(home_);
     }
 
     // -- start: checks before departure ------------------------------------------------------
@@ -104,6 +125,7 @@ private:
         }
         params_ = s;
         status_ = Status{"idle"};
+        refused_ = false;
         auto reply = std::make_shared<Capability>(m.defer_reply());
         auto mi = paglets::service("mesh-info");
         if (!mi) {
@@ -137,7 +159,7 @@ private:
         if (!sent) (void)paglets::reply_to(*reply, Started{false, pt::error_text("mesh-info", sent.error())});
     }
 
-    // -- the source host: find and read ------------------------------------------------------
+    // -- the source host: find and share --------------------------------------------------
 
     void pick_up() {
         pt::granted_dir(params_.from_root, "", {"read"}, "file courier: pick up", [this](paglets::Result<Capability> d) {
@@ -157,7 +179,7 @@ private:
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file) found_.push_back(e.path);
                         }
-                        read_next(0);
+                        share_next(0);
                     },
                     pt::lending(*dir_));
                 if (!sent) fail(pt::error_text("find", sent.error()));
@@ -165,7 +187,8 @@ private:
         });
     }
 
-    void read_next(std::size_t i) {
+    // The host hashes each file; the courier keeps only the capability.
+    void share_next(std::size_t i) {
         if (i >= found_.size()) {
             (void)dir_->drop();
             dir_.reset();
@@ -173,67 +196,67 @@ private:
             if (is_here(params_.to_host)) return deliver();
             return go(params_.to_host);
         }
-        const auto budget = static_cast<std::uint64_t>(std::max<std::int64_t>(0, params_.max_bytes - status_.bytes));
-        pt::read_file(*dir_, found_[i], budget, [this, i](paglets::Result<pt::CarriedFile> f) {
-            if (!f) return fail(pt::error_text("read " + found_[i], f.error()));
-            Item item;
-            item.path = f->name;
-            item.size = static_cast<std::int64_t>(f->data.size());
-            item.sha256 = paglets::to_hex(paglets::sha256(f->data));
-            status_.bytes += item.size;
-            status_.files.push_back(std::move(item));
+        pt::share_file(*dir_, found_[i], [this, i](paglets::Result<pt::SharedFile> f) {
+            if (!f) return fail(pt::error_text("share " + found_[i], f.error()));
+            status_.bytes += static_cast<std::int64_t>(f->size);
+            if (params_.max_bytes > 0 && status_.bytes > params_.max_bytes) {
+                (void)f->content.drop();
+                return fail("more than " + std::to_string(params_.max_bytes) + " bytes");
+            }
+            status_.files.push_back(Item{f->name, static_cast<std::int64_t>(f->size), f->sha256, false});
             carried_.push_back(std::move(*f));
-            read_next(i + 1);
+            share_next(i + 1);
         });
     }
 
-    // -- the destination host: write, read back, compare -------------------------------------
+    // -- the destination host: save -----------------------------------------------------------
 
     std::string target(const std::string& path) const {
         return params_.to_path.empty() ? path : params_.to_path + "/" + path;
     }
 
     void deliver() {
-        pt::granted_dir(params_.to_root, "", {"read", "write", "create"}, "file courier: deliver",
+        pt::granted_dir(params_.to_root, "", {"write", "create"}, "file courier: deliver",
                         [this](paglets::Result<Capability> d) {
                             if (!d) return fail(pt::error_text("files of " + params_.to_root, d.error()));
                             dir_ = std::make_shared<Capability>(*d);
-                            write_next(0);
+                            save_next(0);
                         });
     }
 
-    void write_next(std::size_t i) {
+    void save_next(std::size_t i) {
         if (i >= carried_.size()) {
             (void)dir_->drop();
             dir_.reset();
-            carried_.clear();  // delivered: the content stays on the destination host
-            status_.state = "returning";
-            if (is_here(home_)) {
-                status_.state = "delivered";
-                return;
-            }
-            return go(home_);
+            return go_home();
         }
         const std::string path = target(carried_[i].name);
         const auto slash = path.rfind('/');
         pt::make_dirs(*dir_, slash == std::string::npos ? std::string() : path.substr(0, slash),
                       [this, i, path](paglets::Result<void> made) {
                           if (!made) return fail(pt::error_text("mkdir for " + path, made.error()));
-                          pt::write_file(*dir_, path, carried_[i].data, [this, i, path](paglets::Result<void> w) {
-                              if (!w) return fail(pt::error_text("write " + path, w.error()));
-                              verify(i, path);
-                          });
+                          // This host fetches the content from the source host and
+                          // checks its SHA-256 before the file appears.
+                          pt::save_file(*dir_, path, carried_[i].content,
+                                        [this, i, path](paglets::Result<svc::files::Entry> saved) {
+                                            if (saved) {
+                                                status_.files[i].verified = true;
+                                                return save_next(i + 1);
+                                            }
+                                            if (saved.error() != abi::denied) {
+                                                return fail(pt::error_text("save " + path, saved.error()));
+                                            }
+                                            // The source host keeps the content of its root.
+                                            (void)dir_->drop();
+                                            dir_.reset();
+                                            refused_ = true;
+                                            status_.error = "data residency: " + params_.from_host +
+                                                            " does not give the content of " + params_.from_root +
+                                                            " to " + params_.to_host;
+                                            paglets::log("file courier: " + status_.error);
+                                            go_home();
+                                        });
                       });
-    }
-
-    void verify(std::size_t i, const std::string& path) {
-        const auto size = static_cast<std::uint64_t>(carried_[i].data.size());
-        pt::read_file(*dir_, path, size, [this, i, path](paglets::Result<pt::CarriedFile> back) {
-            if (!back) return fail(pt::error_text("read back " + path, back.error()));
-            status_.files[i].verified = paglets::to_hex(paglets::sha256(back->data)) == status_.files[i].sha256;
-            if (!status_.files[i].verified) return fail("checksum differs after writing " + path);
-            write_next(i + 1);
-        });
     }
 
     Start params_;
@@ -242,7 +265,8 @@ private:
     std::string here_;
     std::string here_name_;
     std::vector<std::string> found_;
-    std::vector<pt::CarriedFile> carried_;
+    std::vector<pt::SharedFile> carried_;
+    bool refused_ = false;
     std::shared_ptr<Capability> dir_;
 };
 

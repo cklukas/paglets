@@ -266,16 +266,17 @@ the guest toolchain and reflection; turn it off with
 `-DPAGLETS_TEST_INSTALL=OFF`.
 
 The multi-host tests inside `paglets_tests` run several hosts in one
-process. They cover the mesh, moves, location, relays, the demos and the
-gateways, connected by an in-memory transport or by HTTPS on loopback.
+process. They cover the mesh, moves, location, relays, the content exchange
+between hosts, the example paglets and the gateways, connected by an
+in-memory transport or by HTTPS on loopback.
 
 `paglets_tests` takes the guest directory and, optionally, a text. It then
 runs only the tests whose names contain that text:
 
 ```bash
 cd build/linux-gcc16
-./tests/paglets_tests guests "demo:"
-PAGLETS_TEST_WORKER=$PWD/host/paglets-worker ./tests/paglets_tests guests "demo:"
+./tests/paglets_tests guests "example:"
+PAGLETS_TEST_WORKER=$PWD/host/paglets-worker ./tests/paglets_tests guests "example:"
 ```
 
 Environment variables of the test suite:

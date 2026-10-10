@@ -5,8 +5,12 @@
 // a content-addressed blob store. `put` stores data and replies with an
 // `artifact` capability (rights `read`) as the first capability of the
 // reply; `get` and `stat` take a lent artifact capability. Artifacts are
-// identified by the SHA-256 of their content (hex), so capabilities to them
-// stay meaningful wherever they are passed.
+// identified by the SHA-256 of their content (hex). On a host of a mesh,
+// the capability also names the host that holds the content
+// (planning/cpp-content-exchange.md): it moves with the paglet and travels
+// in messages to paglets on other hosts, and `get` and `stat` on another
+// host first fetch the content from there, directly between the hosts.
+// Whoever reads the content takes its data residency marks.
 
 #pragma once
 
@@ -18,7 +22,7 @@
 
 namespace paglets::services::artifacts {
 
-// At most 4 MB per request (larger artifacts arrive with WP11 streaming).
+// At most 4 MB per request; `files.share` makes artifacts of larger files.
 struct PutRequest {
     std::vector<std::uint8_t> data;
     std::string media_type;  // informational, for example "text/csv"
@@ -31,6 +35,7 @@ struct Info {
     std::int64_t created_ms = 0;
 };
 
+// At most 4 MB per reply; larger artifacts are read in ranges.
 struct GetRequest {
     std::uint64_t offset = 0;
     std::optional<std::uint64_t> length;

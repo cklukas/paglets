@@ -120,7 +120,7 @@ The patterns library covers the common shapes of paglets. Include
 | `fanout.hpp` | `FanOut`: clones of the paglet on a set of hosts, one report each, a deadline, and failed clones |
 | `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(...)`: find a paglet and keep it in place while working with it |
 | `notify.hpp` | `notify(level, title, text)`: notifications to the owner through `user-info` |
-| `files.hpp` | `granted_dir`, `read_file`, `write_file`, `pick_up(root, path)`, `put_down(file, root, path)`: carrying one file between hosts |
+| `files.hpp` | `granted_dir`; `share_file(dir, path)` and `save_file(dir, path, content)`: files of any size between hosts, as artifact capabilities; `read_file`, `write_file`, `pick_up(root, path)`, `put_down(file, root, path)`: small files carried in the paglet's memory |
 
 ```cpp
 #include <paglets/patterns.hpp>
@@ -129,6 +129,13 @@ struct Count : paglets::patterns::Task<CountRequest, CountResult> {
     void run(const CountRequest& q) override { complete(CountResult{q.n * (q.n + 1) / 2}); }
 };
 ```
+
+> [!NOTE]
+> Prefer `share_file` and `save_file` for files: the paglet carries a
+> capability of a few bytes, and the content goes directly from host to
+> host (see [Moving content between hosts](system-paglets.md#moving-content-between-hosts)).
+> `pick_up` and `read_file` copy the content into the paglet's memory,
+> which holds at most 16 MB in all.
 
 > [!NOTE]
 > Reading a file marks the paglet with the root it came from. If a

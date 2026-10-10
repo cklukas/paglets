@@ -1,7 +1,7 @@
 // Copyright (c) 2026 by C. Klukas.
 // Licensed under the MIT License. See LICENSE for details.
 
-// Demo paglets (WP20, planning/cpp-demo-paglets.md) on meshes of several
+// Example paglets (WP20, planning/cpp-demo-paglets.md) on meshes of several
 // hosts.
 
 #include "mesh_fixture.hpp"
@@ -62,7 +62,7 @@ Mesh::Host* holder(Mesh& net, const rt::PagletId& id) {
 
 }  // namespace
 
-PAGLETS_TEST("demo: Mesh Journey visits every host and comes home with its journal") {
+PAGLETS_TEST("example: Mesh Journey visits every host and comes home with its journal") {
     Mesh net;
     auto& home = net.add_host("home");
     net.add_host("north");
@@ -128,7 +128,7 @@ PAGLETS_TEST("demo: Mesh Journey visits every host and comes home with its journ
     CHECK(journal.skipped[0].starts_with("atlantis"));
 }
 
-PAGLETS_TEST("demo: Mesh File Finder and Storage Analyzer search every host's root") {
+PAGLETS_TEST("example: Mesh File Finder and Storage Analyzer search every host's root") {
     namespace fs = std::filesystem;
     const fs::path ra = temp_root("a"), rb = temp_root("b"), rc = temp_root("c");
     write_file(ra / "report.csv", 1000);
@@ -203,7 +203,7 @@ PAGLETS_TEST("demo: Mesh File Finder and Storage Analyzer search every host's ro
     (void)c;
 }
 
-PAGLETS_TEST("demo: Latency Map measures round trips between every pair of hosts") {
+PAGLETS_TEST("example: Latency Map measures round trips between every pair of hosts") {
     Mesh net;
     auto& a = net.add_host("a");
     net.add_host("b");
@@ -254,7 +254,7 @@ PAGLETS_TEST("demo: Latency Map measures round trips between every pair of hosts
     }));
 }
 
-PAGLETS_TEST("demo: Inventory Collector and Process Finder ask server-info on every host") {
+PAGLETS_TEST("example: Inventory Collector and Process Finder ask server-info on every host") {
     Mesh net;
     auto& a = net.add_host("a");
     net.add_host("b");
@@ -304,7 +304,7 @@ PAGLETS_TEST("demo: Inventory Collector and Process Finder ask server-info on ev
     }
 }
 
-PAGLETS_TEST("demo: Hide and Seek finds and pins a paglet that keeps moving") {
+PAGLETS_TEST("example: Hide and Seek finds and pins a paglet that keeps moving") {
     Mesh net;
     auto& a = net.add_host("a");
     net.add_host("b");
@@ -338,7 +338,7 @@ PAGLETS_TEST("demo: Hide and Seek finds and pins a paglet that keeps moving") {
     CHECK(score.hider_moves >= 3);
 }
 
-PAGLETS_TEST("demo: Volume Guard sleeps between checks and alerts its owner") {
+PAGLETS_TEST("example: Volume Guard sleeps between checks and alerts its owner") {
     Mesh net;
     auto& a = net.add_host("a");
     net.enroll_all();
@@ -374,7 +374,7 @@ PAGLETS_TEST("demo: Volume Guard sleeps between checks and alerts its owner") {
     }));
 }
 
-PAGLETS_TEST("demo: Duplicate Finder finds the same content on different hosts") {
+PAGLETS_TEST("example: Duplicate Finder finds the same content on different hosts") {
     namespace fs = std::filesystem;
     const fs::path ra = temp_root("da"), rb = temp_root("db"), rc = temp_root("dc");
     auto write_text = [](const fs::path& p, const std::string& text) {
@@ -431,7 +431,7 @@ PAGLETS_TEST("demo: Duplicate Finder finds the same content on different hosts")
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
 }
 
-PAGLETS_TEST("demo: File Courier carries files between hosts with checksums, within data residency") {
+PAGLETS_TEST("example: File Courier carries files of any size between hosts with checksums, within data residency") {
     namespace fs = std::filesystem;
     const fs::path data = temp_root("fc-data"), clinic = temp_root("fc-clinic"), inbox = temp_root("fc-inbox");
     auto write_text = [](const fs::path& p, const std::string& text) {
@@ -446,6 +446,11 @@ PAGLETS_TEST("demo: File Courier carries files between hosts with checksums, wit
     for (int i = 0; i < 400; ++i) table += std::to_string(i) + "," + std::to_string(i * i) + "\n";
     write_text(data / "results" / "squares.csv", table);
     write_text(data / "results" / "run-2" / "log.txt", "converged after 12 steps");
+    // Larger than a paglet's whole memory (16 MB): the content goes from
+    // host to host, the courier carries a capability.
+    std::string big(24u * 1024 * 1024 + 123, '\0');
+    for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>((i * 2654435761u) >> 13);
+    write_text(data / "results" / "run-2" / "field.bin", big);
     write_text(data / "notes.md", "not carried");
     write_text(clinic / "results" / "patients.csv", "confidential");
     ps::ServicesConfig lab_sc, archive_sc;
@@ -506,18 +511,23 @@ PAGLETS_TEST("demo: File Courier carries files between hosts with checksums, wit
     CHECK_EQ(done.state, std::string("delivered"));
     CHECK(at == &home);
     CHECK(done.hosts == std::vector<std::string>({"home", "lab", "archive", "home"}));
-    REQUIRE(done.files.size() == 2u);
+    REQUIRE(done.files.size() == 3u);
     for (const auto& f : done.files) CHECK(f.verified);
-    CHECK_EQ(done.bytes, static_cast<std::int64_t>(table.size() + 24));
+    CHECK_EQ(done.bytes, static_cast<std::int64_t>(table.size() + 24 + big.size()));
     CHECK_EQ(read_text(inbox / "from-lab" / "results" / "squares.csv"), table);
     CHECK_EQ(read_text(inbox / "from-lab" / "results" / "run-2" / "log.txt"), std::string("converged after 12 steps"));
+    CHECK(read_text(inbox / "from-lab" / "results" / "run-2" / "field.bin") == big);
+    // Saved files appear whole: no partial files are left.
+    for (const auto& e : fs::recursive_directory_iterator(inbox)) {
+        CHECK(!e.path().filename().string().starts_with(".paglets-save-"));
+    }
     CHECK(!fs::exists(inbox / "from-lab" / "notes.md"));
     for (const auto& f : done.files) {
         if (f.path == "results/squares.csv") CHECK_EQ(f.sha256, paglets::to_hex(paglets::sha256(text(table))));
     }
 
-    // Content of a host-only root may not leave the lab: the courier stays
-    // there, and nothing reaches the archive.
+    // Content of a host-only root may not leave the lab: the courier, which
+    // listed the root, stays there, and nothing reaches the archive.
     const auto [refused, stayed] = run('d', "clinic");
     CHECK_EQ(refused.state, std::string("refused"));
     CHECK(refused.error.find("data residency") != std::string::npos);
@@ -544,7 +554,7 @@ PAGLETS_TEST("demo: File Courier carries files between hosts with checksums, wit
     for (const auto& p : {data, clinic, inbox}) fs::remove_all(p, ec);
 }
 
-PAGLETS_TEST("demo: Tree Compare finds missing and different files on several hosts") {
+PAGLETS_TEST("example: Tree Compare finds missing and different files on several hosts") {
     namespace fs = std::filesystem;
     const fs::path ra = temp_root("ta"), rb = temp_root("tb"), rc = temp_root("tc");
     auto write_text = [](const fs::path& p, const std::string& text) {
@@ -636,7 +646,7 @@ PAGLETS_TEST("demo: Tree Compare finds missing and different files on several ho
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
 }
 
-PAGLETS_TEST("demo: Log Scout searches logs in a time window and follows them live") {
+PAGLETS_TEST("example: Log Scout searches logs in a time window and follows them live") {
     namespace fs = std::filesystem;
     using namespace std::chrono;
     const fs::path r1 = temp_root("log1"), r2 = temp_root("log2");
@@ -760,7 +770,7 @@ PAGLETS_TEST("demo: Log Scout searches logs in a time window and follows them li
     for (const auto& p : {r1, r2}) fs::remove_all(p, ec);
 }
 
-PAGLETS_TEST("demo: Mesh Benchmark measures every host in a compute slot and ranks them") {
+PAGLETS_TEST("example: Mesh Benchmark measures every host in a compute slot and ranks them") {
     Mesh net;
     auto& a = net.add_host("a");
     net.add_host("b");

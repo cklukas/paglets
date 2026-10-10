@@ -450,6 +450,8 @@ PAGLETS_TEST("gateway: Download Courier fetches through the only web host and br
     CHECK_EQ(delivered.artifact, paglets::to_hex(paglets::sha256(text(site.report))));
     CHECK_EQ(delivered.size, static_cast<std::int64_t>(site.report.size()));
     CHECK(delivered.hosts == std::vector<std::string>({"home", "gateway", "home"}));
+    // The home host fetched the content from the gateway into its own store.
+    CHECK(home.services->served_content(delivered.artifact).has_value());
     const auto notes = home.services->notifications(net.owner.id());
     CHECK(std::ranges::any_of(notes, [](const auto& n) { return n.title.starts_with("courier delivered"); }));
 

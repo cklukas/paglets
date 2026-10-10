@@ -55,6 +55,41 @@ struct ServicesConfig {
     ServicePolicy policy;
 };
 
+// Content exchange between hosts (planning/cpp-content-exchange.md). An
+// `artifact` capability names its content by SHA-256 and, on a host of a
+// mesh, the host that holds it: `<hash>@<host key ID>/<token>`. A host that
+// lacks the content fetches it from that host, which serves it only with
+// the token it made and only within the data residency of the content.
+struct ContentFetch {
+    std::string hash;   // hex SHA-256
+    std::string host;   // key ID of the host that holds it
+    std::string token;  // made by that host
+    std::filesystem::path into;  // written here (created or replaced)
+    std::uint64_t max_bytes = 0;
+};
+
+struct ContentFetched {
+    std::int32_t status = 0;  // abi::ok or an abi::Error
+    std::string error;
+    std::uint64_t size = 0;
+    std::vector<std::string> marks;  // data residency marks of the content
+};
+
+struct ContentExchange {
+    std::string host;  // key ID of this host
+    // The token of content `hash` on this host.
+    std::function<std::string(std::string_view hash)> token;
+    // Starts a fetch; `done` is called once, possibly on another thread.
+    std::function<void(ContentFetch, std::function<void(ContentFetched)> done)> fetch;
+};
+
+// Content this host serves to others: a stored artifact or a shared file.
+struct ServedContent {
+    std::filesystem::path file;
+    std::uint64_t size = 0;
+    std::vector<std::string> marks;
+};
+
 class SystemServices {
 public:
     virtual ~SystemServices() = default;
@@ -78,6 +113,14 @@ public:
     virtual std::expected<runtime::Cap, std::int32_t> store_artifact(std::span<const std::uint8_t> data,
                                                                      std::string media_type,
                                                                      std::vector<std::string> marks) = 0;
+
+    // Connects `artifacts` and `files` to the mesh (the node installs it):
+    // their capabilities then name this host and work on every host.
+    virtual void set_content_exchange(ContentExchange exchange) = 0;
+
+    // The content with SHA-256 `hash` (hex) if this host holds it, for
+    // serving it to another host.
+    virtual std::optional<ServedContent> served_content(std::string_view hash) const = 0;
 };
 
 // Registers the standard system paglets with `runtime` (before paglets are

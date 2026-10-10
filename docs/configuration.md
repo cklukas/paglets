@@ -22,6 +22,7 @@ subdirectory, so the two layouts differ. Do not use one directory for both.
 | `DIR/work/<id>/` | a paglet's scratch space; cleared when the host starts |
 | `DIR/revoked` | the IDs of capabilities revoked on this host |
 | `DIR/services/directory.state`, `pubsub.state` | published names and topics |
+| `DIR/services/shares.state` | the files this host shares with `files.share` |
 | `DIR/artifacts/` | the `artifacts` store |
 
 `paglets-host serve --state DIR`:
@@ -29,7 +30,7 @@ subdirectory, so the two layouts differ. Do not use one directory for both.
 | Path | Contents |
 |---|---|
 | `DIR/runtime/` | the runtime's state, laid out as `paglets/`, `modules/`, `storage/`, `work/` and `revoked` above |
-| `DIR/services/services/` | `directory.state` and `pubsub.state` |
+| `DIR/services/services/` | `directory.state`, `pubsub.state` and `shares.state` |
 | `DIR/services/artifacts/` | the `artifacts` store |
 | `DIR/node/node.state` | the node's state: committed moves, held messages, pins |
 | `DIR/node/hosts` | the host registry, so a restarted host reaches its peers without a contact |
@@ -112,7 +113,8 @@ runtime can set them in the configuration structures named below.
 | Linear memory per paglet | 16 MB (256 pages) | `wasm::Limits::max_memory_pages` |
 | Message size | 1 MB | `abi::max_document_size` |
 | Storage per paglet | 16 MB | `services::ServicesConfig::storage_quota` |
-| The whole artifacts store | 1 GB | `services::ServicesConfig::artifacts_limit` |
+| The whole artifacts store, including content fetched from other hosts | 1 GB | `services::ServicesConfig::artifacts_limit` |
+| Files a host remembers as shared | 10 000; the oldest are forgotten first | `max_shares` in `cpp/host/src/services/artifacts.cpp` |
 | Notifications kept per owner | 100 | `services::ServicesConfig::notifications_per_owner` |
 | Compiled modules cached without users | 64 MB | `runtime::Config::module_cache_bytes` |
 

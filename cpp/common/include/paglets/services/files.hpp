@@ -6,7 +6,7 @@
 // Every operation acts on a `dir` capability the caller lends with the
 // request (RequestOptions::lend, first capability); paths are relative to
 // that directory, `/`-separated, without `.` or `..`; "" is the directory
-// itself. Rights of the capability: `read` (list, stat, find, read),
+// itself. Rights of the capability: `read` (list, stat, find, read, share),
 // `write` (change existing files), `create` (new files and directories),
 // `delete` (delete; move needs `delete` and `create`). Sizes are bytes,
 // times Unix milliseconds (UTC). Symbolic links are listed but never
@@ -101,6 +101,33 @@ struct DeleteReply {
     std::uint64_t removed = 0;  // files and directories removed
 };
 
+// `share` makes a file available to every host of the mesh without reading
+// it into the paglet: the host hashes the file and replies with an
+// `artifact` capability (rights `read`) as the first capability of the
+// reply. The capability moves with the paglet and travels in messages; on
+// another host, `artifacts.get` reads the content and `save` writes it to a
+// file, while the content goes directly from host to host. Needs the right
+// `read`. The file must not change until it has been fetched.
+struct ShareRequest {
+    std::string path;
+    std::string media_type;  // informational, for example "text/csv"
+};
+
+struct Shared {
+    std::string hash;  // hex SHA-256
+    std::uint64_t size = 0;
+};
+
+// `save` writes the content of an artifact capability (the second lent
+// capability, after the directory) to `path`, fetching it from the host
+// that holds it if needed; the content is checked against its SHA-256
+// before the file appears. Needs `create` for a new file and `write` to
+// replace one (`replace`).
+struct SaveRequest {
+    std::string path;
+    bool replace = true;
+};
+
 struct Contract {
     static constexpr std::string_view service = "files";
     ListReply list(const ListRequest&);
@@ -111,6 +138,8 @@ struct Contract {
     Entry mkdir(const MkdirRequest&);
     Entry move(const MoveRequest&);
     DeleteReply remove(const DeleteRequest&);
+    Shared share(const ShareRequest&);
+    Entry save(const SaveRequest&);
 };
 
 }  // namespace paglets::services::files

@@ -47,13 +47,13 @@ mesh, surviving the loss of a host ([design](../planning/cpp-compute.md)).
 WP17 adds service offers (hosts announce what their system paglets can do;
 paglets find them with `mesh-info` and move with tickets such as
 `offer:ai.summarize`), the `web` and `ai` gateway system paglets, the
-Download Courier and AI Document Digest demos
+Download Courier and AI Document Digest examples
 ([design](../planning/cpp-web-ai.md)), and data residency: paglets that
 read a restricted root carry its mark and move only where its content may
 go ([design](../planning/cpp-residency.md)). WP18 adds the patterns library
 of the guest SDK ([design](../planning/cpp-patterns.md)); WP19 adds admin
 work against live hosts to the CLI (pull, requests, approve, deny, audit,
-modules, dispose, `module inspect`); WP20 adds demo paglets from the
+modules, dispose, `module inspect`); WP20 adds example paglets from the
 [catalogue](../planning/cpp-demo-paglets.md) (Mesh Journey, File Finder and
 Storage Analyzer, Duplicate Finder, File Courier, Tree Compare, Log Scout,
 Inventory and Process Finder, Volume Guard, Mesh Benchmark, Latency Map,
@@ -62,7 +62,10 @@ Researcher, Release Watcher), tested on meshes of several hosts, and the first
 [benchmarks](../planning/cpp-benchmarks.md); WP21 fuzzes every decoder of
 data from outside (ledger records, frames between hosts, memory images,
 modules, the Noise handshake, contracts) in CI
-([design](../planning/cpp-hardening.md)).
+([design](../planning/cpp-hardening.md)). The content exchange moves files
+and artifacts of any size directly between hosts: paglets carry artifact
+capabilities that work on every host, within data residency
+([design](../planning/cpp-content-exchange.md)).
 
 ## Layout
 
@@ -75,11 +78,11 @@ host/                     host library: Wasm engine, memory images, runtime, wir
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
-examples/                 sample paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
-                          and the demos: courier, digest, journey, finder, dupes, inventory, guard,
+examples/                 example paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
+                          courier, digest, journey, finder, dupes, inventory, guard,
                           latency, seek, semantic, researcher, file_courier,
                           tree_compare, log_scout, describer, watcher, explainer,
-                          benchmark
+                          benchmark; out-of-tree (a project built against the installed package)
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```
@@ -193,7 +196,8 @@ The patterns library ([design](../planning/cpp-patterns.md);
 `#include <paglets/patterns.hpp>`, `paglets_add_module(... PATTERNS)`)
 covers the common shapes: a task paglet with `start`, `status` and `wait`,
 typed operations, mesh fan-out of clones, locate and pin, notifications to
-the owner, and carrying a file between hosts:
+the owner, and moving files of any size between hosts (`share_file`,
+`save_file`):
 
 ```cpp
 #include <paglets/patterns.hpp>
