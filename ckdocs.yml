@@ -4,7 +4,7 @@
 # Documentation portal for ckdocs (from ck-git-hosting): a welcome page and a
 # site selector in every page's header, over two sites. The C++ edition comes
 # from docs/ on this branch (configured in docs/ckdocs.yml); the Python
-# edition from the `main` branch, with that branch's own ckdocs.yml. Build and
+# edition from the `main` branch, with that branch's docs/ckdocs.yml. Build and
 # check from the repository root (the clone needs the `main` branch, or pass
 # --ref-tree main=DIR with a checkout of it):
 #
@@ -23,6 +23,7 @@ sites:
     title: Python edition
     description: "The paglets package on PyPI: paglets as Python classes with dataclass state, hosts, meshes, system services and packaged examples."
     ref: main
+    config: docs/ckdocs.yml
     redirect_from_root: true
   - id: cpp
     title: C++ edition
