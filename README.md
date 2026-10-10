@@ -132,16 +132,19 @@ Flat imports such as `from paglets import Host` are unsupported.
 ## Documentation
 
 The full documentation is published at <https://cklukas.github.io/paglets/>.
+The site has two parts, chosen on its welcome page and in the header of every
+page: this Python edition, and the C++ edition (paglets/cpp, on the
+[`cpp` branch](https://github.com/cklukas/paglets/tree/cpp)).
 
 Useful entry points:
 
-- [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets.html)
-- [Examples](https://cklukas.github.io/paglets/examples/)
-- [Operations](https://cklukas.github.io/paglets/operations/)
-- [Detached Compute With A Collector](https://cklukas.github.io/paglets/examples/detached-compute-collector.html)
-- [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts.html)
-- [Technical Reference](https://cklukas.github.io/paglets/technical/overview.html)
-- [Status And Limitations](https://cklukas.github.io/paglets/project/status.html)
+- [Implementing Paglets](https://cklukas.github.io/paglets/python/implementing-paglets.html)
+- [Examples](https://cklukas.github.io/paglets/python/examples/)
+- [Operations](https://cklukas.github.io/paglets/python/operations/)
+- [Detached Compute With A Collector](https://cklukas.github.io/paglets/python/examples/detached-compute-collector.html)
+- [Artifact Transport](https://cklukas.github.io/paglets/python/system/artifacts.html)
+- [Technical Reference](https://cklukas.github.io/paglets/python/technical/overview.html)
+- [Status And Limitations](https://cklukas.github.io/paglets/python/project/status.html)
 
 Build docs locally with [ckdocs](https://github.com/cklukas/ck-git-hosting)
 (regenerate the API reference and snippets first when the code changed):
@@ -151,6 +154,10 @@ uv run python tools/docs_sync.py
 ckdocs check --root .
 ckdocs serve --root .
 ```
+
+`ckdocs.yml` describes the whole site; the Python edition's pages and navigation
+are in `docs/ckdocs.yml`. The C++ edition's pages come from the `cpp` branch,
+so the clone needs that branch (`git fetch origin cpp`).
 
 ## Project Layout
 

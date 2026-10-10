@@ -20,10 +20,11 @@ virtual environments, caches, build outputs, or other ignored artifacts.
 ## Documentation
 
 When adding or changing user-visible features, update the documentation under
-`docs/`. The site is built with ckdocs (from ck-git-hosting, configured in
-`ckdocs.yml`). Keep pages within the ckdocs Markdown subset: no raw HTML,
-footnotes, definition lists, math, or Mermaid; use `> [!NOTE]`-style alerts,
-tables, and lists instead.
+`docs/`. The site is built with ckdocs (from ck-git-hosting). `ckdocs.yml`
+is a portal over two sites: this Python edition (pages and navigation in
+`docs/ckdocs.yml`) and the C++ edition from the `cpp` branch. Keep pages
+within the ckdocs Markdown subset: no raw HTML, footnotes, definition lists,
+math, or Mermaid; use `> [!NOTE]`-style alerts, tables, and lists instead.
 
 API reference sections (`<!-- api: module -->`) and code snippets
 (`<!-- snippet: path:section -->`, with `--8<-- [start:section]` markers in the

@@ -28,8 +28,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ckdocs is built from ck-git-hosting at this commit (documentation site generator).
-  CKDOCS_REF: 7d693f09c830e8b1272e444d238d8c130d153afa
+  # ckdocs is built from ck-git-hosting at this commit (documentation site
+  # generator; 0.5.0 builds portals of several sites).
+  CKDOCS_REF: 7028a8c95b010f896a69e7f0f306ee4314406e1d
 
 jobs:
   build:
@@ -41,6 +42,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      # The site also shows the C++ edition, from the docs of the cpp branch.
+      - name: Fetch the cpp branch
+        run: git fetch --quiet --depth=1 origin cpp:refs/remotes/origin/cpp
 
       - name: Set up Python
         uses: actions/setup-python@v6
