@@ -1,0 +1,32 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+#
+# The C++ edition's documentation site, one of the sites of the portal in
+# ../ckdocs.yml. Paths are relative to the repository root.
+version: 1
+site:
+  title: paglets C++ edition
+  description: C++ edition of paglets, mobile agents as WebAssembly modules.
+  footer: "© 2026 C. Klukas · MIT License"
+  links:
+    - title: GitHub
+      url: https://github.com/cklukas/paglets/tree/cpp
+source: docs
+search: true
+nav:
+  - title: Overview
+    page: docs/index.md
+  - title: Getting Started
+    pages:
+      - docs/building.md
+      - docs/writing-paglets.md
+      - docs/examples.md
+  - title: Operations
+    pages:
+      - docs/hosts-and-meshes.md
+      - docs/configuration.md
+      - docs/system-paglets.md
+  - title: Reference
+    pages:
+      - docs/sdk-reference.md
+      - docs/cli-reference.md
