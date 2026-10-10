@@ -102,6 +102,9 @@ public:
                 c.done = true;
                 c.error = error_text("clone", clone.error());
             } else {
+                // The clone reports with its ID: the endpoint names it.
+                if (auto info = clone->inspect(); info && info->target.starts_with("paglet:"))
+                    c.clone = info->target.substr(7);
                 (void)clone->drop();  // the clone reports through the parent's endpoint
                 ++sent;
             }
@@ -125,7 +128,7 @@ public:
     // that child is over.
     void clone_failed(const abi::MoveFailed& f) {
         for (auto& c : children_) {
-            if (c.done || c.destination != f.destination) continue;
+            if (c.done || (c.clone.empty() ? c.destination != f.destination : c.clone != f.clone)) continue;
             c.done = true;
             c.clone = f.clone;
             c.error = "clone did not arrive: " + f.reason;
@@ -145,24 +148,20 @@ public:
 
 private:
     void received(const FanOutReport& r) {
-        // The first child still waiting for this destination (or any, if
-        // the clone landed elsewhere) takes the report.
-        Child* match = nullptr;
-        for (auto& c : children_) {
-            if (c.done) continue;
-            if (c.destination == r.host || c.destination == r.host_name || (c.destination.empty() && !match)) {
-                match = &c;
-                break;
-            }
-        }
-        if (match == nullptr) {
+        // Reports arrive in any order: the child of the clone that reported
+        // takes it. A child whose clone ID is unknown takes a report from
+        // the host it named, or else any report not claimed by another.
+        auto first = [this](auto&& pred) -> Child* {
             for (auto& c : children_) {
-                if (!c.done) {
-                    match = &c;
-                    break;
-                }
+                if (!c.done && pred(c)) return &c;
             }
-        }
+            return nullptr;
+        };
+        Child* match = first([&r](const Child& c) { return !c.clone.empty() && c.clone == r.clone; });
+        if (match == nullptr) match = first([&r](const Child& c) {
+            return c.clone.empty() && !c.destination.empty() && (c.destination == r.host || c.destination == r.host_name);
+        });
+        if (match == nullptr) match = first([](const Child& c) { return c.clone.empty(); });
         if (match == nullptr) return;
         match->done = true;
         match->ok = r.ok;
