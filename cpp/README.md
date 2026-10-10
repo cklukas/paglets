@@ -5,10 +5,10 @@ the embedded [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime)
 runtime, moving between hosts as **memory images**. The design and work
 packages are in [`../planning/`](../planning/cpp-edition-plan.md); the user
 documentation is the `paglets/cpp` section of the documentation site
-([`../docs/cpp/`](../docs/cpp/index.md)), with a
-[command-line reference](../docs/cpp/cli-reference.md), a
-[guest SDK reference](../docs/cpp/sdk-reference.md) and
-[configuration and troubleshooting](../docs/cpp/configuration.md).
+([`../docs/`](../docs/index.md)), with a
+[command-line reference](../docs/cli-reference.md), a
+[guest SDK reference](../docs/sdk-reference.md) and
+[configuration and troubleshooting](../docs/configuration.md).
 
 Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
@@ -151,7 +151,7 @@ paglets_add_module(my_paglet SOURCES my_paglet.cpp)
 
 The package has `paglets-host`, the guest SDK, the service clients and the
 schema generator; `examples/out-of-tree` is a complete project (see
-[Building and testing](../docs/cpp/building.md#modules-outside-the-repository)).
+[Building and testing](../docs/building.md#modules-outside-the-repository)).
 
 ## Writing a paglet
 
@@ -263,7 +263,7 @@ $H ledger revoke --ledger ledger --admin alice.key <key-id> --reason retired
 
 `ledger enroll`, `remove`, `deny`, `admins` (add or remove admins, change the
 quorum) and `sign` (co-sign a record that needs several admins) complete the
-set; the [command-line reference](../docs/cpp/cli-reference.md#ledger)
+set; the [command-line reference](../docs/cli-reference.md#ledger)
 lists every command and option.
 
 Access to host resources follows the mesh policy

@@ -1,198 +1,115 @@
-![paglets social preview](repository-open-graph-1280x640.png)
+# paglets/cpp
 
-# paglets - mobile python agents
+paglets/cpp is the C++ edition of paglets. Its paglets are WebAssembly
+modules, run by the embedded
+[WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) runtime.
+They move between hosts as **memory images**: the paglet's whole state is
+ordinary C++ objects in its linear memory, and a move sends that memory
+(only the pages that changed since the target last saw it), not
+serialized fields.
 
-`paglets` is a compact Python runtime inspired by Java Aglets. A paglet is a
-mobile object with explicit dataclass state, lifecycle hooks, message handling,
-and proxy-based control.
+> [!NOTE]
+> paglets/cpp lives on the `cpp` branch, in the `cpp/` directory of the
+> repository. It is a separate implementation from the Python package
+> described in the rest of this site: the two editions do not exchange
+> paglets. The design and the work packages are in the
+> [planning documents](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-edition-plan.md).
 
-Resources:
+## What it offers
 
-Introduction / overview paper:
+- **Code mobility.** Modules travel with the paglet. A host that lacks a
+  module fetches it from its sources or from other hosts, verified by hash.
+  Hosts do not need the same code installed.
+- **Sandboxing.** Paglets run in worker processes that the operating system
+  sandboxes: seccomp on Linux, a sandbox profile on macOS, and a job object
+  with a restricted token on Windows. Paglets cannot open files, create
+  sockets or start programs. They reach host resources only through
+  **system paglets**, within the rules of the mesh policy.
+- **A secured mesh.** Hosts, admins, owners and signers have keys. A
+  signed ledger, spread by gossip, records who belongs to the mesh, which
+  modules are trusted, which policy rules apply and where data may go.
+  Hosts talk over HTTPS, inside end-to-end encrypted, mutually
+  authenticated Noise channels. Hosts behind NAT are reached through
+  relays.
+- **Movement with guarantees.** Paglets move with their grants and
+  capabilities. Transfer tickets name the destination by host, label,
+  service offer or `any`. Location records find a paglet anywhere, and
+  pins keep it in place for a while. A paglet that reads a restricted root
+  carries that root's residency mark and moves only where its data may go.
+- **Gateways to the web and to AI.** Hosts can offer mediated web access
+  (`web`) and local inference (`ai`). Paglets find these offers through
+  `mesh-info` and move to them.
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20820155.svg)](https://doi.org/10.5281/zenodo.20820155)
+## Pages
 
-PyPI package:
+| Page | Contents |
+|---|---|
+| [Building and testing](building.md) | toolchains, presets, build options, guest modules, tests and sanitizers |
+| [Writing paglets](writing-paglets.md) | the guest SDK, messages, capabilities, services and the patterns library |
+| [Guest SDK reference](sdk-reference.md) | every class, function and lifecycle hook of `<paglets/paglet.hpp>`, and your own typed service contracts |
+| [Hosts and meshes](hosts-and-meshes.md) | running hosts, the ledger, policy, module trust, residency, TLS, the remote CLI |
+| [Command-line reference](cli-reference.md) | every command and option of `paglets-host`, `paglets-worker` and `paglets-spike` |
+| [Configuration and troubleshooting](configuration.md) | state directories, keys and passphrases, ports and firewalls, limits, error codes, common problems |
+| [System paglets](system-paglets.md) | the services hosts offer to paglets, and the web and AI gateways |
+| [Example paglets and benchmarks](examples.md) | every example paglet, what each shows, and the first benchmark numbers |
 
-[![PyPI](https://img.shields.io/pypi/v/paglets.svg)](https://pypi.org/project/paglets/)
+## Wire formats and interoperability
 
-The runtime intentionally uses a Python-friendly mobility model:
+paglets/cpp shares concepts with the Python edition (hosts, paglets,
+messages, a mesh, services, compute slots), but none of its formats. A
+Python host and a C++ host cannot talk to each other, and a paglet of one
+edition cannot run on the other.
 
-- all hosts already have the same code importable;
-- every active paglet instance runs in its own child Python process;
-- only dataclass state moves between hosts;
-- control calls use a JSON HTTP API, while paglet movement uses a binary HTTP
-  state payload to avoid JSON encoding large mobile state;
-- large state is streamed for host-to-host movement and shared-memory local
-  host/child handoff, while JSON remains the small control-plane format;
-- same-host movement bypasses HTTP/TCP and delivers the serialized envelope
-  directly inside the local host; different host processes on the same machine
-  still communicate over loopback HTTP;
-- lifecycle hooks resume behavior after create, dispatch, clone, retract, or
-  activation;
-- deactivation persists inactive paglets to disk until activation;
-- agents communicate through `PagletProxy`, `Message`, and per-paglet serial
-  child-process mailboxes;
-- service discovery, transfer tickets, proxy references, context events, and
-  resource cleanup are first-class framework features.
+| Layer | paglets/cpp | Python edition |
+|---|---|---|
+| Transport | HTTPS; every host runs an HTTPS server with the endpoints `/paglets/v1/open`, `/paglets/v1/finish/<session>`, `/paglets/v1/frames/<session>` and `/paglets/v1/poll/<session>` | HTTP with a JSON control API, HTTPS through a reverse proxy |
+| Authentication | a Noise channel inside HTTPS: `Noise_XX_25519_ChaChaPoly_SHA256` between the Ed25519 keys of hosts, admins and owners, bound to the mesh ID | an optional shared API key (`PAGLETS_API_KEY`) |
+| Framing | request bodies are sequences of `[u32 big-endian length][Noise message]`; a frame is split into Noise messages of at most 65 535 bytes | JSON bodies, chunked binary payloads for movement |
+| Frames between hosts | canonical MessagePack values (sorted string keys, shortest encodings, no floats), the same encoding as ledger records | JSON control calls |
+| Messages to paglets | MessagePack payloads; the CLI converts JSON to MessagePack and back | Python values |
+| Moving a paglet | a signed move offer with a page manifest, then the missing 64 KB pages of the memory image, compressed with zstd | pickled dataclass state, streamed over HTTP |
+| Paglet code | WebAssembly modules (paglet ABI v1), fetched by SHA-256 hash | Python classes importable on every host |
 
-The process-per-paglet model isolates crashes and CPU-heavy work from the host
-and from other paglets, and it gives worker paglets real multi-core parallelism.
-The tradeoff is stricter importability, process startup overhead, and
-actor-style serial message handling inside each individual paglet.
+Channels also check the mesh protocol version (`paglets-host --info`
+prints it) and the paglet ABI. Hosts refuse peers of another mesh, another
+protocol version or another ABI.
 
-## Quick Start
+The full protocol is in the planning documents:
 
-Install and test the project in development:
+- [networking and movement](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-networking.md)
+  (channels, transport, frames, moves, CLI sessions);
+- [mesh discovery](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-mesh.md)
+  (announcements, gossip, beacons, the compatibility gate);
+- [security and communication](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-security-and-communication.md);
+- [paglet ABI v1](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-abi-v1.md)
+  (the interface between host and guest);
+- [ledger](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-ledger.md)
+  (records and their canonical encoding).
 
-```bash
-uv run pytest -q
-```
+## Status
 
-Run two hosts:
+Milestones M0 (feasibility), M1 (single-host runtime), M2 (mesh identity,
+policy and system paglets) and M3 (movement between hosts) are closed.
+Milestone M4 (applications) is in progress. Its parts so far:
 
-```bash
-uv run paglets host --name alpha --port 8765 --mesh-version dev
-uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
-```
+- `mesh-info` and `compute-slots`, with the pi example;
+- service offers, the gateways and data residency;
+- the patterns library;
+- admin work against live hosts from the CLI;
+- the demo paglets and benchmarks;
+- fuzzing of every decoder that reads data from outside;
+- this documentation.
 
-For hosts on different machines, start each host with `--bind-public`:
-
-```bash
-uv run paglets host --name mac --bind-public auto --port 8765 --mesh-version dev
-uv run paglets host --name windows --bind-public 192.0.2.10 --port 8765 --mesh-version dev
-```
-
-`--bind-public auto` binds only the detected LAN address. With an explicit
-value such as `--bind-public 192.0.2.10`, it binds only that supplied address.
-Repeat the flag to bind multiple specific addresses; the first one is published
-to the mesh. The auto form keeps watching the detected address and
-rebinds/publishes a new one after DHCP or network reconnect changes it.
-
-For locked-down networks, one public HTTPS endpoint can act as a relay. Bind
-the paglets backend on server A to localhost, publish it through an existing
-reverse-proxy path such as `/paglets`, require an API key, and let other hosts
-connect outbound:
-
-Example Nginx drop-in:
-
-```nginx
-# Example: /etc/nginx/default.d/paglets.conf
-# Include this from an existing HTTPS server block.
-location /paglets/ {
-    proxy_pass http://127.0.0.1:8765/;
-    proxy_http_version 1.1;
-    proxy_set_header Authorization $http_authorization;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-    client_max_body_size 256M;
-}
-```
-
-`/etc/nginx/default.d/paglets.conf` is common on RHEL-style layouts when the
-site includes `default.d/*.conf`. On Debian/Ubuntu-style layouts, place the
-same `location` in `/etc/nginx/sites-available/<site>` or include it as a
-snippet from that server block. Test with `sudo nginx -t` before reloading.
-
-```bash
-export PAGLETS_API_KEY='change-me'
-uv run paglets host --name A --host 127.0.0.1 --port 8765 \
-  --public-url https://server-a.example.com/paglets
-uv run paglets host --name B --connect-to https://server-a.example.com/paglets
-```
-
-Paglets commands read `PAGLETS_API_KEY` automatically. Use `--api-key-env NAME`
-only when the key lives in a different environment variable.
-
-Connect-mode hosts do not open inbound ports. Movement and messages are relayed
-through A over authenticated HTTP long-polling, and git auto-update is disabled
-in this mode.
-
-Relay forwarding is transparent to paglets: lifecycle events name the final
-target, arrivals run only there, and the source paglet is kept active when a
-relay delivery fails. Hubs expose `GET /paglets/relay/diagnostics` and support
-`--relay-offline-after`, `--relay-delivery-timeout`, and `--relay-queue-limit`
-for corporate network tuning.
-
-On first start, `paglets host` copies `~/.paglets/launch.toml` from the bundled
-config. The default launch config declares built-in resident services for host
-inspection, mesh resource snapshots, compute-slot scheduling, and user
-notifications:
-
-```bash
-uv run paglets sys df
-uv run paglets sys load
-uv run paglets mesh summary
-uv run paglets artifacts list
-uv run paglets jobs status
-uv run paglets jobs groups
-uv run paglets examples analysis --tasks 3 --target-runtime 3
-uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets examples pi --digits 16 --output pi.txt
-uv run paglets examples perf
-uv run paglets examples mesh-benchmark --payload-size 64K
-```
-
-`paglets examples file` is the smallest natural file mobility example: the
-source paglet registers one file, dispatches to the destination host, and writes
-the arrived scratch copy to the requested path.
-
-`paglets examples perf` is a pure mobile-agent example: the entry host creates a
-parent benchmark paglet, clones workers to online same-version mesh hosts, runs
-local CPU, memory, and bounded temporary disk I/O checks, and reports the
-summary centrally.
-
-`paglets examples mesh-benchmark` measures mobile-agent movement itself. A starter
-paglet remains on the entry host while a traveler visits every directed host
-pair, stores per-hop timings locally on arrival, then collects and prints a
-directional Markdown matrix plus clock-offset and message round-trip
-diagnostics, ending with the overall benchmark time.
-
-Run the disk survey demo:
-
-```bash
-uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
-```
-
-## Documentation Map
-
-- [Implementing Paglets](implementing-paglets.md): how to write paglet classes,
-  state objects, lifecycle hooks, message handlers, movement, and mesh-aware
-  behavior.
-- [Example Agents](examples/index.md): detailed explanations of packaged example
-  agents, including `server-info`, `mesh-info`, Pi compute,
-  `paglets examples file`, `paglets examples perf`, and
-  `paglets examples mesh-benchmark`.
-- [Git Auto-Update](git-auto-update.md): how trusted host meshes can pull,
-  synchronize dependencies, broadcast commit hashes, and restart from updated
-  code.
-- [Usage Ideas](usage-ideas.md): practical scenarios where mobile state and
-  agent-to-agent communication are a useful fit.
-- [Technical Overview](technical/overview.md): how the topic packages fit
-  together and where implementation details live.
-- [Core](technical/core.md), [Runtime](technical/runtime.md), and
-  [Remote](technical/remote.md): package-level implementation notes and
-  generated API references for the main runtime subsystems.
-- [Glossary](glossary.md): terminology used by the project.
-- [paglets/cpp](cpp/index.md): the C++ edition, a separate implementation
-  whose paglets are sandboxed WebAssembly modules that move between hosts as
-  memory images, with code mobility and a signed mesh ledger. It does not
-  interoperate with this Python package.
-
-## Build The Docs Locally
-
-The site is built with [ckdocs](https://github.com/cklukas/ck-git-hosting).
-API reference sections and code snippets are generated into the Markdown
-files first:
-
-```bash
-uv run python tools/docs_sync.py
-ckdocs serve --root .
-```
-
-For a production build:
-
-```bash
-uv run python tools/docs_sync.py --check
-ckdocs build --root . --out public --strict
-```
+The
+[results of M0](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m0-results.md),
+[M1](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m1-results.md) and
+[M2](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m2-results.md)
+record the measurements and decisions of those milestones. M3 has no
+results document of its own. Its parts are described in the designs of
+[code mobility](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-modules.md),
+[networking](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-networking.md),
+[location](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-location.md),
+[the mesh](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-mesh.md) and
+[relays](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-relay.md).
+The [plan](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-edition-plan.md)
+lists every work package.

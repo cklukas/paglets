@@ -1,192 +1,71 @@
-<img src="https://cklukas.github.io/paglets/repository-open-graph-1280x640.png" alt="paglets social preview" width="640">
+# paglets/cpp
 
-# paglets
-
-[![CI](https://github.com/cklukas/paglets/actions/workflows/ci.yml/badge.svg)](https://github.com/cklukas/paglets/actions/workflows/ci.yml)
-[![Docs](https://github.com/cklukas/paglets/actions/workflows/docs.yml/badge.svg)](https://cklukas.github.io/paglets/)
-[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![C++](https://github.com/cklukas/paglets/actions/workflows/cpp.yml/badge.svg?branch=cpp)](https://github.com/cklukas/paglets/actions/workflows/cpp.yml)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/paglets.svg)](https://pypi.org/project/paglets/)
 
-Introduction / overview paper:
+paglets/cpp is the C++ edition of paglets: mobile agents written in C++,
+compiled to WebAssembly and run by the embedded
+[WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) runtime. A
+paglet's state is ordinary C++ objects in its linear memory, and it moves
+between hosts as a **memory image** (only the pages that changed travel
+again). Hosts form a mesh with keys, a signed ledger, a policy for every
+access to host resources, sandboxed worker processes and code mobility.
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20820155.svg)](https://doi.org/10.5281/zenodo.20820155)
+This branch (`cpp`) holds only the C++ edition. The Python edition, the
+`paglets` package on PyPI, lives on the
+[`main` branch](https://github.com/cklukas/paglets/tree/main). The two
+editions share concepts but no wire formats, and do not exchange paglets.
 
-`paglets` is a compact Python re-imagining of the Java Aglets mobile-agent idea: stateful objects with identity, lifecycle hooks, message passing, proxies, movement between hosts, durable deactivation, resident services, and explicit dataclass state serialization.
+## Quick start
 
-Hosts are expected to already have the same paglet code importable. Movement transfers the paglet class name, state class name, and serialized dataclass state; it does not upload code or move Python stacks, threads, sockets, or arbitrary live resources.
-
-## Quick Start
-
-Install and run tests from a checkout:
-
-```bash
-uv run pytest
-```
-
-Build the Python package locally:
-
-```bash
-uv build
-```
-
-After a tagged release is published, install the package with:
+macOS with Homebrew (Linux and Windows: see
+[Building and testing](docs/building.md)):
 
 ```bash
-python -m pip install paglets
+brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja libsodium openssl@3 zstd pkgconf
+cd cpp
+cmake --preset macos-arm64
+cmake --build --preset macos-arm64
+ctest --preset macos-arm64
 ```
 
-Start two local hosts:
+Run a paglet:
 
 ```bash
-uv run paglets host --name alpha --port 8765 --mesh-version dev
-uv run paglets host --name beta --port 8766 --peer http://127.0.0.1:8765 --mesh-version dev
+cpp/build/macos-arm64/host/paglets-host run cpp/build/macos-arm64/guests/hello.wasm --call greet '"world"'
 ```
-
-Run a packaged example CLI:
-
-```bash
-uv run paglets sys summary
-uv run paglets artifacts list
-uv run paglets jobs status
-uv run paglets jobs groups
-uv run paglets examples analysis --tasks 3 --target-runtime 3
-uv run paglets examples file push ./data.bin --remote beta --dest /tmp/data.bin --dry
-uv run paglets search grep TODO .
-uv run paglets examples pi --digits 32 --output pi.txt
-```
-
-The built-in `compute-slots` service admits coarse jobs by explicit
-`cpu_cores`, expected RAM, and temp-storage estimates. It also gates new grants
-by `max_load_per_cpu`, which defaults to `1.0` and means a host with `N` logical
-CPUs stops starting additional jobs once its one-minute load reaches `N`. On
-Linux and Windows it can best-effort pin granted jobs to allocated CPU IDs. New
-compute job paglets can derive from `ComputeJobPaglet` so scheduling, wakeup,
-redirects, affinity metadata, and lease release stay out of job-specific code.
-`paglets jobs why` explains blocked queued jobs
-and reports active job process-tree memory plus Paglets and application scratch
-usage. `paglets jobs history` shows recent finished job runtime
-and peak usage summaries.
-
-For detached multi-job workflows, `ResultCollectorPaglet`,
-`CollectingComputeJobPaglet`, and `submit_compute_job_group(...)` provide a
-small job-group plus collector layer. Hosts can advertise placement metadata
-with `paglets host --tag TAG --property KEY=VALUE`, and compute jobs can
-require, exclude, or prefer host tags.
-
-Files that belong to a paglet instance can be registered with
-`register_file(...)` and then move naturally with dispatch or clone. Larger
-explicit payloads can use `ArtifactRef`, `HostClient.upload_artifact(...)`,
-`PagletProxy.send_artifact(...)`, and the `paglets artifacts` CLI.
-The `paglets examples file` example demonstrates this natural file mobility for
-one-file push and pull operations between an entry host and one remote host.
-Simple request/result paglets can use `TaskPaglet` and `TaskClient` from
-`paglets.patterns.tasks`. Paglets with several named operations can use
-`OperationPaglet` and `OperationClient`; clone fan-out examples can reuse
-`MeshFanoutMixin` for child bookkeeping. File-transfer paglets can subclass
-`SingleFileTransferPaglet` for the default workflow or use `FileMobilityMixin`
-to keep custom file-transfer code readable.
-
-Run a source-tree demo:
-
-```bash
-uv run python demos/disk_survey_demo.py --hosts alpha beta gamma
-```
-
-## Minimal Paglet
-
-```python
-from dataclasses import dataclass, field
-
-from paglets.core.agent import Paglet, PagletState
-from paglets.core.messages import Message
-
-
-@dataclass
-class CounterState(PagletState):
-    count: int = 0
-    events: list[str] = field(default_factory=list)
-
-
-class CounterPaglet(Paglet[CounterState]):
-    State = CounterState
-
-    def handle_message(self, message: Message):
-        if message.kind == "increment":
-            self.state.count += int(message.args.get("by", 1))
-            return {"count": self.state.count}
-        return self.not_handled()
-```
-
-Public imports are intentionally explicit:
-
-```python
-from paglets.runtime.host import Host
-from paglets.core.agent import Paglet, PagletState
-from paglets.core.messages import Message
-from paglets.remote.proxy import PagletProxy
-```
-
-Flat imports such as `from paglets import Host` are unsupported.
 
 ## Documentation
 
-The full documentation is published at <https://cklukas.github.io/paglets/>.
+The documentation site has two parts, selected in its header: the C++
+edition (from [`docs/`](docs/index.md) on this branch) and the Python edition
+(from `docs/` on `main`). Pages on this branch:
 
-Useful entry points:
+- [Overview](docs/index.md)
+- [Building and testing](docs/building.md)
+- [Writing paglets](docs/writing-paglets.md) and the
+  [guest SDK reference](docs/sdk-reference.md)
+- [Hosts and meshes](docs/hosts-and-meshes.md) and the
+  [command-line reference](docs/cli-reference.md)
+- [Configuration and troubleshooting](docs/configuration.md)
+- [System paglets](docs/system-paglets.md)
+- [Example paglets](docs/examples.md)
 
-- [Implementing Paglets](https://cklukas.github.io/paglets/implementing-paglets.html)
-- [Examples](https://cklukas.github.io/paglets/examples/)
-- [Operations](https://cklukas.github.io/paglets/operations/)
-- [Detached Compute With A Collector](https://cklukas.github.io/paglets/examples/detached-compute-collector.html)
-- [Artifact Transport](https://cklukas.github.io/paglets/system/artifacts.html)
-- [Technical Reference](https://cklukas.github.io/paglets/technical/overview.html)
-- [Status And Limitations](https://cklukas.github.io/paglets/project/status.html)
-- [paglets/cpp](https://github.com/cklukas/paglets/tree/cpp/docs/cpp), the C++/Wasm
-  edition (section `paglets/cpp` of the site; on the `cpp` branch for now)
-
-Build docs locally with [ckdocs](https://github.com/cklukas/ck-git-hosting)
-(regenerate the API reference and snippets first when the code changed):
+Build and check the site with
+[ckdocs](https://github.com/cklukas/ck-git-hosting) from the repository root:
 
 ```bash
-uv run python tools/docs_sync.py
 ckdocs check --root .
 ckdocs serve --root .
 ```
 
-The repository is also hosted on a self-hosted ck-git server, where
-`.ckgit/ci.yml` builds the same site on every push to `main` or `cpp` and
-publishes it on ck-git Pages from the hosted default branch (`cpp`, so the
-ck-git site includes the paglets/cpp pages). Publish a checkout there once with
-`ckgit publish`, then push with `git push ckgit <branch>`.
-
-## Project Layout
+## Repository layout
 
 ```text
-src/paglets/core/            paglet model, messages, lifecycle events
-src/paglets/artifacts.py     artifact references and host artifact storage
-src/paglets/runtime/         host facade, child processes, HTTP, relay, storage runtime
-src/paglets/remote/          clients, proxies, transfer tickets, mesh, admin API
-src/paglets/patterns/        typed task, operation, coordination, notification, and file mobility helpers
-src/paglets/persistence/     inactive records and managed storage
-src/paglets/services/        service contracts and resident services
-src/paglets/system/          built-in resident service agents
-src/paglets/serialization/   dataclass wire conversion and import resolution
-src/paglets/config/          launch config and bundled defaults
-src/paglets/tooling/         CLI, discovery, git auto-update
-src/paglets/examples/        packaged example agents and CLIs
-demos/                       runnable source-tree demo scripts
-tests/                       behavior-oriented test suites by topic
-cpp/                         paglets/cpp, the C++/Wasm edition (branch cpp, milestone M4 in progress)
-planning/                    paglets/cpp planning documents
+cpp/        the C++ edition: host, guest SDK, examples, tests (see cpp/README.md)
+docs/       user documentation of the C++ edition
+planning/   design documents and work packages
 ```
-
-## Status
-
-`paglets` is early-stage software for experiments and trusted local/LAN meshes.
-Use API-key authentication for shared networks and relay deployments. Packaged
-commands read `PAGLETS_API_KEY` automatically; pass `--api-key-env NAME` only
-when the key lives in a different environment variable.
 
 ## License
 

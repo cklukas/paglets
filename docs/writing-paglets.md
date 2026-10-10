@@ -136,7 +136,7 @@ struct Count : paglets::patterns::Task<CountRequest, CountResult> {
 > the data may go. See [Hosts and meshes](hosts-and-meshes.md#data-residency).
 
 The [patterns design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-patterns.md)
-has the details. The [demos](demos.md) show the patterns in use.
+has the details. The [example paglets](examples.md) show the patterns in use.
 
 ## Running paglets locally
 

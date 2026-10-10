@@ -327,4 +327,4 @@ PAGLETS_BENCH=1 ./tests/paglets_tests guests "bench:"
 ```
 
 `PAGLETS_BENCH_JSON=FILE` appends one JSON object per benchmark to `FILE`.
-The numbers are in [Demos and benchmarks](demos.md#benchmarks).
+The numbers are in [Example paglets and benchmarks](examples.md#benchmarks).
