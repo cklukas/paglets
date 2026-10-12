@@ -20,7 +20,7 @@ admin approves the request.
 
 | Service | Operations | Purpose |
 |---|---|---|
-| `files` | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove`, `share`, `save` | files inside a directory capability; the capability's rights limit what is possible. `share` and `save` move files of any size between hosts |
+| `files` | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove`, `hash`, `share`, `save` | files inside a directory capability; the capability's rights limit what is possible. `hash` gives a file's SHA-256 without reading it into the paglet; `share` and `save` move files of any size between hosts |
 | `grants` | `request`, `status`, `release`, `list` | ask the mesh policy for a resource, such as a directory of a named root |
 | `server-info` | `summary`, `load`, `volumes`, `processes` | the host's system, load, volumes and processes, in one schema on every platform |
 | `directory` | `lookup`, `publish`, `unpublish`, `list` | finds system services and paglets that published themselves under a name |

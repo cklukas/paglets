@@ -84,6 +84,7 @@ if(PAGLETS_ENABLE_REFLECTION)
         src/platform/platform_windows.cpp
         src/services/artifacts.cpp
         src/services/common.cpp
+        src/services/content_hash.cpp
         src/services/directory.cpp
         src/services/files.cpp
         src/services/install.cpp
@@ -92,7 +93,7 @@ if(PAGLETS_ENABLE_REFLECTION)
         src/services/server_info.cpp
         src/services/storage.cpp
         src/services/user_info.cpp)
-    target_link_libraries(paglets_services PUBLIC paglets_host)
+    target_link_libraries(paglets_services PUBLIC paglets_host PRIVATE OpenSSL::Crypto)
     target_compile_options(paglets_services PRIVATE ${PAGLETS_WARNINGS})
     if(WIN32)
         target_link_libraries(paglets_services PRIVATE psapi)

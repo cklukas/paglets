@@ -136,6 +136,9 @@ std::unique_ptr<httplib::Client> make_client(const std::string& url, const Trans
     http->set_read_timeout(static_cast<time_t>(read));
     http->set_write_timeout(static_cast<time_t>(secs));
     http->set_keep_alive(true);
+    // Frames are small and answered at once: without this, Nagle's algorithm
+    // and delayed acknowledgements hold each one for about 40 ms.
+    http->set_tcp_nodelay(true);
     if (!config.tls_ca.empty()) {
         http->set_ca_cert_path(config.tls_ca.string());
         http->enable_server_certificate_verification(true);
@@ -351,6 +354,50 @@ struct Transport::Impl {
 
     std::unique_ptr<httplib::SSLServer> server;
     std::thread server_thread;
+
+    // Frames of hosts are handled in order on a thread of their own: a
+    // request is answered once its frames are decrypted, so the sender's next
+    // frames travel while the node handles these (large content arrives as a
+    // stream, not one batch at a time). At most `inbox_limit` bytes wait;
+    // beyond that a request waits for room, which slows the sender down.
+    struct Inbound {
+        Identity from;
+        Bytes frame;
+    };
+    std::mutex inbox_mu;
+    std::condition_variable inbox_cv;       // frames to handle, or stopping
+    std::condition_variable inbox_room_cv;  // room in the inbox
+    std::deque<Inbound> inbox;
+    std::size_t inbox_bytes = 0;
+    bool inbox_stopping = false;
+    std::thread inbox_thread;
+    static constexpr std::size_t inbox_limit = 32u * 1024 * 1024;
+
+    void drain_inbox() {
+        std::unique_lock lock(inbox_mu);
+        while (true) {
+            inbox_cv.wait(lock, [this] { return inbox_stopping || !inbox.empty(); });
+            if (inbox.empty()) return;  // stopping, and everything handled
+            Inbound in = std::move(inbox.front());
+            inbox.pop_front();
+            const std::size_t size = in.frame.size();
+            lock.unlock();
+            (void)handler(in.from, std::move(in.frame));
+            lock.lock();
+            inbox_bytes -= size;
+            inbox_room_cv.notify_all();
+        }
+    }
+
+    void stop_inbox() {
+        {
+            std::lock_guard lock(inbox_mu);
+            inbox_stopping = true;
+        }
+        inbox_cv.notify_all();
+        inbox_room_cv.notify_all();
+        if (inbox_thread.joinable()) inbox_thread.join();
+    }
     int port = 0;
     Certificate certificate;
 
@@ -489,7 +536,18 @@ struct Transport::Impl {
         }
         ++received;
         if (!handler) return {};
-        return handler(from, std::move(frame));
+        // CLI sessions get answers in the response; hosts get none.
+        if (from.role != PeerRole::host) return handler(from, std::move(frame));
+        {
+            std::unique_lock lock(inbox_mu);
+            inbox_room_cv.wait(lock, [this] { return inbox_stopping || inbox_bytes < inbox_limit; });
+            if (inbox_stopping) return {};
+            inbox_bytes += frame.size();
+            inbox.push_back(Inbound{from, std::move(frame)});
+            if (!inbox_thread.joinable()) inbox_thread = std::thread([this] { drain_inbox(); });
+        }
+        inbox_cv.notify_one();
+        return {};
     }
 
     void control(const Identity& from, std::span<const std::uint8_t> frame) {
@@ -1156,8 +1214,14 @@ std::expected<void, std::string> Transport::start() {
     // sent along, so peers that check need only the root CA.
     std::string tls_error;
     t.server = std::make_unique<httplib::SSLServer>([&t, &tls_error](httplib::tls::ctx_t ctx) {
-        auto ok = use_certificate(static_cast<SSL_CTX*>(ctx), t.certificate);
+        auto* ssl = static_cast<SSL_CTX*>(ctx);
+        auto ok = use_certificate(ssl, t.certificate);
         if (!ok) tls_error = ok.error();
+        // ChaCha20-Poly1305 first: CPUs without AES instructions (such as the
+        // Raspberry Pi 4) encrypt it several times faster than AES-GCM, and
+        // CPUs with them still far faster than the network.
+        SSL_CTX_set_ciphersuites(ssl, "TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384");
+        SSL_CTX_set_options(ssl, SSL_OP_CIPHER_SERVER_PREFERENCE);
         return ok.has_value();
     });
     if (!t.server->is_valid()) {
@@ -1170,6 +1234,7 @@ std::expected<void, std::string> Transport::start() {
         }
     }
     const auto secs = std::chrono::duration_cast<std::chrono::seconds>(t.config.timeout).count();
+    t.server->set_tcp_nodelay(true);
     t.server->set_read_timeout(static_cast<time_t>(secs));
     t.server->set_write_timeout(static_cast<time_t>(secs));
     t.server->set_payload_max_length(t.config.max_frame + t.config.max_frame / 1024 + t.config.max_batch_bytes +
@@ -1217,6 +1282,8 @@ void Transport::stop() {
     for (auto& th : threads) th.join();
     if (t.server) t.server->stop();
     if (t.server_thread.joinable()) t.server_thread.join();
+    // Frames that arrived are still handled.
+    t.stop_inbox();
     t.idle_cv.notify_all();
 }
 

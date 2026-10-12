@@ -6,7 +6,7 @@
 // Every operation acts on a `dir` capability the caller lends with the
 // request (RequestOptions::lend, first capability); paths are relative to
 // that directory, `/`-separated, without `.` or `..`; "" is the directory
-// itself. Rights of the capability: `read` (list, stat, find, read, share),
+// itself. Rights of the capability: `read` (list, stat, find, read, hash, share),
 // `write` (change existing files), `create` (new files and directories),
 // `delete` (delete; move needs `delete` and `create`). Sizes are bytes,
 // times Unix milliseconds (UTC). Symbolic links are listed but never
@@ -101,6 +101,17 @@ struct DeleteReply {
     std::uint64_t removed = 0;  // files and directories removed
 };
 
+// `hash` computes the SHA-256 of a file on the host (right `read`), so a
+// paglet compares files of any size without reading them.
+struct HashRequest {
+    std::string path;
+};
+
+struct Hashed {
+    std::string sha256;  // hex
+    std::uint64_t size = 0;
+};
+
 // `share` makes a file available to every host of the mesh without reading
 // it into the paglet: the host hashes the file and replies with an
 // `artifact` capability (rights `read`) as the first capability of the
@@ -138,6 +149,7 @@ struct Contract {
     Entry mkdir(const MkdirRequest&);
     Entry move(const MoveRequest&);
     DeleteReply remove(const DeleteRequest&);
+    Hashed hash(const HashRequest&);
     Shared share(const ShareRequest&);
     Entry save(const SaveRequest&);
 };

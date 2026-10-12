@@ -74,6 +74,20 @@ platform-independent, so guests built on any machine work there.
 > about 60 instances. MinGW-w64 GCC cannot build the guard-page checks at
 > all, because WAMR catches the faults with MSVC `__try`/`__except`.
 
+A host built with a GCC 16 installed next to the system compiler (for
+example below `~/opt/gcc-16` on Debian, whose own GCC is older) needs
+GCC 16's C++ library at run time. Link it statically, and the host runs
+on any machine of the same architecture and C library, without GCC 16:
+
+```bash
+cmake --preset linux-gcc16 -DCMAKE_BUILD_TYPE=Release -DPAGLETS_BUILD_GUESTS=OFF -DPAGLETS_BUILD_TESTS=OFF \
+    -DPAGLETS_WAMR_HW_BOUND_CHECK=OFF "-DCMAKE_EXE_LINKER_FLAGS=-static-libstdc++ -static-libgcc"
+cmake --build build/linux-gcc16 --target paglets-host paglets-worker
+```
+
+Such a host needs no guest modules of its own: it fetches the modules of
+paglets that arrive from the hosts they come from.
+
 `paglets-host --info` shows what a build contains: version, platform,
 compiler, whether reflection is on, the WAMR release and mode, the paglet
 ABI and the mesh protocol.
@@ -328,4 +342,4 @@ PAGLETS_BENCH=1 ./tests/paglets_tests guests "bench:"
 ```
 
 `PAGLETS_BENCH_JSON=FILE` appends one JSON object per benchmark to `FILE`.
-The numbers are in [Example paglets and benchmarks](examples.md#benchmarks).
+The numbers are in [Example paglets and benchmarks](examples/index.md#benchmarks).

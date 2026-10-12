@@ -203,6 +203,23 @@ inline void put_down(const CarriedFile& file, std::string root, std::string path
                 });
 }
 
+// The SHA-256 (hex) and size of `path` below the lent directory `dir`
+// (right `read`), computed by the host: files of any size, nothing read
+// into the paglet.
+inline void hash_file(const Capability& dir, std::string path,
+                      std::function<void(Result<services::files::Hashed>)> next) {
+    endpoint("files", [dir, path = std::move(path), next](Result<Endpoint> files) {
+        if (!files) return next(std::unexpected(files.error()));
+        services::files::Client client{*files};
+        RequestOptions options = lending(dir);
+        options.timeout_ms = 3600 * 1000;  // hashing a large file takes time
+        auto sent = client.hash(
+            services::files::HashRequest{path},
+            [next](Result<services::files::Hashed> r, Message&) { next(std::move(r)); }, options);
+        if (!sent) next(std::unexpected(sent.error()));
+    });
+}
+
 // A file shared for other hosts: its content stays where it is until a
 // host that saves or reads it fetches it.
 struct SharedFile {

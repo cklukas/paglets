@@ -120,7 +120,7 @@ The patterns library covers the common shapes of paglets. Include
 | `fanout.hpp` | `FanOut`: clones of the paglet on a set of hosts, one report each, a deadline, and failed clones |
 | `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(...)`: find a paglet and keep it in place while working with it |
 | `notify.hpp` | `notify(level, title, text)`: notifications to the owner through `user-info` |
-| `files.hpp` | `granted_dir`; `share_file(dir, path)` and `save_file(dir, path, content)`: files of any size between hosts, as artifact capabilities; `read_file`, `write_file`, `pick_up(root, path)`, `put_down(file, root, path)`: small files carried in the paglet's memory |
+| `files.hpp` | `granted_dir`; `hash_file(dir, path)`: a file's SHA-256, computed by the host; `share_file(dir, path)` and `save_file(dir, path, content)`: files of any size between hosts, as artifact capabilities; `read_file`, `write_file`, `pick_up(root, path)`, `put_down(file, root, path)`: small files carried in the paglet's memory |
 
 ```cpp
 #include <paglets/patterns.hpp>
@@ -143,7 +143,7 @@ struct Count : paglets::patterns::Task<CountRequest, CountResult> {
 > the data may go. See [Hosts and meshes](hosts-and-meshes.md#data-residency).
 
 The [patterns design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-patterns.md)
-has the details. The [example paglets](examples.md) show the patterns in use.
+has the details. The [example paglets](examples/index.md) show the patterns in use.
 
 ## Running paglets locally
 

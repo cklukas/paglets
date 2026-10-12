@@ -310,6 +310,37 @@ Result<files::DeleteReply> Files::remove(const files::DeleteRequest& q, Operatio
 
 // -- content for other hosts (planning/cpp-content-exchange.md) ---------------
 
+Result<files::Hashed> Files::hash(const files::HashRequest& q, Operation& op) {
+    auto r = resolve(op, "read", q.path);
+    if (!r) return std::unexpected(r.error());
+    auto file = content_path(r->base, r->path);
+    if (!file) return std::unexpected(file.error());
+    std::error_code ec;
+    if (!fs::is_regular_file(*file, ec)) return std::unexpected(ec ? error_of(ec) : abi::invalid_argument);
+    auto reply = op.call.defer();
+    if (!reply) return std::unexpected(abi::internal);
+    runtime::SystemContext* ctx = &op.ctx;
+    // Hashing a large file blocks: not on a scheduler lane.
+    auto job = [ctx, cap = std::move(*reply), file = *file](bool stopping) {
+        if (stopping) {
+            (void)ctx->reply(cap, abi::failed);
+            return;
+        }
+        auto hashed = Artifacts::hash_file(file);
+        if (!hashed) {
+            (void)ctx->reply(cap, hashed.error());
+        } else {
+            (void)ctx->reply(cap, abi::ok, wire::to_msgpack(*hashed));
+        }
+    };
+    if (artifacts_) {
+        artifacts_->jobs().post(std::move(job));
+    } else {
+        job(false);
+    }
+    return files::Hashed{};
+}
+
 Result<files::Shared> Files::share(const files::ShareRequest& q, Operation& op) {
     if (!artifacts_) return std::unexpected(abi::unsupported);
     // Nothing is read into the paglet: the content carries the root's mark

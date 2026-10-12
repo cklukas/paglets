@@ -58,11 +58,28 @@ unchanged:
 | `content-missing` | `r`, `e` reason | refused or not there |
 
 The pulling host asks for the first part, learns the size, and then keeps
-at most four parts (4 MB) outstanding, which stays well inside a relay's
+at most eight parts (8 MB) outstanding, which stays well inside a relay's
 downlink buffer. Parts must arrive in order (the transport keeps order per
 peer); the file is written and hashed as they arrive. A part out of order,
 a size above the limit, a hash mismatch or 30 s without progress ends the
 pull, and the partial file is removed.
+
+Throughput (measured with `cpp/tools/mesh_bench.sh` on a gigabit LAN) came
+from four changes to the transport and the hosts:
+
+- `TCP_NODELAY` on the HTTPS connections between hosts. Without it, Nagle's
+  algorithm and delayed acknowledgements held small frames (a
+  `content-want`, a message between paglets) for about 40 ms: round trips
+  between paglets took 45 to 95 ms on a LAN, and now about 1 to 4 ms.
+- Frames of hosts are handled on a thread of the receiving transport, in
+  order, after the request that carried them is answered. Before, the
+  receiver wrote and hashed every part inside the request, and the sender
+  waited for that before it sent its next batch.
+- SHA-256 of content in the host through OpenSSL, which uses the CPU's SHA
+  instructions (`ContentHash`); the portable implementation that guests
+  share hashed 256 MB in 2.5 to 10 s, OpenSSL in 0.2 s.
+- TLS between hosts prefers ChaCha20-Poly1305, which the Raspberry Pi 4
+  (no AES instructions) encrypts several times faster than AES-GCM.
 
 The holding host checks every `content-want`:
 

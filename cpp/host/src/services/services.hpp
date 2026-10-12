@@ -85,6 +85,7 @@ public:
     Result<files::Entry> mkdir(const files::MkdirRequest&, Operation&);
     Result<files::Entry> move(const files::MoveRequest&, Operation&);
     Result<files::DeleteReply> remove(const files::DeleteRequest&, Operation&);
+    Result<files::Hashed> hash(const files::HashRequest&, Operation&);
     Result<files::Shared> share(const files::ShareRequest&, Operation&);
     Result<files::Entry> save(const files::SaveRequest&, Operation&);
 
@@ -186,6 +187,9 @@ public:
     static std::optional<Ref> parse_resource(std::string_view resource);
     // True for a usable artifact capability with the right `read`.
     static bool readable(const runtime::Cap& cap);
+    // The SHA-256 (hex) and size of a file, read in blocks; bad_state if it
+    // changed while it was read. Blocks.
+    static Result<files::Hashed> hash_file(const fs::path& file);
     void set_exchange(ContentExchange exchange);
     // An artifact capability (rights `read`) to content `hash` of this host.
     runtime::Cap capability(std::string_view hash) const;

@@ -12,6 +12,7 @@
 // the hosts, and keeps it in its own store. Files shared with
 // `files.share` are served from where they are, without a copy.
 
+#include "content_hash.hpp"
 #include "services.hpp"
 
 #include <paglets/runtime/runtime.hpp>
@@ -228,7 +229,9 @@ std::uint64_t Artifacts::used() const {
 Result<std::string> Artifacts::store(std::span<const std::uint8_t> content, std::string_view media_type,
                                      const std::vector<std::string>& marks) {
     if (media_type.size() > 128) return std::unexpected(abi::invalid_argument);
-    const std::string hash = to_hex(sha256(content));
+    ContentHash digest;
+    digest.update(content);
+    const std::string hash = to_hex(digest.finish());
     {
         std::lock_guard lock(mu_);
         const fs::path data = root_ / hash;
@@ -268,16 +271,14 @@ void Artifacts::save_shares() const {
     (void)write_atomically(shares_file_, wire::to_msgpack(state));
 }
 
-Result<files::Shared> Artifacts::share_file(const fs::path& file, std::string media_type,
-                                            std::vector<std::string> marks) {
-    if (media_type.size() > 128) return std::unexpected(abi::invalid_argument);
+Result<files::Hashed> Artifacts::hash_file(const fs::path& file) {
     std::error_code ec;
     const auto size = fs::file_size(file, ec);
     if (ec) return std::unexpected(abi::not_found);
     const auto before = modified_ns(file);
     std::ifstream in(file, std::ios::binary);
     if (!in) return std::unexpected(abi::denied);
-    Sha256 digest;
+    ContentHash digest;
     std::vector<std::uint8_t> block(copy_block);
     std::uint64_t read = 0;
     while (in) {
@@ -288,22 +289,32 @@ Result<files::Shared> Artifacts::share_file(const fs::path& file, std::string me
         read += got;
     }
     if (in.bad()) return std::unexpected(abi::internal);
-    // A file that changed while it was hashed is not shared.
+    // A file that changed while it was hashed has no hash.
     if (read != size || fs::file_size(file, ec) != size || modified_ns(file) != before || !before) {
         return std::unexpected(abi::bad_state);
     }
-    const auto d = digest.finish();
-    const std::string hash = to_hex(d);
+    return files::Hashed{to_hex(digest.finish()), size};
+}
+
+Result<files::Shared> Artifacts::share_file(const fs::path& file, std::string media_type,
+                                            std::vector<std::string> marks) {
+    if (media_type.size() > 128) return std::unexpected(abi::invalid_argument);
+    const auto before = modified_ns(file);
+    auto hashed = hash_file(file);
+    if (!hashed) return std::unexpected(hashed.error());
+    // Served while it keeps the size and modification time it was hashed with.
+    if (modified_ns(file) != before || !before) return std::unexpected(abi::bad_state);
     {
         std::lock_guard lock(mu_);
-        shares_[hash] = Share{utf8_of(file), size, *before, std::move(media_type), std::move(marks), now_ms()};
+        shares_[hashed->sha256] =
+            Share{utf8_of(file), hashed->size, *before, std::move(media_type), std::move(marks), now_ms()};
         while (shares_.size() > max_shares) {
             auto oldest = std::ranges::min_element(shares_, {}, [](const auto& e) { return e.second.created_ms; });
             shares_.erase(oldest);
         }
         save_shares();
     }
-    return files::Shared{hash, size};
+    return files::Shared{hashed->sha256, hashed->size};
 }
 
 Result<artifacts::GetReply> Artifacts::read_range(std::string_view hash, const artifacts::GetRequest& q,

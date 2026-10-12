@@ -10,6 +10,7 @@
 #include <paglets/node/node.hpp>
 
 #include "../platform/platform.hpp"
+#include "../services/content_hash.hpp"
 
 #include <paglets/services/compute_slots.hpp>
 #include <paglets/services/contract.hpp>
@@ -107,7 +108,7 @@ constexpr std::string_view frame_content_want = "content-want";        // r, h, 
 constexpr std::string_view frame_content_part = "content-part";        // r, o, n, d, s (first part)
 constexpr std::string_view frame_content_missing = "content-missing";  // r, e
 constexpr std::size_t content_part_bytes = 1024 * 1024;
-constexpr std::size_t content_window = 4;  // parts asked for ahead
+constexpr std::size_t content_window = 8;  // parts asked for ahead
 constexpr std::size_t max_module_bytes = 64u * 1024 * 1024;
 
 inline std::string hex(const mesh::RecordId& id) {
@@ -408,7 +409,7 @@ struct Node::Impl {
         std::string token;
         fs::path into;
         std::ofstream out;
-        paglets::Sha256 digest;
+        services::ContentHash digest;
         std::uint64_t received = 0;
         std::uint64_t asked = 0;  // bytes asked for so far
         std::int64_t total = -1;
