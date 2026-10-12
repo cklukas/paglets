@@ -203,6 +203,10 @@ PAGLETS_TEST("compute-slots: grants, a queue, wake-ups and redirects to hosts wi
     REQUIRE(net.settle([&] { return a.node->compute_status().leases.empty(); }, 400));
 }
 
+// The first 100 decimal digits of pi.
+constexpr std::string_view pi_decimal_100 =
+    "3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679";
+
 PAGLETS_TEST("pi: the pi example computes across three hosts and survives the loss of one (WP16 exit)") {
     SigningKey admin = SigningKey::generate();
     SigningKey owner = SigningKey::generate();
@@ -291,7 +295,14 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     // The digits are pi's.
     CHECK(done.hex.starts_with("3.243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89"));
     CHECK(done.hex == "3." + pi_bbp::hex_digits(0, 1200));
+    // Converted into decimal digits: 1200 hex digits fix 1442 of them.
+    REQUIRE(eventually([&] { return status().state == "done"; }));
+    const auto decimal = status();
+    CHECK_EQ(decimal.decimal_done, 1442);
+    CHECK_EQ(decimal.decimal.size(), std::size_t{1444});
+    CHECK(decimal.decimal.starts_with(pi_decimal_100));
     ::paglets::test::report("pi", "hex digits computed", done.done);
+    ::paglets::test::report("pi", "decimal digits converted from them", decimal.decimal_done);
     ::paglets::test::report("pi", "chunks", done.chunks_done);
     ::paglets::test::report("pi", "hosts used before one was lost", before.hosts.size());
     ::paglets::test::report("pi", "chunks sent again after the loss", done.resent);

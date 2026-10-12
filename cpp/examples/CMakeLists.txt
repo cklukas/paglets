@@ -11,7 +11,8 @@ paglets_add_module(pi
     SOURCES pi/pi.cpp
     SCHEMA_HEADER pi/pi_msgs.hpp
     SCHEMA_NAMESPACE pi_msgs
-    SERVICES mesh_info compute_slots)
+    SERVICES mesh_info compute_slots
+    PATTERNS)
 paglets_add_module(courier
     SOURCES courier/courier.cpp
     SCHEMA_HEADER courier/courier_msgs.hpp

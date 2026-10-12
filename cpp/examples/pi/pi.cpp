@@ -11,17 +11,30 @@
 // `compute.redirect`. It sends its digits to the job and disposes itself.
 // The job puts the chunks together in order; a chunk not answered in time
 // (its host may be gone) goes out again to another host.
+//
+// The job takes the chunks in order as they come in: it writes them to a
+// file below a named root of its host (when asked to) and adds them to the
+// fraction of pi as a binary number, half a byte per hex digit. It keeps
+// only chunks that came early, so many digits need little memory. At the
+// end it converts the fraction into decimal digits: every pass multiplies it
+// by 10^9 and takes the nine digits that move in front of the point. That
+// needs every hex digit, so it cannot run per chunk; it runs in slices of
+// 200 ms between messages.
 
 #include "pi.schema.gen.hpp"
 
 #include "bbp.hpp"
 
 #include <paglets/paglet.hpp>
+#include <paglets/patterns/files.hpp>
 #include <paglets/services/compute_slots.gen.hpp>
 #include <paglets/services/mesh_info.gen.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -32,6 +45,10 @@ using namespace pi_msgs;
 namespace svc = paglets::services;
 namespace abi = paglets::abi;
 using paglets::Message;
+namespace pt = paglets::patterns;
+
+constexpr std::size_t shown_digits = 4096;           // in `status`
+constexpr std::int64_t max_decimal_hex = 20'000'000;  // the fraction must fit the paglet's memory
 
 class Pi : public paglets::Paglet {
 public:
@@ -48,6 +65,8 @@ public:
                                                       if (!paglets::dispatch(d.host)) ask_for_slot();
                                                   });
         router().on("work-done", [this](Message&) { compute(); });
+        router().on("compute-more", [this](Message&) { compute_more(); });
+        router().on("convert", [this](Message&) { convert(); });
     }
 
     void on_cloned(paglets::Started& s) override {
@@ -88,25 +107,55 @@ private:
     Started start(const Start& s) {
         if (started_) return Started{false, "already started"};
         if (s.digits <= 0 || s.chunk <= 0 || s.max_in_flight <= 0) return Started{false, "invalid parameters"};
+        if (s.decimal && s.digits > max_decimal_hex) {
+            return Started{false, "the decimal conversion holds every digit in memory: at most " +
+                                      std::to_string(max_decimal_hex) + " hex digits"};
+        }
         started_ = true;
         params_ = s;
+        state_ = "computing";
         for (std::int64_t at = 0; at < s.digits; at += s.chunk) {
             chunks_.push_back(Chunk{at, std::min(s.chunk, s.digits - at)});
         }
+        if (s.decimal) limbs_.reserve(static_cast<std::size_t>(s.digits / 8 + 1));
+        if (s.output_root.empty()) {
+            begin();
+            return Started{true, {}};
+        }
+        // The files: a directory of the root, granted on this host.
+        hex_file_.path = s.output_path + ".hex";
+        if (s.decimal) dec_file_.path = s.output_path + ".txt";
+        hex_file_.pending = dec_file_.pending = "3.";
+        pt::granted_dir(s.output_root, "", {"write", "create"}, "pi: digits", [this](paglets::Result<paglets::Capability> d) {
+            if (!d) return fail(pt::error_text("files of " + params_.output_root, d.error()));
+            dir_ = std::make_shared<paglets::Capability>(*d);
+            const auto slash = params_.output_path.rfind('/');
+            pt::make_dirs(*dir_, slash == std::string::npos ? std::string() : params_.output_path.substr(0, slash),
+                          [this](paglets::Result<void> made) {
+                              if (!made) return fail(pt::error_text("directory for " + params_.output_path, made.error()));
+                              begin();
+                          });
+        });
+        return Started{true, {}};
+    }
+
+    void begin() {
         (void)paglets::after_raw(500, "tick", {});
         // Which host this is (as mesh-info names hosts), then the first chunks.
         auto info = paglets::service("mesh-info");
-        if (!info) {
-            send_more();
-            return Started{true, {}};
-        }
+        if (!info) return send_more();
         svc::mesh_info::Client client{*info};
         auto sent = client.snapshot({}, [this](paglets::Result<svc::mesh_info::Snapshot> snap, Message&) {
             if (snap) host_ = snap->host;
             send_more();
         });
         if (!sent) send_more();
-        return Started{true, {}};
+    }
+
+    void fail(std::string why) {
+        state_ = "failed";
+        error_ = std::move(why);
+        paglets::log("pi: " + error_);
     }
 
     std::int64_t in_flight() const {
@@ -175,7 +224,140 @@ private:
             c.digits = r.digits;
             if (!r.host_name.empty()) hosts_.insert(r.host_name);
         }
+        take_in_order();
         send_more();
+    }
+
+    // --8<-- [start:in_order]
+    // Chunks that are next in order leave the job's memory: into the file,
+    // and into the fraction for the decimal conversion.
+    void take_in_order() {
+        while (next_ < chunks_.size() && chunks_[next_].done) {
+            Chunk& c = chunks_[next_++];
+            done_ += c.count;
+            if (shown_hex_.size() < shown_digits) shown_hex_ += c.digits.substr(0, shown_digits - shown_hex_.size());
+            if (params_.decimal) {
+                for (char h : c.digits) add_nibble(static_cast<std::uint32_t>(h <= '9' ? h - '0' : h - 'A' + 10));
+            }
+            if (dir_) {
+                hex_file_.pending += c.digits;
+                flush(hex_file_);
+            }
+            std::string().swap(c.digits);
+        }
+        if (finished() && state_ == "computing") {
+            if (params_.decimal) return start_conversion();
+            state_ = "writing";
+            maybe_done();
+        }
+    }
+
+    // The fraction, 8 hex digits per 32-bit limb, the most significant first.
+    void add_nibble(std::uint32_t v) {
+        partial_ = (partial_ << 4) | v;
+        if (++partial_n_ == 8) {
+            limbs_.push_back(partial_);
+            partial_ = 0;
+            partial_n_ = 0;
+        }
+    }
+    // --8<-- [end:in_order]
+
+    // -- the decimal conversion --------------------------------------------------------------
+
+    void start_conversion() {
+        if (partial_n_ > 0) limbs_.push_back(partial_ << (4 * (8 - partial_n_)));
+        partial_n_ = 0;
+        // n hex digits fix n * log10(16) decimal digits; two fewer, so that a
+        // run of nines or zeros at the end cannot hide a carry.
+        decimal_total_ = std::max<std::int64_t>(0, static_cast<std::int64_t>(static_cast<double>(done_) * std::log10(16.0)) - 2);
+        state_ = "converting";
+        (void)paglets::after_raw(0, "convert", {});
+    }
+
+    // --8<-- [start:convert]
+    // A slice of the conversion: passes of multiplying the fraction by 10^9,
+    // whose overflow above the point is the next nine decimal digits.
+    void convert() {
+        if (state_ != "converting") return;
+        const std::int64_t began = now_ms();
+        std::string digits;
+        while (decimal_done_ + static_cast<std::int64_t>(digits.size()) < decimal_total_ && now_ms() - began < 200) {
+            // Only the precision the remaining digits need (and two limbs more).
+            const std::int64_t remaining = decimal_total_ - decimal_done_ - static_cast<std::int64_t>(digits.size());
+            const auto need = static_cast<std::size_t>(static_cast<double>(remaining) * 3.3219280949 / 32.0) + 2;
+            if (limbs_.size() > need) limbs_.resize(need);
+            std::uint64_t carry = 0;
+            for (std::size_t i = limbs_.size(); i-- > 0;) {
+                const std::uint64_t t = static_cast<std::uint64_t>(limbs_[i]) * 1'000'000'000ULL + carry;
+                limbs_[i] = static_cast<std::uint32_t>(t);
+                carry = t >> 32;
+            }
+            char nine[16];
+            std::snprintf(nine, sizeof nine, "%09u", static_cast<unsigned>(carry));
+            digits.append(nine, static_cast<std::size_t>(std::min<std::int64_t>(9, remaining)));
+        }
+        decimal_done_ += static_cast<std::int64_t>(digits.size());
+        if (shown_dec_.size() < shown_digits) shown_dec_ += digits.substr(0, shown_digits - shown_dec_.size());
+        if (dir_) {
+            dec_file_.pending += digits;
+            flush(dec_file_);
+        }
+        if (decimal_done_ < decimal_total_) {
+            (void)paglets::after_raw(0, "convert", {});
+            return;
+        }
+        std::vector<std::uint32_t>().swap(limbs_);
+        state_ = "writing";
+        maybe_done();
+    }
+    // --8<-- [end:convert]
+
+    // -- the files -----------------------------------------------------------------------------
+
+    struct Sink {
+        std::string path;
+        std::string pending;  // not written yet
+        bool busy = false;
+        bool written = false;  // the first write replaces the file, later ones append
+    };
+
+    void flush(Sink& sink) {
+        if (!dir_ || sink.busy || sink.pending.empty() || state_ == "failed") return;
+        constexpr std::size_t block = 1024 * 1024;
+        std::string part = sink.pending.substr(0, block);
+        sink.pending.erase(0, part.size());
+        sink.busy = true;
+        Sink* target = &sink;
+        pt::endpoint("files", [this, target, part = std::move(part)](paglets::Result<paglets::Endpoint> files) {
+            if (!files) return fail(pt::error_text("files", files.error()));
+            svc::files::Client client{*files};
+            svc::files::WriteRequest q;
+            q.path = target->path;
+            q.data.assign(part.begin(), part.end());
+            q.mode = target->written ? svc::files::WriteMode::append : svc::files::WriteMode::replace;
+            auto sent = client.write(
+                q,
+                [this, target](paglets::Result<svc::files::Entry> w, Message&) {
+                    target->busy = false;
+                    if (!w) return fail(pt::error_text("write " + target->path, w.error()));
+                    target->written = true;
+                    flush(*target);
+                    maybe_done();
+                },
+                pt::lending(*dir_));
+            if (!sent) fail(pt::error_text("write " + target->path, sent.error()));
+        });
+    }
+
+    void maybe_done() {
+        if (state_ != "writing") return;
+        for (const Sink* f : {&hex_file_, &dec_file_}) {
+            if (f->busy || !f->pending.empty()) return;
+        }
+        state_ = "done";
+        if (dir_) (void)dir_->drop();
+        dir_.reset();
     }
 
     // --8<-- [start:resend]
@@ -200,22 +382,24 @@ private:
 
     Status status() const {
         Status s;
+        s.state = state_;
         s.digits = params_.digits;
+        s.done = done_;
         s.chunks = static_cast<std::int64_t>(chunks_.size());
+        s.chunks_done = std::ranges::count_if(chunks_, [](const Chunk& c) { return c.done; });
         s.in_flight = in_flight();
         s.resent = resent_;
         s.finished = finished();
-        s.hex = "3.";
-        bool contiguous = true;
-        for (const auto& c : chunks_) {
-            if (c.done) ++s.chunks_done;
-            if (!c.done) contiguous = false;
-            if (contiguous) {
-                s.hex += c.digits;
-                s.done += c.count;
-            }
+        s.hex = "3." + shown_hex_;
+        s.decimal_digits = decimal_total_;
+        s.decimal_done = decimal_done_;
+        s.decimal = "3." + shown_dec_;
+        s.shown = static_cast<std::int64_t>(shown_digits);
+        for (const Sink* f : {&hex_file_, &dec_file_}) {
+            if (!f->path.empty()) s.files.push_back(f->path);
         }
         s.hosts.assign(hosts_.begin(), hosts_.end());
+        s.error = error_;
         return s;
     }
 
@@ -254,11 +438,39 @@ private:
     }
 
     void compute() {
+        digits_.clear();
+        block_ = pi_bbp::Block(task_.start, static_cast<int>(std::min<std::int64_t>(6, task_.count)));
+        compute_more();
+    }
+
+    // --8<-- [start:slices]
+    // A slice of about 200 ms: a handler call may take at most 5 s, and far
+    // out a single block of six digits takes seconds. The rest follows in
+    // the next message.
+    void compute_more() {
+        const std::int64_t began = now_ms();
+        while (static_cast<std::int64_t>(digits_.size()) < task_.count) {
+            if (block_.step(20'000)) {
+                digits_ += block_.digits();
+                const std::int64_t at = task_.start + static_cast<std::int64_t>(digits_.size());
+                const std::int64_t left = task_.start + task_.count - at;
+                if (left > 0) block_ = pi_bbp::Block(at, static_cast<int>(std::min<std::int64_t>(6, left)));
+            }
+            if (now_ms() - began >= 200 && static_cast<std::int64_t>(digits_.size()) < task_.count) {
+                (void)paglets::after_raw(0, "compute-more", {});
+                return;
+            }
+        }
+        report_digits();
+    }
+    // --8<-- [end:slices]
+
+    void report_digits() {
         Result r;
         r.start = task_.start;
         r.count = task_.count;
         r.attempt = task_.attempt;
-        r.digits = pi_bbp::hex_digits(task_.start, task_.count);
+        r.digits = std::move(digits_);
         // Where it ran (for the job's report).
         if (auto mi = paglets::service("mesh-info")) {
             svc::mesh_info::Client client{*mi};
@@ -290,6 +502,20 @@ private:
 
     // The job.
     bool started_ = false;
+    std::string state_ = "idle";
+    std::string error_;
+    std::size_t next_ = 0;   // the first chunk not yet taken in order
+    std::int64_t done_ = 0;  // hex digits taken in order
+    std::string shown_hex_;  // the first of them
+    std::vector<std::uint32_t> limbs_;
+    std::uint32_t partial_ = 0;
+    int partial_n_ = 0;
+    std::int64_t decimal_total_ = 0;
+    std::int64_t decimal_done_ = 0;
+    std::string shown_dec_;
+    std::shared_ptr<paglets::Capability> dir_;
+    Sink hex_file_;
+    Sink dec_file_;
     bool asking_ = false;
     Start params_;
     std::vector<Chunk> chunks_;
@@ -299,6 +525,8 @@ private:
     // A worker.
     bool worker_ = false;
     Task task_;
+    pi_bbp::Block block_;
+    std::string digits_;
     paglets::Endpoint job_;
     std::string lease_;
 };

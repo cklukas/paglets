@@ -13,6 +13,8 @@
 #include <dupes_msgs.hpp>
 #include <file_courier_msgs.hpp>
 #include <log_scout_msgs.hpp>
+#include <pi_msgs.hpp>
+#include <bbp.hpp>
 #include <tree_compare_msgs.hpp>
 #include <guard_msgs.hpp>
 #include <inventory_msgs.hpp>
@@ -900,4 +902,71 @@ PAGLETS_TEST("example: Mesh Benchmark measures every host in a compute slot and 
         }
         return user == 1;
     }, 3000));
+}
+
+PAGLETS_TEST("example: Pi writes its digits to files in order and converts them into decimal digits") {
+    namespace fs = std::filesystem;
+    const fs::path results = temp_root("pi-results");
+    ps::ServicesConfig home_sc;
+    home_sc.roots["results"] = results;
+    Mesh net;
+    auto& home = net.add_host("home", home_sc);
+    net.add_host("b");
+    net.add_host("c");
+    net.enroll_all();
+    fast(net);
+    net.admin_record("policy-rule", data::policy_rule({"results", Decision::allow, "files", {"write", "create"}, {},
+                                                       Scope{std::vector<std::string>{"results"}, std::nullopt},
+                                                       std::nullopt, 0}));
+    REQUIRE(net.settle([&] { return net.converged() && home.node->landscape().size() == 3u; }));
+    const std::string module = home.f->module("pi.wasm");
+    auto created = home.node->create(module, net.passport(module, paglet_id('9')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    pi_msgs::Start start;
+    start.digits = 3000;
+    start.chunk = 100;
+    start.max_in_flight = 6;
+    start.output_root = "results";
+    start.output_path = "run/pi";
+    auto r = home.f->runtime->call(id, "start", wire::to_msgpack(start), 20s);
+    REQUIRE(r.status == 0);
+    pi_msgs::Started started;
+    REQUIRE(wire::from_msgpack(r.payload, started));
+    REQUIRE(started.accepted);
+    pi_msgs::Status st;
+    REQUIRE(net.settle(
+        [&] {
+            auto x = home.f->runtime->call(id, "status", {}, 10s);
+            return x.status == 0 && wire::from_msgpack(x.payload, st) && (st.state == "done" || st.state == "failed");
+        },
+        3000));
+    if (st.state != "done") std::cerr << "    pi: " << st.error << "\n";
+    REQUIRE(st.state == "done");
+    auto read_text = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    // Every digit in the files, in order; the status shows the first.
+    const std::string hex = read_text(results / "run" / "pi.hex");
+    CHECK(hex == "3." + pi_bbp::hex_digits(0, 3000));
+    const std::string decimal = read_text(results / "run" / "pi.txt");
+    CHECK_EQ(st.decimal_done, 3610);  // 3000 * log10(16), less two
+    CHECK_EQ(decimal.size(), std::size_t{3612});
+    CHECK(decimal.starts_with("3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679"));
+    CHECK(decimal == st.decimal);  // fewer than `shown` digits: all of them
+    CHECK(st.files == std::vector<std::string>({"run/pi.hex", "run/pi.txt"}));
+    report("pi", "hex digits written to a file in order", static_cast<std::int64_t>(hex.size() - 2));
+    report("pi", "decimal digits written to a file", static_cast<std::int64_t>(decimal.size() - 2));
+    // A conversion that would not fit the paglet's memory is refused.
+    auto big = home.node->create(module, net.passport(module, paglet_id('8')));
+    REQUIRE_OK(big);
+    pi_msgs::Start huge;
+    huge.digits = 100'000'000;
+    r = home.f->runtime->call(*big, "start", wire::to_msgpack(huge), 20s);
+    REQUIRE(r.status == 0);
+    REQUIRE(wire::from_msgpack(r.payload, started));
+    CHECK(!started.accepted);
+    std::error_code ec;
+    fs::remove_all(results, ec);
 }

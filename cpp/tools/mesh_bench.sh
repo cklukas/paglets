@@ -17,7 +17,10 @@
 #   SHA-256, writing);
 # - runs the Latency Map: round trips of messages between paglets on every
 #   pair of hosts;
-# - runs the Mesh Benchmark: every host in a compute slot of its own.
+# - runs the Mesh Benchmark: every host in a compute slot of its own;
+# - computes hex digits of pi in chunks on every host (the Pi example),
+#   streamed in order to a file on this machine, and converts them into
+#   decimal digits.
 #
 # The results go to docs/results/live_*.json and, through paglets-docs-sync,
 # into the docs. Every host needs paglets-host and paglets-worker built from
@@ -26,11 +29,17 @@
 #   cpp/tools/mesh_bench.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       [--local-name mac] [--build cpp/build/macos-arm64] [--sizes "16 64 256"] [--port 7443]
+#       [--pi-digits 100000] [--steps "network transfer latency benchmark pi"]
+#
+# --steps runs only some of the steps; the results of the others stay as
+# they are.
 
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 build="$repo/cpp/build/macos-arm64"
 sizes="16 64 256"
+pi_digits=100000
+steps="network transfer latency benchmark pi"
 local_name="mac"
 port=7443
 names=()
@@ -45,13 +54,16 @@ while [ $# -gt 0 ]; do
         --sizes) sizes="$2"; shift 2 ;;
         --local-name) local_name="$2"; shift 2 ;;
         --port) port="$2"; shift 2 ;;
+        --pi-digits) pi_digits="$2"; shift 2 ;;
+        --steps) steps="$2"; shift 2 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
+step() { [[ " $steps " == *" $1 "* ]]; }
 [ ${#names[@]} -gt 0 ] || { echo "at least one --remote NAME=SSH:BIN_DIR" >&2; exit 2; }
 build="$(cd "$build" && pwd)"
 H="$build/host/paglets-host"
-for m in file_courier latency benchmark; do
+for m in file_courier latency benchmark pi; do
     [ -f "$build/guests/$m.wasm" ] || { echo "build $build first (guests)" >&2; exit 1; }
 done
 for c in jq iperf3; do command -v $c >/dev/null || { echo "$c is needed" >&2; exit 1; }; done
@@ -151,8 +163,8 @@ r1() { awk -v x="$1" 'BEGIN { printf "%.1f", x }'; }
 # -- network baseline: iperf3 for every ordered pair ----------------------------------------------
 
 declare -A tcp_mbits
-echo "== iperf3"
-for a in "${all[@]}"; do
+step network && echo "== iperf3"
+step network && for a in "${all[@]}"; do
     for b in "${all[@]}"; do
         [ "$a" = "$b" ] && continue
         on "$b" "iperf3 -s -1 -p 5201 > /dev/null 2>&1 &"
@@ -183,6 +195,7 @@ errand() {  # from to pattern to_path; prints the final status
 }
 
 transfers="[]"
+step transfer || sizes=""
 for s in $sizes; do
     for a in "${all[@]}"; do
         for b in "${all[@]}"; do
@@ -199,7 +212,7 @@ for s in $sizes; do
 $(value "saving on the destination: transfer, SHA-256 check, write" "$save" ms)
 $(value "transfer rate" "$mbs" MB/s)
 $(value "transfer rate" "$mbit" Mbit/s)
-$(value "TCP between the hosts (iperf3)" "${tcp_mbits[$a,$b]}" Mbit/s)")"
+$(value "TCP between the hosts (iperf3)" "${tcp_mbits[$a,$b]:-}" Mbit/s)")"
             transfers="$(jq -c --argjson e "$(entry "$a → $b, $s MB" "LAN, worker processes" "$outcome" \
                 "$(r1 "$(awk -v t="$total" 'BEGIN { print t / 1000 }')")" "" "$values")" \
                 '. + [$e]' <<<"$transfers")"
@@ -209,6 +222,8 @@ done
 
 # -- Latency Map -------------------------------------------------------------------------------------------
 
+latency="[]"
+if step latency; then
 echo "== Latency Map"
 id="$(launch latency)"
 call "$id" start '{"hosts": [], "rounds": 20, "timeout_ms": 60000}' >/dev/null
@@ -226,9 +241,12 @@ latency="$(jq -c --arg build "$build_type" --arg date "$today" '[.rows[] as $r |
      platform: "", build: $build, date: $date,
      values: [{name: "round trip, mean of 20", value: (.avg_ms * 100 | round / 100 | tostring), unit: "ms"},
               {name: "round trip, fastest", value: (.min_ms * 100 | round / 100 | tostring), unit: "ms"}]}]' <<<"$map")"
+fi
 
 # -- Mesh Benchmark --------------------------------------------------------------------------------------
 
+benchmark="[]"
+if step benchmark; then
 echo "== Mesh Benchmark"
 id="$(launch benchmark)"
 call "$id" start '{"hosts": [], "budget_ms": 1000, "memory_mb": 4, "disk_mb": 8, "timeout_ms": 120000}' >/dev/null
@@ -251,11 +269,54 @@ benchmark="$(jq -c --arg build "$build_type" --arg date "$today" '[.hosts[] |
               {name: "memory copying", value: (.memory_mbs | round | tostring), unit: "MB/s"},
               {name: "storage write, 8 MB", value: (.disk_write_mbs | round | tostring), unit: "MB/s"},
               {name: "storage read, 8 MB", value: (.disk_read_mbs | round | tostring), unit: "MB/s"}]}]' <<<"$ranking")"
+fi
+
+# -- Pi: hex digits on every host, in order into a file here, then decimal -----------------
+
+pi_values="[]"
+pi_outcome="failed"
+pi_seconds=0
+step pi || pi_digits=0
+[ "$pi_digits" -gt 0 ] && echo "== Pi, $pi_digits hex digits"
+if [ "$pi_digits" -gt 0 ]; then
+    id="$(launch pi)"
+    began=$(date +%s)
+    call "$id" start "$(jq -nc --argjson d "$pi_digits" '{digits: $d, chunk: 500, max_in_flight: 32,
+        chunk_timeout_ms: 600000, decimal: true, output_root: "bench", output_path: "pi/pi"}')" >/dev/null
+    computed=0
+    st=""
+    for _ in $(seq 7200); do
+        sleep 1
+        st="$(call "$id" status 2>/dev/null || true)"
+        [ "$computed" -eq 0 ] && [ "$(jq -r '.finished // false' <<<"$st" 2>/dev/null)" = true ] && computed=$(date +%s)
+        case "$(jq -r '.state // ""' <<<"$st" 2>/dev/null)" in done|failed) break ;; esac
+    done
+    ended=$(date +%s)
+    "$H" remote dispose "${R[@]}" "$id" >/dev/null 2>&1 || true
+    jq -c '{state, done, chunks_done, resent, decimal_done, hosts, files, error}' <<<"$st"
+    first100="3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679"
+    hex_bytes=$(($(wc -c < "$work/bench/pi/pi.hex" 2>/dev/null || echo 2) - 2))
+    dec_bytes=$(($(wc -c < "$work/bench/pi/pi.txt" 2>/dev/null || echo 2) - 2))
+    if [ "$(jq -r .state <<<"$st")" = done ] && [ "$(head -c 102 "$work/bench/pi/pi.txt")" = "$first100" ]; then
+        pi_outcome="passed"
+    fi
+    pi_seconds=$((ended - began))
+    [ "$computed" -eq 0 ] && computed=$ended
+    pi_values="$(jq -sc . <<<"$(value "hex digits in the file" "$hex_bytes")
+$(value "decimal digits in the file" "$dec_bytes")
+$(value "chunks of 500 digits" "$(jq -r .chunks_done <<<"$st")")
+$(value "hosts that computed chunks" "$(jq -r '.hosts | join(", ")' <<<"$st")")
+$(value "computing the hex digits" "$((computed - began))" s)
+$(value "converting into decimal digits" "$(t=$((ended - computed)); [ $t -gt 0 ] && echo $t || echo "< 1")" s)")"
+fi
+pi="$(jq -nc --argjson e "$(entry "pi, $pi_digits hex digits" "LAN, worker processes" "$pi_outcome" "$pi_seconds" "" \
+    "$pi_values")" '[$e]')"
 
 mkdir -p "$repo/docs/results"
-jq -n --argjson t "$transfers" '{topic: "live_transfer", tests: $t}' > "$repo/docs/results/live_transfer.json"
-jq -n --argjson t "$latency" '{topic: "live_latency", tests: $t}' > "$repo/docs/results/live_latency.json"
-jq -n --argjson t "$benchmark" '{topic: "live_benchmark", tests: $t}' > "$repo/docs/results/live_benchmark.json"
+step transfer && jq -n --argjson t "$transfers" '{topic: "live_transfer", tests: $t}' > "$repo/docs/results/live_transfer.json"
+step latency && jq -n --argjson t "$latency" '{topic: "live_latency", tests: $t}' > "$repo/docs/results/live_latency.json"
+step benchmark && jq -n --argjson t "$benchmark" '{topic: "live_benchmark", tests: $t}' > "$repo/docs/results/live_benchmark.json"
+[ "$pi_digits" -gt 0 ] && jq -n --argjson t "$pi" '{topic: "live_pi", tests: $t}' > "$repo/docs/results/live_pi.json"
 for h in "${all[@]}"; do printf '%s\t%s\n' "$h" "${about[$h]}"; done |
     jq -Rs --arg date "$today" 'split("\n") | map(select(. != "") | split("\t") |
         {test: .[0], mode: "", outcome: "", seconds: 0, platform: .[1], build: "", date: $date, values: []}) |

@@ -1,0 +1,46 @@
+{
+  "topic": "live_pi",
+  "tests": [
+    {
+      "test": "pi, 100000 hex digits",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 313,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "hex digits in the file",
+          "value": "100000",
+          "unit": ""
+        },
+        {
+          "name": "decimal digits in the file",
+          "value": "120409",
+          "unit": ""
+        },
+        {
+          "name": "chunks of 500 digits",
+          "value": "200",
+          "unit": ""
+        },
+        {
+          "name": "hosts that computed chunks",
+          "value": "mac, pi, uconsole",
+          "unit": ""
+        },
+        {
+          "name": "computing the hex digits",
+          "value": "313",
+          "unit": "s"
+        },
+        {
+          "name": "converting into decimal digits",
+          "value": "< 1",
+          "unit": "s"
+        }
+      ]
+    }
+  ]
+}
