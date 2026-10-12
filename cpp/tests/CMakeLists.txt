@@ -53,6 +53,10 @@ if(PAGLETS_ENABLE_REFLECTION)
 endif()
 
 add_executable(paglets_tests ${test_sources})
+# Recorded with the results tests report for the documentation (test.hpp).
+target_compile_definitions(paglets_tests PRIVATE
+    PAGLETS_TEST_PLATFORM="${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}"
+    PAGLETS_TEST_BUILD="${CMAKE_BUILD_TYPE}")
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net)
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway)
@@ -80,6 +84,8 @@ endforeach()
 add_test(NAME unit COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
 add_dependencies(paglets_tests paglets-worker)
 add_test(NAME worker_sandbox COMMAND paglets-worker --check-sandbox)
+# The code excerpts and results in docs/ match the sources.
+add_test(NAME docs_sync COMMAND paglets-docs-sync --check --root "${PROJECT_SOURCE_DIR}/..")
 # The same tests with paglet instances in (sandboxed) worker processes.
 add_test(NAME unit_workers COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
 set_tests_properties(unit_workers PROPERTIES ENVIRONMENT "PAGLETS_TEST_WORKER=$<TARGET_FILE:paglets-worker>")

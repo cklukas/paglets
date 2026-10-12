@@ -43,6 +43,7 @@ inline double series(int j, std::int64_t n) {
     return s;
 }
 
+// --8<-- [start:digits]
 // Hex digits of pi after the point, starting at `position` (0: the first
 // digit after "3."), 6 at a time (well within double precision).
 inline std::string hex_digits(std::int64_t position, std::int64_t count) {
@@ -61,5 +62,6 @@ inline std::string hex_digits(std::int64_t position, std::int64_t count) {
     }
     return out;
 }
+// --8<-- [end:digits]
 
 }  // namespace pi_bbp

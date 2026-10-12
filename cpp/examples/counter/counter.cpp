@@ -17,6 +17,7 @@ using namespace counter_msgs;
 
 class Counter : public paglets::Paglet {
 public:
+    // --8<-- [start:handlers]
     Counter() {
         router().on<Increment>("increment", [this](const Increment& inc, paglets::Message& m) {
             value_ = inc.mode == Mode::add ? value_ + inc.by : value_ * inc.by;
@@ -35,8 +36,10 @@ public:
             m.reply(status());
         });
     }
+    // --8<-- [end:handlers]
 
 private:
+    // --8<-- [start:status]
     Status status() const {
         Status s;
         s.value = value_;
@@ -57,6 +60,7 @@ private:
     std::int64_t value_ = 0;
     std::vector<Increment> history_;
     std::vector<std::vector<std::uint8_t>> ballast_;
+    // --8<-- [end:status]
 };
 
 }  // namespace

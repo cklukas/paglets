@@ -219,6 +219,9 @@ PAGLETS_TEST("mesh: a host that cannot be reached is one-way; CLI sessions hear 
         return h != nullptr && h->online && !h->send_error.empty();
     }));
     const HostInfo seen_b = *info_of(a.node->hosts(), b.node->host());
+    if (seen_b.send_error.find("unable to get local issuer certificate") == std::string::npos) {
+        std::cerr << "    send error: " << seen_b.send_error << "\n";
+    }
     CHECK(seen_b.send_error.find("unable to get local issuer certificate") != std::string::npos);
     REQUIRE(net.eventually([&] {
         const auto hosts = b.node->hosts();

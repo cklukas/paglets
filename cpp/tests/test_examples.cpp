@@ -114,6 +114,11 @@ PAGLETS_TEST("example: Mesh Journey visits every host and comes home with its jo
         CHECK(s.arrived_ms > 0);
     }
     CHECK(journal.skipped.empty());
+    report("journey", "hosts in the mesh", 4);
+    report("journey", "hosts visited", visited.size());
+    report("journey", "stops in the journal (with home twice)", journal.stops.size());
+    report("journey", "journey time, start to home",
+           journal.stops.back().arrived_ms - journal.stops.front().arrived_ms, "ms");
 
     // Asked for one known host and one that does not exist.
     r = home.f->runtime->call(id, "start", wire::to_msgpack(journey_msgs::Start{{"south", "atlantis"}, ""}), 20s);
@@ -126,6 +131,7 @@ PAGLETS_TEST("example: Mesh Journey visits every host and comes home with its jo
     CHECK_EQ(journal.stops[1].host_name, std::string("south"));
     REQUIRE(journal.skipped.size() == 1u);
     CHECK(journal.skipped[0].starts_with("atlantis"));
+    report("journey", "unknown hosts skipped with a reason", journal.skipped.size());
 }
 
 PAGLETS_TEST("example: Mesh File Finder and Storage Analyzer search every host's root") {
@@ -197,6 +203,10 @@ PAGLETS_TEST("example: Mesh File Finder and Storage Analyzer search every host's
             CHECK(h.error.find("denied") != std::string::npos);  // the policy covers labelled hosts only
         }
     }
+    report("finder", "hosts searched", f.hosts.size());
+    report("finder", "matching files found", f.files);
+    report("finder", "bytes in matching files", f.bytes);
+    report("finder", "hosts that refused access (policy)", 1);
     std::error_code ec;
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
     (void)b;
@@ -242,6 +252,17 @@ PAGLETS_TEST("example: Latency Map measures round trips between every pair of ho
         }
     }
     CHECK(from == std::vector<std::string>({"a", "b", "c"}));
+    double sum = 0;
+    int pairs = 0;
+    for (const auto& row : map.rows) {
+        for (const auto& c : row.cells) {
+            sum += c.avg_ms;
+            ++pairs;
+        }
+    }
+    report("latency", "host pairs measured", pairs);
+    report("latency", "pings per pair", 3);
+    report("latency", "mean round trip (in-memory test transport)", pairs ? sum / pairs : 0.0, "ms");
     // The probes end once the map is complete.
     REQUIRE(net.settle([&] {
         std::size_t paglets = 0;
@@ -293,6 +314,9 @@ PAGLETS_TEST("example: Inventory Collector and Process Finder ask server-info on
         CHECK(h.processes.size() <= 5u);
     }
     CHECK_EQ(report.hosts[0].host_name, std::string("a"));
+    ::paglets::test::report("inventory", "hosts reporting", report.hosts.size());
+    ::paglets::test::report("inventory", "volumes reported on the first host", report.hosts[0].volumes.size());
+    ::paglets::test::report("inventory", "processes on the first host", report.hosts[0].processes_total);
     // Process Finder: the processes named like this test's.
     inventory_msgs::Collect find;
     find.process = "paglets_tests";
@@ -302,6 +326,7 @@ PAGLETS_TEST("example: Inventory Collector and Process Finder ask server-info on
         REQUIRE(!h.processes.empty());  // the hosts share this process in the test
         CHECK(h.processes[0].name.find("paglets_tests") != std::string::npos);
     }
+    ::paglets::test::report("inventory", "hosts where the process finder found the test process", report.hosts.size());
 }
 
 PAGLETS_TEST("example: Hide and Seek finds and pins a paglet that keeps moving") {
@@ -336,6 +361,8 @@ PAGLETS_TEST("example: Hide and Seek finds and pins a paglet that keeps moving")
         if (i > 0) CHECK(c.moves > score.catches[i - 1].moves);
     }
     CHECK(score.hider_moves >= 3);
+    report("seek", "catches", score.catches.size());
+    report("seek", "moves of the hider", score.hider_moves);
 }
 
 PAGLETS_TEST("example: Volume Guard sleeps between checks and alerts its owner") {
@@ -372,6 +399,9 @@ PAGLETS_TEST("example: Volume Guard sleeps between checks and alerts its owner")
         const auto notes = a.services->notifications(net.owner.id());
         return std::ranges::any_of(notes, [](const auto& n) { return n.title.starts_with("volume "); });
     }));
+    report("guard", "checks", st.checks);
+    report("guard", "times inactive between checks", st.sleeps);
+    report("guard", "alerts (each volume once)", st.alerts.size());
 }
 
 PAGLETS_TEST("example: Duplicate Finder finds the same content on different hosts") {
@@ -427,6 +457,10 @@ PAGLETS_TEST("example: Duplicate Finder finds the same content on different host
     CHECK_EQ(g.copies[1].host_name, std::string("b"));
     CHECK_EQ(result.wasted, 5000);
     CHECK_EQ(g.sha256, paglets::to_hex(paglets::sha256(text(report))));
+    ::paglets::test::report("dupes", "files listed on three hosts", result.files);
+    ::paglets::test::report("dupes", "files hashed (same size as another)", result.candidates);
+    ::paglets::test::report("dupes", "groups of duplicates", result.groups.size());
+    ::paglets::test::report("dupes", "bytes in extra copies", result.wasted);
     std::error_code ec;
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
 }
@@ -525,6 +559,16 @@ PAGLETS_TEST("example: File Courier carries files of any size between hosts with
     for (const auto& f : done.files) {
         if (f.path == "results/squares.csv") CHECK_EQ(f.sha256, paglets::to_hex(paglets::sha256(text(table))));
     }
+    report("file_courier", "files carried", done.files.size());
+    report("file_courier", "bytes carried", done.bytes);
+    report("file_courier", "largest file (a paglet's memory holds 16 MB)", big.size() / (1024.0 * 1024.0), "MB");
+    report("file_courier", "sharing (hashing) on the source host", done.share_ms, "ms");
+    report("file_courier", "saving (transfer and check) on the destination", done.save_ms, "ms");
+    if (done.save_ms > 0) {
+        report("file_courier", "transfer rate (in-memory test transport)",
+               done.bytes / (1024.0 * 1024.0) / (done.save_ms / 1000.0), "MB/s");
+    }
+    report("file_courier", "whole errand, start to receipt", done.total_ms, "ms");
 
     // Content of a host-only root may not leave the lab: the courier, which
     // listed the root, stays there, and nothing reaches the archive.
@@ -533,6 +577,7 @@ PAGLETS_TEST("example: File Courier carries files of any size between hosts with
     CHECK(refused.error.find("data residency") != std::string::npos);
     CHECK(stayed == &lab);
     CHECK(!fs::exists(inbox / "from-lab" / "results" / "patients.csv"));
+    report("file_courier", "host-only root: refused, nothing delivered", "yes");
 
     // A host that is not in the mesh: the courier does not leave.
     auto created = home.node->create(module, net.passport(module, paglet_id('e')));
@@ -642,6 +687,10 @@ PAGLETS_TEST("example: Tree Compare finds missing and different files on several
     CHECK_EQ(bin2->kind, std::string("content"));
     REQUIRE(bin2->copies.size() == 2u);
     CHECK_EQ(bin2->copies[0].sha256, paglets::to_hex(paglets::sha256(text(std::string(100, 'a')))));
+    ::paglets::test::report("tree_compare", "hosts compared by size", sizes.hosts.size());
+    ::paglets::test::report("tree_compare", "files compared", sizes.files);
+    ::paglets::test::report("tree_compare", "differences by size (missing or other size)", sizes.differences.size());
+    ::paglets::test::report("tree_compare", "differences by content (two hosts, SHA-256)", content.differences.size());
     std::error_code ec;
     for (const auto& p : {ra, rb, rc}) fs::remove_all(p, ec);
 }
@@ -718,6 +767,8 @@ PAGLETS_TEST("example: Log Scout searches logs in a time window and follows them
     CHECK_EQ(count(report, "web2", "error"), 3);  // connection refused, worker, the end of big.log
     CHECK_EQ(count(report, "web2", "warn"), 1);
     CHECK(report.bytes_read < 200 * 1024);  // big.log is 2.2 MB
+    ::paglets::test::report("log_scout", "hosts searched", 2);
+    ::paglets::test::report("log_scout", "bytes read of 2.2 MB of logs", report.bytes_read);
     bool end_seen = false;
     for (const auto& e : report.excerpts) end_seen = end_seen || (e.path == "big.log" && e.line == "ERROR at the end");
     CHECK(end_seen);
@@ -755,6 +806,8 @@ PAGLETS_TEST("example: Log Scout searches logs in a time window and follows them
     write_text(r1 / "app.log", " written\n", true);
     REQUIRE(net.settle([&] { return (report = report_of(lid)).live_matches == 2; }, 3000));
     CHECK_EQ(report.excerpts.back().line, std::string("ERROR half written"));
+    ::paglets::test::report("log_scout", "live checks while following", report.live_batches);
+    ::paglets::test::report("log_scout", "new lines found live", report.live_matches);
 
     // After `stop` the scout ends at its next check.
     auto stopped = home.f->runtime->call(lid, "stop", {}, 10s);
@@ -835,6 +888,10 @@ PAGLETS_TEST("example: Mesh Benchmark measures every host in a compute slot and 
         if (i > 0) CHECK(h.int_mops <= ranking.hosts[i - 1].int_mops);
     }
     CHECK(names == std::set<std::string>({"a", "b", "c"}));
+    report("benchmark", "hosts measured, each in a compute slot", ranking.hosts.size());
+    report("benchmark", "integer speed of the fastest host (fast interpreter)", ranking.hosts[0].int_mops, "Mops");
+    report("benchmark", "floating point of the fastest host", ranking.hosts[0].float_mflops, "Mflops");
+    report("benchmark", "memory copying of the fastest host", ranking.hosts[0].memory_mbs, "MB/s");
     // The clones end after their report; their slots are free again.
     REQUIRE(net.settle([&] {
         std::size_t user = 0;

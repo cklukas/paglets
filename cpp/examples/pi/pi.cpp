@@ -143,6 +143,7 @@ private:
         }
     }
 
+    // --8<-- [start:clone]
     // `n` chunks, round robin over `hosts` ("" is this host).
     void send_to(const std::vector<std::string>& hosts, std::int64_t n) {
         std::size_t next = 0;
@@ -165,6 +166,7 @@ private:
             --n;
         }
     }
+    // --8<-- [end:clone]
 
     void on_result(const Result& r) {
         for (auto& c : chunks_) {
@@ -176,6 +178,7 @@ private:
         send_more();
     }
 
+    // --8<-- [start:resend]
     // Chunks without an answer in time go out again (their host may be gone).
     void tick() {
         if (worker_) return;
@@ -189,6 +192,7 @@ private:
         send_more();
         if (!finished()) (void)paglets::after_raw(500, "tick", {});
     }
+    // --8<-- [end:resend]
 
     bool finished() const {
         return started_ && std::ranges::all_of(chunks_, [](const Chunk& c) { return c.done; });
@@ -217,6 +221,7 @@ private:
 
     // -- a worker ----------------------------------------------------------------------------
 
+    // --8<-- [start:worker]
     void ask_for_slot() {
         auto slots = paglets::service("compute-slots");
         if (!slots) return compute();  // a host without compute-slots: just run
@@ -237,6 +242,7 @@ private:
         });
         if (!sent) compute();
     }
+    // --8<-- [end:worker]
 
     void run(const std::string& lease) {
         lease_ = lease;

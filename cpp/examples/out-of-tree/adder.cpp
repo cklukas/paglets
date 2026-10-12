@@ -22,6 +22,7 @@ class Adder : public paglets::Paglet {
 public:
     Adder() { adder::serve(router(), *this); }
 
+    // --8<-- [start:operations]
     paglets::Result<adder::AddReply> add(const adder::AddRequest& q, Message&) { return adder::AddReply{q.a + q.b}; }
 
     // Replies later, when server-info has answered.
@@ -38,6 +39,7 @@ public:
         });
         return adder::HostReply{};  // not sent: the reply is deferred
     }
+    // --8<-- [end:operations]
 
 private:
     static void fail(paglets::Capability& pending, std::int32_t status) {

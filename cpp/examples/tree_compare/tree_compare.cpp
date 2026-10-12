@@ -13,7 +13,6 @@
 
 #include <paglets/patterns/fanout.hpp>
 #include <paglets/patterns/files.hpp>
-#include <paglets/sha256.hpp>
 
 #include <algorithm>
 #include <map>
@@ -75,6 +74,7 @@ private:
 
     // -- the parent -----------------------------------------------------------------------
 
+    // --8<-- [start:start]
     void start(const Compare& q, Message& m) {
         if (q.root.empty()) {
             (void)m.reply(Started{false, "no root", 0});
@@ -112,6 +112,7 @@ private:
         });
         if (!sent) go({""});
     }
+    // --8<-- [end:start]
 
     void compare() {
         // path -> the scanned hosts' entries (index into scans_)
@@ -124,6 +125,7 @@ private:
             report_.truncated = report_.truncated || scans_[i].tree.truncated;
             for (const auto& e : scans_[i].tree.entries) by_path[e.path].emplace_back(i, &e);
         }
+        // --8<-- [start:compare]
         for (const auto& [path, have] : by_path) {
             ++report_.files;
             Difference d;
@@ -149,11 +151,13 @@ private:
                 report_.truncated = true;
             }
         }
+        // --8<-- [end:compare]
         report_.state = "done";
     }
 
     // -- a clone --------------------------------------------------------------------------
 
+    // --8<-- [start:scan]
     void scan_here(const Compare& q) {
         pt::granted_dir(q.root, q.path, {"read"}, "tree compare", [this, q](paglets::Result<paglets::Capability> dir) {
             if (!dir) return finish_error(pt::error_text("files of " + q.root, dir.error()));
@@ -186,11 +190,13 @@ private:
     void hash_next(std::size_t i) {
         while (i < tree_.entries.size() && static_cast<std::uint64_t>(tree_.entries[i].size) > max_file_bytes_) ++i;
         if (i >= tree_.entries.size()) return finish();
-        pt::read_file(*dir_, tree_.entries[i].path, max_file_bytes_, [this, i](paglets::Result<pt::CarriedFile> f) {
-            if (f) tree_.entries[i].sha256 = paglets::to_hex(paglets::sha256(f->data));
+        // The host hashes the file; its content never enters the clone.
+        pt::hash_file(*dir_, tree_.entries[i].path, [this, i](paglets::Result<paglets::services::files::Hashed> h) {
+            if (h) tree_.entries[i].sha256 = h->sha256;
             hash_next(i + 1);
         });
     }
+    // --8<-- [end:scan]
 
     void finish() {
         (void)dir_->drop();

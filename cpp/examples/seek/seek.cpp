@@ -36,6 +36,7 @@ public:
         router().on("stop", [this](Message&) { hiding_ = false; });
     }
 
+    // --8<-- [start:hider]
     void on_created(paglets::Started& s) override {
         // Created by a seeker: hide (args: the hop interval).
         if (!s.decode_args(hop_ms_) || hop_ms_ <= 0) return;
@@ -61,6 +62,7 @@ private:
         // While pinned, dispatch says so at once: try again later.
         if (!paglets::dispatch("any")) (void)paglets::after_raw(hop_ms_, "hop", {});
     }
+    // --8<-- [end:hider]
 
     // -- the seeker ---------------------------------------------------------------------
 
@@ -78,6 +80,7 @@ private:
         (void)paglets::after_raw(g.pause_ms, "next-round", {});
     }
 
+    // --8<-- [start:seek]
     // The next round starts once the hider has moved since the last catch,
     // however slow the hosts are.
     void round() {
@@ -110,6 +113,7 @@ private:
                             });
                         });
     }
+    // --8<-- [end:seek]
 
     // How often the hider has moved (-1: no answer).
     void hider_moves(std::function<void(std::int64_t)> next) {

@@ -43,6 +43,7 @@ public:
         });
     }
 
+    // --8<-- [start:wake]
     // The host wakes it when it is time, but a message (a reply to its
     // notification, `status`) wakes it too: then it checks on time with a
     // timer instead.
@@ -57,10 +58,12 @@ public:
         }
         check();
     }
+    // --8<-- [end:wake]
 
 private:
     static std::int64_t now_ms() { return paglets::now_ns(paglets::abi::Clock::wall) / 1'000'000; }
 
+    // --8<-- [start:check]
     void check() {
         pt::lookup("server-info", [this](paglets::Result<paglets::Endpoint> ep) {
             if (!ep) return failed(pt::error_text("server-info", ep.error()));
@@ -85,7 +88,9 @@ private:
             if (!sent) failed(pt::error_text("volumes", sent.error()));
         });
     }
+    // --8<-- [end:check]
 
+    // --8<-- [start:sleep]
     // Inactive until the next check.
     void sleep() {
         if (status_.state != "watching") return;
@@ -97,6 +102,7 @@ private:
         next_check_ = now_ms() + interval;
         if (paglets::deactivate(interval)) ++status_.sleeps;
     }
+    // --8<-- [end:sleep]
 
     void failed(std::string why) {
         status_.state = "failed";

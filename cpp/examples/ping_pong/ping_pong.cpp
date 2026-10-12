@@ -15,6 +15,7 @@ namespace {
 
 class PingPong : public paglets::Paglet {
 public:
+    // --8<-- [start:roles]
     PingPong() {
         // Parent role.
         router().on<std::uint32_t>("run", [this](std::uint32_t rounds, paglets::Message& m) -> std::int32_t {
@@ -32,8 +33,10 @@ public:
         router().on<std::uint32_t>("ping", [](std::uint32_t n, paglets::Message& m) { m.reply_async(n + 1); });
         router().on("stop", [](paglets::Message&) { (void)paglets::dispose(); });
     }
+    // --8<-- [end:roles]
 
 private:
+    // --8<-- [start:bounce]
     void bounce(std::uint32_t n) {
         if (n >= target_) {
             (void)paglets::reply_to(pending_run_, n);
@@ -52,6 +55,7 @@ private:
         });
         if (!sent) (void)pending_run_.drop();
     }
+    // --8<-- [end:bounce]
 
     paglets::Endpoint pong_;
     paglets::Capability pending_run_;

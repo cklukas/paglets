@@ -291,6 +291,10 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     // The digits are pi's.
     CHECK(done.hex.starts_with("3.243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89"));
     CHECK(done.hex == "3." + pi_bbp::hex_digits(0, 1200));
+    ::paglets::test::report("pi", "hex digits computed", done.done);
+    ::paglets::test::report("pi", "chunks", done.chunks_done);
+    ::paglets::test::report("pi", "hosts used before one was lost", before.hosts.size());
+    ::paglets::test::report("pi", "chunks sent again after the loss", done.resent);
 }
 
 PAGLETS_TEST("offers: hosts announce features; paglets find them and move to them by offer") {

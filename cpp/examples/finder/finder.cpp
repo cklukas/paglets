@@ -40,6 +40,7 @@ public:
     Finder() {
         router().on<Search>("start", [this](const Search& s, Message& m) { start(s, m); });
         router().on("findings", [this](Message& m) { (void)m.reply(findings_); });
+        // --8<-- [start:collect]
         fan_.attach(router(), [this](const pt::FanOut::Child& c) {
             HostFindings h;
             if (!c.ok || !paglets::decode(c.result, h)) {
@@ -53,8 +54,10 @@ public:
             findings_.hosts.push_back(std::move(h));
             findings_.finished = fan_.finished();
         });
+        // --8<-- [end:collect]
     }
 
+    // --8<-- [start:cloned]
     void on_cloned(paglets::Started& s) override {
         Search q;
         if (s.caps.empty() || !s.decode_args(q)) {
@@ -68,8 +71,10 @@ public:
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
         if (!f.clone.empty()) fan_.clone_failed(f);
     }
+    // --8<-- [end:cloned]
 
 private:
+    // --8<-- [start:start]
     void start(const Search& s, Message& m) {
         if (s.root.empty()) {
             (void)m.reply(Started{false, "no root", 0});
@@ -97,9 +102,11 @@ private:
         });
         if (!sent) go({""});
     }
+    // --8<-- [end:start]
 
     // -- a clone --------------------------------------------------------------------
 
+    // --8<-- [start:search]
     void search_here(const Search& q) {
         pt::granted_dir(q.root, "", {"read"}, "mesh file finder", [this, q](paglets::Result<paglets::Capability> dir) {
             if (!dir) return pt::report_error(parent_, pt::error_text("files of " + q.root, dir.error()));
@@ -125,6 +132,7 @@ private:
             });
         });
     }
+    // --8<-- [end:search]
 
     static HostFindings analyze(const Search& q, const svc::files::FindReply& r) {
         HostFindings h;

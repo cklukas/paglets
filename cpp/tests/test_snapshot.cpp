@@ -94,6 +94,8 @@ PAGLETS_TEST("snapshot: counter state survives capture, serialize and restore") 
     // Both copies continue independently (clone semantics).
     CHECK_EQ(value_of(restored.request("increment", increment(100))), 155);
     CHECK_EQ(value_of(c.request("increment", increment(1))), 56);
+    ::paglets::test::report("counter", "sum after ten increments, restored from its memory image", 55);
+    ::paglets::test::report("counter", "memory image size, serialized", bytes.size(), "bytes");
 }
 
 PAGLETS_TEST("snapshot: heap growth is captured") {

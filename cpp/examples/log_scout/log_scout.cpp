@@ -146,6 +146,7 @@ public:
         if (!f.clone.empty()) fan_.clone_failed(f);
     }
 
+    // --8<-- [start:wake]
     // A live scout: the host wakes it on time. A message can wake it
     // earlier; then it checks on time with a timer instead.
     void on_activated() override {
@@ -157,6 +158,7 @@ public:
         }
         check();
     }
+    // --8<-- [end:wake]
 
 private:
     // -- the paglet at home ---------------------------------------------------------------
@@ -236,6 +238,7 @@ private:
         });
     }
 
+    // --8<-- [start:tail]
     void read_next(std::size_t i, bool first) {
         if (i >= todo_.size()) return scanned();
         const auto& e = todo_[i];
@@ -260,7 +263,9 @@ private:
         chunk_.clear();
         read_range(i, first, from, from);
     }
+    // --8<-- [end:tail]
 
+    // --8<-- [start:range]
     // Reads `path` from `offset` to its end (in chunks), then matches the
     // complete lines; a line still being written is read next time.
     void read_range(std::size_t i, bool first, std::uint64_t start, std::uint64_t offset) {
@@ -288,6 +293,7 @@ private:
             pt::lending(*dir_));
         if (!sent) read_next(i + 1, first);
     }
+    // --8<-- [end:range]
 
     void match(const svc::files::Entry& e, std::string_view text, bool first) {
         const std::int64_t since = first && scout_.window_ms > 0 ? now_ms() - scout_.window_ms : -1;
@@ -323,6 +329,7 @@ private:
         dir_.reset();
     }
 
+    // --8<-- [start:live]
     void scanned() {
         drop_dir();
         if (scouting_) {
@@ -358,6 +365,7 @@ private:
             (void)paglets::dispose();
         }
     }
+    // --8<-- [end:live]
 
     void scanned_error(const std::string& why) {
         drop_dir();

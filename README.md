@@ -49,7 +49,7 @@ edition (from [`docs/`](docs/index.md) on this branch) and the Python edition
   [command-line reference](docs/cli-reference.md)
 - [Configuration and troubleshooting](docs/configuration.md)
 - [System paglets](docs/system-paglets.md)
-- [Example paglets](docs/examples.md)
+- [Example paglets](docs/examples/index.md)
 
 Build and check the site with
 [ckdocs](https://github.com/cklukas/ck-git-hosting) from the repository root:

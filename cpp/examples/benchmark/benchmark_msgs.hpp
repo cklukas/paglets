@@ -17,7 +17,8 @@ namespace benchmark_msgs {
 struct Bench {
     std::vector<std::string> hosts;
     std::int64_t budget_ms = 300;
-    std::int64_t memory_mb = 8;
+    std::int64_t memory_mb = 4;  // copied between two buffers of this size; at most 6
+
     std::int64_t disk_mb = 8;
     std::int64_t timeout_ms = 60'000;
 };

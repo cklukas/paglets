@@ -71,6 +71,7 @@ find_package(Zstd 1.4 REQUIRED)
 
 add_subdirectory(host)
 add_subdirectory(examples)
+add_subdirectory(tools/docs_sync)
 include(PagletsInstall)
 
 if(PAGLETS_BUILD_TESTS)

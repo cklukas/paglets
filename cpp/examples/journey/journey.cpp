@@ -29,6 +29,7 @@ public:
         router().on("journal", [this](Message& m) { (void)m.reply(journal_); });
     }
 
+    // --8<-- [start:moves]
     void on_arrived(const paglets::abi::ArrivedEvent&) override { record_and_go_on(); }
 
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
@@ -41,6 +42,7 @@ public:
         }
         go_on();  // the next host
     }
+    // --8<-- [end:moves]
 
 private:
     static std::int64_t now_ms() { return paglets::now_ns(paglets::abi::Clock::wall) / 1'000'000; }
@@ -53,6 +55,7 @@ private:
         journal_ = Journal{"travelling", {}, {}};
         next_ = 0;
         auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
+        // --8<-- [start:itinerary]
         // The itinerary: the hosts asked for, else every host mesh-info knows.
         auto mi = paglets::service("mesh-info");
         if (!mi) {
@@ -89,12 +92,14 @@ private:
                 (void)paglets::reply_to(*reply, Started{true, {}, itinerary_});
                 record_and_go_on();  // home is the first stop
             });
+        // --8<-- [end:itinerary]
         if (!sent) {
             journal_.state = "failed";
             (void)paglets::reply_to(*reply, Started{false, pt::error_text("mesh-info", sent.error()), {}});
         }
     }
 
+    // --8<-- [start:record]
     void record_and_go_on() {
         if (journal_.state != "travelling") return;
         const std::int64_t arrived = now_ms();
@@ -118,7 +123,9 @@ private:
             go_on();
         });
     }
+    // --8<-- [end:record]
 
+    // --8<-- [start:go_on]
     void go_on() {
         if (next_ >= itinerary_.size() && here_ == home_) {
             journal_.state = "home";  // nothing (more) to visit
@@ -136,6 +143,7 @@ private:
             go_on();
         }
     }
+    // --8<-- [end:go_on]
 
     Journal journal_{"idle", {}, {}};
     std::vector<std::string> itinerary_;

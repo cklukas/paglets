@@ -25,6 +25,27 @@ void skip(const std::string& reason);
 const std::string& guest_dir();
 std::string guest_path(const std::string& file);  // empty if the guest is unavailable
 
+// Results for the documentation (docs/examples/, rendered by
+// paglets-docs-sync): with PAGLETS_RESULTS_DIR set, a test that reports to
+// `topic` is recorded in <dir>/<topic>.json after it ran, with its outcome,
+// duration and the values it reported (`name` empty: only the outcome).
+void report(const std::string& topic, const std::string& name = {}, const std::string& value = {},
+            const std::string& unit = {});
+template <class T>
+    requires std::is_arithmetic_v<T>
+void report(const std::string& topic, const std::string& name, T value, const std::string& unit = {}) {
+    std::ostringstream os;
+    os.precision(4);
+    os << std::fixed << value;
+    std::string text = os.str();
+    // Integral values and round numbers without trailing zeros.
+    if (text.find('.') != std::string::npos) {
+        while (text.back() == '0') text.pop_back();
+        if (text.back() == '.') text.pop_back();
+    }
+    report(topic, name, text, unit);
+}
+
 struct Registrar {
     Registrar(const char* name, std::function<void()> body) { registry().push_back({name, std::move(body)}); }
 };

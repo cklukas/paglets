@@ -175,6 +175,7 @@ private:
         });
     }
 
+    // --8<-- [start:limits]
     void read_next(std::size_t i) {
         const auto root = params_.sources[source_].root;
         while (i < found_.size() &&
@@ -205,9 +206,11 @@ private:
                           read_next(i + 1);
                       });
     }
+    // --8<-- [end:limits]
 
     // -- describing -------------------------------------------------------------------------
 
+    // --8<-- [start:offer]
     // A host whose `ai` offer can see: the offer requirement vision=yes.
     void to_ai_host() {
         if (pixels_.empty()) {
@@ -234,7 +237,9 @@ private:
         });
         if (!sent) fail(pt::error_text("find_offers", sent.error()));
     }
+    // --8<-- [end:offer]
 
+    // --8<-- [start:describe]
     void describe(std::size_t i) {
         if (i >= pixels_.size()) {
             pixels_.clear();  // described: only the text travels on
@@ -254,6 +259,7 @@ private:
                 });
         });
     }
+    // --8<-- [end:describe]
 
     void ask(const std::vector<std::uint8_t>& image, std::string prompt,
              std::function<void(paglets::Result<svc::ai::TextReply>)> next) {

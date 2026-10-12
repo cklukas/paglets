@@ -50,7 +50,7 @@ public:
         where([this] {
             if (status_.state == "picking-up") return pick_up();
             if (status_.state == "delivering") return deliver();
-            if (status_.state == "returning") status_.state = refused_ ? "refused" : "delivered";
+            if (status_.state == "returning") arrived_home();
         });
     }
 
@@ -104,12 +104,16 @@ private:
     void go_home() {
         drop_carried();
         status_.state = "returning";
-        if (is_here(home_)) {
-            status_.state = refused_ ? "refused" : "delivered";
-            return;
-        }
+        if (is_here(home_)) return arrived_home();
         go(home_);
     }
+
+    void arrived_home() {
+        status_.state = refused_ ? "refused" : "delivered";
+        status_.total_ms = now_ms(abi::Clock::wall) - started_ms_;
+    }
+
+    static std::int64_t now_ms(abi::Clock clock) { return paglets::now_ns(clock) / 1'000'000; }
 
     // -- start: checks before departure ------------------------------------------------------
 
@@ -126,12 +130,14 @@ private:
         params_ = s;
         status_ = Status{"idle"};
         refused_ = false;
+        started_ms_ = now_ms(abi::Clock::wall);
         auto reply = std::make_shared<Capability>(m.defer_reply());
         auto mi = paglets::service("mesh-info");
         if (!mi) {
             (void)paglets::reply_to(*reply, Started{false, "no mesh-info"});
             return;
         }
+        // --8<-- [start:checks]
         // Both hosts must be in the mesh and online before the courier leaves.
         svc::mesh_info::Client client{*mi};
         auto sent = client.landscape(
@@ -157,6 +163,7 @@ private:
                 });
             });
         if (!sent) (void)paglets::reply_to(*reply, Started{false, pt::error_text("mesh-info", sent.error())});
+        // --8<-- [end:checks]
     }
 
     // -- the source host: find and share --------------------------------------------------
@@ -196,17 +203,22 @@ private:
             if (is_here(params_.to_host)) return deliver();
             return go(params_.to_host);
         }
-        pt::share_file(*dir_, found_[i], [this, i](paglets::Result<pt::SharedFile> f) {
+        const std::int64_t began = now_ms(abi::Clock::monotonic);
+        // --8<-- [start:share]
+        pt::share_file(*dir_, found_[i], [this, i, began](paglets::Result<pt::SharedFile> f) {
             if (!f) return fail(pt::error_text("share " + found_[i], f.error()));
+            const std::int64_t took = now_ms(abi::Clock::monotonic) - began;
             status_.bytes += static_cast<std::int64_t>(f->size);
             if (params_.max_bytes > 0 && status_.bytes > params_.max_bytes) {
                 (void)f->content.drop();
                 return fail("more than " + std::to_string(params_.max_bytes) + " bytes");
             }
-            status_.files.push_back(Item{f->name, static_cast<std::int64_t>(f->size), f->sha256, false});
-            carried_.push_back(std::move(*f));
+            status_.files.push_back(Item{f->name, static_cast<std::int64_t>(f->size), f->sha256, false, took, 0});
+            status_.share_ms += took;
+            carried_.push_back(std::move(*f));  // name, hash, size and the artifact capability
             share_next(i + 1);
         });
+        // --8<-- [end:share]
     }
 
     // -- the destination host: save -----------------------------------------------------------
@@ -235,12 +247,17 @@ private:
         pt::make_dirs(*dir_, slash == std::string::npos ? std::string() : path.substr(0, slash),
                       [this, i, path](paglets::Result<void> made) {
                           if (!made) return fail(pt::error_text("mkdir for " + path, made.error()));
+                          const std::int64_t began = now_ms(abi::Clock::monotonic);
+                          // --8<-- [start:save]
                           // This host fetches the content from the source host and
                           // checks its SHA-256 before the file appears.
                           pt::save_file(*dir_, path, carried_[i].content,
-                                        [this, i, path](paglets::Result<svc::files::Entry> saved) {
+                                        [this, i, path, began](paglets::Result<svc::files::Entry> saved) {
                                             if (saved) {
+                                                const std::int64_t took = now_ms(abi::Clock::monotonic) - began;
                                                 status_.files[i].verified = true;
+                                                status_.files[i].save_ms = took;
+                                                status_.save_ms += took;
                                                 return save_next(i + 1);
                                             }
                                             if (saved.error() != abi::denied) {
@@ -256,6 +273,7 @@ private:
                                             paglets::log("file courier: " + status_.error);
                                             go_home();
                                         });
+                          // --8<-- [end:save]
                       });
     }
 
@@ -267,6 +285,7 @@ private:
     std::vector<std::string> found_;
     std::vector<pt::SharedFile> carried_;
     bool refused_ = false;
+    std::int64_t started_ms_ = 0;
     std::shared_ptr<Capability> dir_;
 };
 

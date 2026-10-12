@@ -55,7 +55,7 @@ serialized fields.
 | [Command-line reference](cli-reference.md) | every command and option of `paglets-host`, `paglets-worker` and `paglets-spike` |
 | [Configuration and troubleshooting](configuration.md) | state directories, keys and passphrases, ports and firewalls, limits, error codes, common problems |
 | [System paglets](system-paglets.md) | the services hosts offer to paglets, and the web and AI gateways |
-| [Example paglets and benchmarks](examples.md) | every example paglet, what each shows, and the first benchmark numbers |
+| [Example paglets and benchmarks](examples/index.md) | every example paglet, what each shows, and the first benchmark numbers |
 
 ## Wire formats and interoperability
 

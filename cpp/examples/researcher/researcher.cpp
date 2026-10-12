@@ -69,6 +69,7 @@ private:
         if (auto moved = paglets::dispatch(destination); !moved) fail(pt::error_text("dispatch", moved.error()));
     }
 
+    // --8<-- [start:fail]
     void fail(std::string why) {
         report_.error = std::move(why);
         report_.state = "failed";
@@ -78,7 +79,9 @@ private:
             go(home_);
         }
     }
+    // --8<-- [end:fail]
 
+    // --8<-- [start:search]
     // At the web host.
     void search() {
         pt::lookup("web", [this](paglets::Result<paglets::Endpoint> web) {
@@ -114,7 +117,9 @@ private:
                                    });
         if (!sent) read(i + 1);
     }
+    // --8<-- [end:search]
 
+    // --8<-- [start:summarize]
     // At the AI host.
     void summarize(std::size_t i) {
         if (i >= report_.sources.size()) {
@@ -134,6 +139,7 @@ private:
             if (!sent) fail(pt::error_text("summarize", sent.error()));
         });
     }
+    // --8<-- [end:summarize]
 
     void arrived_home() {
         const bool failed = report_.error.starts_with("failed: ");

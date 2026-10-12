@@ -461,6 +461,14 @@ PAGLETS_TEST("gateway: Download Courier fetches through the only web host and br
     CHECK_EQ(refused.state, std::string("failed"));
     CHECK(refused.error.find("denied") != std::string::npos);
     CHECK(refused.artifact.empty());
+    // The owner hears about the failure too.
+    REQUIRE(net.settle([&] {
+        const auto failed_notes = home.services->notifications(net.owner.id());
+        return std::ranges::any_of(failed_notes, [](const auto& n) { return n.title == "courier failed"; });
+    }));
+    ::paglets::test::report("courier", "hosts on the way", delivered.hosts.size());
+    ::paglets::test::report("courier", "bytes delivered, verified by SHA-256", delivered.size);
+    ::paglets::test::report("courier", "intranet address through web: refused", "yes");
 }
 
 namespace {
@@ -590,6 +598,9 @@ PAGLETS_TEST("gateway: AI Document Digest reads on two hosts, summarizes on the 
     CHECK(refused.error.find("data residency") != std::string::npos);
     CHECK(stayed == &windows_host);
     CHECK(refused.documents.size() == 1u);
+    ::paglets::test::report("digest", "hosts on the way", written.hosts.size());
+    ::paglets::test::report("digest", "documents summarized", written.documents.size());
+    ::paglets::test::report("digest", "host-only root: kept off the AI host", "yes");
 
     std::error_code ec;
     for (const auto& p : {linux_docs, windows_docs, windows_secret, archive}) fs::remove_all(p, ec);
@@ -671,6 +682,8 @@ PAGLETS_TEST("gateway: Semantic Mesh Search indexes documents on the AI host and
     hits = ask("water the tomatoes in the garden");
     CHECK_EQ(hits.hits[0].path, std::string("docs/garden.txt"));
     CHECK_EQ(hits.hits[0].host_name, std::string("b"));
+    ::paglets::test::report("semantic", "documents indexed from two hosts", st.documents);
+    ::paglets::test::report("semantic", "questions answered by meaning", 2);
     std::error_code ec;
     for (const auto& p : {ra, rb}) fs::remove_all(p, ec);
 }
@@ -750,6 +763,8 @@ PAGLETS_TEST("gateway: Web Researcher searches and reads on the web host, summar
     CHECK_EQ(report.sources[0].title, std::string("The report"));
     CHECK_EQ(report.sources[0].summary, std::string("quarterly numbers: 42"));  // three words: all of it
     CHECK_EQ(report.sources[1].summary, std::string("Hello First bold ..."));
+    ::paglets::test::report("researcher", "hosts on the way", report.hosts.size());
+    ::paglets::test::report("researcher", "pages read and summarized", report.sources.size());
 }
 
 PAGLETS_TEST("gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue") {
@@ -854,6 +869,9 @@ PAGLETS_TEST("gateway: Image Describer reads images on their host, describes the
     CHECK_EQ(refused.state, std::string("refused"));
     CHECK(refused.error.find("data residency") != std::string::npos);
     CHECK(stayed == &photos);
+    ::paglets::test::report("describer", "images described", written.images.size());
+    ::paglets::test::report("describer", "images skipped (too large)", written.skipped.size());
+    ::paglets::test::report("describer", "host-only root: kept off the AI host", "yes");
     std::error_code ec;
     for (const auto& p : {pics, priv, out}) fs::remove_all(p, ec);
 }
@@ -945,6 +963,10 @@ PAGLETS_TEST("gateway: Release Watcher stays on the web host, tells its owner ab
 
     auto stopped = gateway.f->runtime->call(id, "stop", {}, 10s);
     REQUIRE(stopped.status == 0);
+    ::paglets::test::report("watcher", "checks of the release feed", st.checks);
+    ::paglets::test::report("watcher", "times inactive between checks", st.sleeps);
+    ::paglets::test::report("watcher", "new versions reported", st.updates.size());
+    ::paglets::test::report("watcher", "release file delivered home by a Download Courier", "yes");
 }
 
 PAGLETS_TEST("gateway: Log Explainer groups what a Log Scout found and explains it on the AI host") {
@@ -1047,6 +1069,9 @@ PAGLETS_TEST("gateway: Log Explainer groups what a Log Scout found and explains 
         }
         return user == 1;
     }, 3000));
+    ::paglets::test::report("explainer", "log lines found by the Log Scout", st.lines);
+    ::paglets::test::report("explainer", "distinct problems after grouping", st.groups.size());
+    ::paglets::test::report("explainer", "lines in the largest group", st.groups[0].count);
     std::error_code ec;
     for (const auto& p : {l1, l2}) fs::remove_all(p, ec);
 }

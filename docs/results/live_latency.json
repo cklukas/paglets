@@ -1,0 +1,131 @@
+{
+  "topic": "live_latency",
+  "tests": [
+    {
+      "test": "mac → uconsole",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "4.69",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.92",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "mac → pi",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "2.84",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.08",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi → mac",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "4.07",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.71",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi → uconsole",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.34",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "0.79",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → mac",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "5.16",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.83",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → pi",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.16",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "0.79",
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

@@ -20,7 +20,42 @@ nav:
     pages:
       - docs/building.md
       - docs/writing-paglets.md
-      - docs/examples.md
+  - title: Examples
+    pages:
+      - docs/examples/index.md
+      - title: First paglets
+        pages:
+          - docs/examples/hello.md
+          - docs/examples/counter.md
+          - docs/examples/ping-pong.md
+          - docs/examples/mesh-journey.md
+          - docs/examples/out-of-tree.md
+      - title: Files
+        pages:
+          - docs/examples/file-finder.md
+          - docs/examples/file-courier.md
+          - docs/examples/tree-compare.md
+          - docs/examples/log-scout.md
+          - docs/examples/duplicate-finder.md
+      - title: Monitoring
+        pages:
+          - docs/examples/inventory.md
+          - docs/examples/volume-guard.md
+      - title: Performance and mobility
+        pages:
+          - docs/examples/mesh-benchmark.md
+          - docs/examples/latency-map.md
+          - docs/examples/hide-and-seek.md
+          - docs/examples/pi.md
+      - title: Web and AI
+        pages:
+          - docs/examples/download-courier.md
+          - docs/examples/ai-digest.md
+          - docs/examples/semantic-search.md
+          - docs/examples/image-describer.md
+          - docs/examples/release-watcher.md
+          - docs/examples/log-explainer.md
+          - docs/examples/web-researcher.md
   - title: Operations
     pages:
       - docs/hosts-and-meshes.md

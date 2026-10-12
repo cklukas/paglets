@@ -31,6 +31,7 @@ public:
     Inventory() {
         router().on<Collect>("start", [this](const Collect& c, Message& m) { start(c, m); });
         router().on("report", [this](Message& m) { (void)m.reply(report_); });
+        // --8<-- [start:collect]
         fan_.attach(router(), [this](const pt::FanOut::Child& c) {
             HostInventory h;
             if (!c.ok || !paglets::decode(c.result, h)) {
@@ -45,8 +46,10 @@ public:
                 std::ranges::sort(report_.hosts, [](const auto& a, const auto& b) { return a.host_name < b.host_name; });
             }
         });
+        // --8<-- [end:collect]
     }
 
+    // --8<-- [start:clone]
     void on_cloned(paglets::Started& s) override {
         Collect q;
         if (s.caps.empty() || !s.decode_args(q)) {
@@ -61,6 +64,7 @@ public:
             summary();
         });
     }
+    // --8<-- [end:clone]
 
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
         if (!f.clone.empty()) fan_.clone_failed(f);
@@ -133,6 +137,7 @@ private:
         if (!sent) processes();
     }
 
+    // --8<-- [start:processes]
     void processes() {
         si::Client c{info_};
         si::ProcessesRequest q;
@@ -156,6 +161,7 @@ private:
         (void)paglets::after_raw(2000, "done", {});
         router().on("done", [](Message&) { (void)paglets::dispose(); });
     }
+    // --8<-- [end:processes]
 
     // The parent.
     pt::FanOut fan_;

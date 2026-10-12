@@ -511,6 +511,7 @@ PAGLETS_TEST("runtime: hello sample") {
     CHECK_EQ(r.status, 0);
     CHECK_EQ(dec<std::string>(r.payload), std::string("hello, world (greeting 1)"));
     CHECK(f.logged("hello paglet created as " + id));
+    ::paglets::test::report("hello", "reply to greet \"world\"", dec<std::string>(r.payload));
 }
 
 PAGLETS_TEST("runtime: ping-pong sample bounces between parent and child") {
@@ -521,6 +522,8 @@ PAGLETS_TEST("runtime: ping-pong sample bounces between parent and child") {
     CHECK_EQ(dec<std::uint32_t>(r.payload), 25u);
     f.runtime->wait_idle();
     CHECK_EQ(f.runtime->list().size(), std::size_t{1});  // the child disposed itself
+    ::paglets::test::report("ping_pong", "messages bounced between parent and child", 25);
+    ::paglets::test::report("ping_pong", "paglets left afterwards (the child disposed itself)", f.runtime->list().size());
 }
 
 PAGLETS_TEST("runtime: children start on their creator's lane, but load still spreads") {

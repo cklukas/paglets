@@ -64,12 +64,14 @@ public:
     void on_move_failed(const paglets::abi::MoveFailed& f) override { fail("move: " + f.reason); }
 
 private:
+    // --8<-- [start:index]
     struct Doc {
         std::string host_name;
         std::string path;
         std::string text;
         std::vector<double> vector;
     };
+    // --8<-- [end:index]
 
     void where(std::function<void()> next) {
         pt::here([this, next](paglets::Result<svc::mesh_info::Snapshot> s) {
@@ -144,6 +146,7 @@ private:
         });
     }
 
+    // --8<-- [start:embed]
     // At the AI host: the documents' vectors, a few at a time.
     void embed(std::size_t from) {
         if (from >= docs_.size()) {
@@ -167,7 +170,9 @@ private:
             if (!sent) fail(pt::error_text("embed", sent.error()));
         });
     }
+    // --8<-- [end:embed]
 
+    // --8<-- [start:query]
     void query(const Query& q, Message& m) {
         if (status_.state != "ready") {
             (void)m.reply(Hits{{}, "the index is not ready (" + status_.state + ")"});
@@ -195,6 +200,7 @@ private:
                             });
         if (!sent) (void)paglets::reply_to(*reply, Hits{{}, pt::error_text("embed", sent.error())});
     }
+    // --8<-- [end:query]
 
     Index params_;
     Status status_{"idle", 0, {}, {}, {}};

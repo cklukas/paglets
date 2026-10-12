@@ -122,6 +122,7 @@ private:
 
     // -- at home: the Log Scout -------------------------------------------------------------
 
+    // --8<-- [start:scout]
     void start(const Explain& e, Message& m) {
         if (status_.state != "idle") return (void)m.reply(Started{false, "already " + status_.state});
         if (e.root.empty() || e.scout_module.empty()) return (void)m.reply(Started{false, "a root and the scout module are needed"});
@@ -148,7 +149,9 @@ private:
             (void)paglets::reply_to(*reply, Started{false, status_.error});
         }
     }
+    // --8<-- [end:scout]
 
+    // --8<-- [start:group]
     // Asks the scout for its report until it is done.
     void poll() {
         if (status_.state != "scouting") return;
@@ -189,9 +192,11 @@ private:
             status_.groups.resize(static_cast<std::size_t>(std::max<std::int64_t>(0, params_.max_groups)));
         }
     }
+    // --8<-- [end:group]
 
     // -- on the AI host -----------------------------------------------------------------------
 
+    // --8<-- [start:explain]
     void explain(std::size_t i) {
         if (i >= status_.groups.size()) {
             status_.state = "returning";
@@ -225,6 +230,7 @@ private:
             if (!sent) fail(pt::error_text("classify", sent.error()));
         });
     }
+    // --8<-- [end:explain]
 
     // -- home again ---------------------------------------------------------------------------
 

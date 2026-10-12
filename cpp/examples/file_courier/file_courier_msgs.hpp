@@ -36,6 +36,8 @@ struct Item {
     std::int64_t size = 0;
     std::string sha256;     // hex, of the file on the source host
     bool verified = false;  // written on the destination host with the same hash
+    std::int64_t share_ms = 0;  // hashing it on the source host
+    std::int64_t save_ms = 0;   // fetching, checking and writing it on the destination host
 };
 
 // `status`: the errand and, once delivered, the receipt.
@@ -45,6 +47,12 @@ struct Status {
     std::int64_t bytes = 0;
     std::vector<std::string> hosts;  // names of the hosts it was on, in order
     std::string error;
+    // Timing, in milliseconds: sharing every file on the source host, saving
+    // every file on the destination host (the transfer), and the whole errand
+    // from `start` to the receipt at home (each measured on one host's clock).
+    std::int64_t share_ms = 0;
+    std::int64_t save_ms = 0;
+    std::int64_t total_ms = 0;
 };
 
 }  // namespace file_courier_msgs

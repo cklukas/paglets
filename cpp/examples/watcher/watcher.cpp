@@ -103,6 +103,7 @@ public:
         status_.error = "no web host: " + f.reason;
     }
 
+    // --8<-- [start:wake]
     // The host wakes it on time. Messages wake it too (`status`, replies):
     // then it checks on time with a timer instead.
     void on_activated() override {
@@ -114,6 +115,7 @@ public:
         }
         check(0);
     }
+    // --8<-- [end:wake]
 
 private:
     void start(const Watch& w, Message& m) {
@@ -154,6 +156,7 @@ private:
                 status_.seen[i].error = pt::error_text("web", web.error());
                 return check(i + 1);
             }
+            // --8<-- [start:check]
             svc::web::Client client{*web};
             svc::web::FetchRequest q;
             q.url = watch_.pages[i].url;
@@ -179,6 +182,7 @@ private:
                 seen.version = version;
                 check(i + 1);
             });
+            // --8<-- [end:check]
             if (!sent) {
                 status_.seen[i].error = pt::error_text("fetch", sent.error());
                 check(i + 1);
@@ -186,6 +190,7 @@ private:
         });
     }
 
+    // --8<-- [start:sleep]
     // Inactive until the next check.
     void sleep() {
         if (status_.state != "watching") return;
@@ -201,9 +206,11 @@ private:
             (void)paglets::after_raw(interval, "check", {});
         }
     }
+    // --8<-- [end:sleep]
 
     // -- a courier for the release file ------------------------------------------------------
 
+    // --8<-- [start:courier]
     void fetch(const Fetch& f, Message& m) {
         const auto page = std::ranges::find_if(watch_.pages, [&](const Page& p) { return p.name == f.name; });
         if (page == watch_.pages.end()) return (void)m.reply(Fetching{false, "not watched: " + f.name, {}});
@@ -228,6 +235,7 @@ private:
         });
         if (!sent) (void)paglets::reply_to(*reply, Fetching{false, pt::error_text("courier", sent.error()), url});
     }
+    // --8<-- [end:courier]
 
     Watch watch_;
     Status status_{"idle"};

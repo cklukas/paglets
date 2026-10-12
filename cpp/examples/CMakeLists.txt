@@ -58,7 +58,6 @@ paglets_add_module(guard
     PATTERNS)
 paglets_add_module(dupes
     SOURCES dupes/dupes.cpp
-    SHA256
     SCHEMA_HEADER dupes/dupes_msgs.hpp
     SCHEMA_NAMESPACE dupes_msgs
     PATTERNS)
@@ -69,7 +68,6 @@ paglets_add_module(file_courier
     PATTERNS)
 paglets_add_module(tree_compare
     SOURCES tree_compare/tree_compare.cpp
-    SHA256
     SCHEMA_HEADER tree_compare/tree_compare_msgs.hpp
     SCHEMA_NAMESPACE tree_compare_msgs
     PATTERNS)

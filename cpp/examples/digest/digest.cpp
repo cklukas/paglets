@@ -56,6 +56,7 @@ public:
         router().on("status", [this](Message& m) { (void)m.reply(status_); });
     }
 
+    // --8<-- [start:states]
     void on_arrived(const abi::ArrivedEvent&) override {
         where([this] {
             if (status_.state == "collecting") return collect();
@@ -70,6 +71,7 @@ public:
         status_.error = f.reason;
         paglets::log("digest: " + f.reason);
     }
+    // --8<-- [end:states]
 
 private:
     // Learns which host this is, then goes on.
@@ -153,6 +155,7 @@ private:
         });
     }
 
+    // --8<-- [start:read]
     void read_next(std::size_t i) {
         if (i >= found_.size() || static_cast<std::int64_t>(texts_.size()) >= params_.max_files) {
             dir_.reset();
@@ -176,9 +179,11 @@ private:
             lending(*dir_));
         if (!sent) fail(error_text("read", sent.error()));
     }
+    // --8<-- [end:read]
 
     // -- summarizing --------------------------------------------------------------------------
 
+    // --8<-- [start:summarize]
     void summarize(std::size_t i) {
         if (i >= texts_.size()) {
             texts_.clear();
@@ -201,6 +206,7 @@ private:
             if (!sent) fail(error_text("summarize", sent.error()));
         });
     }
+    // --8<-- [end:summarize]
 
     // -- writing ------------------------------------------------------------------------------
 

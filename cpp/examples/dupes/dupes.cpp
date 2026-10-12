@@ -11,7 +11,6 @@
 
 #include <paglets/patterns/fanout.hpp>
 #include <paglets/patterns/files.hpp>
-#include <paglets/sha256.hpp>
 
 #include <algorithm>
 #include <map>
@@ -94,6 +93,7 @@ private:
     }
 
     void phase_done() {
+        // --8<-- [start:sizes]
         if (result_.state == "sizes") {
             result_.files = static_cast<std::int64_t>(found_.size());
             std::map<std::int64_t, int> count;
@@ -113,6 +113,8 @@ private:
             fan_.start(hosts_, paglets::encode(Phase{2, search_, std::move(sizes)}), search_.timeout_ms);
             return;
         }
+        // --8<-- [end:sizes]
+        // --8<-- [start:groups]
         // Hashes: groups of two or more.
         std::map<std::string, Group> groups;
         for (auto& f : found_) {
@@ -133,6 +135,7 @@ private:
             return a.size * static_cast<std::int64_t>(a.copies.size()) > b.size * static_cast<std::int64_t>(b.copies.size());
         });
         result_.state = "done";
+        // --8<-- [end:groups]
     }
 
     // -- a clone ------------------------------------------------------------------------
@@ -141,6 +144,7 @@ private:
         pt::endpoint("files", [this](paglets::Result<paglets::Endpoint> files) {
             if (!files) return done(pt::error_text("files", files.error()));
             files_ = *files;
+            // --8<-- [start:find]
             svc::files::Client client{files_};
             svc::files::FindRequest q;
             q.pattern = phase_.search.pattern;
@@ -162,17 +166,21 @@ private:
                 },
                 pt::lending(*dir_));
             if (!sent) done(pt::error_text("find", sent.error()));
+            // --8<-- [end:find]
         });
     }
 
+    // --8<-- [start:hash]
     // Phase 2: the files' SHA-256, one file at a time, here.
     void hash(std::size_t i) {
         if (i >= mine_.files.size()) return done({});
-        pt::read_file(*dir_, mine_.files[i].path, 64u * 1024 * 1024, [this, i](paglets::Result<pt::CarriedFile> f) {
-            if (f) mine_.files[i].sha256 = paglets::to_hex(paglets::sha256(f->data));
+        // The host hashes the file; its content never enters the clone.
+        pt::hash_file(*dir_, mine_.files[i].path, [this, i](paglets::Result<paglets::services::files::Hashed> h) {
+            if (h) mine_.files[i].sha256 = h->sha256;
             hash(i + 1);
         });
     }
+    // --8<-- [end:hash]
 
     void done(std::string error) {
         if (dir_) (void)dir_->drop();

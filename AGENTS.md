@@ -42,6 +42,16 @@ page header. Keep pages within the ckdocs Markdown subset: no raw HTML,
 footnotes, definition lists, math, or Mermaid; use `> [!NOTE]`-style alerts,
 tables, and lists instead. Check the site with `ckdocs check --root .`.
 
+Code excerpts (`<!-- snippet: PATH#SECTION -->`, from `// --8<-- [start:SECTION]`
+markers in the sources) and test results (`<!-- results: TOPIC -->`, from
+`docs/results/TOPIC.json`) are generated into the Markdown by
+`paglets-docs-sync` (built with the C++ tree); never edit them by hand. Run
+`cpp/build/<preset>/tools/docs_sync/paglets-docs-sync --root .` after changing
+marked code; the `docs_sync` ctest fails while a page is not current.
+`cpp/tools/update_results.sh` reruns the example tests and records their
+results; `cpp/tools/mesh_bench.sh` records the live benchmarks on real
+machines.
+
 Also update the root `README.md` and `cpp/README.md` when the change affects
 building, quick-start usage, command-line entry points, major examples, or
 public APIs. Keep documentation examples current with the code.

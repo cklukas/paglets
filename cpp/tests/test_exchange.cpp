@@ -121,6 +121,7 @@ PAGLETS_TEST("exchange: a shared file larger than a paglet's memory travels as a
     REQUIRE(read.status == 0);
     CHECK_EQ(read.size, big.size());
     CHECK(read.data == big.substr(10u * 1024 * 1024, 100));
+    ::paglets::test::report("file_courier", "a 20 MB file shared, moved as a capability, saved and read on two other hosts", "yes");
     const auto marks = c.f->runtime->marks(id);
     CHECK(std::ranges::find(marks, std::string("root:data")) != marks.end());
 

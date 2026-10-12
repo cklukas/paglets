@@ -53,6 +53,7 @@ public:
         router().on("probe.done", [](Message&) { (void)paglets::dispose(); });
     }
 
+    // --8<-- [start:ready]
     void on_cloned(paglets::Started& s) override {
         if (s.caps.empty() || !s.decode_args(rounds_)) {
             (void)paglets::dispose();
@@ -71,6 +72,7 @@ public:
             (void)parent_.send("probe.ready", Ready{name_}, std::move(o));
         });
     }
+    // --8<-- [end:ready]
 
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
         if (!f.clone.empty()) fan_.clone_failed(f);
@@ -103,6 +105,7 @@ private:
         if (!sent) go({""});
     }
 
+    // --8<-- [start:peers]
     // Once every probe is ready, each gets the others.
     void ready(const Ready& r, Message& m) {
         if (m.cap_count() == 0) return;
@@ -121,6 +124,7 @@ private:
             (void)to.endpoint.send("probe.peers", peers, std::move(o));
         }
     }
+    // --8<-- [end:peers]
 
     void finish() {
         map_.finished = true;
@@ -139,6 +143,7 @@ private:
         ping(0, 0);
     }
 
+    // --8<-- [start:ping]
     // Pings target `t`, round `round`; one at a time.
     void ping(std::size_t t, std::int64_t round) {
         if (t >= targets_.size()) {
@@ -172,6 +177,7 @@ private:
             ping(t + 1, 0);
         }
     }
+    // --8<-- [end:ping]
 
     struct Probe_ {
         std::string name;

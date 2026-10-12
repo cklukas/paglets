@@ -1,0 +1,653 @@
+{
+  "topic": "live_transfer",
+  "tests": [
+    {
+      "test": "mac → pi, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 1.0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "23",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "783",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "20.4",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "171",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "941",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "mac → uconsole, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0.8,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "17",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "596",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "26.8",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "225",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → mac, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0.7,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "120",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "477",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "33.5",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "281",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "934",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → uconsole, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 1.1,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "181",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "749",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "21.4",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "179",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → mac, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0.8,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "17",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "644",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "24.8",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "208",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "321",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → pi, 16 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 1.0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "17",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "777",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "20.6",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "173",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "317",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "mac → pi, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 1.8,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "65",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "1618",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "39.6",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "332",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "941",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "mac → uconsole, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 2.6,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "78",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "2366",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "27.0",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "227",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → mac, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 3.1,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "493",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "2316",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "27.6",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "232",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "934",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → uconsole, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 3.5,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "499",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "2902",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "22.1",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "185",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → mac, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 2.6,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "56",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "2470",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "25.9",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "217",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "321",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → pi, 64 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 3.0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "56",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "2835",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "22.6",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "189",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "317",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "mac → pi, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 10.1,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "388",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "9564",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "26.8",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "225",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "941",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "mac → uconsole, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 9.7,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "194",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "9416",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "27.2",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "228",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → mac, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 11.9,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "1841",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "9874",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "25.9",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "217",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "934",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "pi → uconsole, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 14.3,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "1835",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "12323",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "20.8",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "174",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "341",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → mac, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 11.0,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "207",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "10721",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "23.9",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "200",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "321",
+          "unit": "Mbit/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole → pi, 256 MB",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 11.7,
+      "platform": "",
+      "build": "Release",
+      "date": "2026-10-12",
+      "values": [
+        {
+          "name": "sharing (hashing) on the source",
+          "value": "208",
+          "unit": "ms"
+        },
+        {
+          "name": "saving on the destination: transfer, SHA-256 check, write",
+          "value": "11291",
+          "unit": "ms"
+        },
+        {
+          "name": "transfer rate",
+          "value": "22.7",
+          "unit": "MB/s"
+        },
+        {
+          "name": "transfer rate",
+          "value": "190",
+          "unit": "Mbit/s"
+        },
+        {
+          "name": "TCP between the hosts (iperf3)",
+          "value": "317",
+          "unit": "Mbit/s"
+        }
+      ]
+    }
+  ]
+}

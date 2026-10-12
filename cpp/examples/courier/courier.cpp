@@ -48,7 +48,8 @@ public:
     void on_arrived(const abi::ArrivedEvent&) override {
         note_host([this] {
             if (status_.state == "travelling") return download();
-            if (status_.state == "returning") return deliver();
+            // Home with the content, or home to report a failure.
+            if (status_.state == "returning" || status_.state == "failed") return deliver();
         });
     }
 
@@ -84,6 +85,7 @@ private:
         }
         auto reply = std::make_shared<Capability>(m.defer_reply());
         svc::mesh_info::Client client{*mi};
+        // --8<-- [start:depart]
         auto sent = client.snapshot({}, [this, reply](paglets::Result<svc::mesh_info::Snapshot> snap, Message&) {
             if (!snap) {
                 status_.state = "failed";
@@ -107,6 +109,7 @@ private:
             }
             paglets::reply_to(*reply, Started{true, {}});
         });
+        // --8<-- [end:depart]
         if (!sent) (void)m.reply(Started{false, error_text("mesh-info", sent.error())});
     }
 
@@ -125,6 +128,7 @@ private:
         if (!sent) next();
     }
 
+    // --8<-- [start:download]
     void download() {
         status_.state = "downloading";
         lookup("web", [this](paglets::Result<Endpoint> web) {
@@ -153,6 +157,7 @@ private:
             (void)paglets::after_raw(2000, "retry-home", {});
         }
     }
+    // --8<-- [end:download]
 
     // Home again: the home host fetches the content into its store, the
     // owner hears.
@@ -164,6 +169,7 @@ private:
         });
     }
 
+    // --8<-- [start:deliver]
     void store_at_home(Endpoint store) {
         svc::artifacts::Client client{store};
         paglets::RequestOptions options = lending(*blob_);
@@ -181,6 +187,7 @@ private:
             options);
         if (!sent) fail(error_text("fetch home", sent.error()));
     }
+    // --8<-- [end:deliver]
 
     static void notify(svc::user_info::Level level, std::string title, std::string text) {
         paglets::patterns::notify(level, std::move(title), std::move(text));

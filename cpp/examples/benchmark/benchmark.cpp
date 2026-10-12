@@ -53,6 +53,7 @@ public:
                                                   [this](const svc::compute_slots::Decision&, Message&) { run({}); });
         // One test per handler: a handler has a time budget on every host.
         router().on("bench.step", [this](Message&) { step(); });
+        // --8<-- [start:fanout]
         fan_.attach(router(), [this](const pt::FanOut::Child& c) {
             HostResult r;
             if (!c.ok || !paglets::decode(c.result, r)) {
@@ -67,6 +68,7 @@ public:
                 ranking_.state = "done";
             }
         });
+        // --8<-- [end:fanout]
     }
 
     void on_cloned(paglets::Started& s) override {
@@ -112,6 +114,7 @@ private:
 
     // -- a clone: a slot, then the measurements ------------------------------------------------
 
+    // --8<-- [start:slot]
     void ask_for_slot() {
         auto slots = paglets::service("compute-slots");
         if (!slots) return run({});
@@ -136,7 +139,9 @@ private:
         bench_start_ns_ = mono_ns();
         next_step();
     }
+    // --8<-- [end:slot]
 
+    // --8<-- [start:steps]
     void next_step() {
         if (!paglets::after_raw(0, "bench.step", {})) step();
     }
@@ -175,6 +180,7 @@ private:
         result_.int_mops = static_cast<double>(iterations) * 5 / seconds_since(t) / 1e6;  // 3 xor-shifts, an and, an add
         result_.check ^= acc;
     }
+    // --8<-- [end:steps]
 
     void cpu_float() {
         const std::int64_t budget = bench_.budget_ms * 1'000'000;
@@ -195,7 +201,8 @@ private:
     }
 
     void memory() {
-        const std::size_t size = static_cast<std::size_t>(std::max<std::int64_t>(1, bench_.memory_mb)) * mb;
+        // Two buffers: together they must fit the paglet's memory (16 MB).
+        const std::size_t size = static_cast<std::size_t>(std::clamp<std::int64_t>(bench_.memory_mb, 1, 6)) * mb;
         std::vector<std::uint8_t> a(size, 1), b(size, 2);
         const std::int64_t budget = bench_.budget_ms * 1'000'000;
         std::uint64_t copied = 0;
@@ -209,6 +216,7 @@ private:
         result_.check ^= b[size / 2];
     }
 
+    // --8<-- [start:disk]
     // Writes and reads `disk_mb` MB in blocks of 256 KB through the paglet's storage.
     void disk() {
         pt::endpoint("storage", [this](paglets::Result<paglets::Endpoint> st) {
@@ -246,6 +254,7 @@ private:
             clean_up(0);
         }
     }
+    // --8<-- [end:disk]
 
     void read_block(std::int64_t i) {
         if (i >= blocks()) {

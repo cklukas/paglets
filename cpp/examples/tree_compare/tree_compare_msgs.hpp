@@ -20,7 +20,7 @@ struct Compare {
     std::string path;
     std::string pattern = "**";
     bool hashes = false;
-    std::int64_t max_file_bytes = 64 * 1024 * 1024;  // larger files are not hashed
+    std::int64_t max_file_bytes = 64LL * 1024 * 1024 * 1024;  // larger files are not hashed
     std::int64_t timeout_ms = 20'000;
 };
 
