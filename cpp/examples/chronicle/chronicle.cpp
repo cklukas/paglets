@@ -86,6 +86,7 @@ public:
                 t.jitter_ms = s.suspect_ms / 2;
             }
             if (s.round_ms > 0) t.round_ms = s.round_ms;
+            if (s.expand_ms > 0) t.expand_ms = s.expand_ms;
             t.checkpoint_ms = std::max<std::int64_t>(s.sample_ms, t.beat_ms);
             start_group(s.sink, std::move(w), t);
             (void)m.reply(chronicle_msgs::Started{group(), {}});
@@ -96,9 +97,9 @@ public:
             Status st;
             st.group = group();
             st.role = std::string(zp::to_string(r.role));
-            st.replica = r.self;
-            st.replicas = r.replicas;
-            st.main = name_of(r.leader < members().size() ? members()[r.leader] : std::string());
+            st.replica = host_of(r.self);
+            st.replicas = static_cast<std::uint32_t>(r.members.size());
+            st.main = name_of(host_of(r.leader));
             st.samples = r.rank.progress;
             st.started_ms = work().started_ms;
             st.lifetime_ms = work().lifetime_ms;
@@ -110,7 +111,7 @@ public:
             f.accepted = acting();
             if (f.accepted) finish_ = true;
             const auto& r = replica();
-            f.main = name_of(r.leader < members().size() ? members()[r.leader] : std::string());
+            f.main = name_of(host_of(r.leader));
             (void)m.reply(f);
         });
     }
@@ -178,15 +179,23 @@ private:
     void sample(Work& w, const std::vector<services::mesh_info::Snapshot>& hosts) {
         const std::int64_t now = now_ms();
         if (!hosts.empty()) here_ = hosts.front().host;
-        if (w.members.empty()) {  // the first sample: who is in the group
-            w.members = members();
-            w.names.assign(w.members.size(), {});
-            for (const auto& h : hosts) {
-                auto it = std::ranges::find(w.members, h.host);
-                if (it != w.members.end()) w.names[it - w.members.begin()] = h.host_name;
-            }
+        // Who is in the group: the replicas this main knows, with names from
+        // mesh-info. Hosts that joined the mesh got a replica meanwhile.
+        const bool first = w.members.empty();
+        for (const auto& m : members()) {
+            if (std::ranges::find(w.members, m) != w.members.end()) continue;
+            w.members.push_back(m);
+            w.names.emplace_back();
+            if (!first) note(Event{now, "joined", m, here_});
+        }
+        for (const auto& h : hosts) {
+            auto it = std::ranges::find(w.members, h.host);
+            if (it != w.members.end() && !h.host_name.empty()) w.names[it - w.members.begin()] = h.host_name;
+        }
+        if (first) {
             std::string list;
-            for (const auto& n : w.names) list += (list.empty() ? "" : ", ") + n;
+            for (std::size_t i = 0; i < w.members.size(); ++i)
+                list += (list.empty() ? "" : ", ") + (w.names[i].empty() ? w.members[i].substr(0, 8) : w.names[i]);
             note(Event{now, "begin", here_, {}, list});
         }
         if (takeover_) {
@@ -287,6 +296,9 @@ private:
                        (e.text.empty() ? "." : " (" + e.text + ").");
             } else if (e.kind == "link_up") {
                 what = name(e.host) + " reaches " + name(e.other) + " again.";
+            } else if (e.kind == "joined") {
+                what = "**" + name(e.host) + "** joined the mesh and got a replica (made by the main on " + name(e.other) +
+                       ").";
             } else if (e.kind == "takeover") {
                 what = "**" + name(e.host) + " took over as main** (" + e.text + ", reign " + std::to_string(e.term) +
                        ") after " + span(e.gap_ms) + " without a sample.";

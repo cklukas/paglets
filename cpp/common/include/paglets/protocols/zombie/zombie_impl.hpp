@@ -114,10 +114,25 @@ inline std::string_view message_name(const Message& m) {
 
 // -- the transition function ----------------------------------------------------
 
-inline State initial(ReplicaId self, std::uint32_t replicas) {
+inline ReplicaId replica_id(std::string_view key) {
+    if (key.size() < 16) return 0;
+    ReplicaId id = 0;
+    for (std::size_t i = 0; i < 16; ++i) {
+        const char c = key[i];
+        int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0) return 0;
+        id = id << 4 | static_cast<ReplicaId>(v);
+    }
+    return id;
+}
+
+inline State initial(ReplicaId self, std::vector<ReplicaId> members) {
     State s;
     s.self = self;
-    s.replicas = replicas;
+    members.push_back(self);
+    std::ranges::sort(members);
+    members.erase(std::unique(members.begin(), members.end()), members.end());
+    s.members = std::move(members);
     s.leader = self;
     s.rank.author = self;
     return s;
@@ -156,14 +171,22 @@ private:
     }
     void send(ReplicaId to, Message m) { out_.push_back(Send{to, std::move(m)}); }
     void broadcast(const Message& m) {
-        for (ReplicaId r = 0; r < s_.replicas; ++r) {
+        for (ReplicaId r : s_.members) {
             if (r != s_.self) send(r, m);
         }
     }
     void persist() { out_.push_back(Persist{}); }
     void see(std::uint64_t term) { s_.term = std::max(s_.term, term); }
 
-    Beat beat() const { return Beat{s_.rank.term, s_.rank, s_.journal.version()}; }
+    Beat beat() const { return Beat{s_.rank.term, s_.rank, s_.journal.version(), s_.members}; }
+
+    // The membership only grows.
+    void add_members(const std::vector<ReplicaId>& more) {
+        for (ReplicaId r : more) {
+            auto it = std::ranges::lower_bound(s_.members, r);
+            if (it == s_.members.end() || *it != r) s_.members.insert(it, r);
+        }
+    }
 
     // The main records its working state as a new checkpoint (durable before
     // anybody hears of it).
@@ -342,6 +365,8 @@ private:
 
     void on(const Received& in) {
         see(term_of(in.message));
+        add_members({in.from});
+        if (const auto* b = std::get_if<Beat>(&in.message)) add_members(b->members);
         std::visit([&](const auto& m) { receive(in.from, m); }, in.message);
     }
 
@@ -493,6 +518,9 @@ private:
         end(Cause::delivered);
     }
 
+    // A main that made replicas on new hosts tells everybody with its beats.
+    void on(const AddMembers& in) { add_members(in.members); }
+
     void on(const RegistryUpdate& in) {
         s_.sink = std::max(s_.sink, in.sink);
         if (in.tomb) end(Cause::tomb);
@@ -571,7 +599,14 @@ inline void paglets_encode(msgpack::Writer& w, const Message& v) {
     std::visit(
         [&](const auto& m) {
             using M = std::decay_t<decltype(m)>;
-            if constexpr (std::is_same_v<M, Beat> || std::is_same_v<M, Ack>) {
+            if constexpr (std::is_same_v<M, Beat>) {
+                w.write_array_header(5);
+                w.write_uint(v.index());
+                w.write_uint(m.term);
+                msgpack::write_value(w, m.rank);
+                msgpack::write_value(w, m.vv);
+                msgpack::write_value(w, m.members);
+            } else if constexpr (std::is_same_v<M, Ack>) {
                 w.write_array_header(4);
                 w.write_uint(v.index());
                 w.write_uint(m.term);
@@ -614,11 +649,12 @@ inline bool paglets_decode(msgpack::Reader& r, Message& v) {
         case 1: {
             Rank rank;
             VersionVector vv;
-            if (n != 4 || !msgpack::read_value(r, term) || !msgpack::read_value(r, rank) ||
-                !msgpack::read_value(r, vv))
+            std::vector<ReplicaId> members;
+            if (n != (index == 0 ? 5u : 4u) || !msgpack::read_value(r, term) || !msgpack::read_value(r, rank) ||
+                !msgpack::read_value(r, vv) || (index == 0 && !msgpack::read_value(r, members)))
                 return false;
             if (index == 0) {
-                v = Beat{term, rank, std::move(vv)};
+                v = Beat{term, rank, std::move(vv), std::move(members)};
             } else {
                 v = Ack{term, rank, std::move(vv)};
             }
@@ -661,7 +697,7 @@ inline bool paglets_decode(msgpack::Reader& r, Message& v) {
 inline void paglets_encode(msgpack::Writer& w, const State& v) {
     w.write_array_header(21);
     w.write_uint(v.self);
-    w.write_uint(v.replicas);
+    msgpack::write_value(w, v.members);
     detail::write_enum(w, v.role);
     w.write_uint(v.incarnation);
     w.write_uint(v.term);
@@ -694,7 +730,7 @@ inline bool paglets_decode(msgpack::Reader& r, State& v) {
     std::vector<Entry> entries;
     std::uint32_t n = 0;
     std::uint64_t reserved = 0;
-    if (!(msgpack::read_value(r, v.self) && msgpack::read_value(r, v.replicas) && detail::read_enum(r, v.role, 6) &&
+    if (!(msgpack::read_value(r, v.self) && msgpack::read_value(r, v.members) && detail::read_enum(r, v.role, 6) &&
           msgpack::read_value(r, v.incarnation) && msgpack::read_value(r, v.term) && msgpack::read_value(r, v.reign) &&
           msgpack::read_value(r, v.leader) && msgpack::read_value(r, v.rank) && r.read_bin(v.work) &&
           msgpack::read_value(r, v.progress) && msgpack::read_value(r, v.done) && r.read_bin(v.work_now) &&

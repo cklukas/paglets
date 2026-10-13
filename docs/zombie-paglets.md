@@ -64,11 +64,20 @@ start_group("host:mac", initial_work, timing);
 - **Placement.** The group gets a replica on every host with a fresh
   `mesh-info` snapshot. Every one of them must offer `zombies` (every host
   of this version does); otherwise the group does not start, and
-  `on_zombie_failed` names the hosts that lack it. The creator clones
-  itself to the other hosts. Every replica joins the `zombies` registry of
-  its host; the hosts tell each other which replica they hold, and each
-  replica gets endpoints to the others from its own host. It asks again
-  until it knows all of them, and after a restart.
+  `on_zombie_failed` names the hosts that lack it. The creator starts as
+  the main and clones itself to the other hosts. Every replica joins the
+  `zombies` registry of its host; the hosts tell each other which replica
+  they hold, and each replica gets endpoints to the others from its own
+  host. It asks again until it knows all of them, and after a restart.
+- **Growth.** Every `expand_ms` (30 s by default) the acting main looks for
+  hosts of the mesh that offer `zombies` but hold no replica of the group,
+  makes one there and adds it to the membership. A host that joins the mesh
+  later is occupied this way within about a minute; a host that does not
+  offer `zombies` (an older version) is left out. If the mains of two sides
+  of a partition both make a replica on the same new host, that host's
+  registry refuses the second one, which ends. A replica is named by its
+  host's key ID, so replicas made by different mains never get the same
+  name.
 - **The sink** is `host:NAME`, a host of the mesh by its ledger name or key
   ID. That host's `zombies` system paglet accepts the first result per
   group and stores it. `paglets-host remote zombies result GROUP` fetches
@@ -76,7 +85,8 @@ start_group("host:mac", initial_work, timing);
 - **Timing** (`ZombieTiming`): beats every 2 s, a checkpoint at most every
   10 s, a takeover after 10 s without a beat (plus up to 5 s of random
   jitter), election rounds of 4 s, and a pause of 1 s between two steps.
-  The simulator measures takeovers within 20 s with these values.
+  The simulator measures takeovers within 20 s with these values. The main
+  looks for new hosts every 30 s (`expand_ms`).
 
 ## Observations
 
@@ -99,6 +109,57 @@ The rule "durable before visible" is kept by the base class: when the
 protocol makes a checkpoint (a `Persist` output), it calls
 `paglets::checkpoint()` and sends that step's messages only from its next
 handler, after the host stored the image:
+
+How the main occupies new hosts:
+
+<!-- snippet: cpp/sdk/include/paglets/patterns/zombie.hpp#expand -->
+Source: [`cpp/sdk/include/paglets/patterns/zombie.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/sdk/include/paglets/patterns/zombie.hpp)
+
+```cpp
+// The acting main makes a replica on every host of the mesh that offers
+// zombies and has none yet (as far as the registry knows; the registry
+// of that host refuses a second one, for example from the main of
+// another side of a partition), and adds it to the membership. A host
+// whose clone did not arrive is tried again after a while.
+void expand(const std::vector<services::mesh_info::Snapshot>& hosts) {
+    if (!acting()) return;
+    const std::int64_t now = now_ns() / 1'000'000;
+    std::vector<zp::ReplicaId> added;
+    for (const auto& h : hosts) {
+        const auto id = zp::replica_id(h.host);
+        if (id == 0 || id == core_.self || registered_.contains(id) || !offers_zombies(h)) continue;
+        if (auto it = hosts_.find(id); it != hosts_.end() && it->second != h.host) {
+            log(abi::LogLevel::warning, "zombie: hosts " + it->second.substr(0, 16) + " and " +
+                                            h.host.substr(0, 16) + " have the same replica ID; no replica");
+            continue;
+        }
+        if (auto it = cloned_at_.find(h.host); it != cloned_at_.end() && now - it->second < 2 * timing_.expand_ms) {
+            continue;  // on its way
+        }
+        auto me = self().derive(abi::DeriveSpec{});
+        if (!me) return;
+        std::vector<std::string> known = members();
+        if (std::ranges::find(known, h.host) == known.end()) known.push_back(h.host);
+        const detail::ZombieCloneArgs a{group_, known, h.host, hosts_[core_.self], sink_, timing_};
+        auto clone = clone_raw(encode(a), {*me}, h.host);
+        if (!clone) {
+            (void)me->drop();
+            log(abi::LogLevel::warning, "zombie: no replica on " + h.host.substr(0, 8) + ": " +
+                                            std::string(abi::error_name(clone.error())));
+            continue;
+        }
+        cloned_at_[h.host] = now;
+        hosts_[id] = h.host;
+        if (auto old = peers_.find(id); old != peers_.end()) (void)old->second.drop();
+        peers_[id] = *clone;
+        added.push_back(id);
+    }
+    if (!added.empty()) run(zp::AddMembers{added});
+}
+```
+<!-- /snippet -->
+
+And how the protocol's outputs are carried out:
 
 <!-- snippet: cpp/sdk/include/paglets/patterns/zombie.hpp#carry_out -->
 Source: [`cpp/sdk/include/paglets/patterns/zombie.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/sdk/include/paglets/patterns/zombie.hpp)

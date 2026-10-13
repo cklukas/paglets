@@ -35,7 +35,9 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,6 +56,7 @@ struct ZombieTiming {
     std::int64_t jitter_ms = 5000;
     std::int64_t round_ms = 4000;
     std::int64_t step_ms = 1000;  // pause between two steps of the work
+    std::int64_t expand_ms = 30000;  // the main looks for hosts without a replica
 };
 
 namespace detail {
@@ -61,19 +64,19 @@ namespace detail {
 // What a clone receives: its place in the group.
 struct ZombieCloneArgs {
     std::string group;
-    std::vector<std::string> members;  // host key IDs, sorted; the replica number is the index
-    std::uint32_t index = 0;
-    std::uint32_t creator = 0;
+    std::vector<std::string> members;  // host key IDs of the replicas known to the creator
+    std::string host;                  // the clone's host (key ID): its replica ID
+    std::string creator;               // the creator's host (key ID)
     std::string sink;
     ZombieTiming timing;
 };
 
 inline void paglets_encode(msgpack::Writer& w, const ZombieCloneArgs& a) {
-    w.write_array_header(11);
+    w.write_array_header(12);
     w.write_str(a.group);
     msgpack::write_value(w, a.members);
-    w.write_uint(a.index);
-    w.write_uint(a.creator);
+    w.write_str(a.host);
+    w.write_str(a.creator);
     w.write_str(a.sink);
     w.write_int(a.timing.beat_ms);
     w.write_int(a.timing.checkpoint_ms);
@@ -81,16 +84,17 @@ inline void paglets_encode(msgpack::Writer& w, const ZombieCloneArgs& a) {
     w.write_int(a.timing.jitter_ms);
     w.write_int(a.timing.round_ms);
     w.write_int(a.timing.step_ms);
+    w.write_int(a.timing.expand_ms);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, ZombieCloneArgs& a) {
     std::uint32_t n = 0;
-    return r.read_array_header(n) && n == 11 && msgpack::read_value(r, a.group) &&
-           msgpack::read_value(r, a.members) && msgpack::read_value(r, a.index) && msgpack::read_value(r, a.creator) &&
+    return r.read_array_header(n) && n == 12 && msgpack::read_value(r, a.group) &&
+           msgpack::read_value(r, a.members) && msgpack::read_value(r, a.host) && msgpack::read_value(r, a.creator) &&
            msgpack::read_value(r, a.sink) && msgpack::read_value(r, a.timing.beat_ms) &&
            msgpack::read_value(r, a.timing.checkpoint_ms) && msgpack::read_value(r, a.timing.suspect_ms) &&
            msgpack::read_value(r, a.timing.jitter_ms) && msgpack::read_value(r, a.timing.round_ms) &&
-           msgpack::read_value(r, a.timing.step_ms);
+           msgpack::read_value(r, a.timing.step_ms) && msgpack::read_value(r, a.timing.expand_ms);
 }
 
 inline std::string hex_of(std::span<const std::uint8_t> bytes) {
@@ -132,7 +136,9 @@ public:
 
     // Starts a group from the creator (typically from a request handler):
     // a replica on every host with a fresh mesh-info snapshot, which must
-    // all offer `zombies`. `sink`: `host:NAME`.
+    // all offer `zombies`. `sink`: `host:NAME`. Hosts that join the mesh
+    // later get a replica too: the acting main looks for them every
+    // `expand_ms`.
     void start_group(std::string sink, Work initial, ZombieTiming timing = {}) {
         if (started_) return;
         started_ = true;
@@ -149,7 +155,7 @@ public:
         auto sent = client.landscape(services::mesh_info::LandscapeRequest{},
                                      [this](Result<services::mesh_info::Landscape> r, Message&) {
                                          if (!r) return fail("mesh-info: " + std::string(abi::error_name(r.error())));
-                                         place(std::move(r->hosts));
+                                         begin(std::move(r->hosts));
                                      });
         if (!sent) fail("mesh-info: " + std::string(abi::error_name(sent.error())));
     }
@@ -168,7 +174,17 @@ public:
     bool acting() const { return core_.role == Role::main && !core_.frozen; }
     const zp::State& replica() const { return core_; }
     const std::string& group() const { return group_; }
-    const std::vector<std::string>& members() const { return members_; }
+    // The host (key ID) of a replica, if known.
+    std::string host_of(zp::ReplicaId id) const {
+        auto it = hosts_.find(id);
+        return it == hosts_.end() ? std::string() : it->second;
+    }
+    // Host key IDs of the replicas this replica knows, by replica ID.
+    std::vector<std::string> members() const {
+        std::vector<std::string> out;
+        for (const auto& [id, host] : hosts_) out.push_back(host);
+        return out;
+    }
     const std::string& sink() const { return sink_; }
     const Work& work() const { return work_; }
 
@@ -186,23 +202,28 @@ public:
 
     void on_cloned(Started& s) override {
         detail::ZombieCloneArgs a;
-        if (!s.decode_args(a) || a.index >= a.members.size()) return fail("malformed clone arguments");
+        if (!s.decode_args(a) || zp::replica_id(a.host) == 0) return fail("malformed clone arguments");
         // The image is the creator's; this replica starts over.
         reset();
         started_ = true;
         group_ = a.group;
-        members_ = a.members;
         sink_ = a.sink;
         timing_ = a.timing;
-        peers_.assign(members_.size(), Endpoint());
-        if (!s.caps.empty()) peers_[a.creator] = Endpoint(s.caps[0].release());
+        std::vector<zp::ReplicaId> ids;
+        for (const auto& h : a.members) {
+            hosts_[zp::replica_id(h)] = h;
+            ids.push_back(zp::replica_id(h));
+        }
+        hosts_[zp::replica_id(a.host)] = a.host;
+        if (!s.caps.empty()) peers_[zp::replica_id(a.creator)] = Endpoint(s.caps[0].release());
         (void)set_restart(true, true);
-        core_ = zp::initial(a.index, static_cast<std::uint32_t>(members_.size()));
+        core_ = zp::initial(zp::replica_id(a.host), std::move(ids));
         join([this] { run(zp::Start{false, {}}); });
+        schedule_expand();
     }
 
     void on_recovered(const abi::Recovered&) override {
-        if (!started_ || core_.replicas == 0) return;
+        if (!started_ || core_.members.empty()) return;
         // Messages of a step not sent before the restart are stale now;
         // timers of before the restart are void.
         deferred_.clear();
@@ -215,6 +236,7 @@ public:
         ++work_gen_;
         run(zp::Recovered{});
         refresh_peers();
+        schedule_expand();
         // What the registry learnt meanwhile.
         if (auto z = service("zombies")) {
             services::zombies::Client c{*z};
@@ -240,6 +262,9 @@ private:
         delivering_ = false;
         trace_seq_ = 0;
         peers_.clear();
+        hosts_.clear();
+        registered_.clear();
+        cloned_at_.clear();
     }
 
     void fail(std::string why) {
@@ -247,43 +272,92 @@ private:
         (void)dispose();
     }
 
-    // The creator: one replica per host, clones made on the others.
-    void place(std::vector<services::mesh_info::Snapshot> hosts) {
+    // The creator: every host must offer zombies; the creator starts as
+    // main, then makes the replicas as the main does for hosts that join
+    // later (expand).
+    void begin(std::vector<services::mesh_info::Snapshot> hosts) {
         if (hosts.empty()) return fail("no hosts");
-        const std::string self_host = hosts.front().host;  // this host first
         std::vector<std::string> lacking;
         for (const auto& h : hosts) {
-            const bool zombies = std::ranges::any_of(h.offers, [](const auto& o) { return o.service == "zombies"; });
-            if (!zombies) lacking.push_back(h.host_name.empty() ? h.host.substr(0, 8) : h.host_name);
+            if (!offers_zombies(h)) lacking.push_back(h.host_name.empty() ? h.host.substr(0, 8) : h.host_name);
         }
         if (!lacking.empty()) {
             std::string list;
             for (const auto& l : lacking) list += (list.empty() ? "" : ", ") + l;
             return fail("hosts without zombie support: " + list);
         }
-        for (const auto& h : hosts) members_.push_back(h.host);
-        std::ranges::sort(members_);
-        members_.erase(std::unique(members_.begin(), members_.end()), members_.end());
-        const auto self_index =
-            static_cast<std::uint32_t>(std::ranges::find(members_, self_host) - members_.begin());
-        peers_.assign(members_.size(), Endpoint());
-        core_ = zp::initial(self_index, static_cast<std::uint32_t>(members_.size()));
-        join([this, self_index] {
-            for (std::uint32_t k = 0; k < members_.size(); ++k) {
-                if (k == self_index) continue;
-                auto me = self().derive(abi::DeriveSpec{});
-                if (!me) return fail("cannot pass on an endpoint: " + std::string(abi::error_name(me.error())));
-                detail::ZombieCloneArgs a{group_, members_, k, self_index, sink_, timing_};
-                auto clone = clone_raw(encode(a), {*me}, members_[k]);
-                if (!clone) {
-                    log(abi::LogLevel::warning, "zombie: no replica on " + members_[k].substr(0, 8) + ": " +
-                                                    std::string(abi::error_name(clone.error())));
-                    continue;
-                }
-                peers_[k] = *clone;
-            }
+        const std::string self_host = hosts.front().host;  // this host first
+        const auto self_id = zp::replica_id(self_host);
+        if (self_id == 0) return fail("no replica ID for this host");
+        hosts_[self_id] = self_host;
+        core_ = zp::initial(self_id, {});
+        join([this, hosts = std::move(hosts)]() mutable {
             run(zp::Start{true, encode(work_)});
+            expand(hosts);
+            schedule_expand();
         });
+    }
+
+    static bool offers_zombies(const services::mesh_info::Snapshot& h) {
+        return std::ranges::any_of(h.offers, [](const auto& o) { return o.service == "zombies"; });
+    }
+
+    void schedule_expand() {
+        if (timing_.expand_ms > 0) (void)after(timing_.expand_ms, "zombie.expand", std::uint64_t{0});
+    }
+
+    // --8<-- [start:expand]
+    // The acting main makes a replica on every host of the mesh that offers
+    // zombies and has none yet (as far as the registry knows; the registry
+    // of that host refuses a second one, for example from the main of
+    // another side of a partition), and adds it to the membership. A host
+    // whose clone did not arrive is tried again after a while.
+    void expand(const std::vector<services::mesh_info::Snapshot>& hosts) {
+        if (!acting()) return;
+        const std::int64_t now = now_ns() / 1'000'000;
+        std::vector<zp::ReplicaId> added;
+        for (const auto& h : hosts) {
+            const auto id = zp::replica_id(h.host);
+            if (id == 0 || id == core_.self || registered_.contains(id) || !offers_zombies(h)) continue;
+            if (auto it = hosts_.find(id); it != hosts_.end() && it->second != h.host) {
+                log(abi::LogLevel::warning, "zombie: hosts " + it->second.substr(0, 16) + " and " +
+                                                h.host.substr(0, 16) + " have the same replica ID; no replica");
+                continue;
+            }
+            if (auto it = cloned_at_.find(h.host); it != cloned_at_.end() && now - it->second < 2 * timing_.expand_ms) {
+                continue;  // on its way
+            }
+            auto me = self().derive(abi::DeriveSpec{});
+            if (!me) return;
+            std::vector<std::string> known = members();
+            if (std::ranges::find(known, h.host) == known.end()) known.push_back(h.host);
+            const detail::ZombieCloneArgs a{group_, known, h.host, hosts_[core_.self], sink_, timing_};
+            auto clone = clone_raw(encode(a), {*me}, h.host);
+            if (!clone) {
+                (void)me->drop();
+                log(abi::LogLevel::warning, "zombie: no replica on " + h.host.substr(0, 8) + ": " +
+                                                std::string(abi::error_name(clone.error())));
+                continue;
+            }
+            cloned_at_[h.host] = now;
+            hosts_[id] = h.host;
+            if (auto old = peers_.find(id); old != peers_.end()) (void)old->second.drop();
+            peers_[id] = *clone;
+            added.push_back(id);
+        }
+        if (!added.empty()) run(zp::AddMembers{added});
+    }
+    // --8<-- [end:expand]
+
+    void look_for_hosts() {
+        if (!acting()) return;
+        auto mi = service("mesh-info");
+        if (!mi) return;
+        services::mesh_info::Client client{*mi};
+        (void)client.landscape(services::mesh_info::LandscapeRequest{},
+                               [this](Result<services::mesh_info::Landscape> r, Message&) {
+                                   if (r) expand(r->hosts);
+                               });
     }
 
     // Joins the group in the host's registry, then `next`.
@@ -314,16 +388,18 @@ private:
                 for (std::size_t i = 0; i < r->replicas.size() && i < m.cap_count(); ++i) {
                     const auto n = r->replicas[i];
                     Capability cap = m.take_cap(i);
-                    if (n >= peers_.size() || n == core_.self) {
+                    if (n == core_.self) {
                         (void)cap.drop();
                         continue;
                     }
-                    if (peers_[n]) (void)peers_[n].drop();
+                    if (auto old = peers_.find(n); old != peers_.end()) (void)old->second.drop();
                     peers_[n] = Endpoint(cap);
+                    registered_.insert(n);
+                    if (i < r->hosts.size()) hosts_[n] = r->hosts[i];
                 }
             }
-            for (std::uint32_t n = 0; n < peers_.size(); ++n) {
-                if (n != core_.self && !peers_[n]) {
+            for (const auto n : core_.members) {
+                if (n != core_.self && !peers_.contains(n)) {
                     (void)after(3000, "zombie.refresh", std::uint64_t{0});
                     return;
                 }
@@ -332,7 +408,7 @@ private:
     }
 
     void registry(const services::zombies::GroupState& s) {
-        if (core_.replicas == 0) return;
+        if (core_.members.empty()) return;
         if (!s.sink_spec.empty()) sink_ = s.sink_spec;
         run(zp::RegistryUpdate{s.ending != services::zombies::Ending::none, static_cast<std::uint64_t>(s.sink)});
     }
@@ -343,26 +419,28 @@ private:
             services::zombies::GroupState s;
             if (m.decode(s)) registry(s);
         } else if (name == "zombie.msg") {
-            std::uint32_t from = 0;
+            zp::ReplicaId from = 0;
             zp::Message body;
             msgpack::Reader r(m.payload());
             std::uint32_t n = 0;
             if (r.read_array_header(n) && n == 2 && msgpack::read_value(r, from) && zp::paglets_decode(r, body) &&
-                from < members_.size()) {
+                from != 0) {
+                // A sender this replica does not know joins its membership
+                // (step() adds it); its endpoint comes from the registry.
                 run(zp::Received{from, std::move(body)});
-            }
-        } else if (name == "zombie.peers") {
-            std::vector<std::uint32_t> which;
-            if (!m.decode(which)) return;
-            for (std::size_t i = 0; i < which.size() && i < m.cap_count(); ++i) {
-                if (which[i] < peers_.size()) peers_[which[i]] = Endpoint(m.take_cap(i));
             }
         } else if (name == "zombie.timer") {
             std::vector<std::uint64_t> t;  // timer, generation
             if (!m.decode(t) || t.size() != 2 || t[0] >= zp::timer_count || timers_[t[0]].gen != t[1]) return;
             timers_[t[0]].cap = Capability();  // fired
             run(zp::Fired{static_cast<zp::Timer>(t[0])});
+        } else if (name == "zombie.expand") {
+            if (core_.role == Role::ended) return;
+            look_for_hosts();
+            refresh_peers();
+            schedule_expand();
         } else if (name == "zombie.refresh") {
+            refresh_pending_ = false;
             if (core_.role != Role::ended) refresh_peers();
         } else if (name == "zombie.flush") {
             flush_pending_ = false;
@@ -409,14 +487,21 @@ private:
 
     void apply(const zp::Output& o) {
         if (const auto* s = std::get_if<zp::Send>(&o)) {
-            if (s->to >= peers_.size() || !peers_[s->to]) return;
+            auto peer = peers_.find(s->to);
+            if (peer == peers_.end() || !peer->second) {
+                if (!refresh_pending_) {  // a replica without an endpoint yet: ask the registry soon
+                    refresh_pending_ = true;
+                    (void)after(1000, "zombie.refresh", std::uint64_t{0});
+                }
+                return;
+            }
             msgpack::Writer w;
             w.write_array_header(2);
             w.write_uint(core_.self);
             zp::paglets_encode(w, s->message);
             SendOptions options;
             options.async = true;
-            (void)peers_[s->to].send_raw("zombie.msg", w.take(), std::move(options));
+            (void)peer->second.send_raw("zombie.msg", w.take(), std::move(options));
         } else if (const auto* t = std::get_if<zp::SetTimer>(&o)) {
             auto& a = timers_[static_cast<std::size_t>(t->timer)];
             (void)a.cap.drop();
@@ -539,8 +624,11 @@ private:
     Work work_{};
     std::string group_;
     std::string sink_;
-    std::vector<std::string> members_;
-    std::vector<Endpoint> peers_;
+    std::map<zp::ReplicaId, std::string> hosts_;  // replica ID -> host key ID
+    std::map<zp::ReplicaId, Endpoint> peers_;
+    std::set<zp::ReplicaId> registered_;          // replicas the registry knows
+    std::map<std::string, std::int64_t> cloned_at_;  // host -> when a clone went there
+    bool refresh_pending_ = false;
     ZombieTiming timing_{};
     std::array<Armed, zp::timer_count> timers_{};
     zp::Outputs deferred_;

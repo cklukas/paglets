@@ -14,7 +14,7 @@ namespace z = paglets::protocols::zombie;
 PAGLETS_TEST("zombie: small worlds are explored completely without a violated property") {
     // Two replicas with each kind of fault; the documentation records the
     // larger worlds (paglets-protocol-check --suite full).
-    for (int fault = 0; fault < 5; ++fault) {
+    for (int fault = 0; fault < 6; ++fault) {
         z::ModelConfig c;
         c.replicas = 2;
         c.crashes = fault == 0;
@@ -22,6 +22,10 @@ PAGLETS_TEST("zombie: small worlds are explored completely without a violated pr
         c.drops = fault == 2;
         c.duplicates = fault == 3;
         c.early_timeouts = fault == 4;
+        if (fault == 5) {  // a host that joins later, and a crash
+            c.late_hosts = 1;
+            c.crashes = 1;
+        }
         z::Model model(c);
         const auto report = paglets::verify::explore(model);
         CHECK(report.complete);

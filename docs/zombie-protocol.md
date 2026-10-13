@@ -104,6 +104,29 @@ inline constexpr std::array allowed_transitions = {
 ```
 <!-- /snippet -->
 
+## Members: replicas named by their hosts
+
+<!-- snippet: cpp/common/include/paglets/protocols/zombie/zombie.hpp#members -->
+Source: [`cpp/common/include/paglets/protocols/zombie/zombie.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/common/include/paglets/protocols/zombie/zombie.hpp)
+
+```cpp
+// A replica is named by its host: the first 8 bytes of the host's key ID
+// (replica_id()). Names are stable and the same on every replica, so a
+// group can grow while it runs: the membership is a set that only grows
+// (a union, like the journal). Beats carry it, and a message from a replica
+// not in the set adds it.
+using ReplicaId = std::uint64_t;
+```
+<!-- /snippet -->
+
+A group can grow while it runs. When a host joins the mesh, the acting main
+makes a replica there and adds it to its membership (input `AddMembers`).
+Its beats carry the membership, and a replica that gets a message from a
+replica it does not know adds that one too, so every replica learns of the
+new member. The new replica starts sleeping, with the members it was made
+with, and takes the main's checkpoint with the next beat. Membership never
+shrinks: a host that is gone stays a member, and messages to it are lost.
+
 ## Ranks: which lineage is further along
 
 <!-- snippet: cpp/common/include/paglets/protocols/zombie/zombie.hpp#rank -->
@@ -113,7 +136,7 @@ Source: [`cpp/common/include/paglets/protocols/zombie/zombie.hpp`](https://githu
 // How far a lineage got. Ranks are compared lexicographically: a finished
 // lineage beats any other, then more progress, then a later reign and
 // checkpoint, then the author with the lower host key ID (lower replica
-// number). The author is the main that made the checkpoint, so replicas
+// ID). The author is the main that made the checkpoint, so replicas
 // holding the same checkpoint have equal ranks.
 struct Rank {
     bool done = false;
@@ -202,7 +225,7 @@ The state of a zombie has two parts:
 
 | Message | From, to | Content |
 |---|---|---|
-| `beat` | main to every replica | rank of the main's checkpoint, its journal's version vector |
+| `beat` | main to every replica | rank of the main's checkpoint, its journal's version vector, its membership |
 | `ack` | replica to main | the replica's rank and version vector, when it lacks something |
 | `checkpoint` | main to a replica | the work (if the replica is behind) and the entries it lacks |
 | `entries` | replica to main | entries the main lacks |
@@ -474,6 +497,9 @@ void on(const SinkAnswer&) {
     end(Cause::delivered);
 }
 
+// A main that made replicas on new hosts tells everybody with its beats.
+void on(const AddMembers& in) { add_members(in.members); }
+
 void on(const RegistryUpdate& in) {
     s_.sink = std::max(s_.sink, in.sink);
     if (in.tomb) end(Cause::tomb);
@@ -543,7 +569,7 @@ The protocol is checked against these properties:
 | `best_progress_kept` | safety | while the group lives, some replica durably holds the best checkpoint that was ever durable |
 | `observations_kept` | safety | while the group lives, every observation that was ever durable is durable on some replica |
 | `legal_transitions` | safety | every role change is in the table |
-| `one_main` | recovery | from every reachable state, once faults stop: a single main, followed by every other replica with its checkpoint and journal (or the group ends) |
+| `one_main` | recovery | from every reachable state, once faults stop: a single main, followed by every other replica with its checkpoint, journal and membership (or the group ends) |
 | `group_ends` | recovery | from every reachable state, once faults stop: every replica ended, after a sink accepted the result (or the owner cancelled) |
 
 Safety properties hold in every reachable state, whatever the faults. A
@@ -561,11 +587,13 @@ in two ways, both built on `paglets::verify`
 - **Exhaustively**: every reachable state of a small world, with hosts that
   crash and restart (losing what was not durable), links that are cut and
   healed, lost and duplicated messages, sinks that go down, cancels and
-  redirects, and timeouts that fire too early. Faults are limited by a
+  redirects, timeouts that fire too early, and hosts that join the mesh
+  while the group runs. Faults are limited by a
   budget per world. Messages travel in one ordered channel per sender and
   receiver, as the transport's queues per peer do.
 - **Timed**: thousands of random runs with virtual clocks, the real timer
-  durations, message latency, crashes, cuts, losses and duplicates. They
+  durations, message latency, crashes, cuts, losses, duplicates, and a host
+  that joins during the run. They
   check the same properties at scale and measure how long takeovers take.
 
 ```bash

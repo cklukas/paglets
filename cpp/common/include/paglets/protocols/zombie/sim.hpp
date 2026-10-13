@@ -35,6 +35,7 @@ namespace paglets::protocols::zombie {
 
 struct SimConfig {
     std::uint32_t replicas = 3;
+    std::uint32_t late_hosts = 1;  // of these, hosts that join the mesh during the fault phase
     std::int64_t beat_ms = 2000;
     std::int64_t checkpoint_ms = 10000;
     std::int64_t suspect_ms = 10000;
@@ -79,13 +80,18 @@ public:
     Simulation(SimConfig c, std::uint64_t seed) : c_(c), rng_(seed) { run_.seed = seed; }
 
     SimRun run() {
+        const ReplicaId early = c_.replicas - std::min(c_.late_hosts, c_.replicas - 1);
+        std::vector<ReplicaId> members;
+        for (ReplicaId r = 0; r < early; ++r) members.push_back(r);
         for (ReplicaId r = 0; r < c_.replicas; ++r) {
             Host h;
-            h.state = initial(r, c_.replicas);
+            h.joined = r < early;
+            h.state = initial(r, members);
             hosts_.push_back(std::move(h));
         }
         links_.assign(c_.replicas * c_.replicas, true);
-        for (ReplicaId r = 0; r < c_.replicas; ++r) apply(r, Start{r == 0, {}});
+        for (ReplicaId r = 0; r < early; ++r) apply(r, Start{r == 0, {}});
+        for (ReplicaId r = early; r < c_.replicas; ++r) at(uniform(5'000, c_.fault_phase_ms), [this, r] { join(r); });
         at(c_.gossip_ms, [this] { gossip(); });
         for (ReplicaId r = 0; r < c_.replicas; ++r) at(c_.image_ms, [this, r] { image(r); });
         at(next_fault(), [this] { fault(); });
@@ -107,6 +113,7 @@ public:
 private:
     struct Host {
         bool up = true;
+        bool joined = true;  // false: not in the mesh yet
         State state;
         State durable;
         std::array<std::uint64_t, timer_count> timer_gen{};
@@ -137,9 +144,28 @@ private:
     std::int64_t latency() { return uniform(c_.latency_min_ms, c_.latency_max_ms); }
     bool linked(ReplicaId a, ReplicaId b) const { return links_[a * c_.replicas + b]; }
     bool all_ended() const {
-        return std::ranges::all_of(hosts_, [](const Host& h) { return h.up && h.state.role == Role::ended; });
+        return std::ranges::all_of(hosts_, [](const Host& h) { return !h.joined || (h.up && h.state.role == Role::ended); });
     }
-    bool working(const Host& h) const { return h.up && h.state.role == Role::main && !h.state.frozen; }
+    bool working(const Host& h) const { return h.joined && h.up && h.state.role == Role::main && !h.state.frozen; }
+
+    // A host joins the mesh: the acting main makes a replica there (as the
+    // SDK does) and adds it to its membership; without one, it waits.
+    void join(ReplicaId r) {
+        for (ReplicaId m = 0; m < c_.replicas; ++m) {
+            if (!working(hosts_[m])) continue;
+            note("host " + std::to_string(r) + " joins; replica made by the main on host " + std::to_string(m));
+            ++changes_;
+            Host& h = hosts_[r];
+            h.joined = true;
+            h.state = initial(r, hosts_[m].state.members);
+            h.durable = h.state;
+            apply(r, Start{false, {}});
+            apply(m, AddMembers{{r}});
+            return;
+        }
+        if (std::ranges::any_of(hosts_, [](const Host& h) { return h.joined && h.state.role != Role::ended; }))
+            at(5000, [this, r] { join(r); });
+    }
     std::uint32_t mains() const {
         std::uint32_t n = 0;
         for (const auto& h : hosts_) n += working(h);
@@ -187,7 +213,7 @@ private:
 
     void apply(ReplicaId r, const Input& in) {
         Host& h = hosts_[r];
-        if (!h.up) return;
+        if (!h.up || !h.joined) return;
         const Outputs out = step(h.state, in);
         for (const auto& o : out) {
             if (const auto* s = std::get_if<Send>(&o)) {
@@ -247,7 +273,7 @@ private:
 
     void send(ReplicaId from, ReplicaId to, const Message& m) {
         ++run_.messages;
-        if (!linked(from, to)) return;
+        if (to >= hosts_.size() || !hosts_[to].joined || !linked(from, to)) return;
         const bool faulty = now_ < c_.fault_phase_ms;
         if (faulty && chance(c_.loss)) return;
         const int copies = faulty && chance(c_.duplicate) ? 2 : 1;
@@ -308,6 +334,10 @@ private:
         ++run_.faults;
         ++changes_;
         const auto r = static_cast<ReplicaId>(uniform(0, c_.replicas - 1));
+        if (!hosts_[r].joined) {
+            at(next_fault(), [this] { fault(); });
+            return;
+        }
         if (chance(0.5)) {
             Host& h = hosts_[r];
             if (h.up) {

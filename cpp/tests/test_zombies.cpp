@@ -242,11 +242,12 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         const auto creator = start(net, a, module, '1');
         chronicle_msgs::Start s;
         s.sink = "host:c";
-        s.lifetime_ms = 16'000;
+        s.lifetime_ms = 20'000;
         s.sample_ms = 1000;
         s.beat_ms = 200;
         s.suspect_ms = 1500;
         s.round_ms = 500;
+        s.expand_ms = 1000;
         const auto started_reply = a.f->call(creator, "start", wire::to_msgpack(s));
         REQUIRE(started_reply.status == 0);
         chronicle_msgs::Started started;
@@ -271,11 +272,25 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
             if (r.status == 0) (void)wire::from_msgpack(r.payload, st);
             return st;
         };
-        // A few samples, then the main's host is cut off: b and c elect a
+        // A host joins the mesh: the main makes a replica there.
+        REQUIRE(net.settle([&] { return status_of(a).samples >= 2; }, 4000));
+        auto& d = net.add_host("d", {}, dir / "d");
+        net.admin_record("host-enroll", paglets::mesh::data::host_enroll(d.key, "d", {}));
+        fast_mesh(net, d);
+        (void)d.f->module("chronicle.wasm");
+        REQUIRE(net.settle(
+            [&] {
+                auto g = group_on(d, group);
+                return g && !g->paglet.empty();
+            },
+            6000));
+        // A few samples, then the main's host is cut off: b, c and d elect a
         // new main while a works on alone.
-        REQUIRE(net.settle([&] { return status_of(a).samples >= 3; }, 4000));
+        REQUIRE(net.settle([&] { return status_of(a).samples >= 5; }, 4000));
         a.down = true;
-        REQUIRE(net.settle([&] { return status_of(b).role == "main" || status_of(c).role == "main"; }, 4000));
+        REQUIRE(net.settle(
+            [&] { return status_of(b).role == "main" || status_of(c).role == "main" || status_of(d).role == "main"; },
+            4000));
         net.settle([] { return false; }, 1000);  // both sides work apart for a while
         // a restarts (its state is stored) and comes back into the mesh.
         net.restart(a);
@@ -316,6 +331,7 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         CHECK(log.find("is back") != std::string::npos);
         CHECK(log.find("partition: both sides had a main") != std::string::npos);
         CHECK(log.find("The work is done") != std::string::npos);
+        CHECK(log.find("**d** joined the mesh and got a replica") != std::string::npos);
         // The protocol steps of every host conform to the specification.
         std::vector<zb::TraceRecord> records;
         std::atomic<bool> collected = false;
@@ -330,7 +346,7 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         CHECK(report_.ok());
         CHECK(report_.takeovers >= 2u);
         CHECK_EQ(report_.accepted, 1u);
-        report("chronicle", "hosts with a replica", 3);
+        report("chronicle", "hosts with a replica (one joined the mesh during the run)", 4);
         report("chronicle", "takeovers recorded by the hosts", report_.takeovers);
         report("chronicle", "protocol steps checked against the specification", report_.records);
         report("chronicle", "results accepted by the sink", report_.accepted);

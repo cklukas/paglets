@@ -368,9 +368,14 @@ transport for partitions; then live machines.
   rank stays fixed while the other compares (an earlier version ran an
   election round, which the model checker showed to cause needless repeated
   elections from stale beats).
-- **Membership** is fixed when the group is created: the hosts with fresh
-  `mesh-info` snapshots, all of which must offer `zombies`. Hosts that join
-  later get no replica (planned for a later version).
+- **Membership grows.** A replica is named by its host (the first 8 bytes
+  of the host key ID), so names are stable and unique across partitions. The
+  membership is a grow-only set carried by beats; a message from an unknown
+  replica adds it. At creation every host with a fresh `mesh-info` snapshot
+  must offer `zombies`; afterwards the acting main occupies hosts that join
+  the mesh (and offer `zombies`) every `expand_ms`. Two mains of a partition
+  occupying the same host are resolved by the host's registry (one replica
+  per host). Hosts that leave stay members (messages to them are lost).
 - **The sink is a host's `zombies` system paglet** (`host:NAME`): it accepts
   the first result per group and sink number and stores it durably before it
   answers; `paglets-host remote zombies result GROUP` fetches it. Redirects

@@ -15,6 +15,12 @@ namespace z = paglets::protocols::zombie;
 
 namespace {
 
+std::vector<z::ReplicaId> ids(std::uint32_t n) {
+    std::vector<z::ReplicaId> v;
+    for (z::ReplicaId r = 0; r < n; ++r) v.push_back(r);
+    return v;
+}
+
 template <class T>
 std::vector<T> all(const z::Outputs& out) {
     std::vector<T> v;
@@ -56,7 +62,7 @@ PAGLETS_TEST("zombie: ranks order finished work first, then progress, reign, che
 }
 
 PAGLETS_TEST("zombie: a new main is durable before its first beat") {
-    auto s = z::initial(0, 3);
+    auto s = z::initial(0, ids(3));
     const auto out = z::step(s, z::Start{true, {1, 2, 3}});
     CHECK(s.role == z::Role::main);
     CHECK_EQ(s.reign, 1u);
@@ -70,7 +76,7 @@ PAGLETS_TEST("zombie: a new main is durable before its first beat") {
 }
 
 PAGLETS_TEST("zombie: replicas take the main's checkpoint and journal, and hand over their own entries") {
-    std::vector<z::State> g = {z::initial(0, 2), z::initial(1, 2)};
+    std::vector<z::State> g = {z::initial(0, ids(2)), z::initial(1, ids(2))};
     route(g, 0, z::step(g[0], z::Start{true, {7}}));
     z::step(g[1], z::Start{false, {}});
     // The main works, observes and checkpoints.
@@ -89,7 +95,7 @@ PAGLETS_TEST("zombie: replicas take the main's checkpoint and journal, and hand 
 }
 
 PAGLETS_TEST("zombie: a replica that hears nobody becomes main with its checkpoint") {
-    auto s = z::initial(2, 3);
+    auto s = z::initial(2, ids(3));
     z::step(s, z::Start{false, {}});
     s.rank = z::Rank{false, 4, 1, 2, 0};
     s.work = {4};
@@ -107,7 +113,7 @@ PAGLETS_TEST("zombie: a replica that hears nobody becomes main with its checkpoi
 }
 
 PAGLETS_TEST("zombie: the main behind steps down when two mains meet") {
-    std::vector<z::State> g = {z::initial(0, 2), z::initial(1, 2)};
+    std::vector<z::State> g = {z::initial(0, ids(2)), z::initial(1, ids(2))};
     z::step(g[0], z::Start{true, {}});
     // Replica 1 ran alone during a partition and got further.
     z::step(g[1], z::Start{false, {}});
@@ -125,8 +131,33 @@ PAGLETS_TEST("zombie: the main behind steps down when two mains meet") {
     CHECK_EQ(g[0].rank.progress, 9);  // took the winner's checkpoint
 }
 
+PAGLETS_TEST("zombie: a replica made on a host that joined later becomes a member everywhere") {
+    // Replicas 0 and 1 run; replica 2 is made later by the main (0).
+    std::vector<z::State> g = {z::initial(0, ids(2)), z::initial(1, ids(2)), z::initial(2, ids(2))};
+    z::step(g[1], z::Start{false, {}});
+    route(g, 0, z::step(g[0], z::Start{true, {5}}));
+    CHECK(g[0].members == ids(2));
+    z::step(g[2], z::Start{false, {}});
+    CHECK(g[2].members == ids(3));  // it knows the members it was made with, and itself
+    z::step(g[0], z::AddMembers{{2}});
+    CHECK(g[0].members == ids(3));
+    // The next beat reaches the new replica, which takes the checkpoint,
+    // and tells replica 1 about it.
+    route(g, 0, z::step(g[0], z::Fired{z::Timer::beat}));
+    CHECK(g[1].members == ids(3));
+    CHECK(g[2].role == z::Role::sleeping);
+    CHECK_EQ(g[2].leader, 0u);
+    CHECK(g[2].work == z::Bytes{5});
+    // A message from a replica that is not a member yet adds it.
+    auto r = z::initial(7, ids(2));
+    z::step(r, z::Received{9, z::StatusReq{1}});
+    CHECK(std::ranges::find(r.members, z::ReplicaId{9}) != r.members.end());
+    CHECK_EQ(z::replica_id("00000000000000ff11"), 255u);
+    CHECK_EQ(z::replica_id("xyz"), 0u);
+}
+
 PAGLETS_TEST("zombie: the sink's answer ends the group, a tombstone ends the others") {
-    auto s = z::initial(0, 2);
+    auto s = z::initial(0, ids(2));
     z::step(s, z::Start{true, {}});
     auto out = z::step(s, z::Worked{1, true, {1}});
     CHECK(s.role == z::Role::delivering);
@@ -137,7 +168,7 @@ PAGLETS_TEST("zombie: the sink's answer ends the group, a tombstone ends the oth
     CHECK_EQ(all<z::End>(out).size(), 1u);
     CHECK(z::step(s, z::Fired{z::Timer::beat}).empty());
 
-    auto r = z::initial(1, 2);
+    auto r = z::initial(1, ids(2));
     z::step(r, z::Start{false, {}});
     out = z::step(r, z::RegistryUpdate{true, 1});
     CHECK(r.role == z::Role::ended);
@@ -145,7 +176,7 @@ PAGLETS_TEST("zombie: the sink's answer ends the group, a tombstone ends the oth
 }
 
 PAGLETS_TEST("zombie: a restart raises the incarnation durably and listens first") {
-    auto s = z::initial(0, 2);
+    auto s = z::initial(0, ids(2));
     z::step(s, z::Start{true, {}});
     z::step(s, z::Observed{{'x'}});
     const auto out = z::step(s, z::Recovered{});
@@ -158,7 +189,7 @@ PAGLETS_TEST("zombie: a restart raises the incarnation durably and listens first
 }
 
 PAGLETS_TEST("zombie: states and messages survive their encoding") {
-    std::vector<z::State> g = {z::initial(0, 3), z::initial(1, 3), z::initial(2, 3)};
+    std::vector<z::State> g = {z::initial(0, ids(3)), z::initial(1, ids(3)), z::initial(2, ids(3))};
     route(g, 0, z::step(g[0], z::Start{true, {1, 2}}));
     z::step(g[0], z::Observed{{'o'}});
     z::step(g[2], z::Fired{z::Timer::suspect});
@@ -171,7 +202,7 @@ PAGLETS_TEST("zombie: states and messages survive their encoding") {
         CHECK(back == s);
     }
     const std::vector<z::Message> messages = {
-        z::Beat{3, z::Rank{false, 2, 3, 1, 0}, {{0, 0, 2}}},
+        z::Beat{3, z::Rank{false, 2, 3, 1, 0}, {{0, 0, 2}}, {0, 1, 0x1234567890abcdefull}},
         z::Ack{3, z::Rank{}, {}},
         z::CheckpointMsg{3, z::Rank{true, 1, 3, 4, 2}, z::Bytes{1, 2}, {z::Entry{{0, 1, 1}, {'e'}}}},
         z::Entries{0, {z::Entry{{1, 0, 2}, {}}}},

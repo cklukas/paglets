@@ -33,6 +33,9 @@ namespace paglets::protocols::zombie {
 
 struct ModelConfig {
     std::uint32_t replicas = 3;
+    // Of these, hosts that join the mesh while the group runs: the acting
+    // main makes a replica there and adds it to the membership.
+    std::uint32_t late_hosts = 0;
     std::int64_t work = 1;              // progress steps until the work is done
     std::uint32_t observations = 1;     // entries the mains may observe in total
     std::uint32_t crashes = 1;
@@ -66,6 +69,7 @@ public:
         zombie::State durable;
         std::uint8_t tomb = 0;  // 0 none, 1 delivered, 2 cancelled
         std::uint64_t sink = 1;
+        bool joined = true;  // false: the host is not in the mesh yet
     };
     struct Sink {
         bool up = true;
@@ -99,13 +103,18 @@ public:
 
     State initial() const {
         State w;
+        const ReplicaId early = c_.replicas - std::min(c_.late_hosts, c_.replicas - 1);
+        std::vector<ReplicaId> members;
+        for (ReplicaId r = 0; r < early; ++r) members.push_back(r);
         for (ReplicaId r = 0; r < c_.replicas; ++r) {
             Host h;
-            h.replica = zombie::initial(r, c_.replicas);
+            h.joined = r < early;
+            h.replica = zombie::initial(r, members);
+            h.durable = h.replica;
             w.hosts.push_back(std::move(h));
         }
         w.sinks.resize(1 + c_.redirects);
-        for (ReplicaId r = 0; r < c_.replicas; ++r) apply(w, r, Start{r == 0, {0}});
+        for (ReplicaId r = 0; r < early; ++r) apply(w, r, Start{r == 0, {0}});
         return w;
     }
 
@@ -113,6 +122,22 @@ public:
         const auto n = c_.replicas;
         for (ReplicaId r = 0; r < n; ++r) {
             const Host& h = w.hosts[r];
+            if (!h.joined) {
+                // The host joins the mesh: an acting main clones itself there
+                // and adds the new replica to its membership.
+                for (ReplicaId m = 0; m < n; ++m) {
+                    const auto& mh = w.hosts[m];
+                    if (!mh.joined || !mh.up || mh.replica.role != Role::main || mh.replica.frozen) continue;
+                    State x = w;
+                    x.hosts[r].joined = true;
+                    x.hosts[r].replica = zombie::initial(r, mh.replica.members);
+                    x.hosts[r].durable = x.hosts[r].replica;
+                    apply(x, r, Start{false, {}});
+                    apply(x, m, AddMembers{{r}});
+                    emit(std::move(x), {"join", int(r), int(m)}, false);
+                }
+                continue;
+            }
             if (!h.up) {
                 State x = w;
                 x.hosts[r].up = true;
@@ -178,6 +203,7 @@ public:
         }
         for (ReplicaId a = 0; a < n; ++a) {
             for (ReplicaId b = a + 1; b < n; ++b) {
+                if (!w.hosts[a].joined || !w.hosts[b].joined) continue;
                 if (!linked(w, a, b)) {
                     State x = w;
                     x.links &= ~bit(a, b);
@@ -238,7 +264,8 @@ public:
         msgpack::Writer out;
         out.write_array_header(static_cast<std::uint32_t>(w.hosts.size()));
         for (const auto& h : w.hosts) {
-            out.write_array_header(5);
+            out.write_array_header(6);
+            out.write_bool(h.joined);
             out.write_bool(h.up);
             paglets_encode(out, h.replica);
             paglets_encode(out, h.durable);
@@ -277,6 +304,7 @@ public:
         for (auto& h : w.hosts) {
             std::uint32_t k = 0;
             (void)in.read_array_header(k);
+            (void)msgpack::read_value(in, h.joined);
             (void)msgpack::read_value(in, h.up);
             (void)paglets_decode(in, h.replica);
             (void)paglets_decode(in, h.durable);
@@ -320,6 +348,7 @@ public:
         std::ostringstream os;
         os << l.what;
         if (l.a >= 0) os << ' ' << (std::string_view(l.what).starts_with("sink") ? "" : "host ") << l.a;
+        if (std::string_view(l.what) == "join") return os.str() + " (replica made by the main on host " + std::to_string(l.b) + ")";
         if (std::string_view(l.what).ends_with("timer")) {
             os << ' ' << to_string(static_cast<Timer>(l.b));
         } else if (l.b >= 0) {
@@ -370,10 +399,11 @@ public:
              "a single main that every other replica follows, with its checkpoint and journal (or the group ends)",
              [](const State& w) {
                  for (const auto& h : w.hosts) {
-                     if (h.replica.role == Role::ended) return true;
+                     if (h.joined && h.replica.role == Role::ended) return true;
                  }
                  std::int32_t main = -1;
                  for (const auto& h : w.hosts) {
+                     if (!h.joined) continue;
                      if (!h.up) return false;
                      if (h.replica.role == Role::main || h.replica.role == Role::delivering) {
                          if (main >= 0) return false;
@@ -384,7 +414,8 @@ public:
                  const auto& m = w.hosts[main].replica;
                  for (const auto& h : w.hosts) {
                      const auto& s = h.replica;
-                     if (s.self == m.self) continue;
+                     if (!h.joined || s.self == m.self) continue;
+                     if (s.members != m.members) return false;
                      if (s.role != Role::sleeping || s.leader != m.self || !(s.rank == m.rank) ||
                          !(s.journal == m.journal))
                          return false;
@@ -396,6 +427,7 @@ public:
                  bool result = false;
                  for (const auto& s : w.sinks) result |= s.accepted >= 0;
                  for (const auto& h : w.hosts) {
+                     if (!h.joined) continue;
                      if (!h.up || h.replica.role != Role::ended) return false;
                      result |= h.tomb == 2;
                  }
@@ -525,7 +557,7 @@ private:
 
     bool deliverable(const State& w, const Packet& p) const {
         switch (p.kind) {
-            case 0: return w.hosts[p.to].up && linked(w, p.from, p.to);
+            case 0: return w.hosts[p.to].joined && w.hosts[p.to].up && linked(w, p.from, p.to);
             case 1: return w.sinks[p.sink - 1].up;
             default: return w.hosts[p.to].up;
         }
@@ -583,7 +615,9 @@ private:
         const Outputs out = step(h.replica, input);
         for (const auto& o : out) {
             if (const auto* send = std::get_if<Send>(&o)) {
-                if (w.hosts[send->to].up && linked(w, r, send->to)) put(w, Packet{0, r, send->to, send->message});
+                if (send->to < w.hosts.size() && w.hosts[send->to].joined && w.hosts[send->to].up &&
+                    linked(w, r, send->to))
+                    put(w, Packet{0, r, send->to, send->message});
             } else if (std::holds_alternative<Persist>(o) || std::holds_alternative<End>(o)) {
                 h.durable = h.replica;
             } else if (const auto* d = std::get_if<Deliver>(&o)) {

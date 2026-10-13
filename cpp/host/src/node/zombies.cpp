@@ -40,7 +40,7 @@ bool valid_group(std::string_view g) {
 // A replica as hosts tell each other ("zb-members").
 struct Member {
     std::string group;
-    std::uint32_t replica = 0;
+    std::uint64_t replica = 0;
     std::string paglet;
     std::string host;
 };
@@ -525,6 +525,7 @@ public:
             if (m.second != here) c.host = m.second;  // where it is
             op.give.push_back(std::move(c));
             out.replicas.push_back(n);
+            out.hosts.push_back(m.second);
         }
         return out;
     }

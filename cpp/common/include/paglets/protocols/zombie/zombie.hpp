@@ -37,9 +37,14 @@ namespace paglets::protocols::zombie {
 
 using Bytes = std::vector<std::uint8_t>;
 
-// Replicas are numbered by the group's membership, ordered by host key ID:
-// replica 0 is on the host with the lowest key ID.
-using ReplicaId = std::uint32_t;
+// --8<-- [start:members]
+// A replica is named by its host: the first 8 bytes of the host's key ID
+// (replica_id()). Names are stable and the same on every replica, so a
+// group can grow while it runs: the membership is a set that only grows
+// (a union, like the journal). Beats carry it, and a message from a replica
+// not in the set adds it.
+using ReplicaId = std::uint64_t;
+// --8<-- [end:members]
 
 // --8<-- [start:roles]
 enum class Role : std::uint8_t {
@@ -85,7 +90,7 @@ inline std::string_view to_string(Cause c);
 // How far a lineage got. Ranks are compared lexicographically: a finished
 // lineage beats any other, then more progress, then a later reign and
 // checkpoint, then the author with the lower host key ID (lower replica
-// number). The author is the main that made the checkpoint, so replicas
+// ID). The author is the main that made the checkpoint, so replicas
 // holding the same checkpoint have equal ranks.
 struct Rank {
     bool done = false;
@@ -156,6 +161,7 @@ struct Beat {  // main and delivering -> everybody
     std::uint64_t term = 0;
     Rank rank;  // of the main's latest checkpoint
     VersionVector vv;
+    std::vector<ReplicaId> members;  // the main's membership
     friend bool operator==(const Beat&, const Beat&) = default;
 };
 struct Ack {  // a replica -> the main whose beat it answers
@@ -225,7 +231,10 @@ struct RegistryUpdate {  // the host's registry knows more
     bool tomb = false;
     std::uint64_t sink = 1;
 };
-using Input = std::variant<Start, Recovered, Fired, Received, Worked, Observed, SinkAnswer, RegistryUpdate>;
+struct AddMembers {  // replicas made on hosts that joined the mesh
+    std::vector<ReplicaId> members;
+};
+using Input = std::variant<Start, Recovered, Fired, Received, Worked, Observed, SinkAnswer, RegistryUpdate, AddMembers>;
 
 struct Send {
     ReplicaId to = 0;
@@ -260,7 +269,7 @@ using Outputs = std::vector<Output>;
 
 struct State {
     ReplicaId self = 0;
-    std::uint32_t replicas = 1;
+    std::vector<ReplicaId> members;  // sorted, with self; only grows
 
     Role role = Role::sleeping;
     std::uint32_t incarnation = 0;
@@ -290,8 +299,11 @@ struct State {
     friend bool operator==(const State&, const State&) = default;
 };
 
-// A new replica, before its Start input.
-inline State initial(ReplicaId self, std::uint32_t replicas);
+// A new replica, before its Start input; `members` as far as it knows.
+inline State initial(ReplicaId self, std::vector<ReplicaId> members);
+// The replica ID of a host: the first 16 hex digits of its key ID (0 if
+// that is not hex).
+inline ReplicaId replica_id(std::string_view host_key_id);
 
 // --8<-- [start:transitions]
 // Every role change the protocol makes (from, cause, to). step() makes no

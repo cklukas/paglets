@@ -11,7 +11,7 @@
 //   --suite quick|full     a set of worlds (quick: the ctest, full: the documentation)
 //   world options          --replicas N --work N --observations N --crashes N --cuts N
 //                          --drops N --duplicates N --sink-downs N --cancels N
-//                          --redirects N --early-timeouts N --in-flight N --max-states N
+//                          --redirects N --early-timeouts N --late-hosts N --in-flight N --max-states N
 //   --simulate             timed random runs (with --suite: after the worlds)
 //   --seeds N              runs of the simulation (default 1000)
 //   --trace SEED           one simulated run, with its role changes and faults
@@ -45,7 +45,8 @@ struct World {
 
 std::string describe(const zombie::ModelConfig& c) {
     std::ostringstream os;
-    os << c.replicas << " replicas, work " << c.work << ", " << c.observations << " observation(s); faults: " << c.crashes
+    os << c.replicas << " replicas" << (c.late_hosts ? " (" + std::to_string(c.late_hosts) + " joining later)" : "")
+       << ", work " << c.work << ", " << c.observations << " observation(s); faults: " << c.crashes
        << " crash, " << c.cuts << " cut, " << c.drops << " loss, " << c.duplicates << " duplicate, " << c.sink_downs
        << " sink down, " << c.cancels << " cancel, " << c.redirects << " redirect, " << c.early_timeouts << " early timeout; " << c.in_flight
        << " messages in flight per channel";
@@ -77,6 +78,12 @@ std::vector<World> suite(const std::string& name) {
                 c.early_timeouts = fault == 4;
             });
         }
+        add("two replicas, one joining later: crash", [&](auto& c) {
+            none(c);
+            c.replicas = 2;
+            c.late_hosts = 1;
+            c.crashes = 1;
+        });
         return worlds;
     }
     if (name == "full") {
@@ -97,6 +104,14 @@ std::vector<World> suite(const std::string& name) {
         two("sink down, redirect", [](auto& c) {
             c.sink_downs = 1;
             c.redirects = 1;
+        });
+        two("one joining later: crash, cut", [](auto& c) {
+            c.late_hosts = 1;
+            c.crashes = c.cuts = 1;
+        });
+        two("one joining later: crash, early timeout", [](auto& c) {
+            c.late_hosts = 1;
+            c.crashes = c.early_timeouts = 1;
         });
         // Three replicas: every state within a bounded number of steps
         // (safety only; the complete graph is too large).
@@ -254,6 +269,8 @@ int main(int argc, char** argv) {
             ok = number(c.cancels);
         } else if (a == "--redirects") {
             ok = number(c.redirects);
+        } else if (a == "--late-hosts") {
+            ok = number(c.late_hosts);
         } else if (a == "--early-timeouts") {
             ok = number(c.early_timeouts);
         } else if (a == "--in-flight") {

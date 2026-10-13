@@ -22,6 +22,7 @@ struct Start {
     std::int64_t beat_ms = 0;
     std::int64_t suspect_ms = 0;
     std::int64_t round_ms = 0;
+    std::int64_t expand_ms = 0;  // how often the main looks for hosts without a replica
 };
 
 struct Started {
@@ -45,7 +46,7 @@ struct Work {
 // One entry of the journal: something the main observed.
 struct Event {
     std::int64_t time_ms = 0;
-    std::string kind;   // begin, host_up, host_down, link_down, link_up, takeover, end
+    std::string kind;   // begin, joined, host_up, host_down, link_down, link_up, takeover, end
     std::string host;   // key ID: the host it is about (takeover: the new main's host)
     std::string other;  // links: the other end; hosts: the main that saw it
     std::string text;   // details: a failure, the cause of a takeover
@@ -58,8 +59,8 @@ struct StatusRequest {};
 struct Status {
     std::string group;
     std::string role;   // of this replica
-    std::uint32_t replica = 0;
-    std::uint32_t replicas = 0;
+    std::string replica;  // this replica's host (key ID)
+    std::uint32_t replicas = 0;  // replicas it knows of
     std::string main;   // host name of the main this replica follows (itself if main)
     std::int64_t samples = 0;
     std::int64_t started_ms = 0;

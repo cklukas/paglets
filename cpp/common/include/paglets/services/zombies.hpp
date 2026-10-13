@@ -53,7 +53,7 @@ struct GroupState {
 struct JoinRequest {
     std::string group;      // 32 lowercase hex digits
     std::string sink_spec;  // the sink, if this host does not know the group yet
-    std::uint32_t replica = 0;  // its number in the group
+    std::uint64_t replica = 0;  // its ID in the group (from its host's key ID)
 };
 
 struct PeersRequest {
@@ -61,7 +61,8 @@ struct PeersRequest {
 };
 
 struct Peers {
-    std::vector<std::uint32_t> replicas;  // one per capability of the reply
+    std::vector<std::uint64_t> replicas;  // one per capability of the reply
+    std::vector<std::string> hosts;       // the host of each (key ID)
 };
 
 struct JoinReply {
@@ -75,7 +76,7 @@ struct TraceRecord {
     std::string host;    // key ID (set by the host that records it)
     std::string paglet;  // the replica (set by the host)
     std::int64_t time_ms = 0;
-    std::uint32_t replica = 0;      // its number in the group
+    std::uint64_t replica = 0;      // its ID in the group
     std::uint32_t incarnation = 0;  // raised by every restart
     std::uint64_t seq = 0;          // counts the replica's records within an incarnation
     std::string event;              // transition, accepted, already
@@ -86,7 +87,7 @@ struct TraceRecord {
     std::int64_t progress = 0;
     std::uint64_t term = 0;
     std::uint64_t ckpt = 0;  // checkpoint number within the reign
-    std::uint32_t author = 0;
+    std::uint64_t author = 0;
     std::int64_t sink = 0;  // accepted, already: the sink's number
 };
 

@@ -2,7 +2,7 @@
 
 The Mesh Chronicle is a zombie paglet: it keeps running as long as one
 host of its mesh is alive. It writes the life log of its mesh: which hosts
-disappeared and came back, which connections between hosts were lost and
+joined the mesh, which disappeared and came back, which connections between hosts were lost and
 restored, when the mesh was split into partitions, and how the chronicle
 itself survived, with every takeover. When its lifetime is over, it
 delivers the life log as Markdown to a sink and ends on every host.
@@ -160,9 +160,10 @@ host down for a while. The life log it delivered is in
 
 ## Test results
 
-The test runs three hosts in one process. It cuts the main's host off,
+The test runs three hosts in one process and adds a fourth while the
+chronicle runs, which gets a replica. It cuts the main's host off,
 lets both sides elect and work, restarts the cut-off host, and waits for
-the life log. The life log must show the takeovers, the host that
+the life log. The life log must show the new host, the takeovers, the host that
 disappeared and came back, and the partition with a main on both sides.
 The protocol steps that all hosts recorded must conform to the
 specification. Its name is
@@ -170,8 +171,8 @@ specification. Its name is
 in `cpp/tests/test_zombies.cpp`.
 
 <!-- results: chronicle -->
-| Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica | takeovers recorded by the hosts | protocol steps checked against the specification | results accepted by the sink | size of the life log (bytes) |
+| Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica (one joined the mesh during the run) | takeovers recorded by the hosts | protocol steps checked against the specification | results accepted by the sink | size of the life log (bytes) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| example: the Mesh Chronicle outlives a partition and a restart of its main's host | in-process | passed | 16.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 3 | 5 | 12 | 1 | 2173 |
-| example: the Mesh Chronicle outlives a partition and a restart of its main's host | worker processes | passed | 16.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 3 | 5 | 12 | 1 | 2227 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | in-process | passed | 21.0 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 4 | 4 | 13 | 1 | 2480 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | worker processes | passed | 21.6 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 4 | 4 | 13 | 1 | 2390 |
 <!-- /results -->
