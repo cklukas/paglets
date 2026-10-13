@@ -330,7 +330,6 @@ inline constexpr std::array allowed_transitions = {
     Allowed{Role::recovering, Cause::delivered, Role::ended},
     Allowed{Role::sleeping, Cause::delivered, Role::ended},
     Allowed{Role::candidate, Cause::delivered, Role::ended},
-    Allowed{Role::main, Cause::delivered, Role::ended},
     Allowed{Role::delivering, Cause::delivered, Role::ended},
     Allowed{Role::recovering, Cause::tomb, Role::ended},
     Allowed{Role::sleeping, Cause::tomb, Role::ended},
