@@ -145,17 +145,18 @@ $H remote zombies check GROUP $R
 
 ## A life log from three hosts
 
-`cpp/tools/chronicle_live.sh` runs the chronicle for 10 minutes on this
-Mac and two Linux hosts (a Raspberry Pi 4 and a uConsole, both arm64). While
-it runs, it freezes the host of the main for 90 seconds (cut off, its main
-keeps working alone), crashes hosts and restarts them, and shuts the sink's
-host down for a while. The life log it delivered is in
+`cpp/tools/chronicle_live.sh --late uconsole` runs the chronicle for 10
+minutes on this Mac and two Linux hosts (a Raspberry Pi 4 and a uConsole,
+both arm64). The uConsole joins the mesh a minute after the start and gets a
+replica. While the chronicle runs, the script freezes the host of the main
+for 90 seconds (cut off, its main keeps working alone), crashes hosts and
+restarts them, and shuts the sink's host down for a while. The life log it delivered is in
 [A life log of three hosts](mesh-chronicle-log.md).
 
 <!-- results: live_chronicle -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica | lifetime (min) | takeovers in the life log | partitions with a main on both sides | protocol steps checked against the specification | replicas left after the end |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Mesh Chronicle, 10 minutes with freezes, crashes and restarts | LAN, worker processes | passed | 10 min 14 s | macOS arm64, 2 × Linux arm64, Release build | 2026-10-13 | 3 | 10 | 2 | 1 | 20 | 0 |
+| Mesh Chronicle, 10 minutes with a host joining, freezes, crashes and restarts | LAN, worker processes | passed | 10 min 13 s | macOS arm64, 2 × Linux arm64, Release build | 2026-10-13 | 3 | 10 | 2 | 1 | 20 | 0 |
 <!-- /results -->
 
 ## Test results

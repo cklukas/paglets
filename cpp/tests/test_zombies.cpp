@@ -332,6 +332,7 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         CHECK(log.find("partition: both sides had a main") != std::string::npos);
         CHECK(log.find("The work is done") != std::string::npos);
         CHECK(log.find("**d** joined the mesh and got a replica") != std::string::npos);
+        CHECK(log.find("joined the mesh") == log.rfind("joined the mesh"));  // once
         // The protocol steps of every host conform to the specification.
         std::vector<zb::TraceRecord> records;
         std::atomic<bool> collected = false;

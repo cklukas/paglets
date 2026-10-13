@@ -23,7 +23,10 @@
 #   cpp/tools/chronicle_live.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       [--local-name mac] [--build cpp/build/macos-arm64] [--port 7443] [--lifetime-min 10]
-#       [--no-failures] [--keep]
+#       [--no-failures] [--keep] [--late NAME]
+#
+# --late NAME: that host joins the mesh only after a minute (its host process
+# starts then); the chronicle's main makes a replica there.
 
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -33,6 +36,7 @@ port=7443
 lifetime_min=10
 failures=true
 keep=false
+late=""
 names=()
 declare -A ssh_of bin_of ip_of key_of pid_of
 while [ $# -gt 0 ]; do
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
         --lifetime-min) lifetime_min="$2"; shift 2 ;;
         --no-failures) failures=false; shift ;;
         --keep) keep=true; shift ;;
+        --late) late="$2"; shift 2 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -127,13 +132,13 @@ signal() {  # host signal (the pattern is expanded on the host: $HOME)
     on "$1" "pkill -$2 -f \"paglets-host serve --key $(dir_of "$1")/host.key\"" || true
 }
 stop_host() { on "$1" "touch $(dir_of "$1")/stop"; }
-for h in "${all[@]}"; do serve "$h"; done
+for h in "${all[@]}"; do [ "$h" = "$late" ] || serve "$h"; done
 
 R_of() { echo "--connect https://${ip_of[$1]}:$port --key $work/olga.key --ledger $work/ledger --passphrase-file $work/pass"; }
 landscape_ok() {
     local l
     l="$("$H" remote landscape $(R_of "$local_name") 2>/dev/null)" || return 1
-    for h in "${names[@]}"; do grep -qw "$h" <<<"$l" || return 1; done
+    for h in "${names[@]}"; do [ "$h" = "$late" ] || grep -qw "$h" <<<"$l" || return 1; done
 }
 for _ in $(seq 180); do landscape_ok && break; sleep 1; done
 landscape_ok || { echo "the hosts do not see each other" >&2; exit 1; }
@@ -174,9 +179,14 @@ other_than() {  # a host other than the given ones, not the sink's
 events="[]"
 event() { events="$(jq -c --arg t "$(( $(date +%s) - began ))" --arg w "$1" '. + [{at_s: ($t|tonumber), what: $w}]' <<<"$events")"; say "$1"; }
 
-L=$((lifetime_min * 60))
+LT=$((lifetime_min * 60))
+if [ -n "$late" ]; then
+    at $((LT * 10 / 100))
+    event "$late joins the mesh (its host starts)"
+    serve "$late"
+fi
 $failures && {
-at $((L * 15 / 100))
+at $((LT * 15 / 100))
 m="$(main_host)"
 if [ -n "$m" ] && [ "$m" != "$local_name" ]; then
     event "the host of the main ($m) freezes (SIGSTOP): cut off, its main keeps its state"
@@ -186,10 +196,10 @@ else
 fi
 signal "$m" STOP
 frozen="$m"
-at $((L * 30 / 100))
+at $((LT * 30 / 100))
 event "$frozen thaws (SIGCONT): two mains meet"
 signal "$frozen" CONT
-at $((L * 45 / 100))
+at $((LT * 45 / 100))
 m="$(main_host)"
 if [ -n "$m" ] && [ "$m" != "$local_name" ]; then
     event "the host of the main ($m) crashes (SIGKILL)"
@@ -199,20 +209,20 @@ else  # the main is on this machine (or unknown): another host crashes
 fi
 signal "$m" KILL
 crashed="$m"
-at $((L * 60 / 100))
+at $((LT * 60 / 100))
 event "$crashed restarts with its state"
 serve "$crashed"
-at $((L * 70 / 100))
+at $((LT * 70 / 100))
 second="$(other_than "$crashed")"
-event "$second crashes (SIGKILL) and stays down for $((L * 15 / 100)) s"
+event "$second crashes (SIGKILL) and stays down for $((LT * 15 / 100)) s"
 signal "$second" KILL
-at $((L * 85 / 100))
+at $((LT * 85 / 100))
 event "$second restarts with its state"
 serve "$second"
-at $((L * 875 / 1000))
+at $((LT * 875 / 1000))
 event "the sink's host ($local_name) shuts down normally"
 stop_host "$local_name"
-at $((L * 925 / 1000))
+at $((LT * 925 / 1000))
 event "$local_name restarts with its state"
 serve "$local_name"
 }
@@ -250,7 +260,7 @@ out="$repo/docs/examples/mesh-chronicle-log.md"
     echo
     echo "The [Mesh Chronicle](mesh-chronicle.md) on this machine (mac) and two"
     echo "Raspberry Pi class Linux hosts (pi, uconsole), with failures on schedule"
-    echo "(\`cpp/tools/chronicle_live.sh\`). This is the life log it delivered, as it is."
+    echo "(\`cpp/tools/chronicle_live.sh${late:+ --late $late}\`). This is the life log it delivered, as it is."
     echo
     echo "What happened to the hosts (seconds after the start):"
     echo
@@ -274,7 +284,8 @@ values="$(jq -nc --arg hosts "${#all[@]}" --arg tk "$takeovers" --arg pt "${part
       {name: "protocol steps checked against the specification", value: $rec, unit: ""},
       {name: "replicas left after the end", value: $rem, unit: ""}]')"
 jq -nc --arg outcome "$outcome" --argjson seconds $((ended - began)) --arg date "$(date +%Y-%m-%d)" --argjson values "$values" \
-    '{topic: "live_chronicle", tests: [{test: "Mesh Chronicle, 10 minutes with freezes, crashes and restarts",
+    --arg name "Mesh Chronicle, $lifetime_min minutes with ${late:+a host joining, }freezes, crashes and restarts" \
+    '{topic: "live_chronicle", tests: [{test: $name,
       mode: "LAN, worker processes", outcome: $outcome, seconds: $seconds, platform: "macOS arm64, 2 × Linux arm64",
       build: "Release", date: $date, values: $values}]}' > "$repo/docs/results/live_chronicle.json"
 "$build/tools/docs_sync/paglets-docs-sync" --root "$repo"

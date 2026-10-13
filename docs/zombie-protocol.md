@@ -610,17 +610,19 @@ every build; `cpp/tools/update_results.sh` records the larger runs below.
 <!-- results: zombie_protocol -->
 | Test | Mode | Outcome | Duration | Platform | Recorded |
 |---|---|---|---|---|---|
-| zombie protocol, exhaustive: three replicas: crash, cut | model checker, bounded | passed | 3 min 31 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: three replicas: two crashes | model checker, bounded | passed | 1 min 52 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, cancel | model checker | passed | 1 min 10 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, cut | model checker | passed | 4 min 15 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, duplicate | model checker | passed | 2 min 55 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, early timeout | model checker | passed | 2 min 10 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, loss | model checker | passed | 2 min 24 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: cut, loss, early timeout | model checker | passed | 1 min 24 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: sink down, redirect | model checker | passed | 6.7 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: two crashes | model checker | passed | 6 min 17 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol: 10000 timed random runs with faults | simulation | passed | 1 min 20 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: three replicas: crash, cut | model checker, bounded | passed | 1 min 19 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: three replicas: two crashes | model checker, bounded | passed | 40.7 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: crash, cancel | model checker | passed | 54.9 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: crash, cut | model checker | passed | 9 min 25 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: crash, duplicate | model checker | passed | 3 min 25 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: crash, early timeout | model checker | passed | 5 min 08 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: crash, loss | model checker | passed | 3 min 02 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: cut, loss, early timeout | model checker | passed | 1 min 25 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: one joining later: crash, cut | model checker | passed | 3 min 35 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: one joining later: crash, early timeout | model checker | passed | 1 min 42 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: sink down, redirect | model checker | passed | 5.0 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: two replicas: two crashes | model checker | passed | 8 min 39 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol: 10000 timed random runs with faults | simulation | passed | 27.9 s | Darwin arm64, Release build | 2026-10-13 |
 
 zombie protocol, exhaustive: three replicas: crash, cut:
 
@@ -694,6 +696,24 @@ zombie protocol, exhaustive: two replicas: cut, loss, early timeout:
 | longest shortest path | 41 steps |
 | properties | 6 |
 
+zombie protocol, exhaustive: two replicas: one joining later: crash, cut:
+
+| Measured | model checker |
+|---|---|
+| reachable states | 13205168 |
+| steps | 51296859 |
+| longest shortest path | 49 steps |
+| properties | 6 |
+
+zombie protocol, exhaustive: two replicas: one joining later: crash, early timeout:
+
+| Measured | model checker |
+|---|---|
+| reachable states | 8051595 |
+| steps | 31115057 |
+| longest shortest path | 49 steps |
+| properties | 6 |
+
 zombie protocol, exhaustive: two replicas: sink down, redirect:
 
 | Measured | model checker |
@@ -717,10 +737,10 @@ zombie protocol: 10000 timed random runs with faults:
 | Measured | simulation |
 |---|---|
 | runs | 10000 |
-| faults (crashes, cuts) | 120482 |
-| takeovers after a main crashed | 3795 |
-| longest takeover | 19.5 s |
-| time with two working mains | 222525.9 s |
+| faults (crashes, cuts) | 119289 |
+| takeovers after a main crashed | 3370 |
+| longest takeover | 18.9 s |
+| time with two working mains | 213901.2 s |
 | failed runs | 0 |
 <!-- /results -->
 

@@ -2,11 +2,12 @@
 
 The [Mesh Chronicle](mesh-chronicle.md) on this machine (mac) and two
 Raspberry Pi class Linux hosts (pi, uconsole), with failures on schedule
-(`cpp/tools/chronicle_live.sh`). This is the life log it delivered, as it is.
+(`cpp/tools/chronicle_live.sh --late uconsole`). This is the life log it delivered, as it is.
 
 What happened to the hosts (seconds after the start):
 
-- 91 s: the host of the main (pi) freezes (SIGSTOP): cut off, its main keeps its state
+- 60 s: uconsole joins the mesh (its host starts)
+- 92 s: the host of the main (pi) freezes (SIGSTOP): cut off, its main keeps its state
 - 180 s: pi thaws (SIGCONT): two mains meet
 - 271 s: pi crashes (SIGKILL)
 - 360 s: pi restarts with its state
@@ -17,75 +18,83 @@ What happened to the hosts (seconds after the start):
 
 ## The life log
 
-Written by the Mesh Chronicle, zombie group `9b9e3941061a0354a7d3af4487481e23`.
+Written by the Mesh Chronicle, zombie group `cd8f9f3d13f598c658b4bcda95c39257`.
 
 | | |
 |---|---|
-| Began | 2026-10-13 13:13:28 UTC |
-| Ended | 2026-10-13 13:23:38 UTC |
+| Began | 2026-10-13 17:14:34 UTC |
+| Ended | 2026-10-13 17:24:44 UTC |
 | Lifetime | 10 min 09 s |
-| Replicas | 3: mac, uconsole, pi |
+| Replicas | 3: mac, pi, uconsole |
 | Samples of the mesh | 55, every 10 s |
 | Takeovers | 2 |
-| Time without a working main | 49 s (longest gap 34 s) |
+| Time without a working main | 53 s (longest gap 38 s) |
 
 ### Timeline
 
 | Time (UTC) | What happened |
 |---|---|
-| 2026-10-13 13:13:38 | The chronicle began on pi, with replicas on mac, uconsole, pi. |
-| 2026-10-13 13:15:23 | **mac took over as main** (round_won, reign 2) after 34 s without a sample. |
-| 2026-10-13 13:15:23 | **pi** disappeared (no fresh report seen from mac). |
-| 2026-10-13 13:15:23 | mac lost its connection to pi (HTTP error: Failed to read connection). |
-| 2026-10-13 13:15:23 | uconsole lost its connection to pi (HTTP error: Failed to read connection). |
-| 2026-10-13 13:16:29 | **mac** disappeared (no fresh report seen from pi). |
-| 2026-10-13 13:16:29 | **uconsole** disappeared (no fresh report seen from pi). |
-| 2026-10-13 13:16:43 | **mac** is back (seen from mac). |
-| 2026-10-13 13:16:43 | **uconsole** is back (seen from mac). |
-| 2026-10-13 13:16:43 | **pi** is back (seen from mac). |
-| 2026-10-13 13:16:43 | mac reaches pi again. |
-| 2026-10-13 13:16:43 | uconsole reaches pi again. |
-| 2026-10-13 13:18:03 | mac lost its connection to pi (opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:18:03 | uconsole lost its connection to pi (opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:18:13 | **pi** disappeared (no fresh report seen from mac). |
-| 2026-10-13 13:19:33 | **pi** is back (seen from mac). |
-| 2026-10-13 13:19:33 | mac reaches pi again. |
-| 2026-10-13 13:19:33 | uconsole reaches pi again. |
-| 2026-10-13 13:20:33 | mac lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:20:33 | pi lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:20:43 | **uconsole** disappeared (no fresh report seen from mac). |
-| 2026-10-13 13:22:03 | **uconsole** is back (seen from mac). |
-| 2026-10-13 13:22:03 | mac reaches uconsole again. |
-| 2026-10-13 13:22:03 | pi reaches uconsole again. |
-| 2026-10-13 13:22:38 | **uconsole took over as main** (takeover, reign 3) after 34 s without a sample. |
-| 2026-10-13 13:22:38 | **mac** disappeared (no fresh report seen from uconsole). |
-| 2026-10-13 13:22:38 | uconsole lost its connection to mac (opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:22:38 | pi lost its connection to mac (opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection). |
-| 2026-10-13 13:22:48 | **mac** is back (seen from uconsole). |
-| 2026-10-13 13:22:48 | uconsole reaches mac again. |
-| 2026-10-13 13:22:48 | pi reaches mac again. |
-| 2026-10-13 13:23:38 | The work is done on uconsole: 55 samples. |
+| 2026-10-13 17:14:44 | The chronicle began on pi, with replicas on mac, pi. |
+| 2026-10-13 17:14:44 | pi lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:14:44 | mac lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:15:44 | pi reaches uconsole again. |
+| 2026-10-13 17:15:44 | mac reaches uconsole again. |
+| 2026-10-13 17:16:04 | **uconsole** joined the mesh and got a replica (seen from pi). |
+| 2026-10-13 17:16:33 | **mac took over as main** (round_won, reign 2) after 38 s without a sample. |
+| 2026-10-13 17:16:33 | **pi** disappeared (no fresh report seen from mac). |
+| 2026-10-13 17:16:33 | mac lost its connection to pi (HTTP error: Failed to read connection). |
+| 2026-10-13 17:16:33 | uconsole lost its connection to pi (HTTP error: Failed to read connection). |
+| 2026-10-13 17:17:34 | **mac** disappeared (no fresh report seen from pi). |
+| 2026-10-13 17:17:34 | **uconsole** disappeared (no fresh report seen from pi). |
+| 2026-10-13 17:17:48 | **mac** is back (seen from mac). |
+| 2026-10-13 17:17:48 | **pi** is back (seen from mac). |
+| 2026-10-13 17:17:48 | **uconsole** is back (seen from mac). |
+| 2026-10-13 17:17:48 | mac reaches pi again. |
+| 2026-10-13 17:17:48 | uconsole reaches pi again. |
+| 2026-10-13 17:19:08 | mac lost its connection to pi (opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:19:08 | uconsole lost its connection to pi (opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:19:18 | **pi** disappeared (no fresh report seen from mac). |
+| 2026-10-13 17:20:38 | **pi** is back (seen from mac). |
+| 2026-10-13 17:20:38 | mac reaches pi again. |
+| 2026-10-13 17:20:38 | uconsole reaches pi again. |
+| 2026-10-13 17:21:39 | mac lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:21:39 | pi lost its connection to uconsole (opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:21:49 | **uconsole** disappeared (no fresh report seen from mac). |
+| 2026-10-13 17:23:09 | **uconsole** is back (seen from mac). |
+| 2026-10-13 17:23:09 | mac reaches uconsole again. |
+| 2026-10-13 17:23:09 | pi reaches uconsole again. |
+| 2026-10-13 17:23:44 | **pi took over as main** (takeover, reign 3) after 34 s without a sample. |
+| 2026-10-13 17:23:44 | **mac** disappeared (no fresh report seen from pi). |
+| 2026-10-13 17:23:44 | pi lost its connection to mac (opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:23:44 | uconsole lost its connection to mac (opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection). |
+| 2026-10-13 17:23:54 | **mac** is back (seen from pi). |
+| 2026-10-13 17:23:54 | pi reaches mac again. |
+| 2026-10-13 17:23:54 | uconsole reaches mac again. |
+| 2026-10-13 17:24:44 | The work is done on pi: 55 samples. |
 
 ### Connections
 
 | Connection | Lost | Restored | For | Reason |
 |---|---|---|---|---|
-| mac – pi | 2026-10-13 13:15:23 | 2026-10-13 13:16:43 | 1 min 19 s | HTTP error: Failed to read connection |
-| mac – pi | 2026-10-13 13:18:03 | 2026-10-13 13:19:33 | 1 min 30 s | opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection |
-| mac – pi | 2026-10-13 13:22:38 | 2026-10-13 13:22:48 | 10 s | opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection |
-| mac – uconsole | 2026-10-13 13:20:33 | 2026-10-13 13:22:03 | 1 min 30 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
-| mac – uconsole | 2026-10-13 13:22:38 | 2026-10-13 13:22:48 | 10 s | opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection |
-| uconsole – pi | 2026-10-13 13:15:23 | 2026-10-13 13:16:43 | 1 min 19 s | HTTP error: Failed to read connection |
-| uconsole – pi | 2026-10-13 13:18:03 | 2026-10-13 13:19:33 | 1 min 30 s | opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection |
-| uconsole – pi | 2026-10-13 13:20:33 | 2026-10-13 13:22:03 | 1 min 30 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
+| mac – pi | 2026-10-13 17:16:33 | 2026-10-13 17:17:48 | 1 min 15 s | HTTP error: Failed to read connection |
+| mac – pi | 2026-10-13 17:19:08 | 2026-10-13 17:20:38 | 1 min 30 s | opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection |
+| mac – pi | 2026-10-13 17:23:44 | 2026-10-13 17:23:54 | 10 s | opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection |
+| mac – uconsole | 2026-10-13 17:14:44 | 2026-10-13 17:15:44 | 1 min 00 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
+| mac – uconsole | 2026-10-13 17:21:39 | 2026-10-13 17:23:09 | 1 min 30 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
+| mac – uconsole | 2026-10-13 17:23:44 | 2026-10-13 17:23:54 | 10 s | opening a channel to https://192.168.86.216:7443: HTTP error: Could not establish connection |
+| pi – uconsole | 2026-10-13 17:14:44 | 2026-10-13 17:15:44 | 1 min 00 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
+| pi – uconsole | 2026-10-13 17:16:33 | 2026-10-13 17:17:48 | 1 min 15 s | HTTP error: Failed to read connection |
+| pi – uconsole | 2026-10-13 17:19:08 | 2026-10-13 17:20:38 | 1 min 30 s | opening a channel to https://192.168.86.215:7443: HTTP error: Could not establish connection |
+| pi – uconsole | 2026-10-13 17:21:39 | 2026-10-13 17:23:09 | 1 min 30 s | opening a channel to https://192.168.86.241:7443: HTTP error: Could not establish connection |
 
 ### Separations and partitions
 
 | From | To | For | Sides | What it was |
 |---|---|---|---|---|
-| 2026-10-13 13:15:23 | 2026-10-13 13:16:43 | 1 min 19 s | {mac, uconsole} worked / {pi} worked | partition: both sides had a main |
-| 2026-10-13 13:18:03 | 2026-10-13 13:19:33 | 1 min 30 s | {mac, uconsole} worked / {pi} silent | a host was gone or cut off |
-| 2026-10-13 13:20:33 | 2026-10-13 13:22:03 | 1 min 30 s | {uconsole} silent / {mac, pi} worked | a host was gone or cut off |
-| 2026-10-13 13:22:38 | 2026-10-13 13:22:48 | 10 s | {mac} silent / {uconsole, pi} worked | a host was gone or cut off |
+| 2026-10-13 17:14:44 | 2026-10-13 17:15:44 | 1 min 00 s | {mac, pi} worked / {uconsole} silent | a host was gone or cut off |
+| 2026-10-13 17:16:33 | 2026-10-13 17:17:48 | 1 min 15 s | {pi} worked / {mac, uconsole} worked | partition: both sides had a main |
+| 2026-10-13 17:19:08 | 2026-10-13 17:20:38 | 1 min 30 s | {pi} silent / {mac, uconsole} worked | a host was gone or cut off |
+| 2026-10-13 17:21:39 | 2026-10-13 17:23:09 | 1 min 30 s | {mac, pi} worked / {uconsole} silent | a host was gone or cut off |
+| 2026-10-13 17:23:44 | 2026-10-13 17:23:54 | 10 s | {mac} silent / {pi, uconsole} worked | a host was gone or cut off |
 
 1 partition(s) with a main on both sides. What both sides observed is merged into this log: the replicas that worked apart handed over their journals when they met again; the lineage that got furthest went on, the others forgot their work.

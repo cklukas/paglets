@@ -249,6 +249,7 @@ private:
         std::vector<Event> merged;
         for (auto& e : events) {
             const bool repeat = std::ranges::any_of(merged, [&](const Event& m) {
+                if (e.kind == "joined") return m.kind == "joined" && m.host == e.host;  // a host joins once
                 return m.kind == e.kind && m.host == e.host && m.other == e.other && e.time_ms - m.time_ms < 2 * w.sample_ms &&
                        e.kind != "takeover";
             });
@@ -297,8 +298,7 @@ private:
             } else if (e.kind == "link_up") {
                 what = name(e.host) + " reaches " + name(e.other) + " again.";
             } else if (e.kind == "joined") {
-                what = "**" + name(e.host) + "** joined the mesh and got a replica (made by the main on " + name(e.other) +
-                       ").";
+                what = "**" + name(e.host) + "** joined the mesh and got a replica (seen from " + name(e.other) + ").";
             } else if (e.kind == "takeover") {
                 what = "**" + name(e.host) + " took over as main** (" + e.text + ", reign " + std::to_string(e.term) +
                        ") after " + span(e.gap_ms) + " without a sample.";
