@@ -1,0 +1,23 @@
+{
+  "interface": 1,
+  "name": "chronicle",
+  "summary": "A zombie paglet that keeps a life log of the mesh on every host and delivers it once",
+  "launch": {"type": "none"},
+  "messages": [
+    {"name": "start", "kind": "call", "summary": "Starts the replica group; the log goes to the sink when the lifetime ends",
+     "request": "Start", "reply": "Started", "example": {"sink": "host:mac", "lifetime_ms": 3600000, "sample_ms": 10000}},
+    {"name": "status", "kind": "call", "summary": "Role, replicas, main and progress of this replica", "request": "none", "reply": "Status"},
+    {"name": "finish", "kind": "call", "summary": "Ends the work early: the main delivers the log", "request": "none",
+     "reply": "FinishReply", "danger": true}
+  ],
+  "types": [
+    {"name": "Start", "kind": "record", "fields": [
+      {"name": "sink", "type": "string", "doc": "Where the log goes: host:NAME (that host's zombies paglet)"},
+      {"name": "lifetime_ms", "type": "i64", "doc": "How long the chronicle runs", "default": 86400000},
+      {"name": "sample_ms", "type": "i64", "doc": "Time between samples (at least 1000)", "default": 10000},
+      {"name": "beat_ms", "type": "i64", "doc": "Heartbeat between replicas (0: default)", "default": 0},
+      {"name": "suspect_ms", "type": "i64", "doc": "Silence after which the main is suspected (0: default)", "default": 0},
+      {"name": "round_ms", "type": "i64", "doc": "Election round (0: default)", "default": 0},
+      {"name": "expand_ms", "type": "i64", "doc": "How often the main looks for hosts without a replica (0: default)", "default": 0}]}
+  ]
+}

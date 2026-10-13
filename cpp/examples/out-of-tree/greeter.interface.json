@@ -1,0 +1,9 @@
+{
+  "interface": 1,
+  "name": "greeter",
+  "summary": "A paglet built outside the paglets repository",
+  "messages": [
+    {"name": "greet", "kind": "call", "summary": "Greets a name", "request": "string", "reply": "string"},
+    {"name": "digest", "kind": "call", "summary": "SHA-256 of a text", "request": "string", "reply": "string"}
+  ]
+}

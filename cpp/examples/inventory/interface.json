@@ -1,0 +1,18 @@
+{
+  "interface": 1,
+  "name": "inventory",
+  "summary": "Collects system facts from hosts of the mesh with clones (fan-out)",
+  "launch": {"type": "none"},
+  "messages": [
+    {"name": "start", "kind": "call", "summary": "Sends a clone to each host; replies when all reported or timed out",
+     "request": "Collect", "reply": "Started", "example": {"hosts": ["any"], "top": 5}},
+    {"name": "report", "kind": "call", "summary": "The report collected so far", "request": "none", "reply": "Report"}
+  ],
+  "types": [
+    {"name": "Collect", "kind": "record", "fields": [
+      {"name": "hosts", "type": "list<string>", "doc": "Destinations: host names, key IDs, label:L"},
+      {"name": "process", "type": "string", "doc": "Show processes whose name contains this"},
+      {"name": "top", "type": "i64", "doc": "Largest processes per host", "default": 5},
+      {"name": "timeout_ms", "type": "i64", "doc": "How long to wait for the clones", "default": 20000}]}
+  ]
+}

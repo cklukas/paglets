@@ -13,11 +13,11 @@
 # Layout below the prefix:
 #   bin/                          paglets-host, paglets-worker
 #   include/paglets/              guest SDK, ABI, MessagePack, services/,
-#                                 wire/ (schema generator only)
+#                                 wire/ (schema generator and interface tool)
 #   lib/                          libpaglets_wire.a
 #   lib/cmake/paglets/            package configuration, PagletsGuest.cmake
 #   share/paglets/                paglet.cpp, sha256.cpp, schema_gen.cpp,
-#                                 service schemas
+#                                 interface_tool.cpp, service schemas
 
 include(CMakePackageConfigHelpers)
 
@@ -37,10 +37,12 @@ install(DIRECTORY "${PROJECT_SOURCE_DIR}/common/include/" "${PROJECT_SOURCE_DIR}
 install(FILES "${PROJECT_SOURCE_DIR}/host/include/paglets/wire/json.hpp"
               "${PROJECT_SOURCE_DIR}/host/include/paglets/wire/reflect.hpp"
               "${PROJECT_SOURCE_DIR}/host/include/paglets/wire/schema.hpp"
+              "${PROJECT_SOURCE_DIR}/host/include/paglets/wire/interface.hpp"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/paglets/wire")
 install(FILES "${PROJECT_SOURCE_DIR}/sdk/src/paglet.cpp" "${PROJECT_SOURCE_DIR}/host/src/sha256.cpp"
         DESTINATION "${PAGLETS_INSTALL_DATADIR}/sdk")
 install(FILES "${PROJECT_SOURCE_DIR}/tools/schema_gen/schema_gen.cpp" DESTINATION "${PAGLETS_INSTALL_DATADIR}/schema_gen")
+install(FILES "${PROJECT_SOURCE_DIR}/tools/interface/interface_tool.cpp" DESTINATION "${PAGLETS_INSTALL_DATADIR}/interface")
 
 # The typed clients of all system services are generated here, so projects
 # using the package need C++26 reflection only for their own schema headers.

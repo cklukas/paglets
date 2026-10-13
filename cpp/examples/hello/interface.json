@@ -1,0 +1,10 @@
+{
+  "interface": 1,
+  "name": "hello",
+  "summary": "The smallest paglet: answers greetings and counts them",
+  "launch": {"type": "none"},
+  "messages": [
+    {"name": "greet", "kind": "call", "summary": "Greets a name", "request": "string", "reply": "string",
+     "example": "world"}
+  ]
+}

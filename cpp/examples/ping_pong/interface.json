@@ -1,0 +1,11 @@
+{
+  "interface": 1,
+  "name": "ping_pong",
+  "summary": "Bounces a counter between a paglet and its child",
+  "launch": {"type": "none"},
+  "messages": [
+    {"name": "run", "kind": "call", "summary": "Plays the given number of rounds with a new child; replies with the final count",
+     "request": "u32", "reply": "u32", "example": 100},
+    {"name": "stop", "kind": "send", "summary": "Ends the paglet", "request": "none", "danger": true}
+  ]
+}

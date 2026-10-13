@@ -15,8 +15,9 @@ project(paglets_out_of_tree LANGUAGES CXX)
 
 find_package(paglets 0.1 REQUIRED CONFIG)
 
-# A plain paglet: the guest SDK and SHA-256 (<paglets/sha256.hpp>).
-paglets_add_module(greeter SOURCES greeter.cpp SHA256)
+# A plain paglet: the guest SDK and SHA-256 (<paglets/sha256.hpp>), with an
+# interface description (docs/interface-descriptions.md).
+paglets_add_module(greeter SOURCES greeter.cpp SHA256 INTERFACE greeter.interface.json)
 
 # A paglet with a typed service contract (needs a C++26 reflection compiler
 # for the schema generator) that also calls a system service through the

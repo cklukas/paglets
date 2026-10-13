@@ -10,11 +10,15 @@
 # paglets_add_module(<name>
 #     SOURCES <files...>
 #     [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>]
-#     [SERVICES <service>...] [PATTERNS] [SHA256])
+#     [SERVICES <service>...] [PATTERNS] [SHA256] [INTERFACE <file.json>])
 #
 # Builds a paglet module in C++ with the guest SDK (paglet ABI v1). Produces
 # ${PAGLETS_GUEST_OUTPUT_DIR}/<name>.wasm and, with a schema, the generated
-# <name>.schema.gen.hpp and <name>.schema.json. SERVICES names standard
+# <name>.schema.gen.hpp and <name>.schema.json. INTERFACE names an interface
+# description (docs/interface-descriptions.md) that is put into the module's
+# custom section `paglets.interface`, with the schema's types merged in; a
+# module with a schema whose namespace has service contracts gets one made
+# from them. SERVICES names standard
 # system services (files, server_info, directory, storage, artifacts, pubsub,
 # user_info); the module can then include <paglets/services/<service>.gen.hpp>
 # with their codecs and typed clients. PATTERNS adds the services the
@@ -35,6 +39,7 @@
 #   PAGLETS_SDK_SOURCE          guest SDK implementation (paglet.cpp)
 #   PAGLETS_SHA256_SOURCE       SHA-256 for guests (option SHA256)
 #   PAGLETS_SCHEMA_GEN_SOURCE   schema generator (compiled per schema header)
+#   PAGLETS_INTERFACE_TOOL_SOURCE  interface tool (INTERFACE, contracts)
 #   PAGLETS_SERVICE_SCHEMAS_PREBUILT  ON when <paglets/services/*.gen.hpp>
 #                               are installed with the package
 # The schema generator links the target paglets::wire. A host C++ compiler
@@ -56,6 +61,9 @@ if(NOT DEFINED PAGLETS_SHA256_SOURCE)
 endif()
 if(NOT DEFINED PAGLETS_SCHEMA_GEN_SOURCE)
     set(PAGLETS_SCHEMA_GEN_SOURCE "${_paglets_tree_root}/tools/schema_gen/schema_gen.cpp")
+endif()
+if(NOT DEFINED PAGLETS_INTERFACE_TOOL_SOURCE)
+    set(PAGLETS_INTERFACE_TOOL_SOURCE "${_paglets_tree_root}/tools/interface/interface_tool.cpp")
 endif()
 if(NOT DEFINED PAGLETS_SERVICE_SCHEMAS_PREBUILT)
     set(PAGLETS_SERVICE_SCHEMAS_PREBUILT OFF)
@@ -146,6 +154,18 @@ function(paglets_add_schema_generator target header namespace)
         "PAGLETS_SCHEMA_HEADER=\"${header}\"" "PAGLETS_SCHEMA_NAMESPACE=${namespace}")
 endfunction()
 
+# The interface tool (tools/interface): puts interface descriptions into
+# modules. Built once, with the host compiler; it links paglets::wire.
+function(paglets_interface_tool out_var)
+    if(NOT TARGET paglets_interface_tool)
+        add_executable(paglets_interface_tool "${PAGLETS_INTERFACE_TOOL_SOURCE}")
+        target_link_libraries(paglets_interface_tool PRIVATE paglets::wire)
+        set_target_properties(paglets_interface_tool PROPERTIES
+            CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF OUTPUT_NAME paglets-interface)
+    endif()
+    set(${out_var} paglets_interface_tool PARENT_SCOPE)
+endfunction()
+
 # Generates <paglets/services/<service>.gen.hpp> once per build (or finds it
 # in an installed package).
 function(paglets_service_schema service out_var)
@@ -178,7 +198,7 @@ function(paglets_add_guest name)
     if(NOT PAGLETS_GUESTS_AVAILABLE)
         return()
     endif()
-    cmake_parse_arguments(G "NO_SDK;PATTERNS;SHA256" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE" "SOURCES;SERVICES" ${ARGN})
+    cmake_parse_arguments(G "NO_SDK;PATTERNS;SHA256" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE;INTERFACE" "SOURCES;SERVICES" ${ARGN})
     if(G_PATTERNS)
         list(APPEND G_SERVICES directory files grants locator mesh_info user_info)
         list(REMOVE_DUPLICATES G_SERVICES)
@@ -264,10 +284,27 @@ function(paglets_add_guest name)
         list(APPEND include_flags "-I${schema_dir}")
     endif()
 
+    # The interface description goes into the module after linking.
+    set(describe_command "")
+    if(G_INTERFACE OR G_SCHEMA_HEADER)
+        paglets_interface_tool(tool)
+        set(describe_command COMMAND ${tool} embed "${out}" "${out}" --name ${name})
+        if(G_INTERFACE)
+            get_filename_component(interface_abs "${G_INTERFACE}" ABSOLUTE)
+            list(APPEND describe_command --description "${interface_abs}")
+            list(APPEND depends "${interface_abs}")
+        endif()
+        if(G_SCHEMA_HEADER)
+            list(APPEND describe_command --schema "${gen_json}")
+        endif()
+        list(APPEND depends ${tool})
+    endif()
+
     add_custom_command(
         OUTPUT "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PAGLETS_GUEST_OUTPUT_DIR}"
         COMMAND "${compiler}" ${PAGLETS_GUEST_COMMON_FLAGS} ${lang_flags} ${include_flags} ${sources} -o "${out}"
+        ${describe_command}
         DEPENDS ${depends}
         COMMENT "Building guest paglet ${name}.wasm"
         VERBATIM)

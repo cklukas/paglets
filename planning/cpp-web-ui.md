@@ -149,7 +149,7 @@ dispose; refusal without the token and with a foreign Origin. The existing
 |---|---|---|
 | WP31 | `paglets_client` library extracted from `mesh_cli.cpp` (sessions, typed requests, `cli_equivalent`); `remote` commands on it; no behaviour change | done |
 | WP32 | Protocol additions: `status` fields (trust, system list, host facts), `send`, `terminate`, `describe`, `modules` interfaces; CLI `remote send`, `remote terminate`, `remote describe`; tests | done |
-| WP33 | Interface descriptions: format, parser/validator, custom section embed/extract (`paglets/wasm/interface.hpp`), `paglets-interface` tool, `paglets_add_module(INTERFACE …)`, generated descriptions for contract guests, `module inspect`; descriptions for the examples (counter, pi, hello, ping_pong, inventory, chronicle, calc_user); install for out-of-tree builds | open |
+| WP33 | Interface descriptions: format, parser/validator, custom section embed/extract (`paglets/wasm/interface.hpp`), `paglets-interface` tool, `paglets_add_module(INTERFACE …)`, generated descriptions for contract guests, `module inspect`; descriptions for the examples (counter, pi, hello, ping_pong, inventory, chronicle, calc_user); install for out-of-tree builds | done |
 | WP34 | `paglets_webui` HTTP server: sockets (POSIX, Winsock), parser, limits, token/cookie, Host/Origin checks, port search, browser opening; unit tests | open |
 | WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules pages, forms from interfaces, shell hints), actions | open |
 | WP36 | End-to-end test (`cli_web`), gateway User-Agent renamed to `paglets-gateway/1` | open |

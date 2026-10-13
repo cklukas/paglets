@@ -57,11 +57,12 @@ PAGLETS_TEST("interface: custom sections are written, replaced and read") {
 }
 
 PAGLETS_TEST("interface: a real module keeps working with its description") {
-    const auto path = paglets::test::guest_path("counter.wasm");
-    if (path.empty()) paglets::test::skip("counter.wasm not available");
+    // A module built without a description.
+    const auto path = paglets::test::guest_path("conformance.wasm");
+    if (path.empty()) paglets::test::skip("conformance.wasm not available");
     auto bytes = paglets::wasm::read_file(path);
     REQUIRE_OK(bytes);
-    auto described = wi::write_custom_section(*bytes, wi::section_name, R"({"interface":1,"name":"counter"})");
+    auto described = wi::write_custom_section(*bytes, wi::section_name, R"({"interface":1,"name":"conformance"})");
     REQUIRE_OK(described);
     auto info = paglets::wasm::parse_module(*described);
     REQUIRE_OK(info);
@@ -69,7 +70,7 @@ PAGLETS_TEST("interface: a real module keeps working with its description") {
     auto d = wi::of_module(*described);
     REQUIRE_OK(d);
     REQUIRE(d->has_value());
-    CHECK_EQ((*d)->find("name")->as_string(), std::string("counter"));
+    CHECK_EQ((*d)->find("name")->as_string(), std::string("conformance"));
     auto plain = wi::of_module(*bytes);
     REQUIRE_OK(plain);
     CHECK(!plain->has_value());
@@ -122,6 +123,24 @@ PAGLETS_TEST("interface: schema types merge in; contracts become descriptions") 
     REQUIRE(messages.size() == 1u);
     CHECK_EQ(messages[0].find("request")->as_string(), std::string("AddRequest"));
     CHECK_EQ(messages[0].find("kind")->as_string(), std::string("call"));
+}
+
+PAGLETS_TEST("interface: the examples carry their descriptions") {
+    for (const char* file : {"hello.wasm", "ping_pong.wasm", "counter.wasm", "pi.wasm", "inventory.wasm",
+                             "chronicle.wasm", "calc_user.wasm"}) {
+        const auto path = paglets::test::guest_path(file);
+        if (path.empty()) paglets::test::skip(std::string(file) + " not available");
+        auto bytes = paglets::wasm::read_file(path);
+        REQUIRE_OK(bytes);
+        auto d = wi::of_module(*bytes);
+        REQUIRE_OK(d);
+        REQUIRE(d->has_value());
+        CHECK(!(*d)->find("messages")->as_array().empty());
+    }
+    // calc_user's description comes from its contract.
+    auto calc = wi::of_module(*paglets::wasm::read_file(paglets::test::guest_path("calc_user.wasm")));
+    REQUIRE_OK(calc);
+    CHECK((**calc).dump().find("\"divide\"") != std::string::npos);
 }
 
 PAGLETS_TEST("interface: type names") {

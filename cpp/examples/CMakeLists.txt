@@ -1,18 +1,20 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 
-paglets_add_module(hello SOURCES hello/hello.cpp)
-paglets_add_module(ping_pong SOURCES ping_pong/ping_pong.cpp)
+paglets_add_module(hello SOURCES hello/hello.cpp INTERFACE hello/interface.json)
+paglets_add_module(ping_pong SOURCES ping_pong/ping_pong.cpp INTERFACE ping_pong/interface.json)
 paglets_add_module(counter
     SOURCES counter/counter.cpp
     SCHEMA_HEADER counter/messages.hpp
-    SCHEMA_NAMESPACE counter_msgs)
+    SCHEMA_NAMESPACE counter_msgs
+    INTERFACE counter/interface.json)
 paglets_add_module(pi
     SOURCES pi/pi.cpp
     SCHEMA_HEADER pi/pi_msgs.hpp
     SCHEMA_NAMESPACE pi_msgs
     SERVICES mesh_info compute_slots
-    PATTERNS)
+    PATTERNS
+    INTERFACE pi/interface.json)
 paglets_add_module(courier
     SOURCES courier/courier.cpp
     SCHEMA_HEADER courier/courier_msgs.hpp
@@ -45,7 +47,8 @@ paglets_add_module(inventory
     SCHEMA_HEADER inventory/inventory_msgs.hpp
     SCHEMA_NAMESPACE inventory_msgs
     SERVICES server_info
-    PATTERNS)
+    PATTERNS
+    INTERFACE inventory/interface.json)
 paglets_add_module(seek
     SOURCES seek/seek.cpp
     SCHEMA_HEADER seek/seek_msgs.hpp
@@ -118,4 +121,5 @@ paglets_add_module(chronicle
     SCHEMA_HEADER chronicle/chronicle_msgs.hpp
     SCHEMA_NAMESPACE chronicle_msgs
     SERVICES zombies mesh_info user_info
-    PATTERNS)
+    PATTERNS
+    INTERFACE chronicle/interface.json)

@@ -5,12 +5,13 @@
 #
 #   find_package(paglets REQUIRED)
 #   paglets_add_module(<name> SOURCES <files...>
-#       [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>] [SERVICES <service>...] [PATTERNS] [SHA256])
+#       [SCHEMA_HEADER <header> SCHEMA_NAMESPACE <ns>] [SERVICES <service>...] [PATTERNS] [SHA256]
+#       [INTERFACE <file.json>])
 #
 # Call find_package in the top-level CMakeLists.txt after project(): the
 # settings below are directory-scoped variables. Imported targets:
 #   paglets::paglets-host    the host binary (paglets-worker next to it)
-#   paglets::wire            library of the schema generator
+#   paglets::wire            library of the schema generator and the interface tool
 # Guest modules are written to PAGLETS_GUEST_OUTPUT_DIR (default
 # <build>/guests). The WASI toolchain is found as in the paglets/cpp build
 # (PAGLETS_WASI_CLANG, PAGLETS_WASI_SYSROOT, WASI_SDK_PATH); SCHEMA_HEADER
@@ -27,6 +28,7 @@ set(PAGLETS_SDK_INCLUDE_DIR "${PAGLETS_INCLUDE_DIR}")
 set(PAGLETS_SDK_SOURCE "${_paglets_data_dir}/sdk/paglet.cpp")
 set(PAGLETS_SHA256_SOURCE "${_paglets_data_dir}/sdk/sha256.cpp")
 set(PAGLETS_SCHEMA_GEN_SOURCE "${_paglets_data_dir}/schema_gen/schema_gen.cpp")
+set(PAGLETS_INTERFACE_TOOL_SOURCE "${_paglets_data_dir}/interface/interface_tool.cpp")
 set(PAGLETS_SERVICE_SCHEMAS_PREBUILT @_paglets_services_prebuilt@)
 set(PAGLETS_VERSION "@PROJECT_VERSION@")
 set(PAGLETS_HOST_EXECUTABLE paglets::paglets-host)

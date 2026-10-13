@@ -1,0 +1,25 @@
+{
+  "interface": 1,
+  "name": "counter",
+  "summary": "A counter whose state is plain C++ objects; memory images move it",
+  "launch": {"type": "none"},
+  "messages": [
+    {"name": "increment", "kind": "both", "summary": "Adds to or multiplies the value; replies with the status",
+     "request": "Increment", "reply": "Status", "example": {"by": 1, "note": "from the web", "mode": "add"}},
+    {"name": "status", "kind": "call", "summary": "The value and the latest notes", "request": "none", "reply": "Status"},
+    {"name": "echo", "kind": "call", "summary": "Returns the record unchanged (every field type)", "request": "Echo", "reply": "Echo"},
+    {"name": "bloat", "kind": "call", "summary": "Keeps the given amount of memory (image size experiments)",
+     "request": "Bloat", "reply": "Status"},
+    {"name": "log", "kind": "both", "summary": "Writes a line to the host's log", "request": "string", "reply": "Status"},
+    {"name": "schema", "kind": "call", "summary": "The schema descriptor of the messages (JSON text)", "request": "none", "reply": "string"}
+  ],
+  "types": [
+    {"name": "Increment", "kind": "record", "fields": [
+      {"name": "by", "type": "i64", "doc": "Amount (or factor)", "default": 1},
+      {"name": "note", "type": "string", "doc": "Kept in the history"},
+      {"name": "mode", "type": "Mode", "default": "add"}]},
+    {"name": "Bloat", "kind": "record", "fields": [
+      {"name": "kilobytes", "type": "u32", "doc": "Memory to keep, in KB", "default": 1024},
+      {"name": "fill", "type": "u8", "doc": "Byte value written into it"}]}
+  ]
+}
