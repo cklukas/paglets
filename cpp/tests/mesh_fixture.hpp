@@ -240,7 +240,11 @@ struct NetHost {
         namespace net = paglets::net;
         transport = std::make_unique<net::Transport>(
             node->host_key(), genesis.id(), std::move(transport_config),
+            // Hosts of the mesh, and sessions of its admins and owners (as
+            // paglets-host serve).
             [this](const net::Identity& peer) -> std::expected<void, std::string> {
+                if (peer.role == net::PeerRole::admin && node->state().is_admin(peer.key)) return {};
+                if (peer.role == net::PeerRole::owner && node->state().is_owner(peer.key)) return {};
                 const auto peers = node->peers();
                 if (peer.role != net::PeerRole::host || std::ranges::find(peers, peer.key) == peers.end()) {
                     return std::unexpected(std::string("not a host of this mesh"));
@@ -248,8 +252,11 @@ struct NetHost {
                 return {};
             },
             [this](const net::Identity& from, Bytes frame) -> std::vector<Bytes> {
-                if (from.role == net::PeerRole::host) node->receive(from.key, frame);
-                return {};
+                if (from.role == net::PeerRole::host) {
+                    node->receive(from.key, frame);
+                    return {};
+                }
+                return {node->answer_session(from.key, net::to_string(from.role), std::move(frame))};
             });
         REQUIRE_OK(transport->start());
         forward.set_target(transport.get());

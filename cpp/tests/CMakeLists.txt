@@ -54,7 +54,7 @@ set(test_sources
     test_zombie_protocol.cpp
     test_protocol_check.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_session.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_session.cpp test_web.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -64,7 +64,7 @@ target_compile_definitions(paglets_tests PRIVATE
     PAGLETS_TEST_BUILD="${CMAKE_BUILD_TYPE}")
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net paglets_client paglets_webui)
 if(TARGET paglets_node)
-    target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway)
+    target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway paglets_webapp)
 endif()
 target_include_directories(paglets_tests PRIVATE ${PROJECT_SOURCE_DIR}/examples/counter ${PROJECT_SOURCE_DIR}/examples/pi
                            ${PROJECT_SOURCE_DIR}/examples/courier ${PROJECT_SOURCE_DIR}/examples/digest ${PROJECT_SOURCE_DIR}/examples/journey ${PROJECT_SOURCE_DIR}/examples/finder

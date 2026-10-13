@@ -126,13 +126,16 @@ A module may carry a custom section `paglets.interface` holding JSON:
 - `/#paglet/HOST/ID`: interface with a form per message (call or send),
   replies, a log of this session's calls, actions.
 - `/#modules`: modules of the hosts and of `--module-dir`, launch form from
-  the `launch` description, push module.
+  the `launch` description, push module, upload from the browser.
+- `/#zombies`: zombie groups with state, sink and replicas; check,
+  cancel, redirect.
 - Every panel has a "Shell" box with the equivalent command; every action
   result shows the command it corresponds to.
 
 JSON API (`/api/…`, documented in docs/web-ui.md): `GET mesh`,
-`GET host/KEY`, `GET modules`, `GET describe?host=&paglet=|module=`,
-`POST call|send|launch|dispose|terminate|dispatch|pin|push-module`.
+`GET host?key=`, `GET paglet?host=&id=`, `GET modules`, `GET zombies`,
+`POST call|send|launch|push-module|dispose|terminate|dispatch|pin|locate|
+zombie-check|zombie-cancel|zombie-redirect`.
 
 ## 7. Tests
 
@@ -151,8 +154,8 @@ dispose; refusal without the token and with a foreign Origin. The existing
 | WP32 | Protocol additions: `status` fields (trust, system list, host facts), `send`, `terminate`, `describe`, `modules` interfaces; CLI `remote send`, `remote terminate`, `remote describe`; tests | done |
 | WP33 | Interface descriptions: format, parser/validator, custom section embed/extract (`paglets/wasm/interface.hpp`), `paglets-interface` tool, `paglets_add_module(INTERFACE …)`, generated descriptions for contract guests, `module inspect`; descriptions for the examples (counter, pi, hello, ping_pong, inventory, chronicle, calc_user); install for out-of-tree builds | done |
 | WP34 | `paglets_webui` HTTP server: sockets (POSIX, Winsock), parser, limits, token/cookie, Host/Origin checks, port search, browser opening; unit tests | done |
-| WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules pages, forms from interfaces, shell hints), actions | done |
-| WP36 | End-to-end test (`cli_web`), gateway User-Agent renamed to `paglets-gateway/1` | open |
+| WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules and zombies pages, forms from interfaces, module upload, shell hints), actions | done |
+| WP36 | End-to-end test (`web:` in `paglets_tests`: two hosts over HTTPS, the UI's API over HTTP), gateway User-Agent renamed to `paglets-gateway/1` | done |
 | WP37 | Documentation (`docs/web-ui.md`, `docs/interface-descriptions.md`, CLI reference, READMEs, nav), docs sync; live check on the mesh hosts | open |
 
 ## 9. Decisions made while implementing
@@ -171,5 +174,8 @@ dispose; refusal without the token and with a foreign Origin. The existing
   its content.
 - **The counter example takes start arguments** (`{"value": N}`), so the
   launch form has an example with parameters.
+- **The end-to-end test runs in-process** (`tests/test_web.cpp`): two
+  hosts over HTTPS that answer sessions as `paglets-host serve` does, the
+  App and its server, and an HTTP client; no extra processes or tools.
 - **The host answers `describe`**, from the module bytes, so the guest needs
   no code for it and C guests can carry descriptions too.

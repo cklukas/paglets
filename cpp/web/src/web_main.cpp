@@ -136,6 +136,7 @@ int main(int argc, char** argv) {
         web::ServerConfig config;
         config.address = listen;
         config.ports = web::port_candidates(ports);
+        config.limits.max_body = 32 * 1024 * 1024;  // module uploads, in base64
         auto server = web::Server::bind(config);
         if (!server) return fail(server.error());
         const std::uint16_t port = (*server)->port();

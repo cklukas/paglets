@@ -140,7 +140,7 @@ HttpResult http(const std::string& url_text, const HttpOptions& options, const H
                 client.enable_system_ca(true);
             }
         }
-        httplib::Headers headers{{"User-Agent", "paglets-web/1"}, {"Accept-Encoding", "identity"}};
+        httplib::Headers headers{{"User-Agent", "paglets-gateway/1"}, {"Accept-Encoding", "identity"}};
         int status = 0;
         std::vector<std::pair<std::string, std::string>> got_headers;
         std::string body;

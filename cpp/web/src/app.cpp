@@ -91,6 +91,34 @@ Json interface_json(const std::string& text) {
 
 constexpr std::chrono::seconds poll_timeout{15};
 
+// Standard base64 (uploads from the browser); nullopt for anything else.
+std::optional<Bytes> base64_decode(std::string_view text) {
+    auto value = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    while (!text.empty() && text.back() == '=') text.remove_suffix(1);
+    Bytes out;
+    out.reserve(text.size() * 3 / 4);
+    std::uint32_t acc = 0;
+    int bits = 0;
+    for (char c : text) {
+        const int v = value(c);
+        if (v < 0) return std::nullopt;
+        acc = (acc << 6) | static_cast<std::uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<std::uint8_t>((acc >> bits) & 0xff));
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 // A host the poller keeps a session with.
@@ -614,7 +642,93 @@ web::Response App::modules_route() {
     return ok(o.done());
 }
 
+web::Response App::zombies_route() {
+    // Every reachable host's view of the zombie groups, by group.
+    std::vector<std::pair<std::string, std::string>> targets;  // key, name
+    {
+        std::lock_guard lock(mu);
+        if (const Json* hosts = model_.find("hosts")) {
+            for (const auto& h : hosts->as_array()) {
+                const Json* status = h.find("status");
+                if (status != nullptr && !status->is_null()) targets.emplace_back(member(h, "key"), member(h, "name"));
+            }
+        }
+    }
+    std::vector<std::future<std::expected<mesh::Map, std::string>>> jobs;
+    for (const auto& [key, name] : targets) {
+        jobs.push_back(std::async(std::launch::async, [this, key = key]() -> std::expected<mesh::Map, std::string> {
+            auto session = open_session(key);
+            if (!session) return std::unexpected(session.error());
+            return session->ask(mesh::Map{{"t", mesh::Value("zombies")}, {"op", mesh::Value("list")}});
+        }));
+    }
+    struct Group {
+        Json state;
+        std::string owner, module;
+        Json::Array replicas;
+    };
+    std::map<std::string, Group> groups;
+    Json::Array errors;
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        auto answer = jobs[i].get();
+        if (!answer) {
+            errors.push_back(Obj().add("host", str(targets[i].first)).add("error", str(answer.error())).done());
+            continue;
+        }
+        const mesh::Array* list = mesh::Fields{*answer}.array("groups");
+        if (list == nullptr) continue;
+        for (const auto& g : *list) {
+            const Bytes* b = g.as_bin();
+            if (b == nullptr) continue;
+            auto info = wire::msgpack_to_json(*b);
+            if (!info || info->find("state") == nullptr) continue;
+            const Json& state = *info->find("state");
+            Group& e = groups[member(state, "group")];
+            // The newest view of the state: an ending, or a higher sink number.
+            const bool ended = member(state, "ending") != "none";
+            if (e.state.is_null() || ended || integer(state, "sink").value_or(0) > integer(e.state, "sink").value_or(0)) {
+                e.state = state;
+            }
+            e.owner = member(*info, "owner");
+            if (e.module.empty()) e.module = member(*info, "module");
+            e.replicas.push_back(Obj()
+                                     .add("host", str(targets[i].first))
+                                     .add("host_name", str(targets[i].second))
+                                     .add("paglet", str(member(*info, "paglet")))
+                                     .add("joined_ms", num(integer(*info, "joined_ms").value_or(0)))
+                                     .add("traces", num(integer(*info, "traces").value_or(0)))
+                                     .done());
+        }
+    }
+    const client::ShellContext sc = shell("");
+    Json::Array list;
+    for (auto& [id, g] : groups) {
+        list.push_back(Obj()
+                           .add("group", str(id))
+                           .add("state", std::move(g.state))
+                           .add("owner", str(g.owner))
+                           .add("module", str(g.module))
+                           .add("replicas", Json(std::move(g.replicas)))
+                           .add("shell", Obj()
+                                             .add("traces", str(client::remote_command(sc, "zombies", {"traces", id})))
+                                             .add("check", str(client::remote_command(sc, "zombies", {"check", id})))
+                                             .add("result", str(client::remote_command(sc, "zombies", {"result", id})))
+                                             .add("cancel", str(client::remote_command(sc, "zombies", {"cancel", id})))
+                                             .done())
+                           .done());
+    }
+    return ok(Obj()
+                  .add("groups", Json(std::move(list)))
+                  .add("errors", Json(std::move(errors)))
+                  .add("shell", Obj().add("list", str(client::remote_command(sc, "zombies", {"list"}))).done())
+                  .done());
+}
+
 web::Response App::action(const std::string& name, const Json& body) {
+    static const std::set<std::string, std::less<>> actions{
+        "call",     "send", "launch", "push-module",   "dispose",         "terminate",
+        "dispatch", "pin",  "locate", "zombie-cancel", "zombie-redirect", "zombie-check"};
+    if (!actions.contains(name)) return failure(404, "unknown action " + name);
     const std::string host = member(body, "host");
     const std::string paglet = member(body, "paglet");
     const client::ShellContext sc = shell(host);
@@ -655,13 +769,20 @@ web::Response App::action(const std::string& name, const Json& body) {
     if (name == "launch") {
         // A module the host has (by hash), or a file of --module-dir.
         const std::string file = member(body, "file");
+        const std::string data = member(body, "data");  // an upload: base64, and its file name
         std::string module = member(body, "module");
         const Json* args = body.find("args");
         const std::string id = member(body, "id");
         const std::int64_t hours = std::clamp<std::int64_t>(integer(body, "hours").value_or(24), 1, 24 * 30);
         Bytes bytes;
         std::string shown = module;
-        if (!file.empty()) {
+        if (!data.empty()) {
+            auto decoded = base64_decode(data);
+            if (!decoded) return failure(400, "data is a module in base64");
+            bytes = std::move(*decoded);
+            module = to_hex(sha256(bytes));
+            shown = member(body, "name").empty() ? "MODULE.wasm" : member(body, "name");
+        } else if (!file.empty()) {
             if (!options_.module_dir) return failure(400, "paglets-web runs without --module-dir");
             const std::filesystem::path name_only = std::filesystem::path(file).filename();
             if (name_only.string() != file || name_only.extension() != ".wasm") return failure(400, "not a module file");
@@ -700,19 +821,74 @@ web::Response App::action(const std::string& name, const Json& body) {
     }
 
     if (name == "push-module") {
+        // A file of --module-dir, or an upload (base64 `data` and its `name`).
         const std::string file = member(body, "file");
-        if (!options_.module_dir) return failure(400, "paglets-web runs without --module-dir");
-        const std::filesystem::path name_only = std::filesystem::path(file).filename();
-        if (name_only.string() != file || name_only.extension() != ".wasm") return failure(400, "not a module file");
-        const auto path = *options_.module_dir / name_only;
-        const std::string command = client::remote_command(sc, "push-module", {path.string()});
-        auto read = wasm::read_file(path);
-        if (!read) return failure(404, read.error(), command);
+        const std::string data = member(body, "data");
+        Bytes bytes;
+        std::string shown;
+        if (!data.empty()) {
+            auto decoded = base64_decode(data);
+            if (!decoded) return failure(400, "data is a module in base64");
+            bytes = std::move(*decoded);
+            shown = member(body, "name").empty() ? "MODULE.wasm" : member(body, "name");
+        } else {
+            if (!options_.module_dir) return failure(400, "paglets-web runs without --module-dir");
+            const std::filesystem::path name_only = std::filesystem::path(file).filename();
+            if (name_only.string() != file || name_only.extension() != ".wasm") return failure(400, "not a module file");
+            const auto path = *options_.module_dir / name_only;
+            auto read = wasm::read_file(path);
+            if (!read) return failure(404, read.error());
+            bytes = std::move(*read);
+            shown = path.string();
+        }
+        const std::string command = client::remote_command(sc, "push-module", {shown});
         auto session = session_for();
         if (!session) return failure(502, session.error(), command);
-        auto pushed = session->push_module(std::move(*read));
+        auto pushed = session->push_module(std::move(bytes));
         if (!pushed) return failure(422, pushed.error(), command);
         return ok(Obj().add("hash", str(*pushed)).add("shell", str(command)).done());
+    }
+
+    if (name.starts_with("zombie-")) {
+        // Zombie groups (docs/zombie-protocol.md): cancel, redirect, check.
+        const std::string group = member(body, "group");
+        if (group.empty()) return failure(400, "group is required");
+        const std::string op = name.substr(7);
+        std::vector<std::string> args{op, group};
+        mesh::Map request{{"t", mesh::Value("zombies")}, {"op", mesh::Value(op)}, {"g", mesh::Value(group)}};
+        if (op == "redirect") {
+            const std::string sink = member(body, "sink");
+            if (sink.empty()) return failure(400, "sink is required");
+            args.push_back(sink);
+            request.emplace_back("sink", mesh::Value(sink));
+        }
+        if (op == "cancel") request.emplace_back("reason", mesh::Value(member(body, "reason")));
+        const std::string command = client::remote_command(sc, "zombies", args);
+        auto session = session_for();
+        if (!session) return failure(502, session.error(), command);
+        auto r = session->ask(std::move(request));
+        if (!r) return failure(422, r.error(), command);
+        const mesh::Fields f{*r};
+        Obj o;
+        if (op == "check") {
+            Json::Array violations;
+            if (const mesh::Array* list = f.array("violations")) {
+                for (const auto& v : *list) {
+                    if (const auto* text = v.as_str()) violations.emplace_back(*text);
+                }
+            }
+            o.add("records", num(f.integer("records").value_or(0)))
+                .add("hosts", num(f.integer("hosts").value_or(0)))
+                .add("replicas", num(f.integer("replicas").value_or(0)))
+                .add("takeovers", num(f.integer("takeovers").value_or(0)))
+                .add("restarts", num(f.integer("restarts").value_or(0)))
+                .add("accepted", num(f.integer("accepted").value_or(0)))
+                .add("violations", Json(std::move(violations)));
+        } else if (auto state = f.bin("state")) {
+            o.add("state", reply_json(*state));
+        }
+        o.add("shell", str(command));
+        return ok(o.done());
     }
 
     if (paglet.empty()) return failure(400, "paglet is required");
@@ -800,6 +976,7 @@ web::Response App::api(const web::Request& request) {
         if (path == "host") return host_route(request);
         if (path == "paglet") return paglet_route(request);
         if (path == "modules") return modules_route();
+        if (path == "zombies") return zombies_route();
         return failure(404, "no route /api/" + std::string(path));
     }
     if (request.method == "POST") {

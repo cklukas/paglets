@@ -57,6 +57,7 @@ private:
     web::Response host_route(const web::Request& request);
     web::Response paglet_route(const web::Request& request);
     web::Response modules_route();
+    web::Response zombies_route();
     web::Response action(const std::string& name, const wire::Json& body);
 
     // A session with a host for an action (a new one each time, so actions

@@ -206,6 +206,7 @@ function parseRoute() {
   if (parts[0] === 'host' && parts[1]) return { view: 'host', key: parts[1] };
   if (parts[0] === 'paglet' && parts[1] && parts[2]) return { view: 'paglet', host: parts[1], id: parts[2] };
   if (parts[0] === 'modules') return { view: 'modules', host: parts[1] || '' };
+  if (parts[0] === 'zombies') return { view: 'zombies' };
   return { view: 'mesh' };
 }
 
@@ -251,7 +252,8 @@ function morph(from, to) {
 function render() {
   const main = document.getElementById('main');
   for (const a of document.querySelectorAll('nav a')) {
-    const current = a.dataset.nav === (state.route.view === 'modules' ? 'modules' : 'mesh');
+    const section = state.route.view === 'modules' || state.route.view === 'zombies' ? state.route.view : 'mesh';
+    const current = a.dataset.nav === section;
     if (current) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   const me = document.getElementById('me');
@@ -273,6 +275,7 @@ function render() {
     case 'host': view = hostView(state.route.key); break;
     case 'paglet': view = pagletView(state.route.host, state.route.id); break;
     case 'modules': view = modulesView(state.route.host); break;
+    case 'zombies': view = zombiesView(); break;
     default: view = meshView();
   }
   // The same view again (a refresh): patched in place.
@@ -947,9 +950,70 @@ async function loadModules(body, hostKey) {
         h('thead', null, h('tr', null, ['Module', 'Hash', 'Size', 'Where', 'Interface', ''].map((c, i) => h('th', { class: i === 2 ? 'num' : null, text: c })))),
         h('tbody', null, rows))) : h('p', { class: 'muted', text: 'No modules: start paglets-web with --module-dir DIR to launch .wasm files from DIR.' }),
       shellBox('Shell: modules of the entry host', d.shell.modules, 'modules')),
+    uploadPanel(launch, hostKey),
     launch);
   const pre = d.modules.find((m) => m.hash === state.launchModule);
   if (pre) launchPanel(launch, pre, hostKey); else launch.hidden = true;
+}
+
+// A module from this computer: read here, sent along with the launch or push.
+function uploadPanel(launch, hostKey) {
+  const input = h('input', { type: 'file', accept: '.wasm,application/wasm', 'aria-label': 'module file' });
+  const note = h('span', { class: 'muted small' });
+  input.addEventListener('change', async () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let hash = '';
+    try {
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+      hash = [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) { /* no WebCrypto: the host computes it */ }
+    let iface = null;
+    try { iface = interfaceOf(buf); } catch (e) { note.textContent = 'not a Wasm module: ' + e.message; return; }
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    const m = { title: f.name, hash, size: buf.length, interface: iface, upload: { name: f.name, data: btoa(bin) } };
+    note.textContent = bytes(buf.length) + (iface ? ' · described' : ' · not described');
+    launchPanel(launch, m, hostKey);
+    launch.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  return h('section', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h2', { text: 'Upload a module' }),
+      info('A .wasm file from this computer: launched or pushed to a host directly (the module travels with the request, as with paglets-host remote launch FILE).')),
+    h('div', { class: 'row' }, input, note));
+}
+
+// The interface description in a module's custom section, or null.
+function interfaceOf(buf) {
+  const magic = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+  if (buf.length < 8 || magic.some((b, i) => buf[i] !== b)) throw new Error('no Wasm header');
+  let pos = 8;
+  const leb = () => {
+    let v = 0, shift = 0, b;
+    do {
+      if (pos >= buf.length) throw new Error('truncated');
+      b = buf[pos++];
+      v += (b & 0x7f) * Math.pow(2, shift);
+      shift += 7;
+    } while (b & 0x80);
+    return v;
+  };
+  while (pos < buf.length) {
+    const id = buf[pos++];
+    const size = leb();
+    const end = pos + size;
+    if (end > buf.length) throw new Error('truncated section');
+    if (id === 0) {
+      const n = leb();
+      const name = new TextDecoder().decode(buf.subarray(pos, pos + n));
+      if (name === 'paglets.interface') {
+        try { return JSON.parse(new TextDecoder().decode(buf.subarray(pos + n, end))); } catch (e) { return null; }
+      }
+    }
+    pos = end;
+  }
+  return null;
 }
 
 function launchPanel(panel, m, hostKey) {
@@ -968,16 +1032,16 @@ function launchPanel(panel, m, hostKey) {
     const conn = (host ? host.shell.status : state.model.shell.status).replace(/ remote status /, ' remote launch ');
     let args = null;
     try { args = editorRef.get(); } catch (e) { args = '…'; }
-    shell.setCommand(conn + ' ' + shQuote(m.file ? state.moduleDir.replace(/\/$/, '') + '/' + m.file : m.hash) + (args === null ? '' : ' --args ' + shQuote(args)) +
+    shell.setCommand(conn + ' ' + shQuote(m.upload ? m.upload.name : m.file ? state.moduleDir.replace(/\/$/, '') + '/' + m.file : m.hash) + (args === null ? '' : ' --args ' + shQuote(args)) +
       (id.value ? ' --id ' + shQuote(id.value) : '') + (Number(hours.value) !== 24 ? ' --hours ' + Number(hours.value) : ''));
   };
   const editorRef = launchType === 'none' ? { el: h('p', { class: 'muted small', text: 'It takes no start arguments.' }), get: () => null }
     : payloadEditor(launchType, types, iface && iface.launch ? iface.launch.example : undefined, update);
   for (const el of [target, id, hours]) el.addEventListener('input', update);
   const result = h('div', { class: 'result' });
-  const push = m.file ? h('button', { type: 'button', onclick: async () => {
+  const push = m.file || m.upload ? h('button', { type: 'button', onclick: async () => {
     try {
-      const r = await api('push-module', { host: target.value, file: m.file });
+      const r = await api('push-module', m.upload ? { host: target.value, name: m.upload.name, data: m.upload.data } : { host: target.value, file: m.file });
       result.className = 'result';
       fill(result, h('pre', { text: 'stored as ' + r.hash }), shellBox('Shell: the same', r.shell));
     } catch (e) {
@@ -992,7 +1056,9 @@ function launchPanel(panel, m, hostKey) {
       fill(result, h('pre', { text: e.message }));
       return;
     }
-    const text = '{"host":' + JSON.stringify(target.value) + (m.file ? ',"file":' + JSON.stringify(m.file) : ',"module":' + JSON.stringify(m.hash)) +
+    const what = m.upload ? ',"name":' + JSON.stringify(m.upload.name) + ',"data":' + JSON.stringify(m.upload.data)
+      : m.file ? ',"file":' + JSON.stringify(m.file) : ',"module":' + JSON.stringify(m.hash);
+    const text = '{"host":' + JSON.stringify(target.value) + what +
       (args !== null ? ',"args":' + args : '') + (id.value ? ',"id":' + JSON.stringify(id.value) : '') + ',"hours":' + Number(hours.value || 24) + '}';
     result.className = 'result';
     fill(result, h('p', { class: 'muted small', text: 'Launching…' }));
@@ -1018,6 +1084,77 @@ function launchPanel(panel, m, hostKey) {
       h('div', { class: 'row' }, h('button', { type: 'button', class: 'primary', onclick: go, text: 'Launch' }), push)),
     result, shell);
   update();
+}
+
+// -- zombies page ---------------------------------------------------------------
+
+function zombiesView() {
+  const out = h('div');
+  out.append(h('div', { class: 'title-row' }, h('div', null,
+    h('div', { class: 'crumbs' }, h('a', { href: '#/', text: 'Mesh' }), ' › zombie groups'),
+    h('h1', { text: 'Zombie groups' }),
+    h('div', { class: 'muted small', text: 'Paglets that keep running while one host of the mesh is alive: a replica on every host, one result at the sink.' }))));
+  const body = h('div', null, h('p', { class: 'muted', text: 'Asking the hosts…' }));
+  out.append(body);
+  loadZombies(body);
+  return out;
+}
+
+async function loadZombies(body) {
+  let d;
+  try {
+    d = await api('zombies');
+  } catch (e) {
+    fill(body, h('div', { class: 'banner error', text: e.message }));
+    return;
+  }
+  const result = h('div', { class: 'result' });
+  const act = async (name, payload, describe) => {
+    try {
+      const r = await api(name, payload);
+      result.className = 'result';
+      fill(result, h('pre', { text: describe(r) }), shellBox('Shell: the same', r.shell));
+      if (name !== 'zombie-check') setTimeout(() => loadZombies(body), 500);
+    } catch (e) {
+      result.className = 'result err';
+      fill(result, h('pre', { text: e.message }), e.data && e.data.shell ? shellBox('Shell: the same', e.data.shell) : null);
+    }
+  };
+  const entry = state.model.mesh.entry_key;
+  const groups = d.groups.map((g) => {
+    const s = g.state || {};
+    const ended = s.ending && s.ending !== 'none';
+    const sink = h('input', { type: 'text', placeholder: 'host:NAME', size: 14, 'aria-label': 'new sink' });
+    return h('div', { class: 'message', 'data-key': g.group },
+      h('div', { class: 'message-head' }, h('span', { class: 'name', text: g.group }),
+        chip(ended ? s.ending : 'running', ended ? (s.ending === 'delivered' ? 'ok' : 'warn') : 'accent'),
+        h('span', { class: 'muted small', text: 'sink ' + (s.sink_spec || '–') + ' (#' + (s.sink || 1) + ')' })),
+      s.reason ? h('p', { class: 'small', text: s.reason }) : null,
+      h('div', { class: 'small' }, 'replicas: ', g.replicas.map((r) => r.paglet
+        ? h('a', { href: '#/paglet/' + r.host + '/' + encodeURIComponent(r.paglet) }, chip(r.host_name + ' · ' + short(r.paglet, 8)))
+        : chip(r.host_name + ' · none'))),
+      h('div', { class: 'small muted', text: 'owner ' + short(g.owner, 16) + ' · module ' + short(g.module, 16) }),
+      h('div', { class: 'row' },
+        h('button', { type: 'button', onclick: () => act('zombie-check', { host: entry, group: g.group }, (r) =>
+          r.records + ' protocol steps from ' + r.hosts + ' hosts, ' + r.replicas + ' replicas; takeovers ' + r.takeovers +
+          ', restarts ' + r.restarts + ', results accepted ' + r.accepted + '\n' +
+          (r.violations.length ? r.violations.map((v) => 'violation: ' + v).join('\n') : 'conforms to the specification')), text: 'Check' }),
+        ended ? null : h('button', { type: 'button', class: 'danger', onclick: () => {
+          if (confirm('Cancel group ' + g.group + ' on every host?')) act('zombie-cancel', { host: entry, group: g.group, reason: 'cancelled from paglets-web' }, () => 'cancelled');
+        }, text: 'Cancel' }),
+        ended ? null : [sink, h('button', { type: 'button', onclick: () => {
+          if (sink.value) act('zombie-redirect', { host: entry, group: g.group, sink: sink.value }, (r) => 'results go to ' + sink.value);
+        }, text: 'Redirect' })],
+        info('Check compares the protocol steps every host recorded with the specification. Cancel ends the group everywhere (also on hosts that are offline now, once they return). Redirect sends the result to another sink.')),
+      shellBox('Shell: traces', g.shell.traces), shellBox('Shell: check', g.shell.check), shellBox('Shell: result', g.shell.result));
+  });
+  fill(body,
+    d.errors.length ? h('div', { class: 'banner note' }, 'Some hosts did not answer: ', d.errors.map((e) => (hostByKey(e.host) ? hostByKey(e.host).name : short(e.host)) + ' (' + e.error + ') ')) : null,
+    h('section', { class: 'panel' },
+      h('div', { class: 'panel-head' }, h('h2', { text: 'Groups' }), h('span', { class: 'muted', text: d.groups.length + ' known' })),
+      groups.length ? h('div', { class: 'stack' }, groups) : h('p', { class: 'muted', text: 'No zombie groups' + (isAdmin() ? '.' : ' of yours.') }),
+      result,
+      shellBox('Shell: the groups', d.shell.list, 'zombies')));
 }
 
 // -- start ----------------------------------------------------------------------
