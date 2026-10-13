@@ -1,12 +1,14 @@
 # Command-line reference
 
-paglets/cpp builds three programs into `build/<preset>/host/`:
+paglets/cpp builds these programs:
 
 | Program | Purpose |
 |---|---|
-| `paglets-host` | runs paglets on one host, manages keys and the mesh ledger, runs a host of a mesh, and talks to live hosts |
-| `paglets-worker` | runs paglet instances for `paglets-host`, in an operating-system sandbox |
-| `paglets-spike` | the measurement and memory-image tool of milestones M0 and M1 |
+| `paglets-host` | runs paglets on one host, manages keys and the mesh ledger, runs a host of a mesh, and talks to live hosts (`build/<preset>/host/`) |
+| `paglets-worker` | runs paglet instances for `paglets-host`, in an operating-system sandbox (`build/<preset>/host/`) |
+| `paglets-web` | a local web UI for a mesh (`build/<preset>/web/`, see [The web UI](web-ui.md)) |
+| `paglets-interface` | puts [interface descriptions](interface-descriptions.md) into modules; the build runs it (`build/<preset>/examples/`) |
+| `paglets-spike` | the measurement and memory-image tool of milestones M0 and M1 (`build/<preset>/host/`) |
 
 The examples use `H=build/linux-gcc16/host/paglets-host`.
 
@@ -20,6 +22,8 @@ The examples use `H=build/linux-gcc16/host/paglets-host`.
 - Message bodies and arguments are JSON. The host converts them to
   MessagePack for the paglet and prints replies as JSON (`ok` for an empty
   reply, `error: <code>` for an [error code](configuration.md#error-codes)).
+  `{"$bytes": "00ff"}` is a binary string (for `bytes` fields); binary
+  strings in replies print as arrays of numbers.
 - `KEY` is a key file, `KEY-ID` a key's ID (64 hex digits). Where the
   ledger knows an ID, a unique prefix of at least 8 hex digits is enough.
   Commands that add someone to the ledger (`enroll`, `admins --add`,
@@ -139,11 +143,13 @@ Both default to 1. Prints the mesh ID.
 ### module inspect
 
 ```text
-paglets-host module inspect MODULE.wasm
+paglets-host module inspect MODULE.wasm [--json]
 ```
 
 Prints the module's hash and size, its initial and largest memory, whether
-it is a paglet and for which trust classes, and its imports and exports.
+it is a paglet and for which trust classes, its imports and exports, and
+its [interface description](interface-descriptions.md) (`--json`: the
+description as JSON).
 
 ### ledger
 
@@ -281,13 +287,16 @@ file. It accepts the host only if it is enrolled in the ledger copy
 
 | Command | Arguments | Does |
 |---|---|---|
-| `status` | | the host's name, key, mesh, ledger size, and its paglets |
+| `status` | | the host's name, key, mesh, ledger size, version and uptime, system (OS, CPUs, memory), its native system paglets, and its paglets with state, module, owner and trust class |
 | `push` | | sends every record of the ledger copy to the host |
 | `pull` | | adds the host's ledger records to the ledger copy |
-| `launch` | `MODULE.wasm [--args JSON] [--id PAGLET-ID] [--hours N]` | starts a paglet of the owner on the host. The passport is signed locally and is valid for `--hours` (default 24). The ID is random unless given. Prints the paglet ID. |
+| `launch` | `MODULE [--args JSON] [--id PAGLET-ID] [--hours N]` | starts a paglet of the owner on the host, from a `.wasm` file (sent along) or the hash of a module the host has. The passport is signed locally and is valid for `--hours` (default 24). The ID is random unless given. Prints the paglet ID. |
 | `call` | `PAGLET NAME [JSON] [--expect TEXT]` | sends a request to a paglet and prints the reply; status 1 for an error reply, or when the reply lacks `TEXT`. The host waits up to 30 s for the reply (a paglet that is moving replies after the move), then prints `error: timeout` |
+| `send` | `PAGLET NAME [JSON] [--priority N]` | sends a one-way message (priority 0 to 7, default 3); prints `sent` once the host queued it |
+| `describe` | `PAGLET` or `--module HASH`, `[--json]` | the [interface description](interface-descriptions.md) of the paglet's module (of a native system paglet: of its service), or of a module on the host |
 | `dispatch` | `PAGLET DESTINATION` | moves a paglet with a transfer ticket (see [Hosts and meshes](hosts-and-meshes.md#working-with-live-hosts)) and waits until the move ended, at most 120 s: prints `moved to NAME KEY`, or exits with status 1 and `the move failed, the paglet stays: REASON` |
 | `dispose` | `PAGLET` | ends a paglet (its owner or an admin) |
+| `terminate` | `PAGLET [--reason TEXT]` | ends a paglet as failed at once, also while a handler runs (admins) |
 | `hosts` | | the hosts as this host knows them: name, key, state (`this host`, `online`, `one-way` or `offline`), address, protocol and ABI, relays, `INCOMPATIBLE` for hosts of another protocol or ABI, and `send failed: REASON` when this host's frames to it fail |
 | `landscape` | | `mesh-info`'s view of every host: CPUs, load, free memory, compute slots, queue, paglets, and its offers |
 | `slots` | | the host's compute slots: leases and queue |
@@ -305,6 +314,19 @@ file. It accepts the host only if it is enrolled in the ledger copy
 
 `--passphrase-file` works here as for the ledger commands. The CLI waits
 up to 150 s for each answer of the host.
+
+## paglets-web
+
+```text
+paglets-web --connect URL --key KEY --ledger DIR [--host-key KEY-ID] [--passphrase-file FILE]
+            [--port N] [--port-range A-B] [--no-port-search] [--listen ADDR] [--allow-remote]
+            [--no-browser] [--module-dir DIR] [--refresh-ms N] [--program NAME]
+```
+
+Serves a web UI for the mesh on this computer and opens it in the
+browser. The session options are those of `remote`. [The web UI](web-ui.md)
+describes the pages, the options, the port search, the security model and
+the JSON API. `--help` prints the usage, `--version` the version.
 
 ## paglets-worker
 

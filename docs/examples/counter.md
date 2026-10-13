@@ -155,6 +155,11 @@ struct Echo {
     Mode mode = Mode::add;
 };
 
+// Start arguments (optional): the value to begin with.
+struct Start {
+    std::int64_t value = 0;
+};
+
 // Allocates and keeps the given amount of memory (image size experiments).
 struct Bloat {
     std::uint32_t kilobytes = 0;
@@ -166,13 +171,17 @@ struct Bloat {
 <!-- /snippet -->
 
 The module names the header and its namespace, so the build runs
-`schema_gen` for it:
+`schema_gen` for it. It also names its
+[interface description](../interface-descriptions.md), which the build puts
+into the module, so [`paglets-web`](../web-ui.md) shows forms for its
+messages and `remote describe` lists them:
 
 ```cmake
 paglets_add_module(counter
     SOURCES counter/counter.cpp
     SCHEMA_HEADER counter/messages.hpp
-    SCHEMA_NAMESPACE counter_msgs)
+    SCHEMA_NAMESPACE counter_msgs
+    INTERFACE counter/interface.json)
 ```
 
 ## Running it
@@ -190,6 +199,9 @@ $H run build/macos-arm64/guests/counter.wasm \
 The value is 5 after the first call and 15 after the second. `status`
 answers with `history_size` 2, the notes `first` and `triple`, and
 `average_step` 4.
+
+Start arguments are optional: `--args '{"value": 40}'` starts the counter
+at 40, so `increment '{"by": 2}'` then answers with the value 42.
 
 With a state directory, the paglet outlives the host process. `--keep`
 keeps it after the calls, and `call` resumes it from its last memory image

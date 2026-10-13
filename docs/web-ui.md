@@ -49,7 +49,7 @@ with Ctrl-C.
 | `--listen ADDR` | `127.0.0.1` | the address to listen on; any other than `127.0.0.1`, `::1` or `localhost` needs `--allow-remote` |
 | `--allow-remote` | off | allow other addresses, and any `Host` header |
 | `--no-browser` | open it | only print the address |
-| `--module-dir DIR` | none | `.wasm` files offered for launching and pushing |
+| `--module-dir DIR` | none | `.wasm` files offered for launching and pushing (files can also be uploaded from the browser) |
 | `--refresh-ms N` | 2000 | how often the hosts are asked (at least 500) |
 | `--program NAME` | `paglets-host` | the program name in the commands shown |
 
@@ -109,7 +109,20 @@ size, which hosts have it, and whether it is described. **Launch** opens a
 form with the target host, the start arguments (a form made from the
 module's `launch` type), an optional paglet ID and how long the passport
 is valid. **Push only** stores a module file on a host without starting
-it.
+it. **Upload a module** takes a `.wasm` file from this computer: the browser
+reads its interface description, and the module travels with the launch
+or push.
+
+**Zombies.** The [zombie groups](zombie-paglets.md) that the hosts know,
+each with:
+
+- its state (running, delivered, cancelled), sink and replicas;
+- **Check**, which compares the protocol steps every host recorded with
+  the specification;
+- **Cancel**, which ends the group on every host;
+- **Redirect**, which sends its result to another sink.
+
+Owners see their own groups, admins all.
 
 Every page refreshes itself without losing what you typed or which
 sections you opened.
@@ -168,14 +181,17 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8470/api/mesh
 | `GET /api/host?key=KEY-ID` | a host of the model with its `modules` and `pins` |
 | `GET /api/paglet?host=KEY-ID&id=PAGLET` | the paglet's `interface` description and `shell` commands |
 | `GET /api/modules` | the modules of the hosts and of `--module-dir` with their interfaces |
+| `GET /api/zombies` | the zombie groups of every host, with state and replicas |
 | `POST /api/call` | `{host, paglet, name, payload?, timeout_ms?}` → `{status, status_name, reply, shell}` |
 | `POST /api/send` | `{host, paglet, name, payload?, priority?}` → `{sent, shell}` |
-| `POST /api/launch` | `{host, module (hash) or file (in --module-dir), args?, id?, hours?}` → `{paglet, host, shell}` |
-| `POST /api/push-module` | `{host, file}` → `{hash, shell}` |
+| `POST /api/launch` | `{host, module (hash), file (in --module-dir) or name and data (an upload, base64), args?, id?, hours?}` → `{paglet, host, shell}` |
+| `POST /api/push-module` | `{host, file}` or `{host, name, data}` → `{hash, shell}` |
 | `POST /api/dispatch` | `{host, paglet, destination}` → `{moved, pending, reason, host_name, to, shell}` |
 | `POST /api/pin` | `{host, paglet, minutes?, reason?}` → `{pin, until_ms, host_name, shell}` |
 | `POST /api/locate` | `{host, paglet}` → `{host, host_name, moves, shell}` |
 | `POST /api/dispose`, `POST /api/terminate` | `{host, paglet, reason?}` → `{done, shell}` |
+| `POST /api/zombie-check` | `{host, group}` → `{records, hosts, replicas, takeovers, restarts, accepted, violations, shell}` |
+| `POST /api/zombie-cancel`, `POST /api/zombie-redirect` | `{host, group, reason?}`, `{host, group, sink}` → `{state, shell}` |
 
 Payloads and arguments are JSON values. They become MessagePack for the
 paglet, and `{"$bytes": "00ff"}` becomes a binary string (for `bytes`

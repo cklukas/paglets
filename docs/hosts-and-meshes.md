@@ -261,7 +261,18 @@ $H remote pin --connect https://lab-1:7443 --key olga.key --ledger ledger <pagle
 $H remote status --connect https://lab-2:7443 --key alice.key --ledger ledger
 ```
 
-The module travels with a `launch` request. `dispatch` takes a transfer
+The module travels with a `launch` request (or `launch` names the hash of
+a module the host already has). `send` delivers a one-way message, and
+`describe` prints a paglet's [interface description](interface-descriptions.md):
+the messages it understands and their types.
+
+```bash
+$H remote send --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> \
+    increment '{"by": 1}' --priority 5
+$H remote describe --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id>
+```
+
+`dispatch` takes a transfer
 ticket, which names the destination in one of these forms:
 
 - a host name or key ID;
@@ -298,9 +309,15 @@ Admin work against a live host:
 | `remote modules` | lists the host's modules |
 | `remote push-module` | stores a module on the host |
 | `remote dispose` | ends a paglet |
+| `remote terminate` | ends a paglet as failed at once (admins) |
 | `remote pins`, `remote unpin` | lists pins, and releases one (admins) |
 | `remote landscape` | lists every host with its labels, load and offers |
 | `remote slots` | shows the compute slots and queues of the hosts |
+
+> [!NOTE]
+> [`paglets-web`](web-ui.md) shows the same in the browser: every host
+> with its load and paglets, forms for the messages paglets describe, and
+> next to each view the `remote` command that does the same.
 
 ## Location and pins
 

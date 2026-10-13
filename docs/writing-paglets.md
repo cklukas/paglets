@@ -59,6 +59,13 @@ paglets_add_module(counter SOURCES counter/counter.cpp
 [`examples/counter`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/counter)
 shows the whole setup.
 
+To let tools and people use the paglet without reading its code, describe
+its messages and start arguments in a JSON file and add
+`INTERFACE counter/interface.json` to `paglets_add_module`. The build puts
+the description into the module. [`paglets-web`](web-ui.md) then shows
+forms for the messages, and `paglets-host remote describe` prints them
+(see [Interface descriptions](interface-descriptions.md)).
+
 ## Capabilities
 
 Paglets talk to other paglets only through capabilities:
@@ -164,8 +171,8 @@ $H call --state-dir state all increment '{"by": 1, "note": "again"}'
 ```
 
 `--root NAME=DIR` gives the `files` service a named root. `module inspect`
-shows a module's hash, its imports and exports, and the ABI version it was
-built for:
+shows a module's hash, its imports and exports, the ABI version it was
+built for, and its interface description:
 
 ```bash
 $H module inspect build/linux-gcc16/guests/counter.wasm

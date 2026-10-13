@@ -52,7 +52,9 @@ serialized fields.
 | [Writing paglets](writing-paglets.md) | the guest SDK, messages, capabilities, services and the patterns library |
 | [Guest SDK reference](sdk-reference.md) | every class, function and lifecycle hook of `<paglets/paglet.hpp>`, and your own typed service contracts |
 | [Hosts and meshes](hosts-and-meshes.md) | running hosts, the ledger, policy, module trust, residency, TLS, the remote CLI |
-| [Command-line reference](cli-reference.md) | every command and option of `paglets-host`, `paglets-worker` and `paglets-spike` |
+| [Command-line reference](cli-reference.md) | every command and option of `paglets-host`, `paglets-web`, `paglets-worker` and `paglets-spike` |
+| [The web UI](web-ui.md) | `paglets-web`: the mesh in the browser, commands to paglets, launching modules, and the matching shell commands |
+| [Interface descriptions](interface-descriptions.md) | how a module describes its messages and start arguments, for forms and tools |
 | [Configuration and troubleshooting](configuration.md) | state directories, keys and passphrases, ports and firewalls, limits, error codes, common problems |
 | [System paglets](system-paglets.md) | the services hosts offer to paglets, and the web and AI gateways |
 | [Example paglets and benchmarks](examples/index.md) | every example paglet, what each shows, and the first benchmark numbers |

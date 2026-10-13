@@ -35,6 +35,13 @@ Run a paglet:
 cpp/build/macos-arm64/host/paglets-host run cpp/build/macos-arm64/guests/hello.wasm --call greet '"world"'
 ```
 
+Look at a running mesh in the browser, send paglets commands and launch
+modules ([The web UI](docs/web-ui.md)):
+
+```bash
+cpp/build/macos-arm64/web/paglets-web --connect https://lab-1:7443 --key olga.key --ledger ledger
+```
+
 ## Documentation
 
 The documentation site has two parts, selected in its header: the C++
@@ -47,6 +54,8 @@ edition (from [`docs/`](docs/index.md) on this branch) and the Python edition
   [guest SDK reference](docs/sdk-reference.md)
 - [Hosts and meshes](docs/hosts-and-meshes.md) and the
   [command-line reference](docs/cli-reference.md)
+- [The web UI](docs/web-ui.md) (`paglets-web`) and
+  [interface descriptions](docs/interface-descriptions.md) of modules
 - [Configuration and troubleshooting](docs/configuration.md)
 - [System paglets](docs/system-paglets.md)
 - [Zombie paglets](docs/zombie-paglets.md), which keep running while one host

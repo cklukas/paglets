@@ -65,6 +65,7 @@ nav:
       - docs/hosts-and-meshes.md
       - docs/configuration.md
       - docs/system-paglets.md
+      - docs/web-ui.md
   - title: Fault tolerance
     pages:
       - docs/zombie-paglets.md
@@ -73,3 +74,4 @@ nav:
     pages:
       - docs/sdk-reference.md
       - docs/cli-reference.md
+      - docs/interface-descriptions.md

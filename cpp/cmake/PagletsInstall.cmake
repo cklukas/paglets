@@ -1,8 +1,8 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 
-# Installation as a CMake package: `cmake --install` provides paglets-host
-# and paglets-worker, the guest SDK (headers, paglet.cpp, the service
+# Installation as a CMake package: `cmake --install` provides paglets-host,
+# paglets-worker and paglets-web, the guest SDK (headers, paglet.cpp, the service
 # contracts with their generated clients), the schema generator with the
 # library it links (paglets::wire), and pagletsConfig.cmake, so projects
 # outside this repository build guest paglets with
@@ -11,7 +11,7 @@
 #   paglets_add_module(<name> SOURCES ... [SCHEMA_HEADER ...] [SERVICES ...])
 #
 # Layout below the prefix:
-#   bin/                          paglets-host, paglets-worker
+#   bin/                          paglets-host, paglets-worker, paglets-web
 #   include/paglets/              guest SDK, ABI, MessagePack, services/,
 #                                 wire/ (schema generator and interface tool)
 #   lib/                          libpaglets_wire.a
@@ -27,6 +27,7 @@ set(PAGLETS_INSTALL_DATADIR "${CMAKE_INSTALL_DATADIR}/paglets")
 
 install(TARGETS paglets-host paglets-worker EXPORT pagletsTargets
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS paglets-web RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS paglets_wire EXPORT pagletsTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(EXPORT pagletsTargets NAMESPACE paglets:: DESTINATION "${PAGLETS_INSTALL_CMAKEDIR}")

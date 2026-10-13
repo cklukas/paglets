@@ -81,9 +81,12 @@ common/include/paglets/   MessagePack primitives, the paglet ABI v1 documents an
 host/                     host library: Wasm engine, memory images, runtime, wire codecs;
                           mesh library: keys, ledger, gossip, passports;
                           services library: system paglets and the platform layer;
-                          paglets-host, paglets-worker and paglets-spike
+                          paglets-host, paglets-worker and paglets-spike;
+                          client library: sessions with live hosts (remote, paglets-web)
+web/                      paglets-web: its HTTP server, the JSON API and the UI (assets/)
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
+tools/interface/          paglets-interface: interface descriptions into modules
 tools/protocol_check/     paglets-protocol-check: protocols checked exhaustively and in timed runs
 examples/                 example paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
                           courier, digest, journey, finder, dupes, inventory, guard,
@@ -352,7 +355,23 @@ $H remote unpin --connect https://lab-1:7443 --key alice.key --ledger ledger <pa
 $H remote requests --connect https://lab-1:7443 --key alice.key --ledger ledger   # pulls the host's records
 $H remote approve --connect https://lab-1:7443 --key alice.key --ledger ledger <request-id>
 $H remote modules --connect https://lab-2:7443 --key olga.key --ledger ledger
+$H remote send --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id> increment '{"by": 1}'
+$H remote describe --connect https://lab-1:7443 --key olga.key --ledger ledger <paglet-id>
 $H module inspect build/macos-arm64/guests/counter.wasm
+```
+
+`paglets-web` ([docs](../docs/web-ui.md), [design](../planning/cpp-web-ui.md))
+shows the mesh in the browser: every host with its properties and system and
+user paglets, forms for the messages paglets describe in their
+[interface descriptions](../docs/interface-descriptions.md)
+(`paglets_add_module(... INTERFACE file.json)`), launching modules with start
+arguments, moving, pinning and ending paglets, and next to each view the
+`paglets-host remote` command that does the same. It serves its pages itself on
+127.0.0.1 (port 8470, or the next free one) and opens the browser:
+
+```bash
+build/macos-arm64/web/paglets-web --connect https://lab-1:7443 --key olga.key --ledger ledger \
+    --module-dir build/macos-arm64/guests
 ```
 
 Paglets locate and pin each other through the `locator` system paglet;
