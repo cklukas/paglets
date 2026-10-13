@@ -61,6 +61,9 @@ nav:
       - docs/hosts-and-meshes.md
       - docs/configuration.md
       - docs/system-paglets.md
+  - title: Fault tolerance
+    pages:
+      - docs/zombie-protocol.md
   - title: Reference
     pages:
       - docs/sdk-reference.md

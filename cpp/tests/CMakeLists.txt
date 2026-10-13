@@ -47,7 +47,8 @@ set(test_sources
     test_modules.cpp
     test_noise.cpp
     test_network.cpp
-    test_mobility.cpp)
+    test_mobility.cpp
+    test_zombie_protocol.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
