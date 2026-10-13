@@ -30,6 +30,7 @@
 #include <paglets/services/compute_slots.hpp>
 #include <paglets/services/mesh_info.hpp>
 #include <paglets/services/system_services.hpp>
+#include <paglets/services/zombies.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -257,6 +258,21 @@ public:
     void withdraw_offer(const std::string& service);
     // Hosts offering a feature, the best first.
     std::vector<services::mesh_info::OfferMatch> find_offers(const services::mesh_info::OffersRequest& q) const;
+
+    // Zombie groups (docs/zombie-protocol.md): the groups this host knows
+    // (of `owner`; empty: all), cancel and redirect (`owner` empty: an
+    // admin), and the protocol traces of a group from every live host.
+    std::vector<services::zombies::GroupInfo> zombie_groups(const std::string& owner) const;
+    void set_zombie_gossip(std::chrono::milliseconds every);  // default 5 s
+    std::expected<services::zombies::GroupState, std::string> zombie_cancel(const std::string& group,
+                                                                           const std::string& owner,
+                                                                           const std::string& reason);
+    std::expected<services::zombies::GroupState, std::string> zombie_redirect(const std::string& group,
+                                                                             const std::string& owner,
+                                                                             const std::string& sink_spec);
+    std::vector<services::zombies::TraceRecord> zombie_traces(const std::string& group);
+    // The result this host stored as the sink of a group (the highest sink number).
+    services::zombies::StoredResult zombie_result(const std::string& group) const;
 
     // -- CLI sessions (planning/cpp-networking.md, section 8) --
 

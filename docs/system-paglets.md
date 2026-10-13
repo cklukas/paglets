@@ -31,6 +31,7 @@ admin approves the request.
 | `locator` | `locate`, `locate_and_pin`, `release` | find a paglet anywhere in the mesh and pin it |
 | `mesh-info` | `snapshot`, `landscape`, `select`, `find_offers` | every host's snapshot (load, free slots, labels, offers), spread by gossip |
 | `compute-slots` | `request_slot`, `release_slot`, `status`, `candidates` | admission of compute work on a host, with a queue and redirects to hosts with free slots |
+| `zombies` | `join`, `trace`, `ended`, `state`, `cancel`, `redirect`, `list`, `traces` | the host's registry of zombie groups ([The zombie protocol](zombie-protocol.md)): one replica per group and host, tombstones and sink redirects that reach every host, the replicas' protocol traces |
 | `web` | `capabilities`, `fetch`, `extract_text`, `download`, `search` | mediated web access, on hosts started with `--web` |
 | `ai` | `capabilities`, `summarize`, `classify`, `extract`, `generate`, `embed`, `describe_image` | local inference, on hosts started with `--ai` |
 

@@ -5,6 +5,8 @@
 
 #include "node_impl.hpp"
 
+#include <paglets/protocols/zombie/trace.hpp>
+
 #include <future>
 
 namespace paglets::node {
@@ -112,6 +114,59 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
             return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
         }
         return answer(mesh::Map{{"status", mesh::Value(wire::to_msgpack(compute_status()))}});
+    }
+
+    if (*type == "zombies") {
+        // Zombie groups (docs/zombie-protocol.md): owners see and act on
+        // their groups, admins on all.
+        const std::string op = f.str("op").value_or("");
+        const std::string group = f.str("g").value_or("");
+        const std::string owner = admin ? std::string() : peer_id;
+        if (op == "list") {
+            mesh::Array list;
+            for (const auto& g : zombie_groups(owner)) list.emplace_back(wire::to_msgpack(g));
+            return answer(mesh::Map{{"groups", mesh::Value(std::move(list))}});
+        }
+        if (op == "cancel" || op == "redirect") {
+            auto r = op == "cancel" ? zombie_cancel(group, owner, f.str("reason").value_or(""))
+                                    : zombie_redirect(group, owner, f.str("sink").value_or(""));
+            if (!r) return refusal(r.error());
+            return answer(mesh::Map{{"state", mesh::Value(wire::to_msgpack(*r))}});
+        }
+        if (op == "result") {
+            auto r = zombie_result(group);
+            if (!r.found) return refusal("no result of group " + group + " on this host");
+            bool mine = admin;
+            for (const auto& g : zombie_groups(owner)) mine |= g.state.group == group;
+            if (!mine) return refusal("not the group's owner");
+            return answer(mesh::Map{{"result", mesh::Value(wire::to_msgpack(r))}});
+        }
+        if (op == "traces" || op == "check") {
+            std::optional<services::zombies::GroupState> state;
+            for (const auto& g : zombie_groups(owner)) {
+                if (g.state.group == group) state = g.state;
+            }
+            if (!state) return refusal("no group " + group + " of yours on this host");
+            auto records = zombie_traces(group);
+            if (op == "traces") {
+                mesh::Array list;
+                for (const auto& r : records) list.emplace_back(wire::to_msgpack(r));
+                return answer(mesh::Map{{"records", mesh::Value(std::move(list))},
+                                        {"state", mesh::Value(wire::to_msgpack(*state))}});
+            }
+            const auto rep = protocols::zombie::check_traces(std::move(records), state->sink);
+            mesh::Array violations;
+            for (const auto& v : rep.violations) violations.emplace_back(v);
+            auto n = [](std::size_t v) { return mesh::Value(static_cast<std::int64_t>(v)); };
+            return answer(mesh::Map{{"records", n(rep.records)},
+                                    {"replicas", n(rep.replicas)},
+                                    {"hosts", n(rep.hosts)},
+                                    {"takeovers", n(rep.takeovers)},
+                                    {"restarts", n(rep.restarts)},
+                                    {"accepted", n(rep.accepted)},
+                                    {"violations", mesh::Value(std::move(violations))}});
+        }
+        return refusal("unknown zombies operation");
     }
 
     if (*type == "push") {

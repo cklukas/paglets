@@ -291,6 +291,7 @@ file. It accepts the host only if it is enrolled in the ledger copy
 | `hosts` | | the hosts as this host knows them: name, key, state (`this host`, `online`, `one-way` or `offline`), address, protocol and ABI, relays, `INCOMPATIBLE` for hosts of another protocol or ABI, and `send failed: REASON` when this host's frames to it fail |
 | `landscape` | | `mesh-info`'s view of every host: CPUs, load, free memory, compute slots, queue, paglets, and its offers |
 | `slots` | | the host's compute slots: leases and queue |
+| `zombies` | `list`, `cancel GROUP`, `redirect GROUP SINK`, `traces GROUP`, `check GROUP`, `result GROUP` | the zombie groups the host knows ([The zombie protocol](zombie-protocol.md)): `list` shows each group's state (`running`, `delivered`, `cancelled`), sink and replica here; `cancel` ends a group on every host, also on hosts that are offline now, once they return; `redirect` sends its result to another sink; `traces` prints the protocol steps that every live host recorded, in time order; `check` checks them against the specification and exits with status 1 if a step violates it; `result` prints the result this host accepted as the group's sink (to standard output; what it is to standard error). Owners see their own groups, admins all. |
 | `locate` | `PAGLET` | where a paglet is, from any host |
 | `pin` | `PAGLET [--minutes N] [--reason TEXT]` | keeps a paglet where it is (default 10 minutes) |
 | `pins` | | the pins on the host |

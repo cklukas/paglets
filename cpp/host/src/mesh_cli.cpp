@@ -15,6 +15,7 @@
 #if PAGLETS_HAVE_REFLECTION
 #include <paglets/services/compute_slots.hpp>
 #include <paglets/services/mesh_info.hpp>
+#include <paglets/services/zombies.hpp>
 #include <paglets/wire/reflect.hpp>
 #endif
 #include <paglets/sha256.hpp>
@@ -86,6 +87,8 @@ int usage() {
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
            "       paglets-host remote hosts --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote landscape|slots --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote zombies list|cancel GROUP|redirect GROUP SINK|traces GROUP|check GROUP|result GROUP\n"
+           "                    --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote locate --connect URL --key KEY --ledger DIR PAGLET\n"
            "       paglets-host remote pin --connect URL --key KEY --ledger DIR PAGLET [--minutes N] [--reason TEXT]\n"
            "       paglets-host remote pins --connect URL --key KEY --ledger DIR\n"
@@ -1345,7 +1348,107 @@ int remote_slots(const Options& o) {
     return 0;
 }
 
+namespace zb = paglets::services::zombies;
+
+std::string_view ending_name(zb::Ending e) {
+    switch (e) {
+        case zb::Ending::none: return "running";
+        case zb::Ending::delivered: return "delivered";
+        case zb::Ending::cancelled: return "cancelled";
+    }
+    return "?";
+}
+
+int remote_zombies(const Options& o) {
+    if (o.positional.empty()) return usage();
+    const std::string op = o.positional[0];
+    Map q{{"t", Value("zombies")}, {"op", Value(op)}};
+    if (op != "list") {
+        if (o.positional.size() < 2) return usage();
+        q.emplace_back("g", Value(o.positional[1]));
+    }
+    if (op == "redirect") {
+        if (o.positional.size() != 3) return usage();
+        q.emplace_back("sink", Value(o.positional[2]));
+    }
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto a = r->ask(std::move(q));
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    if (op == "list") {
+        if (const Array* groups = f.array("groups")) {
+            for (const auto& g : *groups) {
+                zb::GroupInfo i;
+                const Bytes* b = g.as_bin();
+                if (b == nullptr || !paglets::wire::from_msgpack(*b, i)) continue;
+                std::cout << i.state.group << "  " << ending_name(i.state.ending) << "  sink " << i.state.sink << " "
+                          << i.state.sink_spec << "  replica " << (i.paglet.empty() ? "-" : i.paglet.substr(0, 12))
+                          << "  traces " << i.traces << (i.state.reason.empty() ? "" : "  (" + i.state.reason + ")")
+                          << "\n";
+            }
+        }
+        return 0;
+    }
+    if (op == "cancel" || op == "redirect") {
+        zb::GroupState s;
+        auto b = f.bin("state");
+        if (!b || !paglets::wire::from_msgpack(*b, s)) return fail("malformed answer");
+        std::cout << s.group << "  " << ending_name(s.ending) << "  sink " << s.sink << " " << s.sink_spec << "\n";
+        return 0;
+    }
+    if (op == "traces") {
+        if (const Array* records = f.array("records")) {
+            for (const auto& v : *records) {
+                zb::TraceRecord t;
+                const Bytes* b = v.as_bin();
+                if (b == nullptr || !paglets::wire::from_msgpack(*b, t)) continue;
+                const auto secs = t.time_ms / 1000;
+                std::cout << std::format("{:%F %T}  host {}  replica {} ({}.{})  ",
+                                         std::chrono::sys_seconds(std::chrono::seconds(secs)), t.host.substr(0, 8),
+                                         t.replica, t.incarnation, t.seq);
+                if (t.event == "transition") {
+                    std::cout << t.from << " -> " << t.to << " (" << t.cause << ")  progress " << t.progress
+                              << (t.done ? " done" : "") << "  reign " << t.term << "\n";
+                } else {
+                    std::cout << "sink " << t.sink << ": " << t.event << "\n";
+                }
+            }
+        }
+        return 0;
+    }
+    if (op == "result") {
+        zb::StoredResult s;
+        auto b = f.bin("result");
+        if (!b || !paglets::wire::from_msgpack(*b, s)) return fail("malformed answer");
+        std::cerr << s.name << ": sink " << s.sink << ", accepted "
+                  << std::format("{:%F %T}", std::chrono::sys_seconds(std::chrono::seconds(s.accepted_ms / 1000)))
+                  << " UTC from host " << s.from.substr(0, 8) << ", " << s.data.size() << " bytes\n";
+        std::cout.write(reinterpret_cast<const char*>(s.data.data()), static_cast<std::streamsize>(s.data.size()));
+        return 0;
+    }
+    if (op == "check") {
+        std::cout << "records " << f.integer("records").value_or(0) << " from " << f.integer("hosts").value_or(0)
+                  << " hosts, " << f.integer("replicas").value_or(0) << " replicas; takeovers "
+                  << f.integer("takeovers").value_or(0) << ", restarts " << f.integer("restarts").value_or(0)
+                  << ", results accepted " << f.integer("accepted").value_or(0) << "\n";
+        const Array* violations = f.array("violations");
+        if (violations == nullptr || violations->empty()) {
+            std::cout << "conforms to the specification\n";
+            return 0;
+        }
+        for (const auto& v : *violations) {
+            if (const auto* s = v.as_str()) std::cout << "violation: " << *s << "\n";
+        }
+        return 1;
+    }
+    return usage();
+}
+
 #else
+int remote_zombies(const Options&) {
+    return fail("this build has no zombies codecs (no reflection)");
+}
 int remote_landscape(const Options&) {
     return fail("this build has no mesh-info codecs (no reflection)");
 }
@@ -1457,6 +1560,7 @@ int mesh_command(int argc, char** argv) {
             if (action == "hosts") return remote_hosts(o);
             if (action == "landscape") return remote_landscape(o);
             if (action == "slots") return remote_slots(o);
+            if (action == "zombies") return remote_zombies(o);
             if (action == "locate") return remote_locate(o);
             if (action == "pin") return remote_pin(o);
             if (action == "pins") return remote_pins(o);

@@ -18,6 +18,7 @@
 #include <paglets/services/locator.hpp>
 #include <paglets/services/mesh_info.hpp>
 #include <paglets/services/system_services.hpp>
+#include <paglets/services/zombies.hpp>
 #include <paglets/sha256.hpp>
 #include <paglets/wasm/engine.hpp>
 #include <paglets/wire/reflect.hpp>
@@ -156,6 +157,7 @@ class GrantsService;
 class LocatorService;
 std::shared_ptr<runtime::SystemPaglet> make_locator(Node::Impl& impl);
 std::vector<std::shared_ptr<runtime::SystemPaglet>> make_compute_services(Node::Impl& impl);
+std::shared_ptr<runtime::SystemPaglet> make_zombies(Node::Impl& impl);
 
 struct Node::Impl {
     Impl(runtime::Runtime& rt, std::shared_ptr<services::SystemServices> svc, mesh::Ledger l, mesh::SigningKey k,
@@ -502,6 +504,54 @@ struct Node::Impl {
         std::int64_t used() const;
     };
     ComputeState compute;
+
+    // Zombie groups (zombies.cpp, docs/zombie-protocol.md).
+    struct ZombieGroup {
+        services::zombies::GroupState state;
+        std::string owner;   // key ID
+        std::string module;
+        std::string paglet;  // the replica on this host; empty if none
+        std::int64_t joined_ms = 0;
+        std::deque<services::zombies::TraceRecord> traces;
+    };
+    struct ZombieState {
+        std::map<std::string, ZombieGroup> groups;
+        runtime::SystemContext* ctx = nullptr;
+        Clock::time_point next_gossip{};
+        std::chrono::milliseconds gossip_every{5000};
+        bool dirty = false;
+        struct Collection {  // traces asked from every host
+            std::set<mesh::PublicKey> waiting;
+            std::vector<services::zombies::TraceRecord> records;
+            Clock::time_point deadline{};
+            std::function<void(std::vector<services::zombies::TraceRecord>)> done;
+        };
+        std::map<std::uint64_t, Collection> collections;
+        // Results this host accepted as a sink, by group and sink number.
+        std::map<std::pair<std::string, std::int64_t>, services::zombies::StoredResult> results;
+        struct Delivery {  // a result sent to the sink's host, answer pending
+            runtime::Cap reply;
+            Clock::time_point deadline{};
+            std::int64_t sink = 1;
+            std::string host;
+        };
+        std::map<std::uint64_t, Delivery> deliveries;
+    };
+    ZombieState zombies;
+    void zombie_notify(const std::string& group);
+    bool zombie_merge(const services::zombies::GroupState& s);
+    void zombie_end(const std::string& group, services::zombies::Ending ending, std::string reason);
+    services::zombies::GroupInfo zombie_info(const ZombieGroup& g) const;
+    services::zombies::StoredResult zombie_result(const std::string& group) const;
+    void zombies_tick();
+    bool on_zombies_frame(std::string_view type, const mesh::PublicKey& from, const mesh::Fields& f);
+    bool zombie_accept(const std::string& group, std::int64_t sink, const std::string& from, std::string name,
+                       std::vector<std::uint8_t> data);
+    std::optional<mesh::PublicKey> zombie_sink_host(const std::string& spec) const;
+    void collect_zombie_traces(const std::string& group,
+                               std::function<void(std::vector<services::zombies::TraceRecord>)> done);
+    void load_zombies();
+    void save_zombies();
     void sample_self();
     void compute_tick();
     void on_mesh_info(const mesh::PublicKey& from, const mesh::Fields& f);
@@ -859,7 +909,7 @@ struct Node::Impl {
             on_content_part(from, f);
         } else if (*type == frame_content_missing) {
             on_content_missing(from, f);
-        } else if (!on_location_frame(*type, from, f)) {
+        } else if (!on_location_frame(*type, from, f) && !on_zombies_frame(*type, from, f)) {
             return false;
         }
         return true;

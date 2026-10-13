@@ -176,6 +176,7 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
     impl_->load();
     impl_->load_locations();
     impl_->load_registry();
+    impl_->load_zombies();
     // Pins survive restarts: the paglets they hold stay here.
     for (const auto& [id, lease] : impl_->pins) (void)impl_->runtime.pin(lease.paglet, id, lease.until);
 }
@@ -197,6 +198,9 @@ std::expected<void, std::string> Node::start() {
     for (auto& service : make_compute_services(*impl_)) {
         if (auto id = impl_->runtime.add_system_paglet(service); !id) return std::unexpected(id.error());
     }
+    if (auto id = impl_->runtime.add_system_paglet(make_zombies(*impl_)); !id) return std::unexpected(id.error());
+    // Hosts that run zombie groups say so (a group needs every host to).
+    set_offer(services::mesh_info::Offer{"zombies", {"join", "deliver"}, {}});
     // Artifact capabilities name this host; content moves between hosts.
     impl_->install_exchange();
     // Services with ambient authority: only the operations the rules allow.
@@ -280,6 +284,7 @@ void Node::tick() {
     impl_->location_tick();
     impl_->registry_tick();
     impl_->compute_tick();
+    impl_->zombies_tick();
 }
 
 std::expected<mesh::AddResult, std::string> Node::submit(const mesh::Record& record) {
