@@ -675,6 +675,73 @@ PAGLETS_TEST("runtime: checkpoint policy per paglet") {
     std::filesystem::remove_all(dir);
 }
 
+PAGLETS_TEST("runtime: checkpoint() stores an image right after the handler (ABI v1.2)") {
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    rt::PagletId id;
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        c.checkpoint_interval = std::chrono::hours(1);  // no images on their own
+        Fixture f(std::move(c));
+        id = f.create("conformance.wasm");
+        f.runtime->wait_idle();
+        f.call(id, "count");
+        f.call(id, "count");
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::checkpoint)}), 0);
+        f.call(id, "count");  // after the image: lost with the crash
+        f.runtime->wait_idle();
+        f.runtime->shutdown(false);
+    }
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        Fixture f(std::move(c));
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 3);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: the restart policy decides who comes back; on_recovered tells them (ABI v1.2)") {
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    rt::PagletId gone;
+    rt::PagletId back;
+    rt::PagletId quiet;
+    const auto restart = static_cast<std::int32_t>(abi::LifecycleOp::restart);
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        Fixture f(std::move(c));
+        gone = f.create("conformance.wasm");
+        back = f.create("conformance.wasm");
+        quiet = f.create("conformance.wasm");
+        f.runtime->wait_idle();
+        CHECK_EQ(f.code(gone, "lifecycle", Cmd{.code = restart, .ms = 0}), 0);
+        CHECK_EQ(f.code(back, "lifecycle", Cmd{.code = restart, .ms = 1, .async = true}), 0);
+        f.call(back, "count");
+        f.runtime->wait_idle();
+        CHECK(!f.runtime->info(gone)->restart);
+        CHECK(f.runtime->info(back)->restart);
+        CHECK(f.runtime->info(back)->image_ms > 0);
+        f.runtime->shutdown(true);  // a normal shutdown stores everybody who wants to come back
+    }
+    {
+        rt::Config c;
+        c.state_dir = dir;
+        Fixture f(std::move(c));
+        CHECK(!f.runtime->info(gone).has_value());
+        REQUIRE(f.runtime->info(back).has_value());
+        REQUIRE(f.runtime->info(quiet).has_value());
+        CHECK(journal_eventually(f, back, "event:recovered:ok"));
+        CHECK_EQ(dec<std::int64_t>(f.call(back, "count").payload), 2);
+        CHECK(!contains(f.journal(quiet), "event:recovered:ok"));
+    }
+    std::filesystem::remove_all(dir);
+}
+
 PAGLETS_TEST("runtime: paglets resume from their last image after a restart") {
     const auto dir =
         std::filesystem::temp_directory_path() / ("paglets-test-" + std::to_string(std::random_device{}()));

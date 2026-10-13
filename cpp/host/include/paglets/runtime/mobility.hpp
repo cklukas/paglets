@@ -69,6 +69,8 @@ struct TravelState {
     std::vector<std::pair<std::int32_t, Cap>> caps;               // every capability, endpoints with host hints
     std::vector<std::pair<std::uint64_t, std::int64_t>> pending;  // requests in flight: correlation, ms left
     std::vector<std::string> marks;                               // data residency marks
+    bool restart = true;                                          // restart policy (abi::RestartArg)
+    bool notify_recovered = false;
 };
 Bytes encode_state(const TravelState& state);
 std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_t> bytes);

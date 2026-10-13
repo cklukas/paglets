@@ -24,8 +24,9 @@ namespace paglets::abi {
 inline constexpr std::uint32_t version = 1;
 // Compatible additions within v1 (planning/cpp-abi-v1.md, section 13):
 // 1 adds lent capabilities, resource capabilities, `revoked`, the service
-// map of self_info and derive paths.
-inline constexpr std::uint32_t minor_version = 1;
+// map of self_info and derive paths; 2 adds the lifecycle operations
+// `checkpoint` and `restart` and the `paglets.recovered` message.
+inline constexpr std::uint32_t minor_version = 2;
 inline constexpr std::string_view version_marker = "paglets_abi_v1";
 
 // Error codes (section 9). Negative results of imports and handlers.
@@ -90,7 +91,9 @@ enum class EventKind : std::int32_t {
 
 enum class MessageKind : std::int32_t { message = 0, request = 1, reply = 2, timer = 3 };
 
-enum class LifecycleOp : std::int32_t { dispose = 1, deactivate = 2, clone = 3, dispatch = 4 };
+// v1.2: checkpoint (store an image right after this handler) and restart
+// (whether the paglet comes back after its host restarts, RestartArg).
+enum class LifecycleOp : std::int32_t { dispose = 1, deactivate = 2, clone = 3, dispatch = 4, checkpoint = 5, restart = 6 };
 
 enum class LogLevel : std::int32_t { debug = 0, info = 1, warning = 2, error = 3 };
 
@@ -186,6 +189,9 @@ struct SelfInfo {
     // v1.1: while the paglet is pinned to its host, when the last pin ends
     // (Unix milliseconds); 0 when it is not pinned.
     std::int64_t pinned_until = 0;
+    // v1.2: the restart policy (RestartArg).
+    bool restart = true;
+    bool notify_recovered = false;
 };
 
 struct DeriveSpec {
@@ -246,6 +252,23 @@ struct CloneArg {
 
 struct DispatchArg {
     std::string destination;
+};
+
+// v1.2: the restart policy. With `restart`, the host stores the paglet's
+// images and brings it back from the last one after a restart (the
+// default); without, the paglet ends with its host process. With
+// `notify_recovered`, a paglet that came back receives `paglets.recovered`
+// (Recovered) as its first message.
+struct RestartArg {
+    bool restart = true;
+    bool notify_recovered = false;
+};
+
+// v1.2: payload of `paglets.recovered`.
+inline constexpr std::string_view recovered_message = "paglets.recovered";
+struct Recovered {
+    std::int64_t image_ms = 0;      // when the image it came back from was stored (Unix milliseconds)
+    std::int64_t restarted_ms = 0;  // when the host restarted (Unix milliseconds)
 };
 
 // v1.1: payload of `paglets.move_failed`, sent to a paglet whose dispatch,
@@ -397,7 +420,7 @@ inline bool paglets_decode(msgpack::Reader& r, Delivered& d) {
 }
 
 inline void paglets_encode(msgpack::Writer& w, const SelfInfo& s) {
-    w.write_map_header(9);
+    w.write_map_header(11);
     detail::put(w, "id", s.id);
     detail::put(w, "module", s.module);
     detail::put(w, "owner", s.owner);
@@ -412,6 +435,8 @@ inline void paglets_encode(msgpack::Writer& w, const SelfInfo& s) {
         w.write_int(handle);
     }
     detail::put(w, "pinned_until", s.pinned_until);
+    detail::put(w, "restart", s.restart);
+    detail::put(w, "notify_recovered", s.notify_recovered);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
@@ -424,6 +449,8 @@ inline bool paglets_decode(msgpack::Reader& r, SelfInfo& s) {
         if (k == "abi") return msgpack::read_value(r, s.abi);
         if (k == "minor") return msgpack::read_value(r, s.minor);
         if (k == "pinned_until") return msgpack::read_value(r, s.pinned_until);
+        if (k == "restart") return msgpack::read_value(r, s.restart);
+        if (k == "notify_recovered") return msgpack::read_value(r, s.notify_recovered);
         if (k == "services") {
             std::uint32_t n = 0;
             if (!r.read_map_header(n)) return false;
@@ -600,6 +627,34 @@ inline void paglets_encode(msgpack::Writer& w, const DispatchArg& a) {
 inline bool paglets_decode(msgpack::Reader& r, DispatchArg& a) {
     return detail::read_map(r, [&](std::string_view k) {
         if (k == "destination") return msgpack::read_value(r, a.destination);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const RestartArg& a) {
+    w.write_map_header(2);
+    detail::put(w, "restart", a.restart);
+    detail::put(w, "notify_recovered", a.notify_recovered);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, RestartArg& a) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "restart") return msgpack::read_value(r, a.restart);
+        if (k == "notify_recovered") return msgpack::read_value(r, a.notify_recovered);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const Recovered& e) {
+    w.write_map_header(2);
+    detail::put(w, "image_ms", e.image_ms);
+    detail::put(w, "restarted_ms", e.restarted_ms);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, Recovered& e) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "image_ms") return msgpack::read_value(r, e.image_ms);
+        if (k == "restarted_ms") return msgpack::read_value(r, e.restarted_ms);
         return r.skip();
     });
 }

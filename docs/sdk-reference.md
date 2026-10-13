@@ -52,6 +52,7 @@ public:
     virtual void on_disposing() {}
     virtual void on_undelivered(const abi::Undelivered& u);
     virtual void on_move_failed(const abi::MoveFailed& f);
+    virtual void on_recovered(const abi::Recovered&) {}
 
     virtual std::int32_t on_message(Message& m) { return router_.dispatch(m); }
 
@@ -80,7 +81,8 @@ runs once, when the paglet is created; register message handlers there.
 | `on_disposing()` | after the handler that called `dispose`, before the paglet ends |
 | `on_undelivered(const abi::Undelivered&)` | an asynchronous send or reply could not be delivered. The default logs a warning. |
 | `on_move_failed(const abi::MoveFailed&)` | a dispatch, or a clone for another host, did not happen. After a failed dispatch the paglet continues on its host. The default logs a warning. |
-| `on_message(Message&)` | every message, except replies with a continuation and the two reports above. The default passes it to the router. |
+| `on_recovered(const abi::Recovered&)` | the host restarted and the paglet came back from its last image, as its first message; only after `set_restart(true, true)` (ABI v1.2). `image_ms` says when that image was stored, `restarted_ms` when the host came back. The default does nothing. |
+| `on_message(Message&)` | every message, except replies with a continuation and the reports above. The default passes it to the router. |
 
 The documents of the events:
 
@@ -285,6 +287,8 @@ Result<void> deactivate(std::optional<std::int64_t> wake_after_ms = std::nullopt
 Result<Endpoint> clone_raw(Bytes args = {}, std::vector<Capability> caps = {},
                            std::optional<std::string> destination = std::nullopt);
 Result<void> dispatch(std::string destination);
+Result<void> checkpoint();                                              // ABI v1.2
+Result<void> set_restart(bool restart, bool notify_recovered = false);  // ABI v1.2
 
 Result<Capability> after_raw(std::int64_t delay_ms, std::string_view name, Bytes payload = {},
                              std::int32_t priority = abi::default_priority);
@@ -307,6 +311,19 @@ template <class T> Result<Capability> after(std::int64_t delay_ms, std::string_v
   `?retries=N&arrival=active|inactive`. While the paglet is pinned, it
   fails with `pinned`. When the move fails later, `on_move_failed` runs on
   the old host.
+- `checkpoint` stores the paglet's memory image right after the current
+  handler, before its next message, on a host with a state directory (every
+  `serve` host). Without it, images are stored at the host's checkpoint
+  interval (default 1 s). A crash restores the last image, so a paglet calls
+  `checkpoint` before an effect that must not be repeated after a restart.
+- `set_restart` sets the restart policy. By default every paglet on a host
+  with a state directory comes back from its last image after the host
+  restarts. With `restart` false the paglet is never stored (an image stored
+  earlier is removed) and ends with its host process. With
+  `notify_recovered`, a paglet that came back receives `on_recovered` first,
+  to check what changed while it was down. Clones inherit the policy, and it
+  travels with the paglet. `self_info()` reports it (`restart`,
+  `notify_recovered`).
 - `after` delivers a message named `name` to the paglet itself after
   `delay_ms`. Drop the returned capability to cancel it. Timers survive
   deactivation: a deactivated paglet is activated when its timer fires.

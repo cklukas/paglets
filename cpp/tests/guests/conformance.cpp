@@ -223,6 +223,9 @@ public:
                     return;
                 }
                 case abi::LifecycleOp::dispatch: m.reply(code_of(paglets::dispatch(c.name))); return;
+                case abi::LifecycleOp::checkpoint: m.reply(code_of(paglets::checkpoint())); return;
+                // Cmd.ms: 1 to come back after a restart, 0 not; Cmd.async: notify.
+                case abi::LifecycleOp::restart: m.reply(code_of(paglets::set_restart(c.ms != 0, c.async))); return;
             }
             m.reply(static_cast<std::int32_t>(abi::invalid_argument));
         });
@@ -266,6 +269,9 @@ public:
         }
         note("event:arrived:" + e.from + ":" + std::to_string(e.lost.size()));
         for (const auto& l : e.lost) note("lost:" + l);
+    }
+    void on_recovered(const abi::Recovered& e) override {
+        note(std::string("event:recovered:") + (e.image_ms > 0 && e.restarted_ms >= e.image_ms ? "ok" : "bad"));
     }
     void on_move_failed(const abi::MoveFailed& f) override {
         if (roam_ms_ > 0) {

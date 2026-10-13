@@ -294,7 +294,10 @@ int cmd_list(const Options& o) {
     for (const auto& p : runtime.list()) {
         if (p.trust == rt::TrustClass::system && p.module.empty()) continue;  // native system paglets
         std::cout << p.id << "  " << rt::to_string(p.trust) << "  " << rt::to_string(p.state) << "  module "
-                  << p.module.substr(0, 16) << "  owner " << p.owner << "\n";
+                  << p.module.substr(0, 16) << "  owner " << p.owner
+                  << (p.restart ? "  restart" : "  no-restart");
+        if (p.image_ms > 0) std::cout << "  image " << p.image_ms;
+        std::cout << "\n";
     }
     return 0;
 }

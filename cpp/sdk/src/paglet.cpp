@@ -247,6 +247,16 @@ Result<void> deactivate(std::optional<std::int64_t> wake_after_ms) {
                                     static_cast<std::uint32_t>(doc.size())));
 }
 
+Result<void> checkpoint() {
+    return status(paglets_lifecycle(static_cast<std::int32_t>(abi::LifecycleOp::checkpoint), nullptr, 0));
+}
+
+Result<void> set_restart(bool restart, bool notify_recovered) {
+    const Bytes doc = abi::encode(abi::RestartArg{restart, notify_recovered});
+    return status(paglets_lifecycle(static_cast<std::int32_t>(abi::LifecycleOp::restart), doc.data(),
+                                    static_cast<std::uint32_t>(doc.size())));
+}
+
 Result<Endpoint> clone_raw(Bytes args, std::vector<Capability> caps, std::optional<std::string> destination) {
     abi::CloneArg arg;
     arg.args = std::move(args);
@@ -368,6 +378,12 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
         abi::MoveFailed f;
         if (!m.decode(f)) return abi::malformed;
         paglets::detail::paglet().on_move_failed(f);
+        return abi::handled;
+    }
+    if (m.kind() == abi::MessageKind::message && m.name() == abi::recovered_message && !m.sender()) {
+        abi::Recovered e;
+        if (!m.decode(e)) return abi::malformed;
+        paglets::detail::paglet().on_recovered(e);
         return abi::handled;
     }
     if (m.kind() == abi::MessageKind::message && m.name() == abi::undelivered_message && !m.sender()) {

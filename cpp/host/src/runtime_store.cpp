@@ -76,7 +76,7 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
 namespace {
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
-    w.write_map_header(13);
+    w.write_map_header(16);
     put(w, "id", p.id);
     put(w, "module", p.module);
     put(w, "trust", p.trust);
@@ -102,6 +102,9 @@ void encode_record(msgpack::Writer& w, const PagletRecord& p) {
         w.write_int(h);
     }
     put(w, "marks", p.marks);
+    put(w, "restart", p.restart);
+    put(w, "notify_recovered", p.notify_recovered);
+    put(w, "image_ms", p.image_ms);
 }
 
 bool decode_record(msgpack::Reader& r, PagletRecord& p) {
@@ -131,6 +134,9 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
         if (k == "pending_requests") return msgpack::read_value(r, p.pending_requests);
         if (k == "checkpoint_ms") return msgpack::read_value(r, p.checkpoint_ms);
         if (k == "marks") return msgpack::read_value(r, p.marks);
+        if (k == "restart") return msgpack::read_value(r, p.restart);
+        if (k == "notify_recovered") return msgpack::read_value(r, p.notify_recovered);
+        if (k == "image_ms") return msgpack::read_value(r, p.image_ms);
         if (k == "services") {
             std::uint32_t n = 0;
             if (!r.read_array_header(n) || n > r.remaining()) return false;
@@ -256,7 +262,7 @@ constexpr std::int32_t state_version = 1;
 
 Bytes encode_state(const TravelState& s) {
     msgpack::Writer w;
-    w.write_map_header(13);
+    w.write_map_header(15);
     put(w, "v", state_version);
     put(w, "id", s.id);
     put(w, "module", s.module);
@@ -288,6 +294,8 @@ Bytes encode_state(const TravelState& s) {
         w.write_int(ms);
     }
     put(w, "marks", s.marks);
+    put(w, "restart", s.restart);
+    put(w, "notify_recovered", s.notify_recovered);
     return w.bytes();
 }
 
@@ -306,6 +314,8 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         if (k == "next_timer") return msgpack::read_value(r, s.next_timer);
         if (k == "checkpoint_ms") return msgpack::read_value(r, s.checkpoint_ms);
         if (k == "marks") return msgpack::read_value(r, s.marks);
+        if (k == "restart") return msgpack::read_value(r, s.restart);
+        if (k == "notify_recovered") return msgpack::read_value(r, s.notify_recovered);
         auto pairs = [&](auto&& one) {
             std::uint32_t n = 0;
             if (!r.read_array_header(n) || n > r.remaining()) return false;

@@ -478,3 +478,20 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   ends. Cloning, deactivation and messages are unaffected. Pin capabilities
   (kind `pin`, from the `locator` system paglet) are resource capabilities
   with the right `release`.
+
+## 14. Additions in v1.2
+
+Compatible additions for restarts and zombie paglets
+(planning/cpp-zombie.md); `self_info.minor` is 2 on hosts that have them.
+
+- **`checkpoint`** (lifecycle operation 5, no argument): the host stores the
+  paglet's memory image right after the current handler, before its next
+  message (with a state directory; otherwise nothing happens).
+- **`restart`** (lifecycle operation 6, `RestartArg {restart, notify_recovered}`):
+  the restart policy. Without `restart`, the paglet is never stored (an
+  image stored earlier is removed) and ends with its host process. With
+  `notify_recovered`, a paglet that came back after a restart receives
+  `paglets.recovered` (`Recovered {image_ms, restarted_ms}`, no sender) as
+  its first message. Clones inherit the policy; it travels with the paglet.
+  System paglets: `denied`.
+- **`self_info`** reports `restart` and `notify_recovered`.

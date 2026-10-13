@@ -304,6 +304,9 @@ public:
     // A dispatch, or a clone for another host, did not happen (default:
     // logged). After a failed dispatch the paglet continues here.
     virtual void on_move_failed(const abi::MoveFailed& f);
+    // The host restarted and the paglet came back from its last image (ABI
+    // v1.2, only after set_restart(true, true)). Default: nothing.
+    virtual void on_recovered(const abi::Recovered&) {}
 
     // Default: replies to own requests go to their continuation, everything
     // else to the router.
@@ -336,6 +339,15 @@ Result<void> deactivate(std::optional<std::int64_t> wake_after_ms = std::nullopt
 Result<Endpoint> clone_raw(Bytes args = {}, std::vector<Capability> caps = {},
                            std::optional<std::string> destination = std::nullopt);
 Result<void> dispatch(std::string destination);
+
+// ABI v1.2. Stores an image of the paglet right after the current handler,
+// before its next message (with a state directory; otherwise nothing).
+Result<void> checkpoint();
+// ABI v1.2. Whether the paglet comes back from its last image after its host
+// restarts (the default), and whether it then receives on_recovered()
+// first. Without restart it is never stored and ends with its host process.
+// Clones inherit the policy; it travels with the paglet.
+Result<void> set_restart(bool restart, bool notify_recovered = false);
 
 // Delivers the message to this paglet after `delay_ms`; drop the returned
 // capability to cancel.

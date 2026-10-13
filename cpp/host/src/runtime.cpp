@@ -196,6 +196,11 @@ struct PagletRec {
     // Data residency marks: kept for good, inherited by children and clones,
     // carried along when it moves (planning/cpp-residency.md).
     std::set<std::string> marks;
+    // Restart policy (abi::RestartArg): without `restart` the paglet is
+    // never stored and ends with its host process.
+    bool restart = true;
+    bool notify_recovered = false;
+    std::int64_t image_ms = 0;  // when its last image was stored (Unix milliseconds)
 
     // The end of the last pin, or 0 when the paglet is not pinned.
     std::int64_t pinned_until() {
@@ -397,6 +402,8 @@ struct Runtime::Impl {
         st.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         st.services = rec.services;
         st.marks.assign(rec.marks.begin(), rec.marks.end());
+        st.restart = rec.restart;
+        st.notify_recovered = rec.notify_recovered;
         for (const auto& [h, c] : rec.caps) st.caps.emplace_back(h, portable(c));
         const auto now = SteadyClock::now();
         for (const auto& [at, d] : deadlines) {
@@ -434,6 +441,7 @@ struct Runtime::Impl {
             return;
         }
         if (rec.dormant && rec.mailbox.size() < 2) return;  // only its `arrived` event waits
+        if (lanes.empty()) return;  // recovery, before the scheduler starts: readied then
         if (rec.lane < 0) {
             // Place next to the paglet it talks to, unless that lane is
             // clearly busier than the least loaded one; otherwise on the
@@ -722,6 +730,12 @@ struct Runtime::Impl {
 
     void persist(PagletRec& rec, const wasm::Snapshot& snap) {
         if (!store) return;
+        if (!rec.restart) {
+            // Not to come back: nothing stored (an older record goes).
+            if (rec.image_on_disk) store->remove_paglet(rec.id);
+            rec.image_on_disk = false;
+            return;
+        }
         PagletRecord r;
         r.id = rec.id;
         r.module = rec.module_hash();
@@ -736,10 +750,14 @@ struct Runtime::Impl {
         r.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         r.services = rec.services;
         r.marks.assign(rec.marks.begin(), rec.marks.end());
+        r.restart = rec.restart;
+        r.notify_recovered = rec.notify_recovered;
+        r.image_ms = wall_ms();
         if (auto ok = store->save_paglet(r, snap); !ok) {
             log(3, rec.id, "persisting the paglet failed: " + ok.error());
         } else {
             rec.image_on_disk = true;
+            rec.image_ms = r.image_ms;
         }
     }
 
@@ -824,6 +842,8 @@ public:
             rec_.id,      rec_.module_hash(), rec_.owner,   std::string(to_string(rec_.trust)), rt_.config.host_name,
             abi::version, abi::minor_version, rec_.services};
         info.pinned_until = rec_.pinned_until();
+        info.restart = rec_.restart;
+        info.notify_recovered = rec_.notify_recovered;
         return abi::encode(info);
     }
 
@@ -1178,6 +1198,8 @@ public:
                 PagletRec* created = rt_.new_paglet(id, rec_.module, trust, rec_.owner);
                 if (created == nullptr) return abi::internal;
                 created->marks = rec_.marks;
+                created->restart = rec_.restart;
+                created->notify_recovered = rec_.notify_recovered;
                 auto caps = rt_.take_caps(rec_, arg.caps);
                 if (!caps) {
                     rt_.erase_paglet(id);
@@ -1202,6 +1224,19 @@ public:
                 if (rec_.pinned_until() != 0) return abi::pinned;
                 rec_.pending_end = abi::LifecycleOp::dispatch;
                 rec_.dispatch_to = std::move(arg.destination);
+                return abi::ok;
+            }
+            case abi::LifecycleOp::checkpoint:
+                // Stored right after this handler (with a state directory).
+                rec_.checkpoint_due = true;
+                return abi::ok;
+            case abi::LifecycleOp::restart: {
+                abi::RestartArg arg;
+                if (!abi::decode(doc, arg)) return abi::malformed;
+                if (rec_.trust == TrustClass::system) return abi::denied;
+                rec_.restart = arg.restart;
+                rec_.notify_recovered = arg.notify_recovered;
+                rec_.checkpoint_due = true;  // stored (or removed) after this handler
                 return abi::ok;
             }
         }
@@ -1746,7 +1781,7 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
         if (wake) {
             schedule(SteadyClock::now() + std::chrono::milliseconds(*wake), Deadline{Deadline::Type::wake, rec.id, 0});
         }
-    } else if (store && rec.instance &&
+    } else if (store && rec.instance && (rec.restart || rec.image_on_disk) &&
                (rec.checkpoint_due || SteadyClock::now() - rec.last_checkpoint >=
                                           rec.checkpoint_interval.value_or(config.checkpoint_interval))) {
         lock.unlock();
@@ -1901,6 +1936,10 @@ void Runtime::Impl::recover() {
     const Warn warn = [this](const std::string& text) { log(2, "", text); };
     for (auto& id : store->load_revoked(warn)) revoked_ids.insert(std::move(id));
     for (auto& r : store->load_paglets(warn)) {
+        if (!r.restart) {  // stored before its policy changed; it does not come back
+            store->remove_paglet(r.id);
+            continue;
+        }
         TrustClass trust = TrustClass::roaming;
         if (r.trust == "resident") trust = TrustClass::resident;
         if (r.trust == "system") trust = TrustClass::system;
@@ -1917,6 +1956,9 @@ void Runtime::Impl::recover() {
         if (r.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(r.checkpoint_ms);
         rec.services = r.services;
         rec.marks.insert(r.marks.begin(), r.marks.end());
+        rec.restart = r.restart;
+        rec.notify_recovered = r.notify_recovered;
+        rec.image_ms = r.image_ms;
         rec.caps.clear();
         for (auto& [h, cap] : r.caps) {
             if (cap.kind == Cap::Kind::timer) {
@@ -1933,6 +1975,16 @@ void Runtime::Impl::recover() {
             deliver_reply(rec.id, correlation, abi::timeout, {}, {});
         }
         log(1, rec.id, "recovered from its last image");
+        if (rec.notify_recovered) {
+            // Its first message: when the image was stored and when the
+            // host came back.
+            Envelope env;
+            env.delivered.kind = abi::MessageKind::message;
+            env.delivered.name = std::string(abi::recovered_message);
+            env.delivered.payload = abi::encode(abi::Recovered{r.image_ms, wall_ms()});
+            env.delivered.priority = abi::max_priority;
+            enqueue(rec, std::move(env), abi::max_priority);
+        }
     }
 }
 
@@ -1988,6 +2040,11 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
         }
         if (!lane->executor) lane->executor = make_in_process_executor();
         impl_->lanes.push_back(std::move(lane));
+    }
+    {
+        // Messages queued during recovery (replies `timeout`, `recovered`).
+        std::lock_guard lock(impl_->mu);
+        for (auto& [id, rec] : impl_->paglets) impl_->make_ready(*rec);
     }
     for (unsigned i = 0; i < n; ++i) {
         impl_->lanes[i]->thread = std::thread([this, i] { impl_->lane_loop(i); });
@@ -2467,6 +2524,8 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     rec.next_timer = st.next_timer;
     if (st.checkpoint_ms >= 0) rec.checkpoint_interval = std::chrono::milliseconds(st.checkpoint_ms);
     rec.marks.insert(st.marks.begin(), st.marks.end());
+    rec.restart = st.restart;
+    rec.notify_recovered = st.notify_recovered;
     for (const auto& [correlation, ms] : st.pending) {
         rec.pending_requests.insert(correlation);
         rt.schedule(SteadyClock::now() + std::chrono::milliseconds(ms),
@@ -2612,7 +2671,9 @@ std::optional<PagletInfo> Runtime::info(const PagletId& id) const {
                       r.mailbox.size(),
                       r.caps.size(),
                       r.handled,
-                      r.lane};
+                      r.lane,
+                      r.restart,
+                      r.image_ms};
 }
 
 std::vector<PagletInfo> Runtime::list() const {

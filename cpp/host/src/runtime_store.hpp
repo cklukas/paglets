@@ -38,6 +38,9 @@ struct PagletRecord {
     std::int64_t checkpoint_ms = -1;                             // per-paglet checkpoint interval; -1: host default
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints: name, handle
     std::vector<std::string> marks;                              // data residency marks
+    bool restart = true;            // restart policy (abi::RestartArg)
+    bool notify_recovered = false;
+    std::int64_t image_ms = 0;      // when the image was stored (Unix milliseconds)
 };
 
 using Warn = std::function<void(const std::string&)>;

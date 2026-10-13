@@ -113,6 +113,8 @@ struct PagletInfo {
     std::size_t caps = 0;
     std::uint64_t handled = 0;  // handler calls
     int lane = -1;              // scheduler lane while placed, -1 otherwise
+    bool restart = true;        // comes back after a restart (abi::RestartArg)
+    std::int64_t image_ms = 0;  // when its last image was stored (Unix milliseconds), 0: none
 };
 
 // Why a paglet ended.
