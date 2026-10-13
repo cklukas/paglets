@@ -5,7 +5,8 @@
 # The Mesh Chronicle on real machines (docs/examples/mesh-chronicle.md):
 # a fresh mesh of this machine and remote Linux hosts (reached over SSH, as
 # for mesh_bench.sh), one chronicle with a lifetime of 10 minutes, and a
-# schedule of failures while it runs:
+# schedule of failures while it runs (times for 10 minutes; they scale with
+# --lifetime-min):
 #
 #   1:30  the host of the main freezes (SIGSTOP): the others take over while
 #         the old main, cut off, keeps its state; it thaws at 3:00 and the two
@@ -22,6 +23,7 @@
 #   cpp/tools/chronicle_live.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
 #       [--local-name mac] [--build cpp/build/macos-arm64] [--port 7443] [--lifetime-min 10]
+#       [--no-failures] [--keep]
 
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -29,6 +31,8 @@ build="$repo/cpp/build/macos-arm64"
 local_name="mac"
 port=7443
 lifetime_min=10
+failures=true
+keep=false
 names=()
 declare -A ssh_of bin_of ip_of key_of pid_of
 while [ $# -gt 0 ]; do
@@ -41,6 +45,8 @@ while [ $# -gt 0 ]; do
         --local-name) local_name="$2"; shift 2 ;;
         --port) port="$2"; shift 2 ;;
         --lifetime-min) lifetime_min="$2"; shift 2 ;;
+        --no-failures) failures=false; shift ;;
+        --keep) keep=true; shift ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
@@ -64,6 +70,7 @@ dir_of() { if [ "$1" = "$local_name" ]; then echo "$work"; else echo "\$HOME/$rw
 
 logs="${TMPDIR:-/tmp}/paglets-chronicle-logs"
 cleanup() {
+    if $keep; then echo "kept: $work (hosts still running)" >&2; return; fi
     for h in "${all[@]}"; do
         on "$h" "pkill -CONT -f \"paglets-host serve --key $(dir_of "$h")/host.key\" ; touch $(dir_of "$h")/stop" 2>/dev/null || true
     done
@@ -167,37 +174,40 @@ other_than() {  # a host other than the given ones, not the sink's
 events="[]"
 event() { events="$(jq -c --arg t "$(( $(date +%s) - began ))" --arg w "$1" '. + [{at_s: ($t|tonumber), what: $w}]' <<<"$events")"; say "$1"; }
 
-at 90
+L=$((lifetime_min * 60))
+$failures && {
+at $((L * 15 / 100))
 m="$(main_host)"; m="${m:-$creator_host}"
 [ "$m" = "$local_name" ] && m="$creator_host"
 event "the host of the main ($m) freezes (SIGSTOP): cut off, its main keeps its state"
 signal "$m" STOP
 frozen="$m"
-at 180
+at $((L * 30 / 100))
 event "$frozen thaws (SIGCONT): two mains meet"
 signal "$frozen" CONT
-at 270
+at $((L * 45 / 100))
 m="$(main_host)"; m="${m:-$creator_host}"
 [ "$m" = "$local_name" ] && m="$(other_than)"
 event "the host of the main ($m) crashes (SIGKILL)"
 signal "$m" KILL
 crashed="$m"
-at 360
+at $((L * 60 / 100))
 event "$crashed restarts with its state"
 serve "$crashed"
-at 420
+at $((L * 70 / 100))
 second="$(other_than "$crashed")"
-event "$second crashes (SIGKILL) and stays down for 90 s"
+event "$second crashes (SIGKILL) and stays down for $((L * 15 / 100)) s"
 signal "$second" KILL
-at 510
+at $((L * 85 / 100))
 event "$second restarts with its state"
 serve "$second"
-at 525
+at $((L * 875 / 1000))
 event "the sink's host ($local_name) shuts down normally"
 stop_host "$local_name"
-at 555
+at $((L * 925 / 1000))
 event "$local_name restarts with its state"
 serve "$local_name"
+}
 
 # The end: the life log at the sink.
 deadline=$(( began + lifetime_min * 60 + 240 ))
@@ -207,7 +217,15 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     log=""
     sleep 5
 done
-[ -n "$log" ] || { echo "no life log arrived" >&2; exit 1; }
+if [ -z "$log" ]; then
+    echo "no life log arrived" >&2
+    for h in "${all[@]}"; do
+        echo "== $h" >&2
+        "$H" remote zombies list $(R_of "$h") >&2 || true
+    done
+    "$H" remote zombies traces "$group" $(R_of "$local_name") >&2 || true
+    exit 1
+fi
 ended=$(date +%s)
 say "the life log arrived ($(wc -c <<<"$log") bytes)"
 sleep 15  # the tombstone reaches every host

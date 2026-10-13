@@ -375,10 +375,10 @@ public:
         if (!valid_group(q.group)) return std::unexpected(abi::invalid_argument);
         std::lock_guard lock(node_.mu);
         auto& g = node_.zombies.groups[q.group];
-        if (g.state.group.empty()) {
-            g.state.group = q.group;
-            g.state.sink_spec = q.sink_spec;
-        }
+        g.state.group = q.group;
+        // The host may know the group from gossip already (its members),
+        // but not yet its sink.
+        if (g.state.sink_spec.empty()) g.state.sink_spec = q.sink_spec;
         zb::JoinReply out;
         out.state = g.state;
         if (g.owner.empty()) g.owner = caller->owner;

@@ -376,6 +376,10 @@ private:
         std::int64_t partitions = 0;
         auto close = [&](std::int64_t at) {
             if (!open) return;
+            if (at == open->since) {  // changes of one moment, not a separation
+                open.reset();
+                return;
+            }
             std::string text;
             std::size_t worked = 0;
             for (const auto& side : open->sides) {

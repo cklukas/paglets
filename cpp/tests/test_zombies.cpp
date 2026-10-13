@@ -116,6 +116,19 @@ PAGLETS_TEST("zombies: one replica per host; a tombstone reaches every host and 
     CHECK_EQ(j2.reason, std::string("another replica of the group runs on this host"));
     CHECK(ask<zb::JoinReply>(net, *b.f, p3, "join", zb::JoinRequest{group1, "host:b"}).accepted);
 
+    // A host that knows a group from gossip before its replica joins still
+    // takes the sink from the join.
+    const std::string group3 = "00112233445566778899aabbccddeeff";
+    const auto p5 = start(net, a, module, '5');
+    const auto p6 = start(net, c, module, '6');
+    zb::JoinRequest q3{group3, "host:a", 0};
+    CHECK(ask<zb::JoinReply>(net, *a.f, p5, "join", q3).accepted);
+    REQUIRE(net.settle([&] { return group_on(c, group3).has_value(); }, 2000));
+    q3.replica = 2;
+    auto j6 = ask<zb::JoinReply>(net, *c.f, p6, "join", q3);
+    CHECK(j6.accepted);
+    CHECK_EQ(j6.state.sink_spec, std::string("host:a"));
+
     // Replicas record their steps; the collection from every host conforms.
     ask<zb::Done>(net, *a.f, p1, "trace",
                   zb::TraceRequest{group1, {step(0, 0, "sleeping", "created", "main", 0),

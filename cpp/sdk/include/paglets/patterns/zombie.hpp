@@ -333,7 +333,7 @@ private:
 
     void registry(const services::zombies::GroupState& s) {
         if (core_.replicas == 0) return;
-        sink_ = s.sink_spec;
+        if (!s.sink_spec.empty()) sink_ = s.sink_spec;
         run(zp::RegistryUpdate{s.ending != services::zombies::Ending::none, static_cast<std::uint64_t>(s.sink)});
     }
 
