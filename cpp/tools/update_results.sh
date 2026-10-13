@@ -3,7 +3,8 @@
 # Licensed under the MIT License. See LICENSE for details.
 
 # Runs the tests of the example paglets, with paglets in the host process and
-# in sandboxed worker processes, records what they report in docs/results/,
+# in sandboxed worker processes, and the protocol checks, records what they
+# report in docs/results/,
 # and writes the results and code excerpts into docs/ (paglets-docs-sync).
 #
 #   cpp/tools/update_results.sh [BUILD_DIR]     (default: cpp/build/macos-arm64)
@@ -32,5 +33,10 @@ for worker in "" "$build/host/paglets-worker"; do
         fi
     done
 done
+# The zombie protocol: the larger worlds and 10 000 timed runs (about half
+# an hour).
+echo "== zombie protocol"
+"$build/tools/protocol_check/paglets-protocol-check" --suite full --simulate --seeds 10000 --quiet \
+    --results "$PAGLETS_RESULTS_DIR/zombie_protocol.json" || status=1
 "$build/tools/docs_sync/paglets-docs-sync" --root "$repo"
 exit $status
