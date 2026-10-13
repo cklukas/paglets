@@ -39,6 +39,7 @@ set(test_sources
     test_json.cpp
     test_interface.cpp
     test_client.cpp
+    test_http.cpp
     test_wasm_binary.cpp
     test_engine.cpp
     test_snapshot.cpp
@@ -61,7 +62,7 @@ add_executable(paglets_tests ${test_sources})
 target_compile_definitions(paglets_tests PRIVATE
     PAGLETS_TEST_PLATFORM="${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}"
     PAGLETS_TEST_BUILD="${CMAKE_BUILD_TYPE}")
-target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net paglets_client)
+target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net paglets_client paglets_webui)
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway)
 endif()
