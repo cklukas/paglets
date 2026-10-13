@@ -187,6 +187,9 @@ struct Node::Impl {
     std::mutex trust_mu;
     std::shared_ptr<const mesh::LedgerState> trust;
 
+    // When this node started (Unix milliseconds; `status` reports uptime).
+    const std::int64_t started_ms = mesh::unix_ms();
+
     // Code mobility.
     using Clock = std::chrono::steady_clock;
     using ModuleDone = std::function<void(const std::expected<std::string, std::string>&)>;

@@ -4,7 +4,7 @@
 # The JSON value type of the wire layer. The schema generator links only this
 # library, so it is installed (as paglets::wire) for projects that build
 # guest paglets against an installed paglets package.
-add_library(paglets_wire STATIC src/json.cpp)
+add_library(paglets_wire STATIC src/json.cpp src/interface.cpp)
 add_library(paglets::wire ALIAS paglets_wire)
 set_target_properties(paglets_wire PROPERTIES EXPORT_NAME wire)
 target_include_directories(paglets_wire PUBLIC
@@ -74,6 +74,12 @@ if(WIN32)
     target_link_libraries(paglets_net PRIVATE ws2_32 crypt32)
 endif()
 
+# Mesh client sessions (WP31): what `paglets-host remote` and paglets-web
+# share.
+add_library(paglets_client STATIC src/client/client.cpp)
+target_link_libraries(paglets_client PUBLIC paglets_net paglets_mesh)
+target_compile_options(paglets_client PRIVATE ${PAGLETS_WARNINGS})
+
 # The standard system paglets and the host platform layer (WP10); they use
 # C++26 reflection for their service contracts.
 if(PAGLETS_ENABLE_REFLECTION)
@@ -125,7 +131,7 @@ endif()
 
 # The host binary and its worker processes.
 add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp src/serve_cli.cpp)
-target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh paglets_net)
+target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh paglets_net paglets_client)
 if(TARGET paglets_node)
     target_link_libraries(paglets-host PRIVATE paglets_node paglets_gateway)
 endif()

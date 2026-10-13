@@ -37,6 +37,8 @@ set(test_sources
     test_sha256.cpp
     test_msgpack.cpp
     test_json.cpp
+    test_interface.cpp
+    test_client.cpp
     test_wasm_binary.cpp
     test_engine.cpp
     test_snapshot.cpp
@@ -51,7 +53,7 @@ set(test_sources
     test_zombie_protocol.cpp
     test_protocol_check.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_session.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -59,7 +61,7 @@ add_executable(paglets_tests ${test_sources})
 target_compile_definitions(paglets_tests PRIVATE
     PAGLETS_TEST_PLATFORM="${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}"
     PAGLETS_TEST_BUILD="${CMAKE_BUILD_TYPE}")
-target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net)
+target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net paglets_client)
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway)
 endif()

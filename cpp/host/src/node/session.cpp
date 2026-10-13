@@ -6,8 +6,11 @@
 #include "node_impl.hpp"
 
 #include <paglets/protocols/zombie/trace.hpp>
+#include <paglets/wire/interface.hpp>
+#include <paglets/wire/json_msgpack.hpp>
 
 #include <future>
+#include <map>
 
 namespace paglets::node {
 
@@ -24,6 +27,27 @@ runtime::Bytes answer(mesh::Map m) {
 
 runtime::Bytes refusal(std::string_view why) {
     return mesh::encode(mesh::Value(mesh::Map{{"ok", mesh::Value(false)}, {"e", mesh::Value(why)}}));
+}
+
+// Interface descriptions of modules by hash (the bytes of a hash never
+// change): JSON text, empty for modules without one.
+std::string module_interface(runtime::ModuleStore& modules, const std::string& hash) {
+    static std::mutex mu;
+    static std::map<std::string, std::string> cache;
+    {
+        std::lock_guard lock(mu);
+        if (auto it = cache.find(hash); it != cache.end()) return it->second;
+    }
+    std::string text;
+    if (auto bytes = modules.bytes(hash)) {
+        if (auto d = wire::interface::of_module(*bytes); d && *d) text = (*d)->dump();
+    } else {
+        return {};
+    }
+    std::lock_guard lock(mu);
+    if (cache.size() > 1024) cache.clear();
+    cache[hash] = text;
+    return text;
 }
 
 }  // namespace
@@ -61,12 +85,21 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
     };
 
     if (*type == "status") {
+        // The paglets here (native system paglets are listed by name in
+        // `system`) and facts about the host (WP32).
         mesh::Array paglets;
         for (const auto& p : impl_->runtime.list()) {
             if (p.module.empty()) continue;  // native system paglets
             paglets.emplace_back(mesh::Array{mesh::Value(p.id), mesh::Value(p.module), mesh::Value(p.owner),
-                                             mesh::Value(runtime::to_string(p.state))});
+                                             mesh::Value(runtime::to_string(p.state)),
+                                             mesh::Value(runtime::to_string(p.trust))});
         }
+        mesh::Array system;
+        for (const auto& name : impl_->runtime.system_paglet_names()) {
+            if (auto id = impl_->runtime.system_paglet(name)) system.emplace_back(*id);
+        }
+        const auto facts = platform::summary();
+        auto n = [](std::uint64_t v) { return mesh::Value(static_cast<std::int64_t>(v)); };
         std::lock_guard lock(impl_->mu);
         const mesh::LedgerState& st = impl_->ledger.state();
         auto self = st.hosts.find(impl_->key.public_key());
@@ -75,7 +108,17 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                                 {"mesh", mesh::Value(st.mesh_name)},
                                 {"digest", mesh::Value::bin(impl_->ledger.digest())},
                                 {"records", mesh::Value(static_cast<std::int64_t>(st.records))},
-                                {"paglets", mesh::Value(std::move(paglets))}});
+                                {"paglets", mesh::Value(std::move(paglets))},
+                                {"system", mesh::Value(std::move(system))},
+                                {"version", mesh::Value(PAGLETS_VERSION)},
+                                {"uptime_s", mesh::Value((mesh::unix_ms() - impl_->started_ms) / 1000)},
+                                {"system_uptime_s", n(facts.uptime_s)},
+                                {"os", mesh::Value(facts.os)},
+                                {"os_version", mesh::Value(facts.os_version)},
+                                {"architecture", mesh::Value(facts.architecture)},
+                                {"cpu_model", mesh::Value(facts.cpu_model)},
+                                {"cpus", n(facts.cpu_count)},
+                                {"memory_total", n(facts.memory_total)}});
     }
 
     if (*type == "hosts") {
@@ -224,6 +267,61 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                                 {"payload", mesh::Value(r.payload)}});
     }
 
+    if (*type == "send") {
+        // One-way message (WP32); the paglet's errors do not come back.
+        auto paglet = f.str("paglet");
+        auto name = f.str("name");
+        if (!paglet || !name) return refusal("malformed request");
+        if (auto ok = may_act(*paglet); !ok) return refusal(ok.error());
+        const auto priority = static_cast<std::int32_t>(std::clamp<std::int64_t>(f.integer("priority").value_or(3), 0, 7));
+        if (auto ok = impl_->runtime.send(*paglet, *name, f.bin("payload").value_or(runtime::Bytes{}), priority); !ok) {
+            return refusal(std::string(abi::error_name(ok.error())));
+        }
+        return answer({});
+    }
+
+    if (*type == "describe") {
+        // The interface description of a paglet's module, of a module, or of
+        // a native system paglet's service (WP32, WP33): JSON text, empty
+        // when there is none.
+        if (auto module = f.str("module")) {
+            if (!impl_->runtime.modules().contains(*module)) return refusal("module " + module->substr(0, 16) + " is not here");
+            return answer(mesh::Map{{"interface", mesh::Value(module_interface(impl_->runtime.modules(), *module))}});
+        }
+        auto paglet = f.str("paglet");
+        if (!paglet) return refusal("malformed request");
+        auto info = impl_->runtime.info(*paglet);
+        if (!info) return refusal("no paglet " + *paglet + " here");
+        if (!info->module.empty()) {
+            return answer(mesh::Map{{"interface", mesh::Value(module_interface(impl_->runtime.modules(), info->module))}});
+        }
+        // Native system paglets serve contracts, which describe themselves.
+        const runtime::Reply r = impl_->runtime.call(*paglet, "describe", {}, std::chrono::milliseconds(5000));
+        std::string text;
+        if (r.status == abi::ok) {
+            std::string schema;
+            if (auto j = wire::msgpack_to_json(r.payload); j && j->is_string()) schema = j->as_string();
+            if (auto parsed = wire::Json::parse(schema)) {
+                std::string name = *paglet;
+                if (name.starts_with("system.")) name = name.substr(7);
+                text = wire::interface::from_schema(*parsed, name).dump();
+            }
+        }
+        return answer(mesh::Map{{"interface", mesh::Value(text)}});
+    }
+
+    if (*type == "terminate") {
+        // Admins end a paglet as failed (WP32), for example one that hangs.
+        auto paglet = f.str("paglet");
+        if (!paglet) return refusal("malformed request");
+        if (!admin) return refusal("only admins terminate paglets");
+        if (!impl_->runtime.info(*paglet)) return refusal("no paglet " + *paglet + " here");
+        if (auto ok = impl_->runtime.terminate(*paglet, f.str("reason").value_or("terminated by an admin")); !ok) {
+            return refusal(std::string(abi::error_name(ok.error())));
+        }
+        return answer({});
+    }
+
     if (*type == "dispatch") {
         auto paglet = f.str("paglet");
         auto destination = f.str("destination");
@@ -360,7 +458,8 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
                                         {"size", mesh::Value(static_cast<std::int64_t>(e.size))},
                                         {"users", mesh::Value(static_cast<std::int64_t>(e.users))},
                                         {"pinned", mesh::Value(e.pinned)},
-                                        {"names", mesh::Value(std::move(signed_as))}});
+                                        {"names", mesh::Value(std::move(signed_as))},
+                                        {"interface", mesh::Value(module_interface(impl_->runtime.modules(), e.hash))}});
         }
         return answer(mesh::Map{{"modules", mesh::Value(std::move(list))}});
     }

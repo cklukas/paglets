@@ -7,10 +7,12 @@
 #include "mesh_cli.hpp"
 
 #include <paglets/abi.hpp>
+#include <paglets/client/client.hpp>
 #include <paglets/mesh/crypto.hpp>
 #include <paglets/mesh/ledger.hpp>
 #include <paglets/mesh/passport.hpp>
 #include <paglets/net/transport.hpp>
+#include <paglets/wire/interface.hpp>
 #include <paglets/wire/json_msgpack.hpp>
 #if PAGLETS_HAVE_REFLECTION
 #include <paglets/services/compute_slots.hpp>
@@ -31,16 +33,6 @@
 #include <string>
 #include <vector>
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#else
-#include <termios.h>
-#include <unistd.h>
-#endif
-
 namespace paglets::cli {
 
 namespace {
@@ -54,7 +46,7 @@ int usage() {
            "                             [--passphrase-file FILE] [--kdf moderate|interactive]\n"
            "       paglets-host keys show FILE\n"
            "       paglets-host mesh create --name NAME --ledger DIR --admin KEY... [--admin-quorum N] [--quorum N]\n"
-           "       paglets-host module inspect MODULE.wasm\n"
+           "       paglets-host module inspect MODULE.wasm [--json]\n"
            "       paglets-host ledger show --ledger DIR [--ignored]\n"
            "       paglets-host ledger request --ledger DIR --key KEY [--label L]...\n"
            "       paglets-host ledger approve --ledger DIR --admin KEY... REQUEST [--label L | --group G]...\n"
@@ -84,6 +76,8 @@ int usage() {
            "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE.wasm\n"
            "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
            "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
+           "       paglets-host remote send --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--priority N]\n"
+           "       paglets-host remote describe --connect URL --key KEY --ledger DIR PAGLET|--module HASH [--json]\n"
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
            "       paglets-host remote hosts --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote landscape|slots --connect URL --key KEY --ledger DIR\n"
@@ -100,6 +94,7 @@ int usage() {
            "       paglets-host remote modules --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote push-module --connect URL --key KEY --ledger DIR MODULE.wasm\n"
            "       paglets-host remote dispose --connect URL --key KEY --ledger DIR PAGLET\n"
+           "       paglets-host remote terminate --connect URL --key ADMIN-KEY --ledger DIR PAGLET [--reason TEXT]\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
            "system; 'module-policy trusted' makes roaming modules need trust as well. residency keeps\n"
            "the content of a named root on the host it was read on (host-only) or on some hosts: a paglet\n"
@@ -107,7 +102,9 @@ int usage() {
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
-           "call sends a request to a paglet of the owner, dispatch moves it (a transfer ticket) and\n"
+           "call sends a request to a paglet of the owner and prints the reply, send a one-way message\n"
+           "(priority 0-7, default 3), describe prints the interface description of a paglet's module\n"
+           "(or of a module on the host; --json: as JSON), dispatch moves it (a transfer ticket) and\n"
            "waits until it arrived or failed (at most 120 s; exit status 1 on failure).\n"
            "hosts lists the enrolled hosts as the host knows them (address, online, versions; one-way:\n"
            "the host hears from it but cannot send to it, `send failed` says why);\n"
@@ -118,7 +115,8 @@ int usage() {
            "pull brings the host's ledger records into the ledger copy; requests, approve, deny and audit\n"
            "pull first, so admins decide on what the mesh knows (approve and deny sign with --admin, or\n"
            "--key, and push the decision); modules lists the modules on the host, push-module stores\n"
-           "one there, dispose ends a paglet (its owner or an admin).\n"
+           "one there, dispose ends a paglet (its owner or an admin), terminate ends it as failed\n"
+           "(admins; for a paglet that hangs).\n"
            "Requests are enrollment or grant requests; approving a grant request grants each item\n"
            "on every host (--host-only: on the requesting host).\n"
            "KEY is a key file. Passphrases are read from the terminal, or from the first line of\n"
@@ -142,6 +140,7 @@ struct Options {
     std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths, classes, signers;
     std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service, version;
     std::optional<std::string> connect, host_key, args, id, expect, pin;
+    bool json = false;
     std::optional<std::int64_t> hours, minutes;
     std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
     bool ignored = false;
@@ -208,6 +207,8 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = number(o.quorum);
         } else if (a == "--ignored") {
             o.ignored = true;
+        } else if (a == "--json") {
+            o.json = true;
         } else if (a == "--host-only") {
             o.host_only = true;
         } else if (a == "--decision") {
@@ -272,64 +273,12 @@ std::optional<Options> parse(int first, int argc, char** argv) {
 
 // -- passphrases --------------------------------------------------------------
 
-std::optional<std::string> read_hidden(const std::string& prompt) {
-    std::cerr << prompt << std::flush;
-    std::string line;
-#ifdef _WIN32
-    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
-    DWORD mode = 0;
-    const bool console = GetConsoleMode(in, &mode) != 0;
-    if (console) SetConsoleMode(in, mode & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
-    const bool got = static_cast<bool>(std::getline(std::cin, line));
-    if (console) SetConsoleMode(in, mode);
-#else
-    termios old{};
-    const bool tty = ::isatty(STDIN_FILENO) != 0 && ::tcgetattr(STDIN_FILENO, &old) == 0;
-    if (tty) {
-        termios quiet = old;
-        quiet.c_lflag &= ~static_cast<tcflag_t>(ECHO);
-        ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
-    }
-    const bool got = static_cast<bool>(std::getline(std::cin, line));
-    if (tty) ::tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
-#endif
-    std::cerr << "\n";
-    if (!got) return std::nullopt;
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    return line;
-}
+using client::Passphrases;
+using client::open_key;
+using client::read_hidden;
 
-struct Passphrases {
-    std::optional<std::string> from_file;
-
-    static std::expected<Passphrases, std::string> make(const Options& o) {
-        Passphrases p;
-        if (o.passphrase_file) {
-            std::ifstream in(*o.passphrase_file);
-            std::string line;
-            if (!in || !std::getline(in, line)) return std::unexpected("cannot read " + *o.passphrase_file);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            p.from_file = line;
-        }
-        return p;
-    }
-
-    std::optional<std::string> get(const std::string& prompt) const {
-        if (from_file) return from_file;
-        return read_hidden(prompt);
-    }
-};
-
-std::expected<SigningKey, std::string> open_key(const std::string& path, const Passphrases& passphrases) {
-    auto info = read_key_info(path);
-    if (!info) return std::unexpected(info.error());
-    std::optional<std::string> passphrase;
-    if (info->encrypted) {
-        passphrase = passphrases.get("passphrase for " + std::string(to_string(info->role)) + " key '" + info->name +
-                                     "' (" + path + "): ");
-        if (!passphrase) return std::unexpected(std::string("no passphrase given"));
-    }
-    return load_key(path, passphrase);
+std::expected<Passphrases, std::string> passphrases_of(const Options& o) {
+    return Passphrases::make(o.passphrase_file);
 }
 
 // -- IDs -----------------------------------------------------------------------
@@ -399,7 +348,7 @@ int keys_init(const Options& o) {
     auto role = parse_key_role(*o.role);
     if (!role) return fail("unknown role " + *o.role);
     if (o.kdf && *o.kdf != "moderate" && *o.kdf != "interactive") return fail("unknown --kdf " + *o.kdf);
-    auto passphrases = Passphrases::make(o);
+    auto passphrases = passphrases_of(o);
     if (!passphrases) return fail(passphrases.error());
     std::optional<std::string> passphrase;
     if (*role != KeyRole::host || o.passphrase_file) {
@@ -437,7 +386,7 @@ int mesh_create(const Options& o) {
     if (!o.name || !o.ledger || o.admins.empty() || !o.positional.empty()) return usage();
     std::error_code ec;
     if (fs::exists(*o.ledger, ec) && !fs::is_empty(*o.ledger, ec)) return fail(*o.ledger + " is not empty");
-    auto passphrases = Passphrases::make(o);
+    auto passphrases = passphrases_of(o);
     if (!passphrases) return fail(passphrases.error());
     std::vector<SigningKey> keys;
     for (const auto& path : o.admins) {
@@ -553,7 +502,7 @@ struct AdminSession {
         if (o.admins.empty()) return std::unexpected(std::string("--admin is required"));
         auto ledger = open_ledger(o);
         if (!ledger) return std::unexpected(ledger.error());
-        auto passphrases = Passphrases::make(o);
+        auto passphrases = passphrases_of(o);
         if (!passphrases) return std::unexpected(passphrases.error());
         AdminSession s{std::move(*ledger), {}};
         for (const auto& path : o.admins) {
@@ -608,7 +557,7 @@ int ledger_request(const Options& o) {
     if (!o.key || !o.positional.empty()) return usage();
     auto ledger = open_ledger(o);
     if (!ledger) return fail(ledger.error());
-    auto passphrases = Passphrases::make(o);
+    auto passphrases = passphrases_of(o);
     if (!passphrases) return fail(passphrases.error());
     auto info = read_key_info(*o.key);
     if (!info) return fail(info.error());
@@ -787,7 +736,7 @@ int ledger_sign_module(const Options& o) {
     auto info = read_key_info(*o.key);
     if (!info) return fail(info.error());
     if (info->role == KeyRole::host) return fail("host keys do not sign modules");
-    auto passphrases = Passphrases::make(o);
+    auto passphrases = passphrases_of(o);
     if (!passphrases) return fail(passphrases.error());
     auto key = open_key(*o.key, *passphrases);
     if (!key) return fail(key.error());
@@ -887,62 +836,28 @@ int ledger_sign(const Options& o) {
 // -- remote: CLI sessions with a host ----------------------------------------
 
 struct Remote {
-    Ledger ledger;
-    SigningKey key;
-    net::ClientSession session;
+    client::Identity identity;
+    client::Session session;
 
     static std::expected<Remote, std::string> open(const Options& o) {
         if (!o.connect || !o.key) return std::unexpected(std::string("--connect and --key are required"));
-        auto ledger = open_ledger(o);
-        if (!ledger) return std::unexpected(ledger.error());
-        auto info = read_key_info(*o.key);
-        if (!info) return std::unexpected(info.error());
-        net::PeerRole role = net::PeerRole::owner;
-        if (info->role == KeyRole::admin) {
-            role = net::PeerRole::admin;
-        } else if (info->role != KeyRole::owner) {
-            return std::unexpected(std::string("sessions use an admin or owner key"));
-        }
-        auto passphrases = Passphrases::make(o);
-        if (!passphrases) return std::unexpected(passphrases.error());
-        auto key = open_key(*o.key, *passphrases);
-        if (!key) return std::unexpected(key.error());
+        if (!o.ledger) return std::unexpected(std::string("--ledger is required"));
         std::optional<PublicKey> expected;
         if (o.host_key) {
             expected = parse_key_id(*o.host_key);
             if (!expected) return std::unexpected(std::string("--host-key takes a key ID (64 hex digits)"));
         }
-        const LedgerState state = ledger->state();
-        auto accept = [expected, state](const net::Identity& server) -> std::expected<void, std::string> {
-            if (server.role != net::PeerRole::host) return std::unexpected(std::string("the server is not a host"));
-            if (expected ? server.key != *expected : !state.is_host(server.key)) {
-                return std::unexpected("host " + key_id(server.key) + " is not enrolled in this ledger copy");
-            }
-            return {};
-        };
-        // Hosts answer calls when the paglet replied (up to 30 s) and moves
-        // when they ended (up to 120 s): wait longer than that.
-        net::TransportConfig config;
-        config.read_timeout = std::chrono::seconds(150);
-        auto session = net::ClientSession::open(*o.connect, *key, role, ledger->mesh(), accept, config);
+        auto passphrases = passphrases_of(o);
+        if (!passphrases) return std::unexpected(passphrases.error());
+        auto identity = client::Identity::open(*o.key, *o.ledger, *passphrases);
+        if (!identity) return std::unexpected(identity.error());
+        auto session = client::Session::open(*o.connect, *identity, expected);
         if (!session) return std::unexpected(session.error());
-        return Remote{std::move(*ledger), std::move(*key), std::move(*session)};
+        return Remote{std::move(*identity), std::move(*session)};
     }
 
     // One request, one answer; failures of the host are errors.
-    std::expected<Map, std::string> ask(Map request) {
-        auto answers = session.exchange({encode(Value(std::move(request)))});
-        if (!answers) return std::unexpected(answers.error());
-        if (answers->size() != 1) return std::unexpected(std::string("no answer"));
-        auto v = decode((*answers)[0]);
-        if (!v || v->as_map() == nullptr) return std::unexpected(std::string("malformed answer"));
-        const Fields f{*v->as_map()};
-        const Value* ok = f.get("ok");
-        if (ok == nullptr || ok->as_bool() == nullptr || !*ok->as_bool()) {
-            return std::unexpected(f.str("e").value_or("refused"));
-        }
-        return *v->as_map();
-    }
+    std::expected<Map, std::string> ask(Map request) { return session.ask(std::move(request)); }
 };
 
 std::expected<Bytes, std::string> json_body(const std::optional<std::string>& json) {
@@ -955,21 +870,25 @@ std::expected<Bytes, std::string> json_body(const std::optional<std::string>& js
 int remote_status(const Options& o) {
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
-    auto a = r->ask(Map{{"t", Value("status")}});
-    if (!a) return fail(a.error());
-    const Fields f{*a};
-    std::cout << "host:    " << f.str("name").value_or("") << " " << key_id(*f.fixed<32>("key")) << "\n"
-              << "mesh:    " << f.str("mesh").value_or("") << "\n"
-              << "ledger:  " << f.integer("records").value_or(0) << " records, state "
-              << short_id(r->ledger.state().digest()) << " here\n"
-              << "paglets:\n";
-    if (const Array* paglets = f.array("paglets")) {
-        for (const auto& p : *paglets) {
-            const Array* e = p.as_array();
-            if (e == nullptr || e->size() != 4) continue;
-            std::cout << "  " << *(*e)[0].as_str() << "  " << *(*e)[3].as_str() << "  module "
-                      << (*e)[1].as_str()->substr(0, 16) << "  owner " << (*e)[2].as_str()->substr(0, 16) << "\n";
-        }
+    auto st = r->session.status();
+    if (!st) return fail(st.error());
+    std::cout << "host:    " << st->name << " " << key_id(st->key) << "\n"
+              << "mesh:    " << st->mesh << "\n"
+              << "ledger:  " << st->records << " records, state " << short_id(r->identity.ledger.state().digest())
+              << " here\n";
+    if (st->extended) {
+        std::cout << "version: " << st->version << ", up " << st->uptime_s / 3600 << " h " << st->uptime_s % 3600 / 60
+                  << " min\n"
+                  << "system:  " << st->os << " " << st->os_version << " " << st->architecture << ", " << st->cpus
+                  << " cpus (" << st->cpu_model << "), " << st->memory_total / (1024 * 1024) << " MB\n"
+                  << "system paglets:";
+        for (const auto& name : st->system) std::cout << " " << name;
+        std::cout << "\n";
+    }
+    std::cout << "paglets:\n";
+    for (const auto& p : st->paglets) {
+        std::cout << "  " << p.id << "  " << p.state << "  module " << p.module.substr(0, 16) << "  owner "
+                  << p.owner.substr(0, 16) << (p.trust.empty() ? "" : "  " + p.trust) << "\n";
     }
     return 0;
 }
@@ -978,7 +897,7 @@ int remote_push(const Options& o) {
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
     Array records;
-    for (const Record* rec : r->ledger.records()) records.emplace_back(rec->encode());
+    for (const Record* rec : r->identity.ledger.records()) records.emplace_back(rec->encode());
     auto a = r->ask(Map{{"t", Value("push")}, {"records", Value(std::move(records))}});
     if (!a) return fail(a.error());
     const Fields f{*a};
@@ -988,6 +907,8 @@ int remote_push(const Options& o) {
     }
     return 0;
 }
+
+void print_interface(const paglets::wire::Json& d);
 
 // What a module file is: its hash, the paglet ABI it was built for, its
 // imports (and whether a roaming paglet may have them), exports and memory.
@@ -1024,6 +945,16 @@ int module_inspect(const Options& o) {
     }
     std::cout << "exports:\n";
     for (const auto& e : info->exports) std::cout << "  " << e.name << "  " << pw::to_string(e.kind) << "\n";
+    auto described = paglets::wire::interface::of_module(*bytes);
+    if (!described) {
+        std::cout << "interface: invalid (" << described.error() << ")\n";
+    } else if (!*described) {
+        std::cout << "interface: none\n";
+    } else if (o.json) {
+        std::cout << (*described)->dump() << "\n";
+    } else {
+        print_interface(**described);
+    }
     return 0;
 }
 
@@ -1044,7 +975,7 @@ std::expected<std::int64_t, std::string> pull_records(const Options& o) {
         for (int pass = 0; pass < 4 && !left.empty(); ++pass) {
             std::vector<Bytes> again;
             for (auto& b : left) {
-                auto result = r->ledger.add_encoded(b);
+                auto result = r->identity.ledger.add_encoded(b);
                 if (!result) {
                     again.push_back(std::move(b));
                 } else if (*result != AddResult::known) {
@@ -1054,7 +985,7 @@ std::expected<std::int64_t, std::string> pull_records(const Options& o) {
             left = std::move(again);
         }
         for (const auto& b : left) {
-            auto result = r->ledger.add_encoded(b);
+            auto result = r->identity.ledger.add_encoded(b);
             if (!result) std::cerr << "paglets-host: a record of the host: " << result.error() << "\n";
         }
     }
@@ -1161,22 +1092,11 @@ int remote_launch(const Options& o) {
     if (!module) return fail(module.error());
     auto args = json_body(o.args);
     if (!args) return fail(args.error());
-    std::string id = o.id.value_or("");
-    if (id.empty()) {
-        std::array<std::uint8_t, 16> b{};
-        random_bytes(b);
-        id = paglets::to_hex(std::span<const std::uint8_t>(b));
-    }
-    const std::int64_t now = unix_ms();
-    auto passport = Passport::issue(r->key, r->ledger.mesh(), paglets::sha256(*module), id, Value(), now - 60'000,
-                                    now + o.hours.value_or(24) * 3'600'000);
-    if (!passport) return fail(passport.error());
-    auto a = r->ask(Map{{"t", Value("launch")},
-                        {"passport", Value(passport->encode())},
-                        {"module", Value(std::move(*module))},
-                        {"args", Value(std::move(*args))}});
-    if (!a) return fail(a.error());
-    std::cout << Fields{*a}.str("paglet").value_or("") << "\n";
+    const Digest hash = paglets::sha256(*module);
+    auto id = r->session.launch(r->identity, hash, std::move(*module), std::move(*args), o.id.value_or(""),
+                                o.hours.value_or(24));
+    if (!id) return fail(id.error());
+    std::cout << *id << "\n";
     return 0;
 }
 
@@ -1204,6 +1124,86 @@ int remote_call(const Options& o) {
     std::cout << shown << "\n";
     if (o.expect && shown.find(*o.expect) == std::string::npos) return fail("expected " + *o.expect);
     return status == 0 ? 0 : 1;
+}
+
+int remote_send(const Options& o) {
+    if (o.positional.size() < 2 || o.positional.size() > 3) return usage();
+    auto body = json_body(o.positional.size() == 3 ? std::optional<std::string>(o.positional[2]) : std::nullopt);
+    if (!body) return fail(body.error());
+    if (o.priority && (*o.priority < 0 || *o.priority > 7)) return fail("the priority is 0 to 7");
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    if (auto ok = r->session.send(o.positional[0], o.positional[1], std::move(*body), o.priority.value_or(3)); !ok) {
+        return fail(ok.error());
+    }
+    std::cout << "sent\n";
+    return 0;
+}
+
+// An interface description as text: messages with their request and reply
+// types, the start arguments, and the types.
+void print_interface(const paglets::wire::Json& d) {
+    auto str = [](const paglets::wire::Json& j, std::string_view k) {
+        const auto* v = j.find(k);
+        return v != nullptr && v->is_string() ? v->as_string() : std::string();
+    };
+    std::cout << "interface: " << str(d, "name") << (str(d, "summary").empty() ? "" : " - " + str(d, "summary"))
+              << "\n";
+    if (const auto* launch = d.find("launch")) std::cout << "launch:    " << str(*launch, "type") << "\n";
+    if (const auto* messages = d.find("messages"); messages != nullptr && messages->is_array()) {
+        std::cout << "messages:\n";
+        for (const auto& m : messages->as_array()) {
+            const std::string kind = str(m, "kind").empty() ? "call" : str(m, "kind");
+            std::cout << "  " << str(m, "name") << "  " << kind << "  "
+                      << (str(m, "request").empty() ? "none" : str(m, "request"));
+            if (kind != "send") std::cout << " -> " << (str(m, "reply").empty() ? "none" : str(m, "reply"));
+            if (const auto* danger = m.find("danger"); danger != nullptr && danger->is_bool() && danger->as_bool()) {
+                std::cout << "  (asks first)";
+            }
+            if (!str(m, "summary").empty()) std::cout << "  " << str(m, "summary");
+            std::cout << "\n";
+        }
+    }
+    if (const auto* types = d.find("types"); types != nullptr && types->is_array()) {
+        std::cout << "types:\n";
+        for (const auto& t : types->as_array()) {
+            std::cout << "  " << str(t, "name") << " (" << str(t, "kind") << ")";
+            if (const auto* values = t.find("values"); values != nullptr && values->is_array()) {
+                for (const auto& v : values->as_array()) std::cout << " " << (v.is_string() ? v.as_string() : "");
+            }
+            if (const auto* fields = t.find("fields"); fields != nullptr && fields->is_array()) {
+                for (const auto& f : fields->as_array()) std::cout << " " << str(f, "name") << ":" << str(f, "type");
+            }
+            std::cout << "\n";
+        }
+    }
+}
+
+int remote_describe(const Options& o) {
+    if (o.positional.size() + o.modules.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto text = o.modules.empty() ? r->session.describe_paglet(o.positional[0])
+                                  : r->session.describe_module(o.modules[0]);
+    if (!text) return fail(text.error());
+    if (text->empty()) return fail("no interface description");
+    if (o.json) {
+        std::cout << *text << "\n";
+        return 0;
+    }
+    auto d = paglets::wire::Json::parse(*text);
+    if (!d) return fail("malformed interface description");
+    print_interface(*d);
+    return 0;
+}
+
+int remote_terminate(const Options& o) {
+    if (o.positional.size() != 1) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    if (auto ok = r->session.terminate(o.positional[0], o.reason.value_or("")); !ok) return fail(ok.error());
+    std::cout << "terminated " << o.positional[0] << "\n";
+    return 0;
 }
 
 int remote_dispatch(const Options& o) {
@@ -1556,6 +1556,9 @@ int mesh_command(int argc, char** argv) {
             if (action == "push") return remote_push(o);
             if (action == "launch") return remote_launch(o);
             if (action == "call") return remote_call(o);
+            if (action == "send") return remote_send(o);
+            if (action == "describe") return remote_describe(o);
+            if (action == "terminate") return remote_terminate(o);
             if (action == "dispatch") return remote_dispatch(o);
             if (action == "hosts") return remote_hosts(o);
             if (action == "landscape") return remote_landscape(o);
