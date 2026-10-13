@@ -1,6 +1,7 @@
 # paglets/cpp: zombie paglets (concept, WP23–WP30)
 
-Status: WP23–WP26 implemented (2026-10-13); the protocol is specified in
+Status: WP23–WP30 implemented (2026-10-13; live run on three hosts in
+docs/examples/mesh-chronicle-log.md); the protocol is specified in
 `cpp/common/include/paglets/protocols/zombie/zombie.hpp` and documented in
 `docs/zombie-protocol.md`, which take precedence over this concept where they
 differ. Decisions made while implementing are listed in section 12. A

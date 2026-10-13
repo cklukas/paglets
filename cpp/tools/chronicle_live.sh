@@ -177,18 +177,26 @@ event() { events="$(jq -c --arg t "$(( $(date +%s) - began ))" --arg w "$1" '. +
 L=$((lifetime_min * 60))
 $failures && {
 at $((L * 15 / 100))
-m="$(main_host)"; m="${m:-$creator_host}"
-[ "$m" = "$local_name" ] && m="$creator_host"
-event "the host of the main ($m) freezes (SIGSTOP): cut off, its main keeps its state"
+m="$(main_host)"
+if [ -n "$m" ] && [ "$m" != "$local_name" ]; then
+    event "the host of the main ($m) freezes (SIGSTOP): cut off, its main keeps its state"
+else
+    m="$creator_host"
+    event "$m freezes (SIGSTOP): cut off"
+fi
 signal "$m" STOP
 frozen="$m"
 at $((L * 30 / 100))
 event "$frozen thaws (SIGCONT): two mains meet"
 signal "$frozen" CONT
 at $((L * 45 / 100))
-m="$(main_host)"; m="${m:-$creator_host}"
-[ "$m" = "$local_name" ] && m="$(other_than)"
-event "the host of the main ($m) crashes (SIGKILL)"
+m="$(main_host)"
+if [ -n "$m" ] && [ "$m" != "$local_name" ]; then
+    event "the host of the main ($m) crashes (SIGKILL)"
+else  # the main is on this machine (or unknown): another host crashes
+    m="$(other_than)"
+    event "$m crashes (SIGKILL)"
+fi
 signal "$m" KILL
 crashed="$m"
 at $((L * 60 / 100))

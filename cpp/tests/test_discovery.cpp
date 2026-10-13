@@ -212,11 +212,12 @@ PAGLETS_TEST("mesh: a host that cannot be reached is one-way; CLI sessions hear 
     }
     c.transport->set_address(b.node->host(), b.transport->url());
     b.transport->set_address(c.node->host(), c.transport->url());
-    // a hears from b, but its frames to b fail: one-way, with the reason.
+    // a hears from b, but its frames to b fail: one-way, with the reason
+    // (once a knows b's address; before, frames fail for lack of one).
     REQUIRE(net.eventually([&] {
         const auto hosts = a.node->hosts();
         const HostInfo* h = info_of(hosts, b.node->host());
-        return h != nullptr && h->online && !h->send_error.empty();
+        return h != nullptr && h->online && !h->send_error.empty() && h->send_error != "no address";
     }));
     const HostInfo seen_b = *info_of(a.node->hosts(), b.node->host());
     if (seen_b.send_error.find("unable to get local issuer certificate") == std::string::npos) {

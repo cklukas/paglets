@@ -153,9 +153,9 @@ host down for a while. The life log it delivered is in
 [A life log of three hosts](mesh-chronicle-log.md).
 
 <!-- results: live_chronicle -->
-> [!NOTE]
-> No results are recorded yet. Run `cpp/tools/update_results.sh` (see
-> [Example paglets](index.md#test-results)).
+| Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica | lifetime (min) | takeovers in the life log | partitions with a main on both sides | protocol steps checked against the specification | replicas left after the end |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Mesh Chronicle, 10 minutes with freezes, crashes and restarts | LAN, worker processes | passed | 10 min 14 s | macOS arm64, 2 × Linux arm64, Release build | 2026-10-13 | 3 | 10 | 2 | 1 | 20 | 0 |
 <!-- /results -->
 
 ## Test results
