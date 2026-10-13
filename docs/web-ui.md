@@ -132,6 +132,23 @@ sections you opened.
 > module. Paglets without one still get *Other message* (name and JSON),
 > and modules without one are launched with JSON arguments.
 
+### Trying it on real machines
+
+`cpp/tools/web_live.sh` builds a fresh mesh of this machine and remote
+Linux hosts (over SSH, as `mesh_bench.sh` does). It starts a counter with a
+start value on every host, hello, and a Mesh Chronicle, then runs
+`paglets-web` against the mesh. It checks the API (every host answers with
+its status, and a call through the UI reaches a paglet on a remote host)
+and prints the page's address:
+
+```bash
+cpp/tools/web_live.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
+    --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host
+```
+
+`--check-only` stops after the checks; otherwise Ctrl-C ends `paglets-web`
+and the mesh.
+
 ## The commands next to the views
 
 Every panel has a **Shell** box with the matching command, for example

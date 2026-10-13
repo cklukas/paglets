@@ -1,8 +1,9 @@
 # paglets/cpp: the web UI `paglets-web` (WP31–WP37)
 
-Status: in progress (started 2026-10-13). Decisions made while implementing
-are listed in section 9; the docs pages (`docs/web-ui.md`,
-`docs/interface-descriptions.md`) take precedence where they differ.
+Status: WP31–WP37 implemented (2026-10-13; live check on three machines,
+section 10). Decisions made while implementing are listed in section 9;
+the docs pages (`docs/web-ui.md`, `docs/interface-descriptions.md`) take
+precedence where they differ.
 
 `paglets-web` is a local web UI for a mesh. It is a mesh client like
 `paglets-host remote …`: it opens end-to-end sessions with hosts as an admin
@@ -156,7 +157,7 @@ dispose; refusal without the token and with a foreign Origin. The existing
 | WP34 | `paglets_webui` HTTP server: sockets (POSIX, Winsock), parser, limits, token/cookie, Host/Origin checks, port search, browser opening; unit tests | done |
 | WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules and zombies pages, forms from interfaces, module upload, shell hints), actions | done |
 | WP36 | End-to-end test (`web:` in `paglets_tests`: two hosts over HTTPS, the UI's API over HTTP), gateway User-Agent renamed to `paglets-gateway/1` | done |
-| WP37 | Documentation (`docs/web-ui.md`, `docs/interface-descriptions.md`, CLI reference, READMEs, nav), docs sync; live check on the mesh hosts | open |
+| WP37 | Documentation (`docs/web-ui.md`, `docs/interface-descriptions.md`, CLI reference, READMEs, nav), docs sync; live check on the mesh hosts (`cpp/tools/web_live.sh`) | done |
 
 ## 9. Decisions made while implementing
 
@@ -179,3 +180,25 @@ dispose; refusal without the token and with a foreign Origin. The existing
   App and its server, and an HTTP client; no extra processes or tools.
 - **The host answers `describe`**, from the module bytes, so the guest needs
   no code for it and C guests can carry descriptions too.
+
+## 10. Live check
+
+`cpp/tools/web_live.sh` on 2026-10-13 with this Mac (macOS, arm64, 10
+CPUs) and two Linux arm64 hosts with 4 CPUs each (`pi`, a Raspberry Pi 4,
+and `uconsole`), all built from the same sources:
+
+```text
+mesh of mac pi uconsole
+hosts: 3, with status: 3, system paglets: 36, user paglets: 6
+  mac  online  macos arm64  load 2.2  system 12  user 2
+  pi  online  linux arm64  load 0.74  system 12  user 2
+  uconsole  online  linux arm64  load 0.3  system 12  user 2
+call through the UI on pi: {"value":201,"history_size":1,"recent_notes":["web live"],"average_step":1,"memory_pages":2}
+web live check ok
+```
+
+The counter on `pi` was launched with the start value 200; the call went
+from the browser's API through `paglets-web` to the host `pi`. The pages
+(mesh, host, paglet, modules, zombies) were also used in a browser
+against the live mesh. A build without C++26 reflection compiles
+`paglets-web` and passes the `http:`, `interface:` and `client:` tests.
