@@ -214,6 +214,7 @@ public:
         }
         ++work_gen_;
         run(zp::Recovered{});
+        refresh_peers();
         // What the registry learnt meanwhile.
         if (auto z = service("zombies")) {
             services::zombies::Client c{*z};
@@ -281,21 +282,6 @@ private:
                 }
                 peers_[k] = *clone;
             }
-            // Every clone gets the endpoints of the others.
-            for (std::uint32_t k = 0; k < members_.size(); ++k) {
-                if (!peers_[k]) continue;
-                std::vector<std::uint32_t> which;
-                SendOptions options;
-                options.async = true;
-                for (std::uint32_t j = 0; j < members_.size(); ++j) {
-                    if (j == k || j == self_index || !peers_[j]) continue;
-                    auto copy = peers_[j].derive(abi::DeriveSpec{});
-                    if (!copy) continue;
-                    which.push_back(j);
-                    options.caps.push_back(*copy);
-                }
-                (void)peers_[k].send("zombie.peers", which, std::move(options));
-            }
             run(zp::Start{true, encode(work_)});
         });
     }
@@ -305,14 +291,44 @@ private:
         auto z = service("zombies");
         if (!z) return fail("no zombies service on this host");
         services::zombies::Client c{*z};
-        auto sent = c.join(services::zombies::JoinRequest{group_, sink_},
+        auto sent = c.join(services::zombies::JoinRequest{group_, sink_, core_.self},
                            [this, next = std::move(next)](Result<services::zombies::JoinReply> r, Message&) {
                                if (!r) return fail("join: " + std::string(abi::error_name(r.error())));
                                if (!r->accepted) return fail("join: " + r->reason);
                                next();
                                registry(r->state);
+                               refresh_peers();
                            });
         if (!sent) fail("join: " + std::string(abi::error_name(sent.error())));
+    }
+
+    // Endpoints to the other replicas, from the host's registry (every host
+    // tells the others which replica it holds); asked again until every
+    // replica is known.
+    void refresh_peers() {
+        auto z = service("zombies");
+        if (!z) return;
+        services::zombies::Client c{*z};
+        (void)c.peers(services::zombies::PeersRequest{group_}, [this](Result<services::zombies::Peers> r, Message& m) {
+            if (r) {
+                for (std::size_t i = 0; i < r->replicas.size() && i < m.cap_count(); ++i) {
+                    const auto n = r->replicas[i];
+                    Capability cap = m.take_cap(i);
+                    if (n >= peers_.size() || n == core_.self) {
+                        (void)cap.drop();
+                        continue;
+                    }
+                    if (peers_[n]) (void)peers_[n].drop();
+                    peers_[n] = Endpoint(cap);
+                }
+            }
+            for (std::uint32_t n = 0; n < peers_.size(); ++n) {
+                if (n != core_.self && !peers_[n]) {
+                    (void)after(3000, "zombie.refresh", std::uint64_t{0});
+                    return;
+                }
+            }
+        });
     }
 
     void registry(const services::zombies::GroupState& s) {
@@ -346,6 +362,8 @@ private:
             if (!m.decode(t) || t.size() != 2 || t[0] >= zp::timer_count || timers_[t[0]].gen != t[1]) return;
             timers_[t[0]].cap = Capability();  // fired
             run(zp::Fired{static_cast<zp::Timer>(t[0])});
+        } else if (name == "zombie.refresh") {
+            if (core_.role != Role::ended) refresh_peers();
         } else if (name == "zombie.flush") {
             flush_pending_ = false;
             auto outs = std::move(deferred_);

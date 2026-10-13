@@ -37,6 +37,18 @@ bool valid_group(std::string_view g) {
     return g.size() == 32 && std::ranges::all_of(g, [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
 
+// A replica as hosts tell each other ("zb-members").
+struct Member {
+    std::string group;
+    std::uint32_t replica = 0;
+    std::string paglet;
+    std::string host;
+};
+
+struct Members {
+    std::vector<Member> members;
+};
+
 // What a host keeps of a group (stored in zombies.state).
 struct Stored {
     zb::GroupState state;
@@ -45,6 +57,7 @@ struct Stored {
     std::string paglet;
     std::int64_t joined_ms = 0;
     std::vector<zb::TraceRecord> traces;
+    std::vector<Member> members;
 };
 
 struct StoredAll {
@@ -121,6 +134,18 @@ void Node::Impl::zombies_tick() {
             if (k != key.public_key()) send_frame(k, frame);
         }
     }
+    // The replicas of running groups this host knows of.
+    Members known;
+    for (const auto& [id, g] : zombies.groups) {
+        if (g.state.ending != zb::Ending::none) continue;
+        for (const auto& [n, m] : g.members) known.members.push_back(Member{id, n, m.first, m.second});
+    }
+    if (!known.members.empty()) {
+        const mesh::Map frame{{"t", mesh::Value("zb-members")}, {"m", mesh::Value(wire::to_msgpack(known))}};
+        for (const auto& k : view) {
+            if (k != key.public_key()) send_frame(k, frame);
+        }
+    }
     if (zombies.dirty) save_zombies();
     for (auto it = zombies.deliveries.begin(); it != zombies.deliveries.end();) {
         if (now >= it->second.deadline) {
@@ -151,6 +176,24 @@ bool Node::Impl::on_zombies_frame(std::string_view type, const mesh::PublicKey& 
             if (b == nullptr || (bytes += b->size()) > max_sync_bytes) break;
             zb::GroupState s;
             if (wire::from_msgpack(*b, s)) zombie_merge(s);
+        }
+        return true;
+    }
+    if (type == "zb-members") {
+        auto data = f.bin("m");
+        Members known;
+        if (!data || data->size() > max_sync_bytes || !ledger.state().is_host(from) || !wire::from_msgpack(*data, known))
+            return true;
+        const std::string own = mesh::key_id(key.public_key());
+        for (const auto& m : known.members) {
+            if (!valid_group(m.group) || m.host == own) continue;  // this host knows its own replicas
+            auto& g = zombies.groups[m.group];
+            if (g.state.group.empty()) g.state.group = m.group;
+            auto& slot = g.members[m.replica];
+            if (slot != std::pair{m.paglet, m.host}) {
+                slot = {m.paglet, m.host};
+                zombies.dirty = true;
+            }
         }
         return true;
     }
@@ -274,6 +317,7 @@ void Node::Impl::load_zombies() {
         g.paglet = std::move(s.paglet);
         g.joined_ms = s.joined_ms;
         g.traces.assign(s.traces.begin(), s.traces.end());
+        for (const auto& m : s.members) g.members[m.replica] = {m.paglet, m.host};
     }
     for (std::size_t i = 0; i < all.results.size() && i < all.result_groups.size() && i < all.result_sinks.size(); ++i) {
         zombies.results[{all.result_groups[i], all.result_sinks[i]}] = std::move(all.results[i]);
@@ -285,7 +329,9 @@ void Node::Impl::save_zombies() {
     if (state_dir.empty()) return;
     StoredAll all;
     for (const auto& [id, g] : zombies.groups) {
-        all.groups.push_back(Stored{g.state, g.owner, g.module, g.paglet, g.joined_ms, {g.traces.begin(), g.traces.end()}});
+        Stored st{g.state, g.owner, g.module, g.paglet, g.joined_ms, {g.traces.begin(), g.traces.end()}, {}};
+        for (const auto& [n, m] : g.members) st.members.push_back(Member{id, n, m.first, m.second});
+        all.groups.push_back(std::move(st));
     }
     for (const auto& [k, r] : zombies.results) {
         all.result_groups.push_back(k.first);
@@ -350,6 +396,8 @@ public:
         }
         g.paglet = caller->id;
         g.module = caller->module;
+        g.members[q.replica] = {caller->id, mesh::key_id(node_.key.public_key())};
+        node_.zombies.next_gossip = {};  // the others learn it soon
         g.joined_ms = now_ms();
         node_.zombies.dirty = true;
         out.accepted = true;
@@ -461,6 +509,24 @@ public:
                                           {"n", mesh::Value(q.name)},
                                           {"d", mesh::Value(q.result)}});
         return zb::DeliverReply{};  // answered later
+    }
+
+    services::Result<zb::Peers> peers(const zb::PeersRequest& q, services::Operation& op) {
+        const auto* caller = replica(op);
+        if (caller == nullptr) return std::unexpected(abi::denied);
+        std::lock_guard lock(node_.mu);
+        auto it = node_.zombies.groups.find(q.group);
+        if (it == node_.zombies.groups.end() || it->second.paglet != caller->id) return std::unexpected(abi::denied);
+        const std::string here = mesh::key_id(node_.key.public_key());
+        zb::Peers out;
+        for (const auto& [n, m] : it->second.members) {
+            if (m.first == caller->id) continue;
+            runtime::Cap c = op.ctx.endpoint(m.first, {"*"});
+            if (m.second != here) c.host = m.second;  // where it is
+            op.give.push_back(std::move(c));
+            out.replicas.push_back(n);
+        }
+        return out;
     }
 
     services::Result<zb::StoredResult> result(const zb::ResultRequest& q, services::Operation& op) {

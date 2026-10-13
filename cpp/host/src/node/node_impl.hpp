@@ -514,6 +514,9 @@ struct Node::Impl {
         std::string paglet;  // the replica on this host; empty if none
         std::int64_t joined_ms = 0;
         std::deque<services::zombies::TraceRecord> traces;
+        // The replicas of the group, by number: paglet and host key ID
+        // (every host tells the others about its own).
+        std::map<std::uint32_t, std::pair<std::string, std::string>> members;
     };
     struct ZombieState {
         std::map<std::string, ZombieGroup> groups;

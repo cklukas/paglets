@@ -11,7 +11,11 @@
 //   replica per group and host: a second one is refused (it ends). A group
 //   that ended is refused too. The first replica on any host gives the
 //   sink. A replica that joined receives `zombies.update` (GroupState) when
-//   the group ends or its sink changes.
+//   the group ends or its sink changes. Every host tells the others which
+//   replica of a group it holds (number, paglet, host).
+// - `peers`: endpoints to the group's other replicas that this host knows
+//   of (the reply's capabilities, in the order of `replicas`), with the
+//   host that holds each one.
 // - `trace`: a replica records its protocol steps (role changes and sink
 //   answers); a bounded ring per group, kept with the host's state.
 // - `ended`: the replica's group delivered its result (its Tombstone
@@ -49,6 +53,15 @@ struct GroupState {
 struct JoinRequest {
     std::string group;      // 32 lowercase hex digits
     std::string sink_spec;  // the sink, if this host does not know the group yet
+    std::uint32_t replica = 0;  // its number in the group
+};
+
+struct PeersRequest {
+    std::string group;
+};
+
+struct Peers {
+    std::vector<std::uint32_t> replicas;  // one per capability of the reply
 };
 
 struct JoinReply {
@@ -162,6 +175,7 @@ struct Contract {
     Traces traces(const TracesRequest&);
     DeliverReply deliver(const DeliverRequest&);
     StoredResult result(const ResultRequest&);
+    Peers peers(const PeersRequest&);
 };
 
 // Message to a joined replica when its group ended or its sink changed.

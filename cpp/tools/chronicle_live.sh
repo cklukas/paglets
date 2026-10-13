@@ -65,7 +65,7 @@ dir_of() { if [ "$1" = "$local_name" ]; then echo "$work"; else echo "\$HOME/$rw
 logs="${TMPDIR:-/tmp}/paglets-chronicle-logs"
 cleanup() {
     for h in "${all[@]}"; do
-        on "$h" "pkill -CONT -f 'paglets-host serve --key $(dir_of "$h")/host.key' ; touch $(dir_of "$h")/stop" 2>/dev/null || true
+        on "$h" "pkill -CONT -f \"paglets-host serve --key $(dir_of "$h")/host.key\" ; touch $(dir_of "$h")/stop" 2>/dev/null || true
     done
     sleep 3
     mkdir -p "$logs"
@@ -116,8 +116,8 @@ serve() {
             --stop-file $rwork/stop --no-beacon >> $rwork/host.log 2>&1 < /dev/null &"
     fi
 }
-signal() {  # host signal
-    on "$1" "pkill -$2 -f 'paglets-host serve --key $(dir_of "$1")/host.key'" || true
+signal() {  # host signal (the pattern is expanded on the host: $HOME)
+    on "$1" "pkill -$2 -f \"paglets-host serve --key $(dir_of "$1")/host.key\"" || true
 }
 stop_host() { on "$1" "touch $(dir_of "$1")/stop"; }
 for h in "${all[@]}"; do serve "$h"; done

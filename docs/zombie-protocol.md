@@ -490,6 +490,10 @@ groups it knows:
 - **One replica per host.** A replica joins its group on its host. A second
   replica of the same group on that host is refused and ends, and so is a
   replica of a group that ended.
+- **Replicas find each other.** Every host tells the others which replica
+  of a group it holds (its number, paglet and host). A replica asks its own
+  host for endpoints to the others (`peers`), so the replicas reach each
+  other without passing capabilities around, also after restarts.
 - **Tombstones and redirects reach every host.** A replica that delivered
   the result records a tombstone on its host. The owner cancels a group or
   redirects it to another sink on any host. Every host sends what it knows

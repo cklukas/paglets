@@ -65,8 +65,10 @@ start_group("host:mac", initial_work, timing);
   `mesh-info` snapshot. Every one of them must offer `zombies` (every host
   of this version does); otherwise the group does not start, and
   `on_zombie_failed` names the hosts that lack it. The creator clones
-  itself to the other hosts and hands every clone the endpoints of the
-  others.
+  itself to the other hosts. Every replica joins the `zombies` registry of
+  its host; the hosts tell each other which replica they hold, and each
+  replica gets endpoints to the others from its own host. It asks again
+  until it knows all of them, and after a restart.
 - **The sink** is `host:NAME`, a host of the mesh by its ledger name or key
   ID. That host's `zombies` system paglet accepts the first result per
   group and stores it. `paglets-host remote zombies result GROUP` fetches
