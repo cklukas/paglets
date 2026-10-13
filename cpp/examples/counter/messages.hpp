@@ -46,6 +46,11 @@ struct Echo {
     Mode mode = Mode::add;
 };
 
+// Start arguments (optional): the value to begin with.
+struct Start {
+    std::int64_t value = 0;
+};
+
 // Allocates and keeps the given amount of memory (image size experiments).
 struct Bloat {
     std::uint32_t kilobytes = 0;

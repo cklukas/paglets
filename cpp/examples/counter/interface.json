@@ -2,7 +2,7 @@
   "interface": 1,
   "name": "counter",
   "summary": "A counter whose state is plain C++ objects; memory images move it",
-  "launch": {"type": "none"},
+  "launch": {"type": "Start", "example": {"value": 0}},
   "messages": [
     {"name": "increment", "kind": "both", "summary": "Adds to or multiplies the value; replies with the status",
      "request": "Increment", "reply": "Status", "example": {"by": 1, "note": "from the web", "mode": "add"}},
@@ -14,6 +14,8 @@
     {"name": "schema", "kind": "call", "summary": "The schema descriptor of the messages (JSON text)", "request": "none", "reply": "string"}
   ],
   "types": [
+    {"name": "Start", "kind": "record", "fields": [
+      {"name": "value", "type": "i64", "doc": "The value to begin with", "default": 0}]},
     {"name": "Increment", "kind": "record", "fields": [
       {"name": "by", "type": "i64", "doc": "Amount (or factor)", "default": 1},
       {"name": "note", "type": "string", "doc": "Kept in the history"},

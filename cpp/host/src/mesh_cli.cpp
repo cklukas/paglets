@@ -73,7 +73,7 @@ int usage() {
            "       paglets-host ledger residency --ledger DIR --admin KEY... ROOT hosts [HOST]... [--host-label L]...\n"
            "       paglets-host remote status --connect URL --key KEY --ledger DIR [--host-key KEY-ID]\n"
            "       paglets-host remote push --connect URL --key KEY --ledger DIR\n"
-           "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE.wasm\n"
+           "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE\n"
            "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
            "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
            "       paglets-host remote send --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--priority N]\n"
@@ -101,7 +101,8 @@ int usage() {
            "that read the root moves only there (none lifts the rule).\n"
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
            "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
-           "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here),\n"
+           "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here;\n"
+           "MODULE is a .wasm file, or the hash of a module the host has),\n"
            "call sends a request to a paglet of the owner and prints the reply, send a one-way message\n"
            "(priority 0-7, default 3), describe prints the interface description of a paglet's module\n"
            "(or of a module on the host; --json: as JSON), dispatch moves it (a transfer ticket) and\n"
@@ -1088,12 +1089,21 @@ int remote_launch(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
-    auto module = paglets::wasm::read_file(o.positional[0]);
-    if (!module) return fail(module.error());
+    // A module file, or the hash of a module the host has.
+    Bytes module;
+    Digest hash{};
+    std::error_code ec;
+    if (auto h = parse_hex32(o.positional[0]); h && !fs::is_regular_file(o.positional[0], ec)) {
+        hash = *h;
+    } else {
+        auto bytes = paglets::wasm::read_file(o.positional[0]);
+        if (!bytes) return fail(bytes.error());
+        module = std::move(*bytes);
+        hash = paglets::sha256(module);
+    }
     auto args = json_body(o.args);
     if (!args) return fail(args.error());
-    const Digest hash = paglets::sha256(*module);
-    auto id = r->session.launch(r->identity, hash, std::move(*module), std::move(*args), o.id.value_or(""),
+    auto id = r->session.launch(r->identity, hash, std::move(module), std::move(*args), o.id.value_or(""),
                                 o.hours.value_or(24));
     if (!id) return fail(id.error());
     std::cout << *id << "\n";

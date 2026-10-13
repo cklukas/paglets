@@ -4,6 +4,7 @@
 #include "test.hpp"
 
 #include <paglets/wire/json.hpp>
+#include <paglets/wire/json_msgpack.hpp>
 
 using paglets::wire::Json;
 
@@ -40,4 +41,15 @@ PAGLETS_TEST("json rejects malformed input") {
     CHECK(!Json::parse("tru").has_value());
     CHECK(!Json::parse("1 2").has_value());
     CHECK(!Json::parse("-").has_value());
+}
+
+PAGLETS_TEST("json to msgpack: {\"$bytes\": hex} is a binary string") {
+    auto j = Json::parse(R"({"blob":{"$bytes":"00ff10"},"text":{"$bytes":"xyz"},"two":{"$bytes":"00","x":1}})");
+    REQUIRE(j.has_value());
+    const auto packed = paglets::wire::json_to_msgpack(*j);
+    auto back = paglets::wire::msgpack_to_json(packed);
+    REQUIRE(back.has_value());
+    // The binary string comes back as an array of numbers; malformed hex and
+    // objects with other members stay objects.
+    CHECK_EQ(back->dump(), std::string(R"({"blob":[0,255,16],"text":{"$bytes":"xyz"},"two":{"$bytes":"00","x":1}})"));
 }

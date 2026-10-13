@@ -151,7 +151,7 @@ dispose; refusal without the token and with a foreign Origin. The existing
 | WP32 | Protocol additions: `status` fields (trust, system list, host facts), `send`, `terminate`, `describe`, `modules` interfaces; CLI `remote send`, `remote terminate`, `remote describe`; tests | done |
 | WP33 | Interface descriptions: format, parser/validator, custom section embed/extract (`paglets/wasm/interface.hpp`), `paglets-interface` tool, `paglets_add_module(INTERFACE …)`, generated descriptions for contract guests, `module inspect`; descriptions for the examples (counter, pi, hello, ping_pong, inventory, chronicle, calc_user); install for out-of-tree builds | done |
 | WP34 | `paglets_webui` HTTP server: sockets (POSIX, Winsock), parser, limits, token/cookie, Host/Origin checks, port search, browser opening; unit tests | done |
-| WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules pages, forms from interfaces, shell hints), actions | open |
+| WP35 | `paglets-web` executable: mesh poller, JSON API, embedded UI (overview, host, paglet, modules pages, forms from interfaces, shell hints), actions | done |
 | WP36 | End-to-end test (`cli_web`), gateway User-Agent renamed to `paglets-gateway/1` | open |
 | WP37 | Documentation (`docs/web-ui.md`, `docs/interface-descriptions.md`, CLI reference, READMEs, nav), docs sync; live check on the mesh hosts | open |
 
@@ -162,5 +162,14 @@ dispose; refusal without the token and with a foreign Origin. The existing
   wasm32-wasip1 reactors, so a small host tool appends the section instead.
 - **`status` lists system paglets by ID** (`system.mesh-info`, …), so a
   tool can `describe` them directly.
+- **`{"$bytes": "hex"}` in JSON payloads** becomes a MessagePack binary
+  string (`bytes` fields), in `paglets-host remote` and in the web UI alike.
+- **`remote launch` takes a module hash** as well as a file: the host must
+  have the module (the web UI launches modules the hosts already store).
+- **Pages are patched in place** on every refresh (a small DOM morph), so
+  clicks and open details survive; the model's version only changes with
+  its content.
+- **The counter example takes start arguments** (`{"value": N}`), so the
+  launch form has an example with parameters.
 - **The host answers `describe`**, from the module bytes, so the guest needs
   no code for it and C guests can carry descriptions too.

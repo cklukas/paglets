@@ -38,6 +38,12 @@ public:
     }
     // --8<-- [end:handlers]
 
+    // Optional start arguments (`--args '{"value": 10}'`).
+    void on_created(paglets::Started& s) override {
+        Start start;
+        if (!s.args.empty() && s.decode_args(start)) value_ = start.value;
+    }
+
 private:
     // --8<-- [start:status]
     Status status() const {

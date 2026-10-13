@@ -9,6 +9,27 @@ namespace paglets::wire {
 
 namespace {
 
+// {"$bytes": "<hex>"}: the bytes; nullopt for anything else.
+std::optional<std::vector<std::uint8_t>> bytes_of(const Json& v) {
+    if (!v.is_object() || v.keys().size() != 1 || v.keys()[0] != "$bytes") return std::nullopt;
+    const Json& hex = v.as_array()[0];
+    if (!hex.is_string() || hex.as_string().size() % 2 != 0) return std::nullopt;
+    auto digit = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::uint8_t> out;
+    const std::string& s = hex.as_string();
+    for (std::size_t i = 0; i < s.size(); i += 2) {
+        const int hi = digit(s[i]), lo = digit(s[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out.push_back(static_cast<std::uint8_t>(hi * 16 + lo));
+    }
+    return out;
+}
+
 void write(msgpack::Writer& w, const Json& v) {
     switch (v.type()) {
         case Json::Type::null: w.write_nil(); break;
@@ -34,6 +55,10 @@ void write(msgpack::Writer& w, const Json& v) {
             for (const auto& item : v.as_array()) write(w, item);
             break;
         case Json::Type::object:
+            if (auto b = bytes_of(v)) {
+                w.write_bin(*b);
+                break;
+            }
             w.write_map_header(v.keys().size());
             for (const auto& key : v.keys()) {
                 w.write_str(key);
