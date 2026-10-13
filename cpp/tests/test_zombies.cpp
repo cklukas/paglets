@@ -9,6 +9,12 @@
 #include "runtime_fixture.hpp"
 #include "test.hpp"
 
+#include <atomic>
+#include <cstdlib>
+#include <fstream>
+#include <thread>
+
+#include <chronicle_msgs.hpp>
 #include <paglets/protocols/zombie/trace.hpp>
 #include <paglets/services/zombies.hpp>
 #include <paglets/wire/reflect.hpp>
@@ -189,4 +195,133 @@ PAGLETS_TEST("zombies: the owner redirects and cancels a group; every host follo
         [&] { return group_on(a, group2) && group_on(a, group2)->state.ending == zb::Ending::cancelled; }, 2000));
     CHECK_EQ(group_on(a, group2)->state.reason, std::string("no longer needed"));
     CHECK_EQ(group_on(a, group2)->state.sink, 2);
+}
+
+namespace {
+
+void fast_mesh(Mesh& net, Mesh::Host& h) {
+    h.node->set_zombie_gossip(100ms);
+    h.node->set_compute_timing({.sample = 100ms, .gossip = 100ms, .ttl = 1500ms, .redirect_after = 1000ms});
+    paglets::node::Node::LocationTiming lt;
+    lt.heartbeat = 200ms;
+    lt.host_timeout = 1000ms;
+    h.node->set_location_timing(lt);
+    (void)net;
+}
+
+}  // namespace
+
+PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of its main's host") {
+    const auto dir =
+        std::filesystem::temp_directory_path() / ("paglets-chronicle-" + std::to_string(std::random_device{}()));
+    std::filesystem::remove_all(dir);
+    {
+        Mesh net;
+        auto& a = net.add_host("a", {}, dir / "a");
+        auto& b = net.add_host("b", {}, dir / "b");
+        auto& c = net.add_host("c", {}, dir / "c");
+        net.enroll_all();
+        for (auto& h : net.hosts) fast_mesh(net, *h);
+        const std::string module = a.f->module("chronicle.wasm");
+        if (module.empty()) skip("chronicle.wasm is not built");
+        // Every host has fresh snapshots of the others (the replicas go where mesh-info sees hosts).
+        REQUIRE(net.settle([&] { return a.node->landscape().size() == 3u; }, 2000));
+        const auto creator = start(net, a, module, '1');
+        chronicle_msgs::Start s;
+        s.sink = "host:c";
+        s.lifetime_ms = 16'000;
+        s.sample_ms = 1000;
+        s.beat_ms = 200;
+        s.suspect_ms = 1500;
+        s.round_ms = 500;
+        const auto started_reply = a.f->call(creator, "start", wire::to_msgpack(s));
+        REQUIRE(started_reply.status == 0);
+        chronicle_msgs::Started started;
+        REQUIRE(wire::from_msgpack(started_reply.payload, started));
+        const std::string group = started.group;
+        REQUIRE(group.size() == 32u);
+        // A replica on every host.
+        REQUIRE(net.settle(
+            [&] {
+                for (auto& h : net.hosts) {
+                    auto g = group_on(*h, group);
+                    if (!g || g->paglet.empty()) return false;
+                }
+                return true;
+            },
+            4000));
+        auto status_of = [&](Mesh::Host& h) {
+            chronicle_msgs::Status st;
+            auto g = group_on(h, group);
+            if (!g || g->paglet.empty()) return st;
+            auto r = h.f->call(g->paglet, "status");
+            if (r.status == 0) (void)wire::from_msgpack(r.payload, st);
+            return st;
+        };
+        // A few samples, then the main's host is cut off: b and c elect a
+        // new main while a works on alone.
+        REQUIRE(net.settle([&] { return status_of(a).samples >= 3; }, 4000));
+        a.down = true;
+        REQUIRE(net.settle([&] { return status_of(b).role == "main" || status_of(c).role == "main"; }, 4000));
+        net.settle([] { return false; }, 1000);  // both sides work apart for a while
+        // a restarts (its state is stored) and comes back into the mesh.
+        net.restart(a);
+        fast_mesh(net, a);
+        a.down = false;
+        // One main again, then the end: the result at the sink, every replica gone.
+        REQUIRE(net.settle([&] { return c.node->zombie_result(group).found; }, 20000));
+        const bool all_ended = net.settle(
+            [&] {
+                for (auto& h : net.hosts) {
+                    auto g = group_on(*h, group);
+                    if (!g || g->state.ending != zb::Ending::delivered || !g->paglet.empty()) return false;
+                }
+                return true;
+            },
+            4000);
+        if (!all_ended) {
+            for (auto& h : net.hosts) {
+                auto g = group_on(*h, group);
+                std::cerr << h->name << ": " << (g ? std::to_string(int(g->state.ending)) + " paglet " + g->paglet : "none");
+                if (g && !g->paglet.empty()) {
+                    auto st = status_of(*h);
+                    std::cerr << " role " << st.role << " samples " << st.samples;
+                    if (auto i = h->f->runtime->info(g->paglet)) std::cerr << " alive";
+                }
+                std::cerr << "\n";
+            }
+        }
+        REQUIRE(all_ended);
+        const auto result = c.node->zombie_result(group);
+        const std::string log(result.data.begin(), result.data.end());
+        if (const char* out = std::getenv("PAGLETS_CHRONICLE_LOG")) {
+            std::ofstream(out) << log;  // to read the life log of the test run
+        }
+        CHECK(log.starts_with("# Mesh life log"));
+        CHECK(log.find("took over as main") != std::string::npos);
+        CHECK(log.find("disappeared") != std::string::npos);
+        CHECK(log.find("is back") != std::string::npos);
+        CHECK(log.find("partition: both sides had a main") != std::string::npos);
+        CHECK(log.find("The work is done") != std::string::npos);
+        // The protocol steps of every host conform to the specification.
+        std::vector<zb::TraceRecord> records;
+        std::atomic<bool> collected = false;
+        std::thread collect([&] {
+            records = c.node->zombie_traces(group);
+            collected = true;
+        });
+        net.settle([&] { return collected.load(); }, 4000);
+        collect.join();
+        const auto report_ = paglets::protocols::zombie::check_traces(records, 1);
+        for (const auto& v : report_.violations) paglets::test::record_failure(__FILE__, __LINE__, v);
+        CHECK(report_.ok());
+        CHECK(report_.takeovers >= 2u);
+        CHECK_EQ(report_.accepted, 1u);
+        report("chronicle", "hosts with a replica", 3);
+        report("chronicle", "takeovers recorded by the hosts", report_.takeovers);
+        report("chronicle", "protocol steps checked against the specification", report_.records);
+        report("chronicle", "results accepted by the sink", report_.accepted);
+        report("chronicle", "size of the life log", log.size(), "bytes");
+    }
+    std::filesystem::remove_all(dir);
 }

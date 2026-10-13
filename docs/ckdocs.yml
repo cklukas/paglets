@@ -47,6 +47,10 @@ nav:
           - docs/examples/latency-map.md
           - docs/examples/hide-and-seek.md
           - docs/examples/pi.md
+      - title: Fault tolerance
+        pages:
+          - docs/examples/mesh-chronicle.md
+          - docs/examples/mesh-chronicle-log.md
       - title: Web and AI
         pages:
           - docs/examples/download-courier.md
@@ -63,6 +67,7 @@ nav:
       - docs/system-paglets.md
   - title: Fault tolerance
     pages:
+      - docs/zombie-paglets.md
       - docs/zombie-protocol.md
   - title: Reference
     pages:

@@ -78,6 +78,20 @@ void Node::Impl::sample_self() {
     s.slots_free = c.slots - c.used();
     s.queued = static_cast<std::int64_t>(c.queue.size());
     for (const auto& [service, offer] : c.offers) s.offers.push_back(offer);
+    // Links to the other hosts of the mesh, as this host sees them.
+    for (const auto& [k, h] : st.hosts) {
+        if (k == key.public_key()) continue;
+        mi::Link l;
+        l.host = mesh::key_id(k);
+        l.host_name = h.name;
+        if (auto f = transport.send_failure(k)) l.failure = *f;
+        l.up = std::ranges::binary_search(view, k) && l.failure.empty();
+        if (auto seen = last_seen.find(k); seen != last_seen.end()) l.last_heard_ms = seen->second;
+        auto [it, first] = c.link_since.try_emplace(k, l.up, s.observed_ms);
+        if (!first && it->second.first != l.up) it->second = {l.up, s.observed_ms};
+        l.since_ms = it->second.second;
+        s.links.push_back(std::move(l));
+    }
     c.own = std::move(s);
 }
 

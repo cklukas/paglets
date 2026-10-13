@@ -45,6 +45,12 @@ in the planning documents lists the planned examples and which are done.
 | [Hide and Seek](hide-and-seek.md) | `seek/` | a hider keeps moving between hosts; the seeker finds it, pins it, and releases it again | `locate_and_pin` while a paglet keeps moving |
 | [Pi](pi.md) | `pi/` | computes hex digits of pi in chunks on the hosts of the mesh, and survives the loss of a host | `mesh-info`, `compute-slots`, redirects |
 
+## Fault tolerance
+
+| Example | Directory | What it does | Shows |
+|---|---|---|---|
+| [Mesh Chronicle](mesh-chronicle.md) | `chronicle/` | writes the life log of its mesh: hosts that disappear and return, lost connections, partitions, its own takeovers; delivers it as Markdown when its lifetime is over | a zombie paglet: a replica on every host, takeovers, journals merged across partitions, restarts, one result ([a life log of three hosts](mesh-chronicle-log.md)) |
+
 ## Web and AI
 
 | Example | Directory | What it does | Shows |

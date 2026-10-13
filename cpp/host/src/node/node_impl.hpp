@@ -501,6 +501,7 @@ struct Node::Impl {
         Clock::time_point next_gossip{};
         std::uint64_t redirects = 0;
         std::map<std::string, services::mesh_info::Offer> offers;  // this host's, by service
+        std::map<mesh::PublicKey, std::pair<bool, std::int64_t>> link_since;  // up, since (Unix ms)
         std::int64_t used() const;
     };
     ComputeState compute;

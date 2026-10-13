@@ -41,6 +41,18 @@ struct Offer {
     std::vector<Attribute> attributes;
 };
 
+// A host's connection to another host, as the host sees it: up while it
+// hears from the other host (heartbeats of the mesh) and its frames to it
+// do not fail.
+struct Link {
+    std::string host;       // key ID of the other host
+    std::string host_name;  // its name in the ledger
+    bool up = false;
+    std::int64_t since_ms = 0;        // when it last changed, Unix milliseconds
+    std::int64_t last_heard_ms = 0;   // the last frame from the other host
+    std::string failure;              // why frames to it fail, if they do
+};
+
 struct Snapshot {
     std::string host;       // key ID
     std::string host_name;  // its name in the ledger
@@ -60,6 +72,7 @@ struct Snapshot {
     std::int64_t slots_free = 0;
     std::int64_t queued = 0;
     std::vector<Offer> offers;
+    std::vector<Link> links;  // to every other host enrolled in the mesh
 };
 
 struct SnapshotRequest {};

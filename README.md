@@ -49,6 +49,9 @@ edition (from [`docs/`](docs/index.md) on this branch) and the Python edition
   [command-line reference](docs/cli-reference.md)
 - [Configuration and troubleshooting](docs/configuration.md)
 - [System paglets](docs/system-paglets.md)
+- [Zombie paglets](docs/zombie-paglets.md), which keep running while one host
+  of the mesh is alive, and [the zombie protocol](docs/zombie-protocol.md)
+  behind them, checked by `paglets-protocol-check`
 - [Example paglets](docs/examples/index.md)
 
 Build and check the site with

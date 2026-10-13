@@ -65,7 +65,13 @@ modules, the Noise handshake, contracts) in CI
 ([design](../planning/cpp-hardening.md)). The content exchange moves files
 and artifacts of any size directly between hosts: paglets carry artifact
 capabilities that work on every host, within data residency
-([design](../planning/cpp-content-exchange.md)).
+([design](../planning/cpp-content-exchange.md)). Zombie paglets keep running
+as long as one host of the mesh is alive: a replica on every host, takeovers,
+journals merged across partitions, one result at the sink, restarts from
+memory images (ABI v1.2). The protocol is specified as a C++ state machine
+and checked by `paglets-protocol-check`, a model checker and simulator in
+the code base; the Mesh Chronicle example writes the life log of its mesh
+([design](../planning/cpp-zombie.md), [docs](../docs/zombie-protocol.md)).
 
 ## Layout
 
@@ -78,11 +84,12 @@ host/                     host library: Wasm engine, memory images, runtime, wir
                           paglets-host, paglets-worker and paglets-spike
 sdk/                      guest SDK (paglets/paglet.hpp)
 tools/schema_gen/         guest schema generator (C++26 reflection -> codecs, service clients)
+tools/protocol_check/     paglets-protocol-check: protocols checked exhaustively and in timed runs
 examples/                 example paglets: hello, counter, ping_pong, pi (chunked compute across the mesh),
                           courier, digest, journey, finder, dupes, inventory, guard,
                           latency, seek, semantic, researcher, file_courier,
                           tree_compare, log_scout, describer, watcher, explainer,
-                          benchmark; out-of-tree (a project built against the installed package)
+                          benchmark, chronicle (a zombie paglet); out-of-tree (a project built against the installed package)
 tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```

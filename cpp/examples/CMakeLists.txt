@@ -113,3 +113,9 @@ paglets_add_module(researcher
     SCHEMA_NAMESPACE researcher_msgs
     SERVICES ai web
     PATTERNS)
+paglets_add_module(chronicle
+    SOURCES chronicle/chronicle.cpp
+    SCHEMA_HEADER chronicle/chronicle_msgs.hpp
+    SCHEMA_NAMESPACE chronicle_msgs
+    SERVICES zombies mesh_info user_info
+    PATTERNS)
