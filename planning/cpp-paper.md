@@ -109,5 +109,10 @@ says what was found, why it matters, and what to do; "done" when it is in
 - **Excerpts are generated.** `paglets-docs-sync` renders the same
   `--8<--` sections into LaTeX listings; a stale paper fails the
   `docs_sync` ctest, as a stale docs page does.
+- **Generative AI is acknowledged.** A section "Use of generative AI" in
+  the paper says that the library and the paper were developed with
+  substantial support from a generative AI assistant under the author's
+  direction and review, and what guards the result (tests, generated
+  excerpts, claims checked against the code).
 - **No ORCID, no venue formatting.** Published as a PDF on GitHub and
   linked from the C++ docs; a venue version is a later step.
