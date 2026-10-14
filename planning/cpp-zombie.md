@@ -305,11 +305,13 @@ compiled one (`paglets-docs-sync`, checked by the `docs_sync` ctest).
   explicit-state model checker for protocols written this way: a fault
   model (message loss, duplication, reordering, crash, restart, partitions
   and their healing, all as nondeterministic events), breadth-first search
-  with state hashing and symmetry reduction over replicas, safety
-  properties on every state, liveness on the finite state graph (from every
-  reachable state, once faults stop and the network is connected, the goal
-  is reachable and no cycle avoids it), and counterexamples as the shortest
-  event trace. Other protocols of the mesh (moves, location records) can be
+  with state hashing and a canonical encoding (terms renamed to their
+  order, messages to ended replicas dropped), safety
+  properties on every state, recoverability on the finite state graph
+  (from every reachable state, once faults stop and the network is
+  connected, the goal stays reachable: no dead end and no trap; a check
+  that no fair cycle avoids the goal is planned, planning/cpp-paper.md),
+  and counterexamples as the shortest event trace. Other protocols of the mesh (moves, location records) can be
   specified and checked the same way later.
 - A deterministic simulator in the same library: the protocol under timed
   random fault schedules with virtual clocks, thousands of seeds per run,
@@ -349,7 +351,7 @@ transport for partitions; then live machines.
 | --- | --- |
 | WP23 | Protocol specification as code (`protocols/zombie`: states, messages, transitions, properties) and the docs page `docs/zombie-protocol.md` with snippets from it |
 | WP24 | Runtime/ABI v1.2: `recovered` event, `checkpoint()`, restart policy; store and CLI; tests |
-| WP25 | `paglets::verify` (model checker with fault model, symmetry reduction, liveness, counterexamples; deterministic simulator) and `paglets-protocol-check`; results JSON; ctest with small bounds |
+| WP25 | `paglets::verify` (model checker with fault model, canonical states, recoverability as liveness, counterexamples; deterministic simulator) and `paglets-protocol-check`; results JSON; ctest with small bounds |
 | WP26 | `zombies` system paglet: per-host group registry, one replica per host, tombstones with gossip, `cancel`, protocol event traces, `mesh zombies check` (live conformance), contract; node frames |
 | WP27 | SDK `patterns::Zombie<Work, Entry>` on the specification's state machine: roles on timers, journals and hand-over, endpoints between replicas, inline and artifact checkpoints, placement by clone, sinks (file `create_new`, sink paglet), term fencing |
 | WP28 | Links in `mesh-info` snapshots; Mesh Chronicle example (lifetime, link changes, partitions, reconciliation summaries), peer block in the transport (tests only), `cli_mesh` fault tests |
