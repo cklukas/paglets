@@ -35,14 +35,21 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install TeX and tools
+      - name: Install TeX, tools and the GitHub CLI
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
             gnuplot-nox jq latexmk lmodern \
             texlive-fonts-extra texlive-bibtex-extra texlive-fonts-recommended \
             texlive-latex-base texlive-latex-extra texlive-latex-recommended \
-            texlive-pictures poppler-utils
+            texlive-pictures poppler-utils ca-certificates curl gnupg
+          # gh is not in the gcc image: GitHub's apt repository.
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
 
       - name: The excerpts and tables are current
         run: |
