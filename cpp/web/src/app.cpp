@@ -597,7 +597,7 @@ web::Response App::modules_route() {
         std::error_code ec;
         for (const auto& f : std::filesystem::directory_iterator(*options_.module_dir, ec)) {
             if (f.path().extension() != ".wasm" || !f.is_regular_file()) continue;
-            auto bytes = wasm::read_file(f.path());
+            auto bytes = wasm::read_file(f.path().string());
             if (!bytes) continue;
             const std::string hash = to_hex(sha256(*bytes));
             Entry& e = by_hash[hash];
@@ -787,7 +787,7 @@ web::Response App::action(const std::string& name, const Json& body) {
             const std::filesystem::path name_only = std::filesystem::path(file).filename();
             if (name_only.string() != file || name_only.extension() != ".wasm") return failure(400, "not a module file");
             const auto path = *options_.module_dir / name_only;
-            auto read = wasm::read_file(path);
+            auto read = wasm::read_file(path.string());
             if (!read) return failure(404, read.error());
             bytes = std::move(*read);
             module = to_hex(sha256(bytes));
@@ -836,7 +836,7 @@ web::Response App::action(const std::string& name, const Json& body) {
             const std::filesystem::path name_only = std::filesystem::path(file).filename();
             if (name_only.string() != file || name_only.extension() != ".wasm") return failure(400, "not a module file");
             const auto path = *options_.module_dir / name_only;
-            auto read = wasm::read_file(path);
+            auto read = wasm::read_file(path.string());
             if (!read) return failure(404, read.error());
             bytes = std::move(*read);
             shown = path.string();

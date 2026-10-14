@@ -154,7 +154,10 @@ add_test(NAME host_cli_ledger
 # temporary prefix, find_package(paglets) in examples/out-of-tree, modules
 # run by the installed paglets-host.
 option(PAGLETS_TEST_INSTALL "Test the installed CMake package with an out-of-tree project" ON)
-if(PAGLETS_TEST_INSTALL AND PAGLETS_GUESTS_AVAILABLE AND PAGLETS_ENABLE_REFLECTION)
+# Not with sanitizers: the consumer project links the installed paglets::wire
+# (built with them) without the sanitizer runtime.
+if(PAGLETS_TEST_INSTALL AND PAGLETS_GUESTS_AVAILABLE AND PAGLETS_ENABLE_REFLECTION
+   AND NOT PAGLETS_SANITIZE AND NOT PAGLETS_SANITIZE_THREAD)
     add_test(NAME package_out_of_tree
              COMMAND ${CMAKE_COMMAND} -DBUILD=${PROJECT_BINARY_DIR} -DCONFIG=$<CONFIG> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/package
                      -DSOURCE=${PROJECT_SOURCE_DIR}/examples/out-of-tree "-DGENERATOR=${CMAKE_GENERATOR}"

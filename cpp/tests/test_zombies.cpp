@@ -136,8 +136,12 @@ PAGLETS_TEST("zombies: one replica per host; a tombstone reaches every host and 
     ask<zb::Done>(net, *b.f, p3, "trace",
                   zb::TraceRequest{group1, {step(1, 0, "sleeping", "suspect", "candidate", 0)}});
     std::vector<zb::TraceRecord> records;
-    std::thread collect([&] { records = a.node->zombie_traces(group1); });
-    REQUIRE(net.settle([&] { return !records.empty(); }, 2000));
+    std::atomic<bool> collected = false;
+    std::thread collect([&] {
+        records = a.node->zombie_traces(group1);
+        collected = true;
+    });
+    REQUIRE(net.settle([&] { return collected.load(); }, 2000));
     collect.join();
     CHECK_EQ(records.size(), 3u);
     auto report = paglets::protocols::zombie::check_traces(records, 1);
@@ -242,7 +246,9 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         const auto creator = start(net, a, module, '1');
         chronicle_msgs::Start s;
         s.sink = "host:c";
-        s.lifetime_ms = 20'000;
+        // Long enough that the main's host returns before the end, also on
+        // slow machines (CI runners).
+        s.lifetime_ms = 30'000;
         s.sample_ms = 1000;
         s.beat_ms = 200;
         s.suspect_ms = 1500;
@@ -291,7 +297,9 @@ PAGLETS_TEST("example: the Mesh Chronicle outlives a partition and a restart of 
         REQUIRE(net.settle(
             [&] { return status_of(b).role == "main" || status_of(c).role == "main" || status_of(d).role == "main"; },
             4000));
-        net.settle([] { return false; }, 1000);  // both sides work apart for a while
+        // Both sides work apart for a while (wall time: samples are timed).
+        const auto apart_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+        net.settle([&] { return std::chrono::steady_clock::now() >= apart_until; }, 100'000);
         // a restarts (its state is stored) and comes back into the mesh.
         net.restart(a);
         fast_mesh(net, a);
