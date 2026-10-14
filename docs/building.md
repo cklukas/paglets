@@ -3,6 +3,29 @@
 paglets/cpp builds with CMake presets from the `cpp/` directory of the `cpp`
 branch. The build fetches WAMR and cpp-httplib at pinned releases.
 
+## Installing with Homebrew
+
+On macOS, the tap [cklukas/homebrew-paglets](https://github.com/cklukas/homebrew-paglets)
+builds the latest release from source:
+
+```bash
+brew install cklukas/paglets/paglets
+```
+
+It installs `paglets-host`, `paglets-worker`, `paglets-web`, the guest SDK
+and the CMake package (`find_package(paglets)`, see
+[Modules outside the repository](#modules-outside-the-repository)). Building your
+own paglets against it also needs the guest toolchain:
+
+```bash
+brew install llvm lld wasi-libc wasi-runtimes
+```
+
+`brew install --HEAD cklukas/paglets/paglets` builds the current `cpp`
+branch instead. Releases are tags `cpp-vMAJOR.MINOR.PATCH`. Their workflow
+builds and tests the edition, publishes the source archive, and updates the
+formula in the tap.
+
 ## Toolchains
 
 | Part | Compiler | Why |

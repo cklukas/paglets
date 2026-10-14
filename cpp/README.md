@@ -97,6 +97,18 @@ tests/                    unit and conformance tests, test guests
 cmake/                    WAMR build (with source fixes) and guest build functions
 ```
 
+## Installing
+
+macOS (Homebrew, the tap [cklukas/homebrew-paglets](https://github.com/cklukas/homebrew-paglets)):
+
+```bash
+brew install cklukas/paglets/paglets
+```
+
+Releases are tags `cpp-vMAJOR.MINOR.PATCH` matching `project(paglets_cpp VERSION ...)`;
+`.github/workflows/cpp-release.yml` builds and tests them, publishes the source archive
+and updates the tap's formula (`packaging/homebrew/`).
+
 ## Toolchains
 
 | Part | Compiler | Why |

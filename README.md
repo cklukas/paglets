@@ -18,7 +18,13 @@ editions share concepts but no wire formats, and do not exchange paglets.
 
 ## Quick start
 
-macOS with Homebrew (Linux and Windows: see
+Install the release on macOS:
+
+```bash
+brew install cklukas/paglets/paglets
+```
+
+Or build it: macOS with Homebrew (Linux and Windows: see
 [Building and testing](docs/building.md)):
 
 ```bash

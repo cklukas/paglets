@@ -1,0 +1,68 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+# The documentation site on GitHub Pages, built as the ck-git CI builds it
+# (.ckgit/ci.yml): the portal of ckdocs.yml over the C++ edition (docs/ of
+# this branch) and the Python edition (docs/ of `main`, checked out next to
+# it). The `main` branch deploys the same site when its docs change.
+
+name: Docs (paglets/cpp)
+
+on:
+  push:
+    branches:
+      - cpp
+    paths:
+      - ".github/workflows/cpp-docs.yml"
+      - "ckdocs.yml"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # ckdocs (the documentation site generator) from ck-git-hosting v0.6.3.
+  CKDOCS_REF: b647a36908295e9fcfa88db95a181cee2b5efa21
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check out main (the Python edition)
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          path: main-tree
+      - name: Build ckdocs
+        run: |
+          git clone --quiet --filter=blob:none https://github.com/cklukas/ck-git-hosting.git "$RUNNER_TEMP/ck-git-hosting"
+          git -C "$RUNNER_TEMP/ck-git-hosting" checkout --quiet "$CKDOCS_REF"
+          make -C "$RUNNER_TEMP/ck-git-hosting" BUILD_ROOT="$RUNNER_TEMP" BUILD_DIR="$RUNNER_TEMP/ckdocs" client
+          echo "$RUNNER_TEMP/ckdocs/bin" >> "$GITHUB_PATH"
+      - name: Build the site
+        run: |
+          mv main-tree "$RUNNER_TEMP/main-tree"
+          ckdocs build --root "$PWD" --ref-tree main="$RUNNER_TEMP/main-tree" --out "$RUNNER_TEMP/site" --strict
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/site
+
+  deploy:
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
