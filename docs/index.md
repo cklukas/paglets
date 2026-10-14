@@ -59,6 +59,20 @@ serialized fields.
 | [System paglets](system-paglets.md) | the services hosts offer to paglets, and the web and AI gateways |
 | [Example paglets and benchmarks](examples/index.md) | every example paglet, what each shows, and the first benchmark numbers |
 
+## The paper
+
+*Paglets: Mobile Agents as Migrating WebAssembly Instances* introduces the
+C++ edition as a whole: the model, the lifecycle and event semantics,
+movement as memory images, the mesh, the zombie paglets and their checked
+protocol, the tools, and the measurements on a three-machine mesh, with
+code excerpts throughout and the complete examples in its appendix. The
+PDF is built from the `cpp-paper` branch and published with every change:
+[paglets-cpp.pdf](https://cklukas.github.io/paglets/cpp/paglets-cpp.pdf)
+(also on the
+[releases page](https://github.com/cklukas/paglets/releases), tagged
+`cpp-paper-*`). The Python edition has its own
+[application note](https://cklukas.github.io/paglets/paglets-application-note.pdf).
+
 ## Wire formats and interoperability
 
 paglets/cpp shares concepts with the Python edition (hosts, paglets,

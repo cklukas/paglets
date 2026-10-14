@@ -68,6 +68,9 @@ edition (from [`docs/`](docs/index.md) on this branch) and the Python edition
   of the mesh is alive, and [the zombie protocol](docs/zombie-protocol.md)
   behind them, checked by `paglets-protocol-check`
 - [Example paglets](docs/examples/index.md)
+- The paper on the C++ edition,
+  [paglets-cpp.pdf](https://cklukas.github.io/paglets/cpp/paglets-cpp.pdf)
+  (source on the `cpp-paper` branch)
 
 Build and check the site with
 [ckdocs](https://github.com/cklukas/ck-git-hosting) from the repository root:
