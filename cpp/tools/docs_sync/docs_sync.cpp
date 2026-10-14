@@ -2,7 +2,8 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 // paglets-docs-sync: keeps generated parts of the documentation (docs/*.md)
-// current. Between HTML comment markers, which ckdocs drops, it writes
+// and of the papers (papers/**/*.tex) current. Between markers (HTML
+// comments, which ckdocs drops; LaTeX comments) it writes
 //
 //   <!-- snippet: PATH -->  or  <!-- snippet: PATH#SECTION -->  ... <!-- /snippet -->
 //       the file PATH (relative to the repository root), or the lines
@@ -14,9 +15,18 @@
 //       (PAGLETS_RESULTS_DIR, tests/test.hpp) or by live benchmarks
 //       (cpp/tools/mesh_bench.sh).
 //
-// Usage: paglets-docs-sync [--root DIR] [--check]
+// In LaTeX the markers are `% snippet: SPEC [OPTIONS]` ... `% /snippet` and
+// `% results: TOPICS [OPTIONS]` ... `% /results`. A snippet becomes a
+// `lstlisting` of style `paglets-<language>` with OPTIONS as further
+// listings options (for example `[float,caption={...},label={lst:x}]`; a
+// caption gets the source path appended as `\src{PATH}`). Results become
+// booktabs tabulars inside a `table` with OPTIONS `caption={...}` and
+// `label={...}`. The paper's preamble defines `\src` and the styles.
+//
+// Usage: paglets-docs-sync [--root DIR] [--check] [--only FILE]...
 //   --root   the repository root (default: the current directory)
 //   --check  change nothing; exit 1 if a page is not current
+//   --only   process only these files (relative to the root)
 
 #include <paglets/wire/json.hpp>
 
@@ -129,6 +139,78 @@ std::string render_snippet(const fs::path& root, const std::string& spec) {
     return out;
 }
 
+// -- LaTeX ---------------------------------------------------------------------------------------
+
+// Text in LaTeX: the special characters escaped.
+std::string latex(std::string_view text) {
+    std::string out;
+    for (char c : text) {
+        switch (c) {
+            case '\\': out += "\\textbackslash{}"; break;
+            case '&': case '%': case '$': case '#': case '_': case '{': case '}':
+                out += '\\';
+                out += c;
+                break;
+            case '~': out += "\\textasciitilde{}"; break;
+            case '^': out += "\\textasciicircum{}"; break;
+            case '\n': out += ' '; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+// The argument of a LaTeX marker: the spec, and the options in [...].
+struct TexArgument {
+    std::string spec;
+    std::string options;
+};
+
+TexArgument split_tex_argument(const std::string& argument) {
+    const auto bracket = argument.find('[');
+    if (bracket == std::string::npos) return {trim(argument), {}};
+    std::string options = trim(argument.substr(bracket + 1));
+    if (!options.empty() && options.back() == ']') options.pop_back();
+    return {trim(argument.substr(0, bracket)), trim(options)};
+}
+
+// The value of `key={...}` in listings/table options, if given.
+std::optional<std::string> option_value(const std::string& options, std::string_view key) {
+    const std::string needle = std::string(key) + "={";
+    const auto at = options.find(needle);
+    if (at == std::string::npos) return std::nullopt;
+    int depth = 0;
+    std::string value;
+    for (std::size_t i = at + needle.size() - 1; i < options.size(); ++i) {
+        if (options[i] == '{') {
+            if (depth++ == 0) continue;
+        } else if (options[i] == '}') {
+            if (--depth == 0) return value;
+        }
+        value += options[i];
+    }
+    return std::nullopt;
+}
+
+std::string render_snippet_tex(const fs::path& root, const std::string& argument) {
+    const auto [spec, options] = split_tex_argument(argument);
+    const std::string path = spec.substr(0, spec.find('#'));
+    std::string opts = "style=paglets-" + language_of(path);
+    if (!options.empty()) {
+        // The source path goes into the caption.
+        std::string o = options;
+        if (auto caption = option_value(o, "caption")) {
+            const std::string old = "caption={" + *caption + "}";
+            o.replace(o.find(old), old.size(), "caption={" + *caption + " \\src{" + latex(path) + "}}");
+        }
+        opts += "," + o;
+    }
+    std::string out = "\\begin{lstlisting}[" + opts + "]\n";
+    for (const auto& line : snippet_lines(root, spec)) out += line + "\n";
+    out += "\\end{lstlisting}\n";
+    return out;
+}
+
 // -- results -------------------------------------------------------------------------------------
 
 std::string str(const Json& j, std::string_view key) {
@@ -218,25 +300,27 @@ std::string value_header(const Json& item) {
     return unit.empty() ? str(item, "name") : str(item, "name") + " (" + unit + ")";
 }
 
-std::string render_results(const fs::path& root, const std::string& topics) {
+// The results of topics as tables: one wide table (every entry measured
+// the same values, which become columns), or a table per test (a row per
+// measured value, a column per mode).
+struct Table {
+    std::string title;                           // empty for the wide table
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows;
+};
+
+std::vector<Table> result_tables(const fs::path& root, const std::string& topics) {
     std::vector<Json> tests;
-    std::vector<std::string> missing;
     std::stringstream list(topics);
     for (std::string topic; std::getline(list, topic, ',');) {
         topic = trim(topic);
         const fs::path file = root / "docs" / "results" / (topic + ".json");
-        if (!fs::exists(file)) {
-            missing.push_back(topic);
-            continue;
-        }
+        if (!fs::exists(file)) continue;
         auto j = Json::parse(read_file(file));
         if (!j || !j->find("tests") || !j->find("tests")->is_array()) throw Failure{"malformed " + file.string()};
         for (const auto& t : j->find("tests")->as_array()) tests.push_back(t);
     }
-    if (tests.empty()) {
-        return "> [!NOTE]\n> No results are recorded yet. Run `cpp/tools/update_results.sh` (see\n"
-               "> [Example paglets](index.md#test-results)).\n";
-    }
+    if (tests.empty()) return {};
     std::ranges::stable_sort(tests, [](const Json& a, const Json& b) {
         const int c = natural_compare(str(a, "test"), str(b, "test"));
         return c != 0 ? c < 0 : str(a, "mode") < str(b, "mode");
@@ -269,7 +353,6 @@ std::string render_results(const fs::path& root, const std::string& topics) {
     for (const auto& c : columns) {
         if (std::ranges::any_of(tests, [&](const Json& t) { return !c.text(t).empty(); })) shown.push_back(&c);
     }
-    // When every entry measured the same values, they become columns.
     auto headers_of = [](const Json& t) {
         std::vector<std::string> h;
         if (const Json* v = t.find("values"); v != nullptr && v->is_array()) {
@@ -280,30 +363,22 @@ std::string render_results(const fs::path& root, const std::string& topics) {
     const auto pivot = headers_of(tests.front());
     const bool pivoted = !pivot.empty() && pivot.size() <= 6 &&
                          std::ranges::all_of(tests, [&](const Json& t) { return headers_of(t) == pivot; });
-    std::string out = "|";
-    std::string rule = "|";
-    for (const auto* c : shown) {
-        out += " " + c->title + " |";
-        rule += "---|";
-    }
+    std::vector<Table> tables;
+    Table wide;
+    for (const auto* c : shown) wide.columns.push_back(c->title);
     if (pivoted) {
-        for (const auto& h : pivot) {
-            out += " " + cell(h) + " |";
-            rule += "---|";
-        }
+        for (const auto& h : pivot) wide.columns.push_back(h);
     }
-    out += "\n" + rule + "\n";
     for (const auto& t : tests) {
-        out += "|";
-        for (const auto* c : shown) out += " " + cell(c->text(t)) + " |";
+        std::vector<std::string> row;
+        for (const auto* c : shown) row.push_back(c->text(t));
         if (pivoted) {
-            for (const auto& item : t.find("values")->as_array()) out += " " + cell(rounded(str(item, "value"))) + " |";
+            for (const auto& item : t.find("values")->as_array()) row.push_back(rounded(str(item, "value")));
         }
-        out += "\n";
+        wide.rows.push_back(std::move(row));
     }
-    if (pivoted) return out;
-    // Otherwise one small table per test: a row per measured value, a
-    // column per mode.
+    tables.push_back(std::move(wide));
+    if (pivoted) return tables;
     std::vector<std::string> names;
     for (const auto& t : tests) {
         if (std::ranges::find(names, str(t, "test")) == names.end()) names.push_back(str(t, "test"));
@@ -327,52 +402,117 @@ std::string render_results(const fs::path& root, const std::string& topics) {
             }
         }
         if (rows.empty()) continue;
-        out += "\n" + cell(name) + ":\n\n| Measured |";
-        std::string head_rule = "|---|";
-        for (const auto& m : modes) {
-            out += " " + cell(m.empty() ? std::string("value") : m) + " |";
-            head_rule += "---|";
-        }
-        out += "\n" + head_rule + "\n";
+        Table per;
+        per.title = name;
+        per.columns.push_back("Measured");
+        for (const auto& m : modes) per.columns.push_back(m.empty() ? std::string("value") : m);
         for (const auto& r : rows) {
-            out += "| " + cell(r) + " |";
+            std::vector<std::string> row{r};
             for (const auto& m : modes) {
                 auto it = at.find({r, m});
-                out += " " + (it == at.end() ? std::string() : cell(it->second)) + " |";
+                row.push_back(it == at.end() ? std::string() : it->second);
             }
+            per.rows.push_back(std::move(row));
+        }
+        tables.push_back(std::move(per));
+    }
+    return tables;
+}
+
+std::string render_results(const fs::path& root, const std::string& topics) {
+    const auto tables = result_tables(root, topics);
+    if (tables.empty()) {
+        return "> [!NOTE]\n> No results are recorded yet. Run `cpp/tools/update_results.sh` (see\n"
+               "> [Example paglets](index.md#test-results)).\n";
+    }
+    std::string out;
+    for (const auto& t : tables) {
+        if (!t.title.empty()) out += "\n" + cell(t.title) + ":\n\n";
+        out += "|";
+        std::string rule = "|";
+        for (const auto& c : t.columns) {
+            out += " " + cell(c) + " |";
+            rule += "---|";
+        }
+        out += "\n" + rule + "\n";
+        for (const auto& row : t.rows) {
+            out += "|";
+            for (const auto& c : row) out += " " + cell(c) + " |";
             out += "\n";
         }
     }
     return out;
 }
 
-// -- pages ---------------------------------------------------------------------------------------
-
-std::optional<std::string> marker_argument(const std::string& line, std::string_view kind) {
-    const std::string t = trim(line);
-    const std::string open = "<!-- " + std::string(kind) + ":";
-    if (!t.starts_with(open) || !t.ends_with("-->")) return std::nullopt;
-    return trim(t.substr(open.size(), t.size() - open.size() - 3));
+std::string render_results_tex(const fs::path& root, const std::string& argument) {
+    const auto [topics, options] = split_tex_argument(argument);
+    const auto tables = result_tables(root, topics);
+    if (tables.empty()) return "% no results are recorded yet (cpp/tools/update_results.sh)\n";
+    std::string out = "\\begin{table}[htbp]\n\\centering\\small\n";
+    if (auto caption = option_value(options, "caption")) out += "\\caption{" + *caption + "}\n";
+    if (auto label = option_value(options, "label")) out += "\\label{" + *label + "}\n";
+    for (const auto& t : tables) {
+        if (!t.title.empty()) out += "\\par\\medskip\\noindent\\textit{" + latex(t.title) + "}\\par\\smallskip\n";
+        std::string spec;
+        for (std::size_t i = 0; i < t.columns.size(); ++i) spec += i == 0 ? "l" : "r";
+        out += "\\begin{tabular}{" + spec + "}\n\\toprule\n";
+        for (std::size_t i = 0; i < t.columns.size(); ++i) out += (i ? " & " : "") + latex(t.columns[i]);
+        out += " \\\\\n\\midrule\n";
+        for (const auto& row : t.rows) {
+            for (std::size_t i = 0; i < row.size(); ++i) out += (i ? " & " : "") + latex(row[i]);
+            out += " \\\\\n";
+        }
+        out += "\\bottomrule\n\\end{tabular}\n";
+    }
+    out += "\\end{table}\n";
+    return out;
 }
 
+// -- pages ---------------------------------------------------------------------------------------
+
+// The marker of a page: HTML comments in Markdown, `%` comments in LaTeX.
+struct Markers {
+    bool tex = false;
+    std::optional<std::string> argument(const std::string& line, std::string_view kind) const {
+        const std::string t = trim(line);
+        if (tex) {
+            const std::string open = "% " + std::string(kind) + ":";
+            if (!t.starts_with(open)) return std::nullopt;
+            return trim(t.substr(open.size()));
+        }
+        const std::string open = "<!-- " + std::string(kind) + ":";
+        if (!t.starts_with(open) || !t.ends_with("-->")) return std::nullopt;
+        return trim(t.substr(open.size(), t.size() - open.size() - 3));
+    }
+    std::string close(std::string_view kind) const {
+        return tex ? "% /" + std::string(kind) : "<!-- /" + std::string(kind) + " -->";
+    }
+};
+
 std::string sync_page(const fs::path& root, const fs::path& page) {
+    const Markers markers{page.extension() == ".tex"};
     const auto lines = lines_of(read_file(page));
     std::string out;
     for (std::size_t i = 0; i < lines.size(); ++i) {
         const std::string& line = lines[i];
-        std::optional<std::string> snippet = marker_argument(line, "snippet");
-        std::optional<std::string> results = marker_argument(line, "results");
+        std::optional<std::string> snippet = markers.argument(line, "snippet");
+        std::optional<std::string> results = markers.argument(line, "results");
         if (!snippet && !results) {
             out += line + "\n";
             continue;
         }
-        const std::string close = snippet ? "<!-- /snippet -->" : "<!-- /results -->";
+        const std::string close = markers.close(snippet ? "snippet" : "results");
         std::size_t end = i + 1;
         while (end < lines.size() && trim(lines[end]) != close) ++end;
         if (end == lines.size()) throw Failure{page.string() + ": " + trim(line) + " has no " + close};
         try {
-            out += line + "\n" + (snippet ? render_snippet(root, *snippet) : render_results(root, *results)) + close +
-                   "\n";
+            std::string rendered;
+            if (markers.tex) {
+                rendered = snippet ? render_snippet_tex(root, *snippet) : render_results_tex(root, *results);
+            } else {
+                rendered = snippet ? render_snippet(root, *snippet) : render_results(root, *results);
+            }
+            out += line + "\n" + rendered + close + "\n";
         } catch (const Failure& f) {
             throw Failure{page.string() + ": " + f.message};
         }
@@ -386,22 +526,41 @@ std::string sync_page(const fs::path& root, const fs::path& page) {
 int main(int argc, char** argv) {
     fs::path root = fs::current_path();
     bool check = false;
+    std::vector<std::string> only;
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "--check") {
             check = true;
         } else if (a == "--root" && i + 1 < argc) {
             root = argv[++i];
+        } else if (a == "--only" && i + 1 < argc) {
+            only.emplace_back(argv[++i]);
         } else {
-            std::cerr << "usage: paglets-docs-sync [--root DIR] [--check]\n";
+            std::cerr << "usage: paglets-docs-sync [--root DIR] [--check] [--only FILE]...\n";
             return 2;
         }
     }
     try {
         if (!fs::is_directory(root / "docs")) throw Failure{"no docs/ below " + root.string()};
         std::vector<fs::path> pages;
-        for (const auto& e : fs::recursive_directory_iterator(root / "docs")) {
-            if (e.is_regular_file() && e.path().extension() == ".md") pages.push_back(e.path());
+        if (only.empty()) {
+            for (const auto& e : fs::recursive_directory_iterator(root / "docs")) {
+                if (e.is_regular_file() && e.path().extension() == ".md") pages.push_back(e.path());
+            }
+            if (fs::is_directory(root / "papers")) {
+                for (const auto& e : fs::recursive_directory_iterator(root / "papers")) {
+                    if (e.is_regular_file() && e.path().extension() == ".tex" &&
+                        e.path().string().find("/build/") == std::string::npos) {
+                        pages.push_back(e.path());
+                    }
+                }
+            }
+        } else {
+            for (const auto& o : only) {
+                const fs::path p = fs::path(o).is_absolute() ? fs::path(o) : root / o;
+                if (!fs::is_regular_file(p)) throw Failure{"no file " + p.string()};
+                pages.push_back(p);
+            }
         }
         std::ranges::sort(pages);
         int stale = 0;

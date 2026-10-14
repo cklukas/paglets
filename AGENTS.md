@@ -47,7 +47,11 @@ markers in the sources) and test results (`<!-- results: TOPIC -->`, from
 `docs/results/TOPIC.json`) are generated into the Markdown by
 `paglets-docs-sync` (built with the C++ tree); never edit them by hand. Run
 `cpp/build/<preset>/tools/docs_sync/paglets-docs-sync --root .` after changing
-marked code; the `docs_sync` ctest fails while a page is not current.
+marked code; the `docs_sync` ctest fails while a page is not current. LaTeX
+papers under `papers/` use the same markers as `%` comments
+(`% snippet: PATH#SECTION [listings options]` ... `% /snippet`,
+`% results: TOPIC [caption={...},label={...}]` ... `% /results`), rendered
+as `lstlisting` blocks and booktabs tables.
 `cpp/tools/update_results.sh` reruns the example tests and records their
 results; `cpp/tools/mesh_bench.sh` records the live benchmarks on real
 machines.
