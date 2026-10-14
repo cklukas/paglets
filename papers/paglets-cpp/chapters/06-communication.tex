@@ -1,4 +1,506 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+A paglet reaches another paglet only through an endpoint, a capability
+that names the target by its ID (Section~\ref{sec:model}). The endpoint
+does not name a host. This chapter shows how a message still arrives
+when its target has moved since the endpoint was handed out, what the
+sender sees when it cannot, and what holds a paglet in place while
+somebody acts on an answer.
+
+\subsection{Endpoints across hosts}\label{sec:communication-endpoints}
+
+The host of a sending paglet keeps, with every endpoint and reply
+capability whose target is on another host, a \emph{host hint}: the key
+ID of the host where the target was last known to be (\code{Cap::host} in
+the runtime's \code{capability.hpp}; empty for targets on this host).
+A capability gets the hint when it leaves a host, in a message or with a
+moving paglet. Endpoints to system paglets carry none: they do not travel
+in messages, and a moving paglet's endpoints to its default services are
+made anew on arrival from the destination's own system paglets
+(Section~\ref{sec:movement}). A send, request or reply whose target is not
+on this host leaves the runtime as a \code{RemoteMessage} (the runtime's
+\code{mobility.hpp}): the target and its hinted host, the message, and
+for a request the requester, its host and the correlation. Only endpoints
+to paglets travel between hosts, and artifact capabilities (of the
+\code{artifacts} system paglet, Section~\ref{sec:mesh}), which name the
+host that holds their content. A send, request or reply to a paglet on
+another host that carries any other capability is refused with
+\code{unsupported}; a message that was accepted on the same host and then
+follows its target after a move has such capabilities dropped as
+\code{gone}. Lending a capability (\code{SendOptions::lend}) shows it to a
+system paglet of this host only; a lend to another host is
+\code{invalid\_argument}. The node wraps the message in a \code{deliver}
+frame and sends it through the channel to the hinted host
+(Section~\ref{sec:communication-channel}).
+
+The hint is a guess. It is right for a target that has not moved. When
+it is wrong, the host that receives the frame has to find the target
+without help from the sender.
+
+\subsection{Location records}\label{sec:communication-records}
+
+Every paglet has a location record: the host that holds it, its move
+counter, when it arrived there and its owner. No host is special. The
+records of a paglet live on three \emph{responsible hosts} chosen by
+consistent hashing~\cite{karger1997consistent} over the hosts this host
+believes are up: each host
+has 16 points on a 64-bit ring (SHA-256 over a fixed prefix, the host key
+and the point number), a paglet has one point, and the first three
+distinct hosts clockwise from it keep its record. With three or fewer
+hosts, all of them do (Listing~\ref{lst:comm-responsible}).
+
+% snippet: cpp/host/src/node/location.cpp#responsible [float,caption={The responsible hosts of a paglet: the first three distinct hosts clockwise from its point on the ring},label={lst:comm-responsible}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The responsible hosts of a paglet: the first three distinct hosts clockwise from its point on the ring \src{cpp/host/src/node/location.cpp}},label={lst:comm-responsible}]
+std::vector<mesh::PublicKey> Node::Impl::responsible_for(const runtime::PagletId& paglet) {
+    update_view();
+    if (view.size() <= replicas) return view;
+    std::vector<mesh::PublicKey> out;
+    const std::uint64_t p = paglet_point(paglet);
+    auto it = std::ranges::lower_bound(ring, std::pair{p, mesh::PublicKey{}});
+    for (std::size_t n = 0; n < ring.size() && out.size() < replicas; ++n, ++it) {
+        if (it == ring.end()) it = ring.begin();
+        if (std::ranges::find(out, it->second) == out.end()) out.push_back(it->second);
+    }
+    return out;
+}
+\end{lstlisting}
+% /snippet
+
+Creation writes a record with counter~0. Every move increments the
+counter, and a record with a higher counter replaces one with a lower
+counter; the same counter from the same host only refreshes it. The
+counter is what makes a stale record harmless: a host that was down and
+returns with an old record loses to any newer one. The update is the
+commit step of the move protocol (Section~\ref{sec:movement-protocol}):
+the source sends the new record to the responsible hosts and commits the
+move only after a majority ($\lfloor n/2 \rfloor + 1$) acknowledged it,
+recording above a newer record at most three times before it aborts and
+the paglet stays. So every committed move is visible to a majority of
+the responsible hosts before the paglet runs on its new host.
+
+The set of live hosts changes. Every host sends a heartbeat to every
+enrolled host every 2\,s (any frame counts as one); a host not heard from
+for 10\,s, or one that announced another mesh protocol or ABI version, is
+out of this host's view, and the ring is rebuilt over the view. Holders
+then re-send the records of their paglets, and every host sends the
+records it keeps to hosts that became responsible for them. Holders also
+refresh their records every five minutes, and a record not refreshed for
+an hour ends, which removes the records of paglets that ended. Records are
+kept in the node's state directory, so a restarted host still has them.
+Different hosts can disagree about the view for a few seconds; the lookup
+below has a fallback for the case that no responsible host knows a paglet.
+
+\subsection{Delivery after a move}\label{sec:communication-delivery}
+
+A lookup (the node's lookup behind \code{Node::locate}, the
+\code{locator} system paglet, \code{paglets-host remote locate} and
+message forwarding) runs in three steps, the second and third limited to
+3\,s each. First, a paglet on this host is found at once. Second, the
+responsible hosts are asked (\code{loc-get}); with answers from a
+majority, the record with the highest counter wins, which is the latest
+committed location. When the 3\,s pass with fewer answers, the best record
+that did arrive is used, which may be stale. Third, if no responsible host
+knows the paglet, every live host is asked (\code{loc-who}), and the host
+that holds it answers; if none does, the lookup ends with
+\code{not\_found}. Hosts cache the answers of lookups and moves for 10\,s.
+
+Message forwarding adds a cheaper first step. A host remembers for ten
+minutes where a departed paglet went (a \emph{tombstone},
+\code{Config::tombstone\_ttl}). A message that arrives for a paglet that
+left is forwarded to the tombstone's host, with a hop counter in the
+message that allows at most four forwards in all. Only when the host has
+neither the paglet nor a tombstone, and the message has not yet been
+forwarded four times, does the runtime hand the message to the node
+(\code{MobilityHooks::unresolved}), which uses its location cache or
+starts a lookup and forwards the message to the host it finds
+(Listing~\ref{lst:comm-unresolved}). A request that nobody holds is
+answered \code{not\_found} to the requester; a one-way message that
+nobody holds is dropped. Figure~\ref{fig:comm-forward} shows both paths.
+
+% snippet: cpp/host/src/node/location.cpp#unresolved [float,caption={Messages for paglets that are neither here nor remembered: the location cache, otherwise a lookup; requests for paglets nobody holds are answered},label={lst:comm-unresolved}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Messages for paglets that are neither here nor remembered: the location cache, otherwise a lookup; requests for paglets nobody holds are answered \src{cpp/host/src/node/location.cpp}},label={lst:comm-unresolved}]
+for (auto& m : queue) {
+    auto deliver = [this](runtime::RemoteMessage& msg, const mesh::PublicKey& host) {
+        msg.host = mesh::key_id(host);
+        ++msg.hops;
+        send_remote(std::move(msg));
+    };
+    if (auto c = loc_cache.find(m.target); c != loc_cache.end() && Clock::now() - c->second.second < cache_ttl &&
+                                           c->second.first.host != key.public_key()) {
+        deliver(m, c->second.first.host);
+        continue;
+    }
+    Lookup l;
+    l.kind = LookupKind::locate;
+    l.paglet = m.target;
+    l.done = [this, m = std::move(m), deliver](const LookupResult& r) mutable {
+        if (r.status == abi::ok) return deliver(m, r.where.host);
+        if (m.kind != runtime::RemoteMessage::Kind::request) return;
+        // Nobody has it: the requester hears so.
+        runtime::RemoteMessage answer;
+        answer.kind = runtime::RemoteMessage::Kind::reply;
+        answer.target = m.requester;
+        answer.host = m.requester_host;
+        answer.correlation = m.correlation;
+        answer.status = abi::not_found;
+        send_remote(std::move(answer));
+    };
+    start_lookup(std::move(l));
+}
+\end{lstlisting}
+% /snippet
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[box] (s) at (0,0) {sender's host $S$};
+  \node[box] (a) at (3.9,0) {old host $A$};
+  \node[box] (r) at (7.8,0) {responsible host $R$};
+  \node[box] (b) at (11.7,0) {new host $B$};
+  \foreach \n in {s,a,r,b} \draw[lifeline] (\n.south) -- ++(0,-5.0);
+  \draw[msg] ($(s.south)+(0,-0.6)$) -- node[above]{\code{deliver} (hint: $A$)} ($(a.south)+(0,-0.6)$);
+  \draw[msg] ($(a.south)+(0,-1.3)$) -- node[above,pos=0.3]{tombstone for $B$: \code{deliver}, hop $1$} ($(b.south)+(0,-1.3)$);
+  \draw[dashedarrow] ($(a.south)+(0,-2.3)$) -- node[above,event]{no tombstone: \code{loc-get}} ($(r.south)+(0,-2.3)$);
+  \draw[dashedarrow] ($(r.south)+(0,-2.9)$) -- node[above,event]{\code{loc-rec}: $B$, counter $c$} ($(a.south)+(0,-2.9)$);
+  \draw[dashedarrow] ($(a.south)+(0,-3.6)$) -- node[above,event,pos=0.3]{\code{deliver}, hop $1$} ($(b.south)+(0,-3.6)$);
+  \draw[msg] ($(b.south)+(0,-4.5)$) -- node[above,pos=0.7]{reply (requester's host: $S$)} ($(s.south)+(0,-4.5)$);
+\end{tikzpicture}
+\caption{A request to a paglet that moved from $A$ to $B$ after the sender got its endpoint. $A$ forwards by its tombstone (solid), or, after the tombstone ended or $A$ restarted, by a lookup on the responsible hosts (dashed). The reply goes to the requester's host directly, because a request names it.}
+\label{fig:comm-forward}
+\end{figure}
+
+A paglet in the middle of a move handles no message: after the handler
+that called \code{dispatch} it receives only the \code{dispatching} event,
+and from then until the outcome is known the runtime holds the messages
+that arrive for it. When the move succeeds, the held messages are sent on
+to the new host in mailbox order (by priority, then arrival); a held
+request becomes a remote request that names the requester and its host,
+so its reply finds the way back. When the move fails, the paglet
+continues on its host and handles the held messages there. In the other
+direction, the paglet's own requests in flight travel with it: the
+travelling state lists each pending correlation with its remaining time,
+and the new host arms the timeouts again on arrival. The continuation of
+a request lives in the paglet's memory and moves with the image, so a
+reply that arrives after the move runs the continuation on the new host.
+Table~\ref{tab:comm-timing} collects the constants of this section.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Timing and limits of location and delivery. Names without a file are fields of \code{Node::LocationTiming} (\code{node.hpp}). All are compiled-in defaults; the node's timings can be changed by its embedder, not from the command line.}
+\label{tab:comm-timing}
+\begin{tabular}{llll}
+\toprule
+Quantity & Value & Name & File \\
+\midrule
+Heartbeat to every enrolled host & 2\,s & \code{heartbeat} & \\
+A host counts as down after & 10\,s & \code{host\_timeout} & \\
+Lookup steps two and three & 3\,s each & \code{lookup\_timeout} & \\
+Location cache & 10\,s & \code{cache\_ttl} & \code{location.cpp} \\
+Record refresh by holders & 5\,min & \code{refresh} & \\
+A record not refreshed ends after & 1\,h & \code{record\_ttl} & \\
+Tombstone of a departed paglet & 10\,min & \code{Config::tombstone\_ttl} & \code{runtime.hpp} \\
+Forwards of one message & 4 & \code{max\_forwards} & \code{runtime.cpp} \\
+Redirects a pin follows & 8 & \code{max\_hops} & \code{location.cpp} \\
+Waits for a moving paglet & $40 \times 100$\,ms & \code{max\_busy}, \code{busy\_wait} & \code{location.cpp} \\
+Default request timeout & 30\,s & \code{abi::default\_timeout\_ms} & \code{abi.hpp} \\
+Mailbox of a paglet & 1024 messages & \code{Config::mailbox\_limit} & \code{runtime.hpp} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pins}\label{sec:communication-pins}
+
+An answer from the locator can be stale by the time its receiver acts on
+it. A \emph{pin} keeps a paglet on its host for a while. While a paglet
+holds an unexpired pin, its own \code{dispatch} returns \code{pinned}
+(error $-17$), and a dispatch an owner or admin requests is refused with
+the same error. A dispatch requested before the pin fails with
+\code{paglets.move\_failed} when it comes due.
+\code{self\_info().pinned\_until} names the end of its last pin. Cloning,
+deactivation and messages are not affected. A paglet can hold up to 64
+pins and moves once all have ended. Pins are leases: they end at their
+expiry, when their holder releases them or when an admin ends them
+(\code{remote unpin}). The node stores them in its state and applies them
+again after a restart. A pin never races a move: pinning a paglet that is
+leaving or about to leave is refused with \code{bad\_state}, and the pin
+protocol then waits 100\,ms and looks the paglet up again; a host that no
+longer has the paglet redirects the pin to its tombstone's host. One
+counter bounds both: a pin ends with \code{timeout} after eight redirects,
+or after 40 waits and redirects together.
+
+Paglets pin through the \code{locator} system paglet, whose endpoint
+every paglet has by default (operations \code{locate},
+\code{locate\_and\_pin} and \code{release}). The caller lends the
+endpoint of the target, which must carry the \code{locate} or \code{pin}
+right. \code{locate\_and\_pin} finds the paglet and pins it where it is in
+one step; its reply carries the \code{Location} (paglet ID, host key ID
+and name, time of the last move, move counter), the pin's ID and end, and
+as its first capability a \emph{pin capability} of kind \code{pin} with
+the right \code{release}. The capability is transferable and stays valid
+when its holder moves; releasing revokes it and every copy. Who may pin,
+and for how long, is decided by the mesh policy: \code{locate\_and\_pin}
+needs a rule that allows service \code{locator}, operation \code{pin},
+for the caller, and the rule's \code{max\_duration\_ms} caps the pin (one
+hour without a maximum; the request itself is clamped to between 1\,s and
+30 days). Without such a rule, pinning is \code{denied}. Owners (for their
+own paglets) and admins pin through a CLI session (\code{paglets-host
+remote pin}), which needs no rule: 10 minutes by default, at most 24
+hours.
+
+The Hide and Seek example (\code{cpp/examples/seek/}) plays this out
+under continuous movement. The hider is a child that moves to \code{any}
+host on a timer; while pinned, its \code{dispatch} says so at once and it
+tries again later (Listing~\ref{lst:comm-hider}).
+
+% snippet: cpp/examples/seek/seek.cpp#hider [float,caption={The hider moves on a timer and treats a refused dispatch as a reason to try later},label={lst:comm-hider}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The hider moves on a timer and treats a refused dispatch as a reason to try later \src{cpp/examples/seek/seek.cpp}},label={lst:comm-hider}]
+    void on_created(paglets::Started& s) override {
+        // Created by a seeker: hide (args: the hop interval).
+        if (!s.decode_args(hop_ms_) || hop_ms_ <= 0) return;
+        hiding_ = true;
+        (void)paglets::after_raw(hop_ms_, "hop", {});
+    }
+
+    void on_arrived(const paglets::abi::ArrivedEvent&) override {
+        if (!hiding_) return;
+        ++moves_;
+        (void)paglets::after_raw(hop_ms_, "hop", {});
+    }
+
+    void on_move_failed(const paglets::abi::MoveFailed&) override {
+        if (hiding_) (void)paglets::after_raw(hop_ms_, "hop", {});  // pinned, or nowhere to go: later
+    }
+
+private:
+    // -- the hider ----------------------------------------------------------------------
+
+    void hop() {
+        if (!hiding_) return;
+        // While pinned, dispatch says so at once: try again later.
+        if (!paglets::dispatch("any")) (void)paglets::after_raw(hop_ms_, "hop", {});
+    }
+\end{lstlisting}
+% /snippet
+
+The seeker keeps one endpoint to the hider. Each round it pins the hider
+for at most 10\,s with \code{patterns::with\_pinned}
+(\code{<paglets/patterns/locate.hpp>}), which calls
+\code{locate\_and\_pin}, runs the work with the location, and releases
+the pin when the work calls \code{done}. Pinned, the hider answers the
+request \code{moves} from the host where it was found, which is the point
+of the pin: the answer and the location belong to the same host
+(Listing~\ref{lst:comm-seek}). A round starts only once the hider has
+moved since the last catch, so every catch finds it after a new move.
+Table~\ref{tab:comm-seek} records the test on three hosts in one process,
+with a hop every 30\,ms.
+
+% snippet: cpp/examples/seek/seek.cpp#seek [float,caption={A round of Hide and Seek: pin the hider where it is, ask it something there, let it go},label={lst:comm-seek}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A round of Hide and Seek: pin the hider where it is, ask it something there, let it go \src{cpp/examples/seek/seek.cpp}},label={lst:comm-seek}]
+// The next round starts once the hider has moved since the last catch,
+// however slow the hosts are.
+void round() {
+    if (static_cast<std::int64_t>(score_.catches.size()) >= game_.rounds) return finish();
+    hider_moves([this](std::int64_t n) {
+        if (!score_.catches.empty() && n >= 0 && n <= caught_at_moves_) {
+            (void)paglets::after_raw(game_.pause_ms, "next-round", {});
+            return;
+        }
+        seek();
+    });
+}
+
+void seek() {
+    pt::with_pinned(hider_, 10'000, "hide and seek",
+                    [this](paglets::Result<pt::Location> where, std::function<void()> done) {
+                        Catch c;
+                        if (where) {
+                            c.host_name = where->host_name;
+                            c.moves = where->moves;
+                        } else {
+                            c.error = std::string(paglets::abi::error_name(where.error()));
+                        }
+                        score_.catches.push_back(std::move(c));
+                        // Pinned, it stays where it is while it counts.
+                        hider_moves([this, done](std::int64_t n) {
+                            caught_at_moves_ = n;
+                            done();  // let it go
+                            (void)paglets::after_raw(game_.pause_ms, "next-round", {});
+                        });
+                    });
+}
+\end{lstlisting}
+% /snippet
+
+% Hand-written from docs/results/seek.json (recorded 2026-10-12): the
+% `% results: seek` marker renders every column of the JSON (test name,
+% outcome, platform, date, ...), which is wider than the text block; see
+% the refinement plan. Keep these numbers in step with the JSON.
+\begin{table}[htbp]
+\centering\small
+\caption{Hide and Seek on three hosts in one test process (\code{example: Hide and Seek finds and pins a paglet that keeps moving}, Darwin arm64, Release build, recorded 2026-10-12): four rounds with a hop every 30\,ms and 300\,ms between rounds. Both runs passed.}
+\label{tab:comm-seek}
+\begin{tabular}{lrrr}
+\toprule
+Mode & Duration (s) & Catches & Moves of the hider \\
+\midrule
+in-process & 1.7 & 4 & 35 \\
+worker processes & 1.8 & 4 & 30 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Asynchronous sends, replies and failures}\label{sec:communication-async}
+
+\code{Endpoint::send} and \code{Message::reply} are synchronous by
+default: the call returns when the host has accepted the message, with
+\code{denied}, \code{expired} or \code{quota} when the endpoint does not
+allow it, \code{not\_found} when a target on this host ended, and
+\code{quota} when the target's mailbox here is full. For a target on
+another host the call succeeds once the runtime has handed the message to
+the node; whether the frame reaches the other host is not reported. The
+remote host answers a request that it cannot deliver (unknown paglet, full
+mailbox, a system paglet of its own) with the error as the reply status,
+and drops a one-way message it cannot deliver.
+
+With \code{SendOptions::async}, \code{reply\_async} or \code{async = true}
+in \code{reply\_to}, the call returns \code{ok} as soon as the document is
+well-formed. This matters in worker processes (Section~\ref{sec:model}):
+a synchronous call is a round trip to the host, an asynchronous one is a
+one-way frame. A failure is reported later as the host's report
+\code{paglets.undelivered}, which the SDK delivers to
+\code{on\_undelivered} with the name, the handle and the error the
+synchronous call would have returned; transferred capabilities are gone
+and a failed reply has answered the requester \code{gone}
+(Section~\ref{sec:lifecycle-reports}). A request is never
+asynchronous: \code{RequestOptions} has no \code{async}, and the ABI call
+refuses the flag with \code{invalid\_argument}, since a request has its
+continuation. Its timeout (\code{RequestOptions::timeout\_ms}, 30\,s by
+default) runs on the requester's host and is armed again after a move;
+when it passes, the continuation runs with status \code{timeout}, and a
+reply that arrives later is discarded.
+
+Ping Pong (Listings~\ref{lst:pingpong-roles} and \ref{lst:pingpong-bounce})
+has both sides: the child answers with \code{reply\_async}, the parent
+answers a deferred reply from the continuation of the last ping or drops
+it, which answers the caller \code{gone} at once. Nothing in it depends on
+where the child is: had the child dispatched itself between two pings,
+the parent's endpoint would carry the next ping to it by the paths of
+Section~\ref{sec:communication-delivery}. The example in the repository
+stays on one host; Hide and Seek above and the Latency Map below talk
+across hosts.
+
+\subsection{Hosts without an inbound port}\label{sec:communication-relays}
+
+A host behind NAT or a firewall can open connections but accept none.
+Started with \code{--no-listen}, such a host keeps two \emph{relays},
+reachable hosts that it polls for the frames held for it (the
+transport's \code{poll} request), and announces them to the mesh in place
+of an address; the bootstrap contact of \code{--join} is the first. Every
+other host reaches it through a relay over a Noise channel of its own,
+tunneled in transport control frames, so the relay sees only the two host
+keys and the sizes. Relaying is a duty of every reachable host. The design
+is in \code{planning/cpp-relay.md}; the test \code{host\_mesh\_discovery}
+runs a host with \code{--no-listen} that joins through another and
+receives a paglet.
+
+\subsection{The channel between hosts}\label{sec:communication-channel}
+
+Hosts talk HTTPS, and inside it Noise channels~\cite{perrin2018noise}
+(\code{Noise\_XX\_25519\_ChaChaPoly\_SHA256}, built on libsodium). The
+static keys of the handshake are the X25519 forms of the Ed25519 identity
+keys, so the peer of a channel is an identity key, which the node checks
+against the ledger (Section~\ref{sec:mesh}). The prologue contains the
+mesh ID, so hosts of different meshes fail at the second handshake
+message. TLS keeps proxies and firewalls working and authenticates
+nothing by itself: a host checks the certificates of the hosts it
+connects to only when it was started with \code{-{}-tls-ca FILE}; the
+identity of a peer is its Noise key in every case. A server handles the
+requests of a session one at a time, so
+frames arrive in the order they were sent. Frames that cannot be delivered
+are dropped and counted; the protocols above time out: a lookup asks the
+records once more and then fails, a move offers the next host of its
+ticket or is aborted, and the paglet stays.
+
+\subsection{Measuring the links}\label{sec:communication-latency}
+
+The Latency Map (\code{cpp/examples/latency/}) measures what a request
+between paglets on two hosts costs. It clones a probe to every host; each
+probe derives an endpoint to itself that allows only \code{ping},
+\code{probe.peers} and \code{probe.done} and sends it to the parent, which
+hands every probe copies of the others' endpoints narrowed to
+\code{ping}. A probe pings its targets one at a time, waits for each
+reply before the next ping and keeps the shortest and the mean round
+trip per target (Listing~\ref{lst:comm-ping}); a ping without a reply in
+5\,s puts the status into the cell. The parent collects one row per
+probe with the \code{FanOut} pattern and then tells the probes to end.
+
+% snippet: cpp/examples/latency/latency.cpp#ping [float,caption={A probe of the Latency Map pings one target at a time and records the round trip in the continuation},label={lst:comm-ping}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A probe of the Latency Map pings one target at a time and records the round trip in the continuation \src{cpp/examples/latency/latency.cpp}},label={lst:comm-ping}]
+// Pings target `t`, round `round`; one at a time.
+void ping(std::size_t t, std::int64_t round) {
+    if (t >= targets_.size()) {
+        for (auto& x : targets_) {
+            if (x.cell.replies > 0) x.cell.avg_ms /= static_cast<double>(x.cell.replies);
+            row_.cells.push_back(x.cell);
+        }
+        return pt::report(parent_, paglets::encode(row_));
+    }
+    if (round >= rounds_) return ping(t + 1, 0);
+    const double sent_at = now_ms();
+    paglets::RequestOptions o;
+    o.timeout_ms = 5000;
+    auto sent = targets_[t].endpoint.request(
+        "ping",
+        [this, t, round, sent_at](Message& reply) {
+            Cell& c = targets_[t].cell;
+            if (reply.ok()) {
+                const double rtt = now_ms() - sent_at;
+                c.avg_ms += rtt;
+                c.min_ms = c.replies == 0 ? rtt : std::min(c.min_ms, rtt);
+                ++c.replies;
+            } else {
+                c.error = std::string(paglets::abi::error_name(reply.status()));
+            }
+            ping(t, round + 1);
+        },
+        std::move(o));
+    if (!sent) {
+        targets_[t].cell.error = pt::error_text("ping", sent.error());
+        ping(t + 1, 0);
+    }
+}
+\end{lstlisting}
+% /snippet
+
+Table~\ref{tab:comm-latency} is the last run on real machines: the live
+mesh of Section~\ref{sec:evaluation-setup}, a Mac Studio (\emph{mac}), a
+Raspberry Pi~4 (\emph{pi}) and a uConsole built on a Raspberry Pi
+Compute Module~5 (\emph{uconsole}) on a gigabit LAN, 20 pings per pair,
+with the probes in worker processes. A round trip passes both runtimes,
+the worker process boundary on both sides and the encrypted channel
+between the hosts; relays would add to it. The evaluation
+(Section~\ref{sec:evaluation-mesh}) puts the numbers next to the TCP
+baseline and the transfer rates of the same mesh.
+
+% Hand-written from docs/results/live_latency.json (recorded 2026-10-12):
+% the `% results: live_latency` marker renders every column of the JSON
+% (mode, outcome, build, date, ...), which is wider than the text block;
+% see the refinement plan. Keep these numbers in step with the JSON.
+\begin{table}[htbp]
+\centering\small
+\caption{Round trips of a request between probes on two hosts (mac: Mac Studio; pi: Raspberry Pi~4; uconsole: uConsole on a Raspberry Pi Compute Module~5), gigabit LAN, probes in worker processes, Release build, 20 pings per pair, recorded 2026-10-12.}
+\label{tab:comm-latency}
+\begin{tabular}{lrr}
+\toprule
+Pair & Mean of 20 (ms) & Fastest (ms) \\
+\midrule
+mac $\rightarrow$ pi & 2.84 & 1.08 \\
+mac $\rightarrow$ uconsole & 4.69 & 1.92 \\
+pi $\rightarrow$ mac & 4.07 & 1.71 \\
+pi $\rightarrow$ uconsole & 1.34 & 0.79 \\
+uconsole $\rightarrow$ mac & 5.16 & 1.83 \\
+uconsole $\rightarrow$ pi & 1.16 & 0.79 \\
+\bottomrule
+\end{tabular}
+\end{table}

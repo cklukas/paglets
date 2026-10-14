@@ -1,4 +1,184 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+\subsection{Mobile agents, again}\label{sec:introduction-agents}
+
+A mobile agent is a program that moves itself, with its state, to the
+machine where the data or the resource is, works there, and moves on.
+The case for it was made in the 1990s: fewer round trips over slow
+links, work that continues while the client is disconnected, services
+that are extended by code that arrives rather than by code that is
+installed \cite{lange1999seven,harrison1995mobileAgents}. Aglets, the
+system that fixed the vocabulary, made agents Java objects with a
+lifecycle of creation, cloning, dispatch, deactivation and disposal,
+each with a callback, reached through proxies that forward messages to
+the agent wherever it is \cite{lange1997aglets,lange1998aglets}.
+
+The first generation had three problems that were design problems, not
+accidents. An agent moved as a serialized Java object, so what travelled
+was decided by what the author marked serializable, and the classes had
+to be present on the destination or fetched from a code base. The Java
+virtual machine does not expose the state of a thread, so execution could
+not move: the agent's \code{run()} started again from its beginning on
+the new host, the weak mobility of Fuggetta et al.\
+\cite{fuggetta1998mobility}. And a host ran foreign bytecode inside its
+own virtual machine, protected by the Java security model alone, which
+was the doubt raised by Harrison, Chess and Kershenbaum before the
+systems existed \cite{harrison1995mobileAgents}; the design space of
+code shipping, state capture and security is surveyed by Karnik and
+Tripathi \cite{karnik1998design}. Serialization that captures too much
+or too little, no execution state and no sandbox that one could trust
+with a stranger's code: these were the reasons to prefer remote calls,
+and remote calls won.
+
+\subsection{What WebAssembly changes}\label{sec:introduction-wasm}
+
+WebAssembly \cite{haas2017wasm} changes the trade-offs of each of the
+three. It is a portable binary instruction set with a formal semantics,
+compiled from C and C++ by clang and from other languages by their own
+toolchains. An instance of a module has one linear memory, a contiguous
+array of bytes that only the instance's own code and its host can read
+or write, and a set of globals; a C++ program compiled for it keeps its
+heap and its shadow stack in that memory. Between two calls into the
+instance, the memory and the mutable globals are its complete state, and
+the specification defines both without reference to the host, the CPU
+or the operating system. The instance is sandboxed by construction: it
+reaches the outside only through the functions its host provides as
+imports, and a module that imports anything else cannot be
+instantiated. Small
+runtimes embed in a C program; \paglets{} uses WAMR \cite{wamr}. What
+WebAssembly does not give is execution state across a call: a running
+function's stack is the runtime's, not the module's. The design of
+\paglets{} accepts this and moves agents only between calls.
+
+\subsection{The idea}\label{sec:introduction-idea}
+
+A \paglet{} is a WebAssembly module, named by the SHA-256 hash of its
+bytes, together with one instance of it. Its whole state is the
+instance's linear memory and exported mutable globals; a \emph{memory
+image} of these, the non-zero 64\,KB pages with their hashes and the
+globals, is all a host needs to store it, copy it or send it to another
+host. A \paglet{} is \emph{created} from a module, with start arguments
+and the capabilities its creator passes. It \emph{handles} messages,
+requests and timers, one call at a time, through handlers that must
+return within a time budget. It is \emph{dispatched} to another host by
+a transfer ticket that names a host, a label, a service offer or
+\code{any}; the destination fetches the module by hash if it lacks it
+and receives the pages it does not hold, and the \paglet{} continues
+there with its next message. It is \emph{cloned}, on its host or onto
+another one, with a copy of its memory. It is \emph{deactivated} to an
+image and \emph{activated} by the next message, timer or wake-up, and
+on a host with a state directory it resumes from its last image after
+the host restarts. It is
+\emph{disposed}, or it ends by a trap. Every transition is a hook the
+\paglet{} may implement, and every failure of a transition is a report
+it receives as a message. The host that runs it, \code{paglets-host},
+keeps the instance in a worker process that the operating system
+confines, and belongs to a \emph{mesh}: hosts that share a signed
+ledger of members, trusted modules and policy, and nothing else.
+
+\subsection{Design principles}\label{sec:introduction-principles}
+
+Five principles shape the system.
+
+\begin{itemize}
+\item \emph{State is the memory image.} No \paglet{} serializes
+  anything: a \code{std::vector} in a member moves as the bytes it
+  occupies, and nothing in memory can be left behind, because there is
+  no list of what to take. The price is a fixed memory limit
+  (16\,MB) and images that keep every page that was ever non-zero
+  (Sections~\ref{sec:movement} and \ref{sec:discussion}).
+\item \emph{Events between handlers.} The host calls into an instance
+  from one thread at a time and takes images only between calls. A move,
+  a clone or a deactivation requested inside a handler takes effect
+  after the handler returns, in a fixed order, and a hook is a call like
+  any other. Failures arrive as reports (\code{on\_move\_failed},
+  \code{on\_undelivered}, \code{on\_recovered}), not as exceptions
+  (Section~\ref{sec:lifecycle}).
+\item \emph{Capabilities, not addresses.} A \paglet{} has no address.
+  It reaches another \paglet{}, a service or a resource only through a
+  capability in a table the host keeps for it: an endpoint, a reply
+  capability, a timer, a directory or an artifact. Capabilities move
+  with the \paglet{} under a rule per kind, and location records let an
+  endpoint find its target after a move (Sections~\ref{sec:model} and
+  \ref{sec:communication}).
+\item \emph{A signed mesh.} Admins, hosts, owners and signers hold
+  Ed25519 keys. Membership, module trust, policy and grants are signed
+  records in a grow-only ledger spread by gossip; hosts talk inside
+  mutually authenticated, end-to-end encrypted channels; and a
+  \paglet{} reaches host resources only through system \paglet{}s, within
+  the policy (Section~\ref{sec:mesh}).
+\item \emph{Verification in the same code base.} The fault-tolerance
+  protocol of zombie \paglet{}s is a pure C++ transition function. The
+  guest SDK runs it, an explicit-state model checker in the repository
+  explores it, a simulator runs it under time and random faults, and
+  live traces are checked against its transition table
+  (Section~\ref{sec:zombies}).
+\end{itemize}
+
+\subsection{Contributions}\label{sec:introduction-contributions}
+
+\begin{enumerate}
+\item A programming model and an ABI (v1, minor version 1.2,
+  Appendix~\ref{app:abi}) for mobile agents as WebAssembly instances:
+  fourteen imports, six required exports, seven event kinds and three
+  reports, covered by 41 conformance tests.
+\item A host runtime with sandboxed worker processes on Linux and macOS
+  (Windows experimental), whose memory images are independent of the
+  CPU and the operating system: one build of the counter module (an
+  ABI~v0 build of the feasibility milestone) was moved in four transfers between macOS arm64, Linux arm64 and an x86-64
+  build under Rosetta~2 (Section~\ref{sec:evaluation}).
+\item A move protocol between hosts that sends only the pages the
+  destination lacks (2.2 pages on average on repeated moves of a 4\,MB
+  \paglet{}, after 66 on the first), with location records on three
+  hosts chosen by consistent hashing, so that endpoints keep working
+  across moves (Sections~\ref{sec:movement} and \ref{sec:communication}).
+\item A mesh bound only by a signed ledger: four key roles, quorums,
+  gossip, Noise channels inside HTTPS, allow/ask/deny policy with
+  grants, system \paglet{}s as the only path to resources
+  (Section~\ref{sec:mesh}), and relays for hosts without an inbound port
+  (Section~\ref{sec:communication-relays}).
+\item Zombie \paglet{}s, whose protocol is checked in the repository:
+  four invariants and two recoverability goals hold in ten two-replica
+  worlds explored completely (up to 22.4 million states), the invariants
+  hold to depth 11 in two three-replica worlds, 10\,000 timed runs with
+  119\,289 faults show no failure, and a live run with a failure
+  schedule on three machines conforms to the specification
+  (Section~\ref{sec:zombies}).
+\item Tools that stay true to the sources: interface descriptions inside
+  the module, a command line and a web UI built from them, and a
+  generator that renders the code excerpts and result tables of the
+  documentation and of this paper from the sources, checked by a test
+  (Section~\ref{sec:tools}).
+\item An evaluation on three real machines and in a test suite of 252
+  cases run in two modes: request round trips of 1.16--5.16\,ms mean,
+  file transfers of 20--40\,MB/s, 100\,000 hexadecimal digits of $\pi$
+  in 313\,s on three hosts, and what is not measured
+  (Section~\ref{sec:evaluation}).
+\end{enumerate}
+
+\subsection{The paper}\label{sec:introduction-outline}
+
+Section~\ref{sec:background} places \paglets{} among Aglets, weak and
+strong mobility, process migration, actors and earlier Wasm snapshots,
+and names the Python edition of \paglets{}, whose application note
+\cite{klukas2026pagletsNote} describes a system that moves a declared
+state record between hosts sharing the code; the C++ edition
+\cite{pagletsCpp,pagletsCppDocs} keeps its concepts and none of its
+formats. Section~\ref{sec:model} defines the model: module and instance,
+identity, messages, typed payloads, capabilities and the import set.
+Section~\ref{sec:lifecycle} gives the states, the hooks and the order in
+which the host runs them. Section~\ref{sec:movement} describes the
+memory image, what does not move, transfer tickets and the two-host
+protocol. Section~\ref{sec:communication} shows how an endpoint reaches
+a \paglet{} that has moved. Section~\ref{sec:mesh} describes the ledger,
+passports, policy and system \paglet{}s. Section~\ref{sec:zombies}
+presents zombie \paglet{}s and what was verified about them.
+Section~\ref{sec:tools} covers interface descriptions, the command line,
+the web UI and the documentation generator. Section~\ref{sec:evaluation}
+reports the measurements, Section~\ref{sec:discussion} the costs and
+limits, and Section~\ref{sec:conclusion} concludes. The appendices list
+the ABI (\ref{app:abi}), the complete example \paglet{}s
+(\ref{app:examples}), the hooks and ordering guarantees
+(\ref{app:events}) and how to reproduce the results
+(\ref{app:reproduce}).

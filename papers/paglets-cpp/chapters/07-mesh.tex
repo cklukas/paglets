@@ -1,4 +1,560 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+A mesh is a set of hosts that trust the same signed ledger. Nothing else
+binds them: there is no central server, no shared secret, and no
+membership list or policy outside the ledger. This section describes the ledger and the identities
+in it, the passports that paglets carry, the policy that decides access to
+host resources, the system paglets through which that access is given, the
+contracts that define them, and the two services with which a paglet sees
+the mesh and gets compute time on it. Figure~\ref{fig:mesh} shows the
+parts.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=9mm and 12mm]
+  \node[box] (h1) {host \code{lab-1}\\[1pt]\footnotesize ledger copy, runtime,\\[-2pt]\footnotesize system paglets};
+  \node[box, right=of h1] (h2) {host \code{lab-2}\\[1pt]\footnotesize ledger copy, runtime,\\[-2pt]\footnotesize system paglets};
+  \node[box, right=of h2] (h3) {host \code{laptop}\\[1pt]\footnotesize ledger copy, runtime,\\[-2pt]\footnotesize system paglets};
+  \draw[both] (h1) -- node[event, above] {gossip} (h2);
+  \draw[both] (h2) -- node[event, above] {gossip} (h3);
+  \node[plain, above=of h1] (admin) {admin\\\footnotesize admin key};
+  \draw[arrow] (admin) -- node[event, right] {signed records} (h1);
+  \node[plain, above=of h3] (owner) {owner\\\footnotesize owner key};
+  \draw[arrow] (owner) -- node[event, left] {module, passport} (h3);
+  \node[state, below=of h2] (p) {paglet\\\footnotesize image + passport};
+  \draw[dashedarrow] (h3.south) -- node[event, below, sloped] {move} (p.east);
+  \draw[dashedarrow] (p.west) -- node[event, below, sloped] {move} (h1.south);
+\end{tikzpicture}
+\caption{A mesh of three hosts. Every host holds a copy of the ledger and
+  enforces the state it derives from it. Gossip spreads ledger records
+  and host announcements; every host sends its own snapshot to every live
+  host. An admin signs records on its own
+  machine and brings them to any live host. An owner signs a passport for
+  a paglet it launches; the passport moves with the paglet's image.}
+\label{fig:mesh}
+\end{figure}
+
+\subsection{Hosts and the ledger}\label{sec:mesh-ledger}
+
+Identities are Ed25519 keys in four roles: admins, hosts, owners and
+signers (signers vouch for modules, Section~\ref{sec:movement}). A key's
+ID is the hex form of its public key. Admin, owner and signer keys are
+stored encrypted with a passphrase (Argon2id, XChaCha20-Poly1305); host
+keys are stored unencrypted with owner-only file permissions, because a
+host starts without a person.
+
+The ledger is a grow-only set of signed records. A record is a canonical
+MessagePack body with a set of signatures. Its ID is the SHA-256 of the
+body, and signatures cover the ID, so a signature can be added later
+without changing the record: this is how several admins co-sign a record
+that needs a quorum. The first record is the genesis record: the mesh
+name, the initial admins and the quorum, two numbers: how many admin
+signatures an admin record needs, and how many a change of the admin set
+needs (both 1 unless \code{mesh create} is given \code{-{}-quorum} and
+\code{-{}-admin-quorum}; \code{admin-set} records change them). Its ID
+is the mesh ID, with which a host opens its ledger copy as its trust
+anchor.
+Table~\ref{tab:ledger-records} lists the record types.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{@{}p{4.9cm}p{3.6cm}p{5.6cm}@{}}
+\toprule
+Record & Signed by & Content \tabularnewline
+\midrule
+\raggedright\code{genesis} & \raggedright every initial admin & \raggedright mesh name, admins, quorum \tabularnewline
+\raggedright\code{admin-set} & \raggedright the admin-set quorum of its epoch & \raggedright admins added or removed, quorum \tabularnewline
+\raggedright\code{host-enroll-request}, \code{owner-enroll-request} & \raggedright the key itself & \raggedright key, name; a host's labels \tabularnewline
+\raggedright\code{host-enroll}, \code{owner-enroll} & \raggedright admin quorum & \raggedright key, name, labels (host) or groups (owner), the request answered \tabularnewline
+\raggedright\code{host-remove}, \code{owner-remove} & \raggedright admin quorum & \raggedright key \tabularnewline
+\raggedright\code{request-deny}, \code{revoke} & \raggedright admin quorum & \raggedright a request; a key, a record or a module \tabularnewline
+\raggedright\code{module-sign} & \raggedright a signer & \raggedright module hash, name, version \tabularnewline
+\raggedright\code{module-trust}, \code{module-policy} & \raggedright admin quorum & \raggedright modules or signers per trust class; whether roaming modules need trust \tabularnewline
+\raggedright\code{root-residency} & \raggedright admin quorum & \raggedright where the content of a named root may go \tabularnewline
+\raggedright\code{policy-rule} & \raggedright admin quorum & \raggedright decision, service, operations, match, scope \tabularnewline
+\raggedright\code{grant-request} & \raggedright the paglet's host, or the owner & \raggedright principal, items, duration, reason \tabularnewline
+\raggedright\code{grant} & \raggedright admin quorum, or a host under an allow rule & \raggedright principal, item, hosts, expiry \tabularnewline
+\raggedright\code{grant-release}, \code{audit} & \raggedright a host & \raggedright a released grant; a decision \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The ledger's record types (\code{cpp/host/include/paglets/mesh/ledger.hpp}).
+  Records of unknown types are kept and replicated but have no effect, so
+  newer record types pass through older hosts.}
+\label{tab:ledger-records}
+\end{table}
+
+Adding a record checks only its form, its signatures and its mesh. What a
+record means is decided when the state is derived from the whole set, in a
+fixed order: by Lamport clock, then by ID. Hosts that hold the same
+records derive the same state, whatever order the records arrived in.
+Three rules close the gaps that a signed set leaves open. Admin changes
+form a chain of epochs, and a signature counts only if its signer was an
+admin of the epoch the record names. Because the signer chooses the
+clock, the record that removes an admin lists the records that admin had
+signed so far (its keep list); the removed admin's signatures count only
+on those, so whatever it signs later, with any epoch and clock, has no
+effect. Revocations win regardless of order: a revoked key is removed and
+can never be enrolled again, and a revoked record has no effect. Records
+without effect are listed with the reason (\code{LedgerState::ignored}),
+and a digest of the derived state compares two hosts.
+
+Replication is gossip over the host channels. A record that is new to a
+host goes on at once to every host it knows except the sender; periodic
+anti-entropy rounds exchange digests and inventories and repair what the
+pushes missed. Every host holds the whole ledger and enforces the last
+state it has, so allow and deny rules keep working while the mesh is
+partitioned or no admin is online; when the partition heals, the records
+merge. The ledger has no checkpoints yet: a host's copy grows with every
+record.
+
+A new host or owner signs an enrollment request with its own key, as proof
+of possession, and an admin approves it from any host or enrolls the key
+directly. An admin works on a local ledger copy and brings its records to
+a live host with \code{remote push}; from there they spread. A host whose
+key is not enrolled yet starts anyway and waits for its enrollment record.
+Hosts find each other through a bootstrap contact (\code{--join URL}),
+through signed host announcements that spread like records, and on a
+local network through multicast beacons. A channel between two hosts
+proves both host keys against the ledger, is encrypted end to end inside
+HTTPS, and is refused between hosts of different mesh protocol versions or
+paglet ABI major versions. Listing~\ref{lst:mesh-cli} builds a small
+mesh: an admin creates it, enrolls a host and an owner, and adds a rule
+under which the paglets of owners in the group \code{staff} must ask
+before they read below \code{docs/} of the named root \code{data}; the
+host binds that root to a directory when it starts
+(\code{--root data=/srv/data}). The grant requests that such paglets later
+make under the rule (Section~\ref{sec:mesh-policy}) are what
+\code{remote requests} lists and \code{remote approve} decides;
+\code{ledger audit} prints every decision the local copy holds.
+
+\begin{lstlisting}[style=paglets-bash,float,caption={A mesh with one host and one owner, and a policy rule.},label={lst:mesh-cli}]
+H=build/macos-arm64/host/paglets-host
+$H keys init --role admin --name alice --out alice.key
+$H keys init --role host --name lab-1 --out lab-1.key       # prints <lab-1-key-id>
+$H keys init --role owner --name olga --out olga.key        # prints <olga-key-id>
+$H mesh create --name lab --ledger ledger --admin alice.key
+$H ledger enroll --ledger ledger --admin alice.key host <lab-1-key-id> lab-1 --label linux
+$H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga --group staff
+$H ledger rule --ledger ledger --admin alice.key --name "staff docs" --decision ask \
+    --service files --op read --group staff --root data --path "docs/**"
+$H serve --key lab-1.key --ledger ledger --state state-1 --listen 0.0.0.0:7443 \
+    --advertise https://lab-1:7443 --root data=/srv/data
+$H remote requests --connect https://lab-1:7443 --key alice.key --ledger ledger
+$H remote approve  --connect https://lab-1:7443 --key alice.key --ledger ledger <request-id>
+$H ledger audit --ledger ledger
+\end{lstlisting}
+
+\subsection{Passports}\label{sec:mesh-passports}
+
+A paglet carries a passport. Its root is signed by the owner's key: the
+mesh, the owner, the module hash, the paglet ID, a capability manifest,
+and the issue and expiry times. \code{remote launch} issues one on the
+owner's machine, valid for 24 hours unless \code{--hours} says otherwise,
+and sends it to the host with the module and the start arguments. A child
+or clone extends its creator's passport with a link signed by the host
+that created it: the kind (\code{child} or \code{clone}), the parent and
+the new paglet ID, the new module hash, the creating host, the issue
+time, and the hash of the previous element, so a link cannot be moved to
+another chain. A host verifies a
+passport when it creates the paglet and when the paglet arrives from
+another host: the signatures and the chain, the mesh, that the owner and
+every linking host are enrolled and not revoked, that the passport has
+not expired, and that its last element names the paglet and module in
+question. The passport is stored beside the paglet and moves with its
+image.
+
+From the passport and the module the host forms the \emph{principal} that
+every policy decision is made for: the paglet ID, the owner, the module
+hash and the trust class (\code{roaming}, \code{resident} or
+\code{system}). The host stamps the same fields into the sender record of
+every delivered message, so a receiver can rely on them without a check
+of its own. The manifest, a list of policy items the paglet declares in
+advance, is evaluated by the same rules. The ledger accepts an
+owner-signed \code{grant-request} for a paglet ID chosen in advance, so an
+admin can approve the manifest before the paglet exists, and the grants
+materialize when the paglet starts. No command of \code{paglets-host}
+issues such a request yet, and \code{remote launch} issues passports with
+an empty manifest.
+
+\subsection{Policy rules and grants}\label{sec:mesh-policy}
+
+Access to host resources is decided by rules in the ledger. The unit of
+access is an \emph{item}: a service and its operations, and for
+\code{files} a named root and a path below it, with rights (\code{read},
+\code{write}, \code{create}, \code{delete}) in place of operations. A rule
+names a service (or \code{*}) and operations, a decision (\emph{allow},
+\emph{ask} or \emph{deny}), a match on the principal and the host, and for
+files a scope. The match selects owners, owner groups, module hashes,
+module signers, trust classes, and hosts by key or label; an absent member
+matches everything. The scope lists roots and path patterns (\code{*},
+\code{?}, \code{**}). A rule can bound the duration of the grants it gives
+and carry a priority.
+
+A host evaluates an item for a principal from its own ledger copy. Among
+the rules that match the principal and the host, name the service and
+cover all the operations and the scope, the most specific one wins:
+highest priority, then most match members, then a scope over none, then
+\emph{deny} over \emph{ask} over \emph{allow}, then ledger order. When no
+rule matches, the decision is \emph{deny}. Every host evaluates the same
+rules, so the decision does not depend on which host a paglet is on, only
+on the host selectors of the rules.
+
+The decision becomes records. Under an \emph{allow} rule the host signs a
+\code{grant} that names the rule and itself as the only host; it expires
+after the requested duration (1~s to 30 days), capped by the rule's
+maximum. Other hosts accept such a grant only if the rule allows it for
+that principal, so a host cannot mint access its rules do not give. Under
+an \emph{ask} rule the host signs a \code{grant-request}; it is pending
+until an admin, from any host, signs a \code{grant} that names it (with
+\code{remote approve}, for every host or only the requesting one) or a
+\code{request-deny}. A \emph{deny} leaves only the audit record. Every
+decision writes an \code{audit} record signed by the host, and the admin's
+approvals, denials and revocations are records themselves, so the audit
+log is the ledger and is read from any host (\code{remote audit};
+\code{ledger audit} prints the audit records a local copy holds). A grant
+ends when it expires, when an admin revokes it, or when a host releases
+it.
+
+A paglet asks through the \code{grants} system paglet
+(Listing~\ref{lst:grants-request}). The answer is \code{granted}, with the
+capability as the first capability of the reply; \code{pending}, with the
+request ID; or \code{denied}, with the deciding rule, if any. When an
+approval arrives by gossip, the paglet's host \emph{materializes} the grant
+and sends the capability in the message \code{grants.granted}
+(Figure~\ref{fig:grant-flow}); a denial arrives as \code{grants.denied}. A
+files item becomes a \code{dir} capability for the root and path with the
+rights, the grant's ID and its expiry; an item of another service becomes
+a non-transferable endpoint carrying the granted operations. The
+capability records its grant, and the runtime refuses it with
+\code{revoked} as soon as the record that revokes or releases the grant
+arrives: every copy, derivative and transfer of the capability fails on
+every host. An admin's grant belongs to the mesh, not to a host: it
+materializes on every host its selector covers, also when the paglet
+arrives there later, so it follows the paglet, while a host-local
+capability does not (Section~\ref{sec:movement}). A grant a host derived
+from an \emph{allow} rule names that host only; after a move the paglet
+asks again, and the same rule allows again.
+
+% snippet: cpp/common/include/paglets/services/grants.hpp#request [float,caption={The request and the answer of the \code{grants} service},label={lst:grants-request}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The request and the answer of the \code{grants} service \src{cpp/common/include/paglets/services/grants.hpp}},label={lst:grants-request}]
+struct Item {
+    std::string service;           // files, server-info, ...
+    std::vector<std::string> ops;  // files: rights (read, write, create, delete)
+    std::string root;              // files: named root
+    std::string path;              // files: directory below the root ("" for the root)
+};
+
+struct Request {
+    Item item;
+    std::int64_t duration_ms = 3'600'000;
+    std::string reason;
+};
+
+enum class Status { granted, pending, denied };
+
+struct Answer {
+    Status status = Status::denied;
+    Item item;
+    std::string grant;    // hex ID of the grant record (granted)
+    std::string request;  // hex ID of the request record (pending, and later answers)
+    std::string rule;     // hex ID of the deciding rule, if any
+    std::int64_t expires_ms = 0;
+    std::string reason;
+};
+\end{lstlisting}
+% /snippet
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[plain] (P) at (0,0) {paglet};
+  \node[plain] (A) at (5.2,0) {host A: \code{grants}};
+  \node[plain] (B) at (10.4,0) {host B: admin};
+  \draw[lifeline] (P.south) -- (0,-7.0);
+  \draw[lifeline] (A.south) -- (5.2,-7.0);
+  \draw[lifeline] (B.south) -- (10.4,-7.0);
+  \draw[msg] (0,-0.8) -- node[above] {\code{request}(item, duration, reason)} (5.2,-0.8);
+  \node[event, anchor=west, align=left, text width=4.4cm] at (5.4,-1.6) {rule: \emph{ask}; records\\\code{grant-request}, \code{audit}};
+  \draw[msg] (5.2,-2.6) -- node[above] {\code{Answer}: \code{pending}, request ID} (0,-2.6);
+  \draw[msg] (5.2,-3.4) -- node[above] {gossip: \code{grant-request}} (10.4,-3.4);
+  \node[event, anchor=east] at (10.2,-4.1) {\code{remote approve}: record \code{grant}};
+  \draw[msg] (10.4,-4.9) -- node[above] {gossip: \code{grant}} (5.2,-4.9);
+  \node[event, anchor=west] at (5.4,-5.6) {materialize a \code{dir} capability};
+  \draw[msg] (5.2,-6.4) -- node[above] {\code{grants.granted} + capability} (0,-6.4);
+\end{tikzpicture}
+\caption{A grant request under an \emph{ask} rule. The admin decides on
+  any host; the records travel by gossip; the paglet's host turns the
+  approval into a capability.}
+\label{fig:grant-flow}
+\end{figure}
+
+The pi example of Section~\ref{sec:mesh-compute} writes its digits below a
+named root of its host. It asks for the directory with the patterns
+helper \code{granted\_dir}, which sends the request and hands the
+capability to a continuation (Listing~\ref{lst:pi-grant}). The helper
+treats \code{pending} as a failure (\code{bad\_state}); a paglet that wants
+to wait for an admin handles \code{grants.granted} itself.
+
+% snippet: cpp/examples/pi/pi.cpp#grant [float,caption={The pi job asks for a directory of the named root it was started with},label={lst:pi-grant}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The pi job asks for a directory of the named root it was started with \src{cpp/examples/pi/pi.cpp}},label={lst:pi-grant}]
+pt::granted_dir(s.output_root, "", {"write", "create"}, "pi: digits", [this](paglets::Result<paglets::Capability> d) {
+    if (!d) return fail(pt::error_text("files of " + params_.output_root, d.error()));
+    dir_ = std::make_shared<paglets::Capability>(*d);
+    const auto slash = params_.output_path.rfind('/');
+    pt::make_dirs(*dir_, slash == std::string::npos ? std::string() : params_.output_path.substr(0, slash),
+                  [this](paglets::Result<void> made) {
+                      if (!made) return fail(pt::error_text("directory for " + params_.output_path, made.error()));
+                      begin();
+                  });
+});
+\end{lstlisting}
+% /snippet
+
+\subsection{System paglets}\label{sec:mesh-system-paglets}
+
+A paglet runs in a sandbox: it cannot open files, create sockets or start
+programs. Hosts lend them such resources through \emph{system paglets},
+native services built into the host process. A system paglet is a paglet
+for everybody else: it has the ID \code{system.<name>}, a mailbox, and
+handles one message at a time; but it has no Wasm instance and no memory
+image, and it never deactivates, moves or ends. Its handlers are trusted
+host code without a time budget. Besides the ABI's imports
+(Appendix~\ref{app:abi}: messages, capabilities, children and the
+lifecycle, timers, the clock, random bytes and the log), these services
+are the only way a paglet reaches anything on its host.
+Table~\ref{tab:system-paglets} lists them.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{@{}l p{2.1cm} p{4.4cm} p{5.3cm}@{}}
+\toprule
+Service & Endpoint & Operations & Purpose \tabularnewline
+\midrule
+\code{files} & directory & \raggedright\code{list}, \code{stat}, \code{find}, \code{read}, \code{write}, \code{mkdir}, \code{move}, \code{remove}, \code{hash}, \code{share}, \code{save} & \raggedright files below a lent \code{dir} capability; \code{share} and \code{save} move files of any size between hosts as artifacts \tabularnewline
+\code{grants} & default & \raggedright\code{request}, \code{status}, \code{release}, \code{list} & \raggedright access by the mesh policy \tabularnewline
+\code{storage} & default & \raggedright\code{get}, \code{put}, \code{remove}, \code{list} & \raggedright the paglet's own key-value store, 16~MB \tabularnewline
+\code{artifacts} & directory & \raggedright\code{put}, \code{get}, \code{stat} & \raggedright content-addressed blobs (SHA-256) that work on every host \tabularnewline
+\code{pubsub} & directory & \raggedright\code{create}, \code{publish}, \code{subscribe}, \code{unsubscribe} & \raggedright topics on a host, reached by \code{topic} capabilities \tabularnewline
+\code{server-info} & directory & \raggedright\code{summary}, \code{load}, \code{volumes}, \code{processes} & \raggedright the host's system, in one schema on every platform \tabularnewline
+\code{directory} & default & \raggedright\code{lookup}, \code{publish}, \code{unpublish}, \code{list} & \raggedright services and paglets by name \tabularnewline
+\code{user-info} & default & \raggedright\code{notify} & \raggedright notifications to the owner \tabularnewline
+\code{locator} & default & \raggedright\code{locate}, \code{locate\_and\_pin}, \code{release} & \raggedright a paglet anywhere in the mesh; pins \tabularnewline
+\code{mesh-info} & default & \raggedright\code{snapshot}, \code{landscape}, \code{select}, \code{find\_offers} & \raggedright every host's snapshot and offers \tabularnewline
+\code{compute-slots} & default & \raggedright\code{request\_slot}, \code{release\_slot}, \code{status}, \code{candidates} & \raggedright admission of compute work \tabularnewline
+\code{zombies} & default & \raggedright\code{join}, \code{peers}, \code{trace}, \code{ended}, \code{state}, \code{deliver}, \code{result}, \code{cancel}, \code{redirect}, \code{list}, \code{traces} & \raggedright the host's registry of zombie groups (Section~\ref{sec:zombies}) \tabularnewline
+\code{web} & \raggedright directory, \code{--web} hosts & \raggedright\code{capabilities}, \code{fetch}, \code{extract\_text}, \code{download}, \code{search} & \raggedright mediated web access; downloads become artifacts \tabularnewline
+\code{ai} & \raggedright directory, \code{--ai} hosts & \raggedright\code{capabilities}, \code{summarize}, \code{classify}, \code{extract}, \code{generate}, \code{embed}, \code{describe\_image} & \raggedright local inference through Ollama \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The system paglets. \emph{Default}: every paglet is created with a
+  non-transferable endpoint to the service. \emph{Directory}: a paglet looks
+  the service up. For \code{server-info} the endpoint carries only the
+  operations the policy allows; \code{files}, \code{artifacts} and
+  \code{pubsub} act only on lent capabilities and need no policy;
+  \code{web} and \code{ai} check the policy per request, against rules for
+  the URL's host and path, or for the operation and the model.
+  Every service also answers \code{describe} with its schema.}
+\label{tab:system-paglets}
+\end{table}
+
+A paglet reaches a service in one of two ways. Services that act only on
+the caller's own things (\code{directory}, \code{storage},
+\code{user-info}, \code{grants}, \code{locator}, \code{mesh-info},
+\code{compute-slots}, \code{zombies}) are installed as default endpoints
+when the paglet is created (\code{paglets::service(name)} returns them).
+Services that act only on capabilities the caller lends (\code{files},
+\code{artifacts}, \code{pubsub}) are looked up in the \code{directory},
+which returns an endpoint with every operation. Neither kind needs a
+policy, because holding the capability is the permission.
+\code{server-info} has ambient authority: it reads host state without any
+capability. It is reached through the \code{directory}, and the endpoint
+that a lookup returns carries only the operations the policy allows the
+principal; the lookup fails with \code{denied} when it allows none. The
+gateways \code{web} and \code{ai} are looked up the same way but decide
+per request, against rules whose root and path are the URL's host and
+path, or whose operation and scope name the task and the model. The
+volume guard example works with \code{server-info}: a rule allows its
+owner's paglets the operation \code{volumes}, and the guard looks the
+service up, asks for the volumes and notifies its owner when one runs low
+(Listing~\ref{lst:guard-check}). The first two calls of the listing
+matter here: \code{lookup} returns the endpoint the policy allows, and
+\code{volumes} succeeds only because the rule names that operation;
+without the rule the lookup fails with \code{denied}. The rest is the
+guard's bookkeeping of what it has reported.
+
+% snippet: cpp/examples/guard/guard.cpp#check [float,caption={The volume guard reads the host's volumes through an endpoint whose operations the policy chose},label={lst:guard-check}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The volume guard reads the host's volumes through an endpoint whose operations the policy chose \src{cpp/examples/guard/guard.cpp}},label={lst:guard-check}]
+void check() {
+    pt::lookup("server-info", [this](paglets::Result<paglets::Endpoint> ep) {
+        if (!ep) return failed(pt::error_text("server-info", ep.error()));
+        si::Client c{*ep};
+        auto sent = c.volumes({}, [this](paglets::Result<si::Volumes> v, Message&) {
+            if (!v) return failed(pt::error_text("volumes", v.error()));
+            ++status_.checks;
+            for (const auto& vol : v->volumes) {
+                if (vol.total == 0) continue;
+                const double free = 100.0 * static_cast<double>(vol.available) / static_cast<double>(vol.total);
+                if (free >= watch_.min_free_percent) {
+                    low_.erase(vol.mount_point);  // recovered
+                    continue;
+                }
+                if (!low_.insert(vol.mount_point).second) continue;  // reported already
+                status_.alerts.push_back(Alert{vol.mount_point, free, now_ms()});
+                pt::notify(pt::Level::warning, "volume " + vol.mount_point + " is low on space",
+                           std::to_string(static_cast<int>(free)) + "% free");
+            }
+            sleep();
+        });
+        if (!sent) failed(pt::error_text("volumes", sent.error()));
+    });
+}
+\end{lstlisting}
+% /snippet
+
+Resource capabilities are the second half of the mechanism. A \code{dir}
+capability names a root and a relative path and carries rights, and
+optionally the grant it came from, an expiry and a use limit
+(Section~\ref{sec:model-capabilities}). The guest never names a host
+path: it lends the capability with a request to \code{files}, which acts
+on what it is shown and never on its own authority; this is the
+confused-deputy protection. A derived capability keeps the lineage and
+the grant of its root, so one revocation reaches them all.
+\code{files} resolves every path canonically
+and refuses one that leads out of the root, also through symbolic links.
+Content larger than a message travels as \emph{artifact} capabilities: a
+few bytes that name the content by hash and the host that holds it. The
+content moves from host to host only when a host needs it, within the
+data residency of its root.
+
+\subsection{Service contracts}\label{sec:mesh-contracts}
+
+The system services are contracts of the form of
+Section~\ref{sec:model-schemas}: a schema header in
+\path{cpp/common/include/paglets/services/}, served on the host by
+\code{services::ContractPaglet} and called from a guest through the
+generated \code{Client}. Listings~\ref{lst:compute-types}
+and~\ref{lst:compute-contract} show the request, the reply and the
+contract of \code{compute-slots}.
+
+% snippet: cpp/common/include/paglets/services/compute_slots.hpp#types [float,caption={The request and the reply of \code{request\_slot}},label={lst:compute-types}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The request and the reply of \code{request\_slot} \src{cpp/common/include/paglets/services/compute\_slots.hpp}},label={lst:compute-types}]
+struct SlotRequest {
+    std::string job;  // the job it belongs to (for status)
+    std::int64_t cores = 1;
+    std::int64_t estimated_ms = 0;
+};
+
+enum class Verdict { run_now, queued, redirect, rejected };
+
+struct Decision {
+    Verdict verdict = Verdict::rejected;
+    std::string lease;  // run_now
+    std::int64_t cores = 0;
+    std::string host;           // redirect: key ID of the host to go to
+    std::string host_name;      // its name
+    std::int64_t position = 0;  // queued: place in the queue (0: next)
+    std::string reason;
+};
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/common/include/paglets/services/compute_slots.hpp#contract [float,caption={The contract of the \code{compute-slots} service},label={lst:compute-contract}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The contract of the \code{compute-slots} service \src{cpp/common/include/paglets/services/compute\_slots.hpp}},label={lst:compute-contract}]
+struct Contract {
+    static constexpr std::string_view service = "compute-slots";
+    Decision request_slot(const SlotRequest&);
+    ReleaseReply release_slot(const ReleaseRequest&);
+    Status status(const StatusRequest&);
+    Candidates candidates(const CandidatesRequest&);
+};
+\end{lstlisting}
+% /snippet
+
+Host and guest embed the same JSON descriptor of the namespace,
+byte-identical by construction, and every service answers \code{describe}
+with it. (The forms of the tools in Section~\ref{sec:tools} come from a
+module's interface description, a separate document that travels inside
+the module.) A module names the services it uses in its build rule
+(\code{paglets\_add\_module(... SERVICES compute\_slots mesh\_info)}) and
+includes \code{<paglets/services/compute\_slots.gen.hpp>}; a caller
+cannot tell a guest that serves a contract from a native system paglet.
+Contracts need reflection on the host; a host built without it runs
+paglets but has no services and no mesh.
+
+\subsection{Mesh information and compute slots}\label{sec:mesh-compute}
+
+Two services let a paglet see the mesh and get compute time on it.
+\code{mesh-info} spreads a \emph{snapshot} of every host. Each host
+samples itself every 2~s (CPUs, load average per CPU, CPU use, memory,
+free space where it keeps state, paglets, compute slots, labels, offers,
+and its links to the other hosts: up or down, since when, and why frames
+fail) and sends the snapshot to every live host. A host accepts a snapshot
+only from the host it describes, over the channel that proved its key; a
+snapshot older than 20~s is not fresh, and after a minute it is dropped.
+So every host answers for the whole mesh: \code{landscape} lists the hosts
+with a fresh snapshot, \code{select} returns the hosts that fit a load,
+memory, free-slot and label requirement, the best first, or, when none
+fits, the least loaded hosts marked as a fallback, and
+\code{find\_offers} the hosts whose services offer a feature, such as
+\code{ai.summarize} with a model of a given context size. Offers are also
+destinations: a transfer ticket \code{offer:ai.summarize}
+(Table~\ref{tab:movement-tickets}) moves a paglet to such a host.
+
+\code{compute-slots} is admission. A host has slots, by default one per
+CPU (\code{serve --slots N} changes it); there is no central scheduler or
+job queue, every host decides for itself and tells the others what it has
+free. A job paglet asks the \code{compute-slots} of the host it is on and
+gets a \code{Decision}: \code{run\_now} with a lease when slots are free
+and nobody waits; \code{redirect} with a host that has free slots now and
+no queue; \code{queued} with its position otherwise; \code{rejected} for
+more cores than the host has, unless another host has them free now,
+which is a \code{redirect}. The queue is served oldest-fit: the first
+waiter, from the oldest, whose cores are free receives the message
+\code{compute.granted}, which activates it if it deactivated while
+waiting; a small waiter can pass a larger one ahead of it. Waiters behind
+the first that have waited a second are offered to hosts that have free
+slots and no queue (\code{compute.redirect}, at most four per round and
+half the queue, with shadow reservations so that one host is not
+flooded). The service never
+moves a paglet: the paglet dispatches itself and asks again on arrival. A
+lease ends when it is released, or when the paglet ends or leaves the
+host.
+
+Listing~\ref{lst:pi-worker} is a worker of the pi example, which computes
+hexadecimal digits of pi in independent chunks, each in a clone of the job
+on a host that \code{mesh-info} selected. The worker asks for one slot and
+acts on the verdict; on a host without the service it runs at once. It
+handles \code{compute.granted} by running and \code{compute.redirect} by
+dispatching itself; \code{on\_arrived} asks again, and
+\code{on\_move\_failed} asks the host it is still on. The job keeps the
+state of every chunk and sends a chunk out again when it is not answered
+in time, so the loss of a host costs only the chunks in flight there
+(Section~\ref{sec:evaluation} reports a live run on three machines, and
+the example's test, in which one of three hosts in one process is shut
+down mid-run).
+
+% snippet: cpp/examples/pi/pi.cpp#worker [float,caption={A pi worker asks its host for a compute slot},label={lst:pi-worker}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A pi worker asks its host for a compute slot \src{cpp/examples/pi/pi.cpp}},label={lst:pi-worker}]
+void ask_for_slot() {
+    auto slots = paglets::service("compute-slots");
+    if (!slots) return compute();  // a host without compute-slots: just run
+    svc::compute_slots::Client client{*slots};
+    svc::compute_slots::SlotRequest q;
+    q.job = "pi";
+    q.cores = 1;
+    auto sent = client.request_slot(q, [this](paglets::Result<svc::compute_slots::Decision> d, Message&) {
+        if (!d) return compute();
+        switch (d->verdict) {
+            case svc::compute_slots::Verdict::run_now: run(d->lease); break;
+            case svc::compute_slots::Verdict::queued: break;  // compute.granted comes later
+            case svc::compute_slots::Verdict::redirect:
+                if (!paglets::dispatch(d->host)) compute();
+                break;
+            case svc::compute_slots::Verdict::rejected: compute(); break;
+        }
+    });
+    if (!sent) compute();
+}
+\end{lstlisting}
+% /snippet

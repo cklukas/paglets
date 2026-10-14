@@ -1,4 +1,425 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+% This appendix is dense with monospaced names that cannot be hyphenated;
+% the emergency stretch keeps such paragraphs inside the text width.
+\begingroup\setlength{\emergencystretch}{3em}
+
+The paglet ABI is the only contract between a host and a \paglet{} module.
+It is plain core WebAssembly, without the component model: a few exports
+the module provides, a few imports the host provides, and MessagePack
+documents passed through linear memory. This appendix lists the contract as
+the host implements it (\path{cpp/common/include/paglets/abi.hpp} holds the
+constants and documents, \path{cpp/host/src/wasm_binary.cpp} the import
+allowlists and the mutable-global check, \path{cpp/host/src/wasm_engine.cpp}
+the import bindings and the pointer checks, \path{cpp/host/src/runtime.cpp}
+the module check and the semantics); the design document \path{planning/cpp-abi-v1.md} is the
+normative text and names the conformance tests. The guest SDK of
+Section~\ref{sec:model} wraps all of this; a module written in another
+language implements it directly.
+
+\subsection{Module requirements and exports}\label{sec:abi-exports}
+
+A module is a core Wasm module for \code{wasm32} with exactly one linear
+memory, built as a reactor (\path{-mexec-model=reactor}). It declares the
+ABI version by exporting a function \code{paglets\_abi\_v1}; the host never
+calls it and looks only at the name. A module may declare several versions,
+and the host uses the highest it supports; the current host supports v1
+only and rejects a module that declares none. Table~\ref{tab:abi-exports}
+lists the exports. The host checks them, the import set
+(Section~\ref{sec:abi-imports}) and the mutable globals statically, before
+it instantiates the module, and names the missing export or the offending
+import in its error.
+
+Every mutable global the module defines must be exported, because a memory
+image captures the linear memory and the exported mutable globals and
+nothing else (Section~\ref{sec:movement},
+Listing~\ref{lst:movement-snapshot-ready}). A C or C++ guest built as
+the documentation prescribes (a non-PIC reactor,
+Appendix~\ref{app:reproduce}) has one such global, the stack pointer, so
+the guest build links with \path{-Wl,--export=__stack_pointer}; the host
+names any other unexported mutable global in its error. The module must
+not change its tables at run time, so that function pointers stay valid
+across images; C and C++ guests satisfy this, and the host cannot verify
+it. The reactor initializer \code{\_initialize}, which runs static
+constructors, takes effect once, at the \paglet{}'s creation: for a module
+that imports WASI the runtime runs it at every instantiation and a restore
+from an image then overwrites its effects; for a module without WASI
+imports the host runs it at creation only.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{42mm}p{58mm}}
+\toprule
+Export & Signature & Purpose \tabularnewline
+\midrule
+\code{paglets\_abi\_v1} & \code{() -> ()} & \raggedright version marker; never called \tabularnewline
+\code{memory} & memory & \raggedright the one linear memory \tabularnewline
+\code{paglets\_alloc} & \code{(size: i32) -> i32} & \raggedright a buffer for a document from the host; 0 on failure, which fails the \paglet{} like a trap \tabularnewline
+\code{paglets\_free} & \code{(ptr: i32) -> ()} & \raggedright releases such a buffer \tabularnewline
+\code{paglets\_on\_event} & \code{(kind, ptr, len) -> i32} & \raggedright lifecycle events (Table~\ref{tab:abi-events}) \tabularnewline
+\code{paglets\_on\_message} & \code{(ptr, len) -> i32} & \raggedright message delivery (Table~\ref{tab:abi-delivered}) \tabularnewline
+mutable globals & global & \raggedright every mutable global the module defines, for images \tabularnewline
+\code{\_initialize} & \code{() -> ()} & \raggedright optional reactor initializer \tabularnewline
+\code{paglets\_state\_export} & \code{() -> i64} & \raggedright reserved for code upgrades; accepted, never called \tabularnewline
+\code{paglets\_state\_import} & \code{(ptr, len) -> i32} & \raggedright reserved for code upgrades; accepted, never called \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The exports of an ABI v1 module. The first six are required (\code{abi::required\_exports}); the host rejects a module that lacks one. Unlabelled parameters are \code{i32}.}
+\label{tab:abi-exports}
+\end{table}
+
+\subsection{Calling convention and memory ownership}\label{sec:abi-memory}
+
+Figure~\ref{fig:abi-call} shows one delivery. To pass a document of
+\code{len} bytes, the host calls \code{paglets\_alloc(len)}, copies the
+document into the returned buffer, calls the handler with the pointer and
+the length, and calls \code{paglets\_free} after the handler returns. The
+guest must not keep pointers into the buffer. An empty document is passed
+as \code{(0, 0)} without an allocation. In the other direction, imports
+take pointer and length pairs; the runtime validates every pair against
+the bounds of linear memory before the native function runs, and traps the
+guest otherwise, so a guest cannot read host memory. The host copies what
+it keeps before the import returns. Imports that return a document
+(\code{self\_info}, \code{cap\_inspect}, \code{cap\_list}) write it into a
+guest buffer \code{(out, cap)} and return the document's length; if the
+length exceeds \code{cap}, nothing is written and the guest retries with a
+larger buffer. A negative result is an error code. A document longer than
+1~MB (\code{abi::max\_document\_size}) is refused with \code{too\_large}
+before it is decoded.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[box] (host) at (0,0) {host};
+  \node[box] (guest) at (8,0) {\paglet{} module};
+  \draw[lifeline] (host.south) -- ++(0,-6.6);
+  \draw[lifeline] (guest.south) -- ++(0,-6.6);
+  \draw[msg] (0,-0.8) -- node[above] {\code{paglets\_alloc(len)}} (8,-0.8);
+  \draw[msg] (8,-1.5) -- node[above] {\code{ptr}} (0,-1.5);
+  \node[event] at (4,-2.05) {copies the document to \code{ptr}};
+  \draw[msg] (0,-2.9) -- node[above] {\code{paglets\_on\_message(ptr, len)}} (8,-2.9);
+  \draw[msg] (8,-3.7) -- node[above] {\code{paglets.send}, \code{paglets.reply}, \ldots} (0,-3.7);
+  \draw[msg] (0,-4.4) -- node[above] {\code{0} or an error code} (8,-4.4);
+  \draw[msg] (8,-5.2) -- node[above] {\code{0} handled, \code{1} not handled, or an error} (0,-5.2);
+  \draw[msg] (0,-6.0) -- node[above] {\code{paglets\_free(ptr)}} (8,-6.0);
+  \node[event] at (4,-6.45) {the next call, or a memory image};
+\end{tikzpicture}
+\caption{One delivery. Imports run inside the handler; the host takes memory images only between two calls.}
+\label{fig:abi-call}
+\end{figure}
+
+The host calls into a \paglet{} from one thread at a time and takes memory
+images only at quiescent points, between two calls and never while an
+import runs. \code{paglets\_on\_event} and \code{paglets\_on\_message}
+return 0 for handled, 1 for not handled, or a negative error code
+(Table~\ref{tab:abi-errors}). For a request whose handler returns 1 or an
+error without having replied, the host answers the requester with status
+\code{unknown\_message} or that error. A trap (\code{unreachable}, an
+out-of-bounds access, stack exhaustion, the exceeded time budget of 5~s,
+\code{proc\_exit}) fails the \paglet{}: the host discards the instance,
+answers every pending request of the \paglet{} and every reply capability
+it holds with \code{failed}, and ends it.
+
+\subsection{Imports}\label{sec:abi-imports}
+
+The host provides the module \code{paglets} with fourteen functions
+(Table~\ref{tab:abi-imports}) and a subset of WASI preview~1
+(\path{wasi_snapshot_preview1}). Pointers are \code{i32} offsets into
+linear memory; \code{endpoint}, \code{handle} and \code{reply} are
+capability handles, positive \code{i32} values indexing the \paglet{}'s
+host-side capability table. Handle 1 is always the \paglet{}'s endpoint to
+itself. Every use of a handle is checked against the table, so handles
+cannot be forged; the table is host state and travels with the \paglet{}
+as part of its record, not inside the image.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{54mm}p{58mm}}
+\toprule
+Import & Signature & Result \tabularnewline
+\midrule
+\code{log} & \code{(level, ptr, len) -> ()} & \raggedright a log line; levels 0 debug to 3 error \tabularnewline
+\code{self\_info} & \code{(out, cap) -> i32} & \raggedright length of the self document \tabularnewline
+\code{send} & \code{(endpoint, msg, len) -> i32} & \raggedright 0 or an error \tabularnewline
+\code{request} & \code{(endpoint, msg, len) -> i64} & \raggedright correlation ID ($>0$) or an error \tabularnewline
+\code{reply} & \code{(reply, msg, len) -> i32} & \raggedright 0 or an error; consumes the reply capability \tabularnewline
+\code{cap\_derive} & \code{(handle, spec, len) -> i32} & \raggedright a new, weaker handle or an error \tabularnewline
+\code{cap\_drop} & \code{(handle) -> i32} & \raggedright 0 or an error; cancels a timer, answers a request \code{gone} \tabularnewline
+\code{cap\_inspect} & \code{(handle, out, cap) -> i32} & \raggedright length of the capability document \tabularnewline
+\code{cap\_list} & \code{(out, cap) -> i32} & \raggedright length of the list of held handles \tabularnewline
+\code{create\_child} & \code{(spec, len) -> i32} & \raggedright endpoint handle to the new \paglet{}, or an error \tabularnewline
+\code{lifecycle} & \code{(op, arg, len) -> i32} & \raggedright 0, or an endpoint handle for \code{clone}, or an error (Table~\ref{tab:abi-lifecycle}) \tabularnewline
+\code{timer\_set} & \code{(delay: i64, msg, len) -> i32} & \raggedright timer handle or an error \tabularnewline
+\code{now} & \code{(clock) -> i64} & \raggedright nanoseconds; clock 0 wall time since the Unix epoch, 1 monotonic \tabularnewline
+\code{random} & \code{(out, len) -> i32} & \raggedright 0; fills the buffer with secure random bytes \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The \code{paglets} import module (\code{abi::import\_names}). Unlabelled parameters are \code{i32}.}
+\label{tab:abi-imports}
+\end{table}
+
+The WASI subset is the one of Table~\ref{tab:model-imports}:
+\code{args\_get}, \code{args\_sizes\_get}, \code{environ\_get} and
+\code{environ\_sizes\_get} (always empty); \code{clock\_res\_get},
+\code{clock\_time\_get}, \code{random\_get} and \code{sched\_yield};
+\code{proc\_exit}, which fails the \paglet{}; \code{fd\_write}, where
+stdout and stderr go to the host log line by line at the levels info and
+warning, and other descriptors are \code{EBADF}; and \code{fd\_close},
+\code{fd\_seek}, \code{fd\_fdstat\_get}, \code{fd\_prestat\_get} and
+\code{fd\_prestat\_dir\_name}, with no directory preopened. The host
+implements \code{fd\_write} itself; the others come from the runtime's
+WASI library. Files, sockets and every other resource are reached only by
+message, through the system \paglet{}s of Section~\ref{sec:mesh}.
+
+\subsubsection{Import policies}
+
+Which imports a module may have depends on its trust class
+(\code{wasm::ImportPolicy}). The \emph{standard} policy allows the
+fourteen \code{paglets} functions and the WASI subset, and applies to
+roaming and resident \paglet{}s. The \emph{system} policy adds
+\code{paglets\_sys.*},
+the module reserved for privileged host calls of system \paglet{}s written
+as Wasm modules. In the current release that module is empty: the host
+registers no functions under the name, and every system \paglet{} is
+native. An import outside even the system set is refused when the module
+is loaded. A roaming or resident module that imports from
+\code{paglets\_sys} is accepted into the module store but refused when a
+\paglet{} of that trust class is created from it, before instantiation,
+with a message that names every offending import. The command
+\code{paglets-host module inspect} prints a module's imports with the
+policy's verdict and the trust classes it can run as.
+
+\subsection{Events}\label{sec:abi-events}
+
+\code{paglets\_on\_event(kind, ptr, len)} delivers the seven lifecycle
+events of Table~\ref{tab:abi-events} (\code{abi::EventKind},
+Listing~\ref{lst:lifecycle-abi-kinds}; the documents are
+Listing~\ref{lst:lifecycle-abi-documents}). \code{created} and
+\code{cloned} are the first delivery, ahead of any message already queued;
+the others belong to their transition and are not queued. A negative
+result is logged and does not stop the transition.
+Appendix~\ref{app:events} gives the ordering of hooks and handlers.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{rlp{40mm}p{66mm}}
+\toprule
+Kind & Event & Document & Delivered \tabularnewline
+\midrule
+1 & \code{created} & \raggedright \code{StartEvent}: \code{args}, \code{caps} & \raggedright once, before any message \tabularnewline
+2 & \code{activated} & none & \raggedright after a restore from its memory image (from the state directory or from memory), right before the delivery that woke the \paglet{} \tabularnewline
+3 & \code{deactivating} & none & \raggedright after the handler that requested \code{deactivate}, before the image is taken \tabularnewline
+4 & \code{arrived} & \raggedright \code{ArrivedEvent}: \code{from}, \code{lost} & \raggedright on the new host after a move; \code{lost} lists capabilities that could not be re-created there \tabularnewline
+5 & \code{cloned} & \raggedright \code{StartEvent} with \code{original} & \raggedright in a clone, instead of \code{created} \tabularnewline
+6 & \code{dispatching} & \raggedright \code{DispatchingEvent}: \code{destination} & \raggedright after the handler that requested \code{dispatch}, before the image is taken \tabularnewline
+7 & \code{disposing} & none & \raggedright after the handler that requested \code{dispose}, before the end \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{Lifecycle events and their documents.}
+\label{tab:abi-events}
+\end{table}
+
+\subsection{Messages and documents}\label{sec:abi-messages}
+
+All documents are MessagePack maps with string keys; decoders skip keys
+they do not know, which is what makes additions within a major version
+compatible. Table~\ref{tab:abi-delivered} is the argument of
+\code{paglets\_on\_message}; Table~\ref{tab:abi-outgoing} is the document
+of \code{send}, \code{request}, \code{reply} and \code{timer\_set}.
+Message names have 1 to 128 bytes, and names starting with
+\code{paglets.} are reserved for the host: \code{send}, \code{request}
+and \code{timer\_set} refuse them with \code{invalid\_argument}
+(\code{reply} ignores the name; the delivered reply is always named
+\code{reply}). Three such names carry the host's reports
+(Table~\ref{tab:abi-reports}); each arrives as an ordinary message
+(kind 0) at priority 7 and without a sender record; the SDK recognizes
+them by their reserved name and the missing sender and turns them into
+hooks (Listing~\ref{lst:lifecycle-sdk-reports}).
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{llp{96mm}}
+\toprule
+Key & Type & Meaning \tabularnewline
+\midrule
+\code{kind} & int & \raggedright 0 message, 1 request, 2 reply, 3 timer (\code{abi::MessageKind}) \tabularnewline
+\code{name} & str & \raggedright the message name \tabularnewline
+\code{payload} & bin & \raggedright the payload, usually MessagePack \tabularnewline
+\code{caps} & [int] & \raggedright transferred capabilities, already in the receiver's table \tabularnewline
+\code{priority} & int & \raggedright 0 to 7 \tabularnewline
+\code{sender} & map & \raggedright host-stamped record of the sender: \code{id}, \code{owner}, \code{trust}, \code{module}, \code{host}; absent for timers, replies and the host's reports \tabularnewline
+\code{badge} & str & \raggedright badge of the endpoint the sender used, if any \tabularnewline
+\code{reply} & int & \raggedright requests only: the one-shot reply capability \tabularnewline
+\code{correlation} & int & \raggedright replies only: the ID that \code{request} returned \tabularnewline
+\code{status} & int & \raggedright replies only: 0, or \code{timeout}, \code{unknown\_message}, \code{failed}, \code{gone}, or the error the handler returned \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The delivered message (\code{abi::Delivered}).}
+\label{tab:abi-delivered}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{llp{92mm}}
+\toprule
+Key & Type & Meaning \tabularnewline
+\midrule
+\code{name} & str & \raggedright required; \code{reply} for a reply \tabularnewline
+\code{payload} & bin & \raggedright default empty \tabularnewline
+\code{caps} & [int] & \raggedright handles to transfer; each must be transferable and moves to the receiver on success \tabularnewline
+\code{priority} & int & \raggedright default 3; replies arrive at 7 \tabularnewline
+\code{timeout\_ms} & int & \raggedright \code{request} only, positive; default 30\,000 \tabularnewline
+\code{lend} & [int] & \raggedright v1.1: capabilities shown to a system \paglet{} for this message; they stay with the sender \tabularnewline
+\code{async} & bool & \raggedright v1.1, \code{send} and \code{reply} only: return at once; a failure is reported as \code{paglets.undelivered} \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The outgoing message (\code{abi::OutMessage}).}
+\label{tab:abi-outgoing}
+\end{table}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{46mm}p{58mm}}
+\toprule
+Name & Payload & When \tabularnewline
+\midrule
+\code{paglets.undelivered} & \raggedright \code{Undelivered}: \code{name}, \code{handle}, \code{status} & \raggedright v1.1: an asynchronous \code{send} or \code{reply} could not be delivered; \code{status} is the error the synchronous call would have returned \tabularnewline
+\code{paglets.move\_failed} & \raggedright \code{MoveFailed}: \code{destination}, \code{reason}, \code{clone} & \raggedright v1.1: a \code{dispatch} or a clone for another host did not happen; \code{clone} is the clone's ID, empty for a dispatch \tabularnewline
+\code{paglets.recovered} & \raggedright \code{Recovered}: \code{image\_ms}, \code{restarted\_ms} & \raggedright v1.2: the host restarted and the \paglet{} came back from its last image; only with \code{notify\_recovered} \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The host's reports: messages of kind 0 at priority 7 without a sender record.}
+\label{tab:abi-reports}
+\end{table}
+
+Table~\ref{tab:abi-documents} lists the remaining documents. Capability
+kinds are \code{endpoint}, \code{reply} and \code{timer}, and since v1.1
+the resource kinds \code{dir}, \code{artifact}, \code{topic} and
+\code{pin} handed out by system \paglet{}s; the design document also
+names a \code{file} kind, which no service of the current release hands
+out.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{26mm}p{88mm}}
+\toprule
+Document & Import & Keys \tabularnewline
+\midrule
+self (\code{SelfInfo}) & \code{self\_info} & \raggedright \code{id}, \code{module} (hex SHA-256), \code{owner}, \code{trust}, \code{host}, \code{abi}, \code{minor}, \code{services} (service name to handle), \code{pinned\_until}, \code{restart}, \code{notify\_recovered} \tabularnewline
+derive (\code{DeriveSpec}) & \code{cap\_derive} & \raggedright \code{ops}, \code{expires\_ms}, \code{uses}, \code{transferable}, \code{badge}, \code{path}; each optional, each only narrows the source \tabularnewline
+capability (\code{CapInfo}) & \code{cap\_inspect} & \raggedright \code{kind}, \code{target}, \code{ops}, \code{transferable}, and when set \code{badge}, \code{expires}, \code{uses\_left}, \code{revoked} \tabularnewline
+child (\code{ChildSpec}) & \code{create\_child} & \raggedright \code{module} (default: the creator's), \code{args}, \code{caps} \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The documents of the capability and introspection imports (\code{abi.hpp}).}
+\label{tab:abi-documents}
+\end{table}
+
+\subsection{Lifecycle operations}\label{sec:abi-lifecycle}
+
+\code{lifecycle(op, arg, len)} requests a transition
+(Table~\ref{tab:abi-lifecycle}). At most one of \code{dispose},
+\code{deactivate} and \code{dispatch} can be pending per handler call;
+they take effect after the handler returns, after any clones of the same
+call (Section~\ref{sec:lifecycle-hooks}). An unknown operation returns
+\code{invalid\_argument}.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{rlp{33mm}p{73mm}}
+\toprule
+Op & Name & Argument & Effect and errors \tabularnewline
+\midrule
+1 & \code{dispose} & none & \raggedright ends the \paglet{} after the handler; \code{bad\_state} if an end is pending \tabularnewline
+2 & \code{deactivate} & \raggedright \code{wake\_after\_ms?} & \raggedright takes the image after the handler (to the state directory when the host has one, otherwise in memory); the next message, a timer or the delay activates it; \code{malformed} for an undecodable argument, \code{invalid\_argument} for a negative delay, \code{bad\_state} if an end is pending \tabularnewline
+3 & \code{clone} & \raggedright \code{args}, \code{caps}, \code{destination?} & \raggedright a copy from the image taken after the handler; returns an endpoint to it at once; a system \paglet{}'s clone is roaming; \code{quota} beyond 16 per call or the capability limit; a local clone: \code{denied} when the policy refuses the module for the clone, \code{quota} at the owner's limit; with \code{destination} (v1.1): \code{unsupported} outside a mesh, \code{denied} unless roaming, \code{invalid\_argument} unless \code{caps} holds only endpoints to \paglet{}s and mesh artifacts \tabularnewline
+4 & \code{dispatch} & \raggedright \code{destination} & \raggedright moves the \paglet{} after the handler; \code{unsupported} outside a mesh, \code{denied} for system and resident \paglet{}s, \code{pinned} while pinned, \code{bad\_state} if an end is pending \tabularnewline
+5 & \code{checkpoint} & none & \raggedright v1.2: stores the image right after the handler, ahead of the host's periodic checkpoints (Section~\ref{sec:lifecycle-restart}); on a host with a state directory and unless the restart policy is off \tabularnewline
+6 & \code{restart} & \raggedright \code{RestartArg}: \code{restart}, \code{notify\_recovered} & \raggedright v1.2: the restart policy (Listing~\ref{lst:lifecycle-restart}); \code{denied} for system \paglet{}s; clones inherit it \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{Lifecycle operations (\code{abi::LifecycleOp}).}
+\label{tab:abi-lifecycle}
+\end{table}
+
+\subsection{Error codes}\label{sec:abi-errors}
+
+Imports and handlers return the negative codes of
+Table~\ref{tab:abi-errors} (\code{abi::Error}; \code{abi::error\_name}
+gives the name). The same codes are reply statuses, the \code{status} of
+an undelivered report, and the \code{error: <name>} of the command line.
+An unknown code is a generic error to a v1.0 guest.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{rlp{104mm}}
+\toprule
+Code & Name & Meaning \tabularnewline
+\midrule
+$-1$ & \code{invalid\_argument} & \raggedright a parameter is out of range, or a document is incomplete \tabularnewline
+$-2$ & \code{bad\_handle} & \raggedright the capability handle does not exist, or has the wrong kind \tabularnewline
+$-3$ & \code{denied} & \raggedright the capability, or the mesh policy, does not allow the operation \tabularnewline
+$-4$ & \code{expired} & \raggedright the capability has expired \tabularnewline
+$-5$ & \code{quota} & \raggedright a quota or limit is exhausted: a full mailbox, too many \paglet{}s of an owner, too many pins, the storage quota, the uses of a capability \tabularnewline
+$-6$ & \code{too\_large} & \raggedright a document or message exceeds its size limit \tabularnewline
+$-7$ & \code{malformed} & \raggedright a body is not valid MessagePack, or does not decode into the expected type \tabularnewline
+$-8$ & \code{not\_found} & \raggedright the target \paglet{}, module or service does not exist \tabularnewline
+$-9$ & \code{bad\_state} & \raggedright not possible now, for example replying twice \tabularnewline
+$-10$ & \code{unsupported} & \raggedright not supported by this host \tabularnewline
+$-11$ & \code{internal} & \raggedright an error of the host \tabularnewline
+$-12$ & \code{timeout} & \raggedright reply status: no reply within the request's timeout \tabularnewline
+$-13$ & \code{unknown\_message} & \raggedright reply status: the receiver has no handler for the message \tabularnewline
+$-14$ & \code{failed} & \raggedright reply status: the receiver trapped or exceeded the time budget; it has ended \tabularnewline
+$-15$ & \code{gone} & \raggedright reply status: the receiver was disposed of, or did not answer the request \tabularnewline
+$-16$ & \code{revoked} & \raggedright v1.1: the capability, one it was derived from, or its grant was revoked \tabularnewline
+$-17$ & \code{pinned} & \raggedright v1.1: \code{dispatch} while the \paglet{} is pinned to its host \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{Error codes.}
+\label{tab:abi-errors}
+\end{table}
+
+The limits behind \code{quota} and \code{too\_large} are compiled-in
+defaults of \code{runtime::Config} and \code{wasm::Limits}: 1~MB per
+document, 1024 messages per mailbox, 1024 capabilities and 64 pending
+timers per \paglet{}, 16 children and clones per handler call, 5~s per
+handler call, 16~MB of linear memory, 10\,000 \paglet{}s of one owner per
+host and 64 pins on one \paglet{}.
+
+\subsection{Version history}\label{sec:abi-versions}
+
+Within the major version 1, additions are compatible: a module using an
+import the host does not know is rejected at load time, both sides ignore
+document keys they do not know, and a guest treats unknown event kinds as
+no-ops and unknown error codes as generic errors (the SDK returns
+\code{not\_handled} for an unknown kind, \code{abi::error\_name} returns
+\code{error} for an unknown code). The host reports its
+minor version in \code{self\_info.minor} (\code{abi::minor\_version}, 2 in
+the current release), so a guest can test for a feature before it uses
+it. Table~\ref{tab:abi-versions} lists the additions.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{124mm}}
+\toprule
+Version & Content \tabularnewline
+\midrule
+v1.0 & \raggedright the fourteen imports, the six required exports, the seven event kinds, the four message kinds, the operations \code{dispose}, \code{deactivate}, \code{clone} and \code{dispatch} (the last answering \code{unsupported}), the capability kinds \code{endpoint}, \code{reply} and \code{timer}, the error codes $-1$ to $-15$ \tabularnewline
+v1.1 & \raggedright resource capabilities (\code{dir}, \code{artifact}, \code{topic}, \code{pin}; the design document also names \code{file}) with \code{revoked} ($-16$) and the derive \code{path}; \code{lend}; default service endpoints in \code{self\_info.services}; \code{async} with \code{paglets.undelivered}; \code{dispatch} and \code{clone} to another host in a mesh, with \code{arrived}, \code{dispatching} and \code{paglets.move\_failed}; \code{pinned} ($-17$) and \code{pinned\_until}; \code{minor} \tabularnewline
+v1.2 & \raggedright \code{checkpoint} and \code{restart} with \code{RestartArg}; \code{paglets.recovered}; \code{restart} and \code{notify\_recovered} in \code{self\_info} \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{Additions within ABI v1.}
+\label{tab:abi-versions}
+\end{table}
+
+The design document lists 41 conformance tests, C01 to C41, from the
+rejection of a module without the version marker to the behaviour of a
+pinned \paglet{}. They run in CI against the host runtime: C01 to C30 and
+C36 in \path{cpp/tests/test_runtime.cpp} with the conformance guest
+\path{cpp/tests/guests/conformance.cpp}, the system-\paglet{} tests C31
+to C35 in \path{cpp/tests/test_system.cpp}, the movement tests C37 to C40
+in \path{cpp/tests/test_mobility.cpp} and the pin test C41 (unnumbered
+there) in \path{cpp/tests/test_location.cpp}.
+\par\endgroup

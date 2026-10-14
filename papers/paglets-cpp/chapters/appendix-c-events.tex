@@ -1,4 +1,244 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+This appendix lists the hooks of \code{paglets::Paglet}, how each one
+reaches the \paglet{}, and what the host promises about the order of hooks
+and messages. Section~\ref{sec:lifecycle} explains the lifecycle; this
+appendix only states it. Everything here is taken from
+\code{cpp/sdk/include/paglets/paglet.hpp}, \code{cpp/sdk/src/paglet.cpp},
+\code{cpp/common/include/paglets/abi.hpp} and the delivery loop in
+\code{cpp/host/src/runtime.cpp}; the ABI specification
+(\code{planning/cpp-abi-v1.md}) is the normative text for the binary
+interface, summarized in Appendix~\ref{app:abi}.
+
+\subsection{The hooks}\label{sec:events-hooks}
+
+Each module defines one class derived from \code{paglets::Paglet} and
+registers it with the macro \code{PAGLETS\_PAGLET}; the SDK keeps one static
+instance of that class in linear memory. Its constructor runs inside the
+first call of \code{paglets\_on\_event} or \code{paglets\_on\_message},
+which for a new \paglet{} is the \code{created} event (the host's earlier
+calls, \code{\_initialize} at instantiation and \code{paglets\_alloc}
+before each delivery, do not touch it); a clone and an arriving \paglet{}
+start from a memory image in which the object already exists, so the
+constructor does not run again for them. Table~\ref{tab:events-hooks} lists
+the virtual functions of \code{Paglet}. Seven of them are lifecycle events,
+which the host delivers through the export \code{paglets\_on\_event} with
+the event kind of section~6 of the ABI specification (``ABI section''
+below names a section of \code{planning/cpp-abi-v1.md}). Three are reports, which the host delivers
+as ordinary messages through \code{paglets\_on\_message}: their names start
+with the reserved prefix \code{paglets.}, they carry no sender record, and
+they have priority~7, the highest a message can have. The SDK recognizes
+them by name and by the missing sender record, and calls the hook instead
+of \code{on\_message}.
+\code{on\_message} receives every other message, except a reply whose
+request was given a continuation: the SDK keeps continuations in a map in
+linear memory, keyed by correlation ID, and calls the continuation directly.
+
+\begin{table}[htbp]
+\centering\small
+\caption{The hooks of \code{paglets::Paglet}. Events reach the \paglet{}
+through \code{paglets\_on\_event} (``event~$n$'', the kind of ABI
+section~6); reports are messages with priority~7 and no sender record,
+recognized by name in the SDK. ``Nothing'' means the default
+implementation is empty.}
+\label{tab:events-hooks}
+\newcommand{\rr}{\raggedright\let\\\tabularnewline}%
+\setlength{\tabcolsep}{4pt}%
+\begin{tabular}{@{}p{2.9cm}p{6.0cm}p{4.1cm}p{1.9cm}@{}}
+\toprule
+Hook & Runs & Document & Default \\
+\midrule
+\code{on\_created} & \rr once, as the first delivery of a new \paglet{}, before any queued message (event~1) & \rr \code{Started}: \code{args}, \code{caps}; \code{original} empty & nothing \\
+\code{on\_cloned} & \rr in a clone, instead of \code{on\_created}, as its first delivery (event~5); also for a clone made on another host & \rr \code{Started}: \code{args}, \code{caps}, \code{original} (the original's ID) & nothing \\
+\code{on\_activated} & \rr after the \paglet{} was restored from its memory image, right before whatever woke it: a message, a timer, a wake after \code{deactivate(ms)}, a report, or a host-side dispose or dispatch of an inactive \paglet{}; never before \code{on\_created}, \code{on\_cloned} or \code{on\_arrived} (event~2) & none & nothing \\
+\code{on\_deactivating} & \rr after the handler that called \code{deactivate}, or after a host-side deactivation, before the image is taken (event~3) & none & nothing \\
+\code{on\_arrived} & \rr on the new host after a move, as the first delivery there (event~4); with \code{arrival=inactive} it waits until the first message & \rr \code{abi::ArrivedEvent}: \code{from} (the previous host's key ID), \code{lost} (capabilities not re-created) & nothing \\
+\code{on\_dispatching} & \rr after the handler that called \code{dispatch}, or after a host-side dispatch (the CLI's \code{dispatch}), before the image is taken (event~6) & \rr \code{abi::DispatchingEvent}: \code{destination} (the transfer ticket) & nothing \\
+\code{on\_disposing} & \rr after the handler that called \code{dispose}, or after a host-side disposal, before the \paglet{} ends (event~7) & none & nothing \\
+\code{on\_undelivered} & \rr an asynchronous send or reply could not be delivered (report \code{paglets.undelivered}) & \rr \code{abi::Undelivered}: \code{name}, \code{handle}, \code{status} & \rr logs a warning \\
+\code{on\_move\_failed} & \rr a dispatch, or a clone for another host, did not happen; the \paglet{} continues on its host (report \code{paglets.move\_failed}) & \rr \code{abi::MoveFailed}: \code{destination}, \code{reason}, \code{clone} (empty for a dispatch) & \rr logs a warning \\
+\code{on\_recovered} & \rr the host restarted and the \paglet{} came back from its last image; only after \code{set\_restart(true, true)} (report \code{paglets.recovered}, ABI~1.2) & \rr \code{abi::Recovered}: \code{image\_ms}, \code{restarted\_ms} & nothing \\
+\code{on\_message} & \rr every message, request, timer, and every reply without a continuation (\code{paglets\_on\_message}) & \code{Message} & the router \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Appendix~\ref{app:abi} lists the handler results. Two SDK details matter
+here: the SDK answers a handled request that was neither answered nor
+deferred with \code{gone}, by dropping its reply capability; and the event
+hooks return \code{void}, so the SDK reports \code{handled} for them and
+\code{malformed} when an event document does not decode. A negative result
+from \code{paglets\_on\_event} is logged by the host and does not stop the
+transition.
+
+\subsection{Ordering guarantees}\label{sec:events-ordering}
+
+The host promises the following. Each item names the function in the
+sources that implements it.
+
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{One call at a time.} A \paglet{} never sees two calls at once:
+  hooks and handlers run one after the other, on one thread at a time
+  (\code{runtime.cpp}, \code{lane\_loop}: \code{rec.running}). Images are
+  never taken while an import runs (ABI section~4).
+\item \textbf{Mailbox order.} Messages are delivered by priority, highest
+  first, and in arrival order within a priority. Replies and host reports
+  have priority~7; a timer message has the priority given to \code{after}
+  (\code{runtime.cpp}, the mailbox key \code{(-priority, seq)}; ABI
+  section~7.1).
+\item \textbf{First delivery.} \code{created}, \code{cloned} and
+  \code{arrived} are queued above every message priority, so they are the
+  \paglet{}'s first call on that host, ahead of every message queued for it
+  earlier (host-side lifecycle requests share this priority and keep their
+  arrival order) (\code{runtime.cpp}, \code{control\_priority}).
+\item \textbf{Lifecycle operations are deferred.} \code{dispose},
+  \code{deactivate}, \code{dispatch} and \code{clone} take effect when the
+  current call returns. At most one of
+  \code{dispose}, \code{deactivate} and \code{dispatch} can be requested
+  per call; a second one fails with \code{bad\_state}. \code{clone} and
+  \code{create\_child} together can be called up to
+  \code{spawn\_limit\_per\_call} times (16) per call; beyond that they fail
+  with \code{quota} (\code{runtime.cpp}, \code{Imports::lifecycle},
+  \code{Imports::create\_child}).
+\item \textbf{After the call: clones first.} When the call returns, the
+  host takes one memory image for all clones requested in it and starts
+  each clone with \code{cloned}; a clone for another host departs with
+  that image. Only then does it run the end-of-call hook of item~6. The
+  clone therefore sees the memory as the handler left it, not as
+  \code{on\_dispatching} or \code{on\_deactivating} changed it
+  (\code{runtime.cpp}, \code{finish\_call}).
+\item \textbf{After the call: the end-of-call hook, then the image.}
+  For a disposal, \code{on\_disposing} runs and the \paglet{} ends. For a
+  dispatch, \code{on\_dispatching} runs, the image is taken and the move
+  starts. For a deactivation, \code{on\_deactivating} runs, the image is
+  taken and the instance is unloaded. What a hook changes is in the image.
+  Images are taken only
+  between calls, never while a call runs (\code{finish\_call}; ABI
+  section~4).
+\item \textbf{Checkpoints.} If none of the three operations was requested,
+  the host stores an image after the call when \code{checkpoint} was called
+  in it, when the \paglet{}'s checkpoint interval (default 1\,s) has
+  elapsed, after the first call of a \paglet{} that has no stored image,
+  and after \code{set\_restart}. Nothing is stored without a state
+  directory or with \code{restart} false (\code{finish\_call},
+  \code{persist}).
+\item \textbf{Activation.} A \paglet{} without a loaded instance is restored
+  from its image before the next delivery, a host-side dispose or dispatch
+  included, and \code{on\_activated} runs right before that delivery. It
+  does not run before \code{created}, \code{cloned} or \code{arrived}: a new
+  instance, a clone and an arriving \paglet{} get their start event only
+  (\code{runtime.cpp}, \code{process}, \code{activate}).
+\item \textbf{A pending move holds messages.} From the image until the
+  mesh commits the move or reports it failed, the \paglet{} is unloaded and
+  messages for it are held on the old host. After a successful move they
+  are forwarded and delivered after \code{on\_arrived}, in mailbox order
+  with whatever reached the new host directly. After a failed move the
+  \paglet{} is restored on the old host: \code{on\_activated}, then the held
+  messages and the report in mailbox order, where \code{paglets.move\_failed}
+  is queued at priority~7 when the outcome is known, so it precedes every
+  held message of lower priority and follows held replies and held messages
+  sent at priority~7 (\code{Runtime::finish\_departure}).
+\item \textbf{Timers and wakes.} A timer or a wake after
+  \code{deactivate(ms)} activates a deactivated \paglet{}; a wake alone
+  delivers no message, only \code{on\_activated}. Timers survive
+  deactivation, moves and host restarts (\code{Impl::fire}, \code{recover}).
+  A wake does not: it is not stored with the \paglet{} and does not travel
+  with it, so after a host restart (or a host-side dispatch of the sleeping
+  \paglet{}) the \paglet{} waits for its next message or timer.
+\item \textbf{Recovery.} After a host restart a \paglet{} with
+  \code{restart} true is re-created from its last image with its
+  capabilities, timers and the correlation IDs of its pending requests.
+  Those requests are answered \code{timeout}, and the answers are queued
+  before \code{paglets.recovered}; the first calls are then
+  \code{on\_activated}, the timeout replies, \code{on\_recovered} (when
+  requested), and the rest of the mailbox (\code{recover}).
+\item \textbf{Budget and failure.} Every call, hooks included, has the
+  handler time budget (default 5\,s). A trap or an exceeded budget in a
+  message handler or in \code{on\_created}, \code{on\_cloned},
+  \code{on\_arrived}, \code{on\_activated} or \code{on\_deactivating} ends the
+  \paglet{} as failed; pending requests to it are answered \code{failed}. A
+  trap in \code{on\_disposing} is logged and the \paglet{} ends as disposed.
+  A trap in \code{on\_dispatching} is reported to the \paglet{} as a failed
+  move (\code{reason} ``no image: \ldots'') and it stays
+  (\code{guest\_call}, \code{process}, \code{finish\_call}).
+\end{enumerate}
+
+\subsection{The sequences}\label{sec:events-sequences}
+
+Figure~\ref{fig:events-sequences} draws items 4 to 6 and 8 to 10 for the
+four operations. Each row starts with the handler call that requested the
+operation and ends with the next call the \paglet{} receives. White nodes
+are calls into the \paglet{}; shaded nodes are steps of the host; the grey
+labels without a frame mark what happens at that point.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=2mm and 1.3mm,
+  plain/.append style={font=\scriptsize,inner xsep=3.5pt,inner ysep=3.5pt},
+  box/.append style={font=\scriptsize,inner xsep=3.5pt,inner ysep=3.5pt},
+  rowlabel/.style={font=\scriptsize\bfseries\color{pagletsBlue},anchor=east,text width=12.5mm,align=right},
+  every edge/.style={arrow}
+]
+% -- dispatch -------------------------------------------------------------
+\node[rowlabel] (l1) at (0,0) {dispatch};
+\node[plain,right=1.5mm of l1] (d1) {handler calls\\\code{dispatch(t)}};
+\node[plain,right=of d1] (d2) {\code{on\_dispatching}\\\code{\{destination\}}};
+\node[box,right=of d2] (d3) {image};
+\node[box,right=of d3] (d4) {transfer\\to host B};
+\node[plain,right=of d4] (d5) {\code{on\_arrived}\\on host B};
+\node[plain,right=of d5] (d6) {next delivery\\on host B};
+\draw (d1) edge (d2) (d2) edge (d3) (d3) edge (d4) (d4) edge (d5) (d5) edge (d6);
+\node[event,below=0.8mm of d1] {returns};
+\node[event,below=0.8mm of d3] {messages\\held on A};
+% failed move
+\node[plain,below=8.5mm of d4.south,anchor=north west,xshift=-7mm] (f1) {\code{on\_activated}\\on host A};
+\node[plain,right=of f1] (f2) {\code{on\_move\_failed}\\\code{\{destination, reason\}}};
+\node[plain,right=of f2] (f3) {held messages\\(replies first)};
+\draw[dashedarrow] (d4.south) -- (d4.south |- f1.north);
+\node[event,anchor=west] at ($(d4.south)+(0.8mm,-4.5mm)$) {fails};
+\draw (f1) edge (f2) (f2) edge (f3);
+% -- deactivate -----------------------------------------------------------
+\node[rowlabel,below=21mm of l1] (l2) {deactivate};
+\node[plain,right=1.5mm of l2] (a1) {handler calls\\\code{deactivate(ms)}};
+\node[plain,right=of a1] (a2) {\code{on\_deactivating}};
+\node[box,right=of a2] (a3) {image,\\unload};
+\node[box,right=of a3] (a4) {message,\\timer or wake};
+\node[box,right=of a4] (a5) {restore\\from image};
+\node[plain,right=of a5] (a6) {\code{on\_activated}};
+\node[plain,right=of a6] (a7) {the message};
+\draw (a1) edge (a2) (a2) edge (a3) (a3) edge[dashedarrow] (a4) (a4) edge (a5) (a5) edge (a6) (a6) edge (a7);
+% -- dispose --------------------------------------------------------------
+\node[rowlabel,below=9mm of l2] (l3) {dispose};
+\node[plain,right=1.5mm of l3] (p1) {handler calls\\\code{dispose()}};
+\node[plain,right=of p1] (p2) {\code{on\_disposing}};
+\node[box,right=of p2] (p3) {ended: queued requests and held\\reply capabilities answered \code{gone}};
+\draw (p1) edge (p2) (p2) edge (p3);
+% -- clone ----------------------------------------------------------------
+\node[rowlabel,below=12mm of l3] (l4) {clone};
+\node[plain,right=1.5mm of l4] (c1) {handler calls\\\code{clone\_raw(args)}};
+\node[box,right=of c1] (c2) {image};
+\node[plain,right=of c2] (c3) {original: end-of-call\\hook, next delivery};
+\node[plain,below=2mm of c3.south west,anchor=north west] (c4) {clone, here or on host B: \code{on\_cloned}\\\code{\{original, args, caps\}}, next delivery};
+\draw (c1) edge (c2) (c2) edge (c3);
+\draw[arrow] (c2.east) -- ++(1mm,0) |- (c4.west);
+\end{tikzpicture}
+\caption{The order of calls and host steps after a handler requests a
+lifecycle operation (items 4 to 6 and 8 to 10 of
+Section~\ref{sec:events-ordering}). The dashed path of the first row is a
+move that the mesh reports as failed; the dashed arrow of the second row is
+the wait, of any length, for the event that activates the \paglet{} again.}
+\label{fig:events-sequences}
+\end{figure}
+
+Two consequences are easy to miss. First, as item~8 says, a move delivers
+\code{on\_arrived} and no \code{on\_activated} on the new host; in the
+course of a move, the only \code{on\_activated} a \paglet{} can see is the
+one on its old host after a failed move, or the one before
+\code{on\_dispatching} when a host-side dispatch wakes an inactive
+\paglet{}. Second, the continuation of a request issued before
+\code{dispatch} lives in linear memory and travels with the \paglet{}; the
+reply follows it (Section~\ref{sec:communication}), is held while the move
+is pending, and is delivered after \code{on\_arrived} like any other
+message.

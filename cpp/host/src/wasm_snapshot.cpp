@@ -56,6 +56,7 @@ private:
 
 }  // namespace
 
+// --8<-- [start:capture]
 std::expected<Snapshot, std::string> capture(Instance& instance) {
     const ModuleInfo& info = instance.module()->info();
     if (auto ready = check_snapshot_ready(info); !ready) {
@@ -83,6 +84,7 @@ std::expected<Snapshot, std::string> capture(Instance& instance) {
     }
     return snap;
 }
+// --8<-- [end:capture]
 
 std::expected<std::unique_ptr<Instance>, std::string> restore(std::shared_ptr<Module> module, const Snapshot& snapshot,
                                                               const Limits& limits) {

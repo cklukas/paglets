@@ -66,6 +66,7 @@ public:
     }
     // --8<-- [end:clone]
 
+    // --8<-- [start:fanout]
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
         if (!f.clone.empty()) fan_.clone_failed(f);
     }
@@ -92,6 +93,7 @@ private:
         });
         if (!sent) go({""});
     }
+    // --8<-- [end:fanout]
 
     // -- a clone: summary, load, volumes, processes, then the report -------------------
 

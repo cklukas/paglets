@@ -21,6 +21,7 @@
 
 namespace paglets::wasm {
 
+// --8<-- [start:image]
 struct GlobalValue {
     std::string name;       // export name
     std::uint8_t type = 0;  // ValType byte
@@ -41,6 +42,7 @@ struct Snapshot {
 
     std::uint32_t data_pages() const { return static_cast<std::uint32_t>(data.size() / page_size); }
 };
+// --8<-- [end:image]
 
 std::expected<Snapshot, std::string> capture(Instance& instance);
 

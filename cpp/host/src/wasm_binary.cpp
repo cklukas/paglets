@@ -349,6 +349,7 @@ std::expected<void, std::string> ImportPolicy::check(const ModuleInfo& info) con
     return {};
 }
 
+// --8<-- [start:snapshot_ready]
 std::expected<void, std::string> check_snapshot_ready(const ModuleInfo& info) {
     std::string missing;
     for (const auto& g : info.globals) {
@@ -363,5 +364,6 @@ std::expected<void, std::string> check_snapshot_ready(const ModuleInfo& info) {
     }
     return {};
 }
+// --8<-- [end:snapshot_ready]
 
 }  // namespace paglets::wasm

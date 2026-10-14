@@ -126,6 +126,7 @@ private:
         hex_file_.path = s.output_path + ".hex";
         if (s.decimal) dec_file_.path = s.output_path + ".txt";
         hex_file_.pending = dec_file_.pending = "3.";
+        // --8<-- [start:grant]
         pt::granted_dir(s.output_root, "", {"write", "create"}, "pi: digits", [this](paglets::Result<paglets::Capability> d) {
             if (!d) return fail(pt::error_text("files of " + params_.output_root, d.error()));
             dir_ = std::make_shared<paglets::Capability>(*d);
@@ -136,6 +137,7 @@ private:
                               begin();
                           });
         });
+        // --8<-- [end:grant]
         return Started{true, {}};
     }
 

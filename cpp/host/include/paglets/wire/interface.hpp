@@ -49,6 +49,7 @@ std::expected<std::vector<std::uint8_t>, std::string> write_custom_section(std::
 
 // -- descriptions --------------------------------------------------------------
 
+// --8<-- [start:api]
 // Checks a description: the format version, message names and kinds, and
 // that every type it names is a built-in type or one of its `types`.
 std::expected<void, std::string> validate(const Json& description);
@@ -67,6 +68,7 @@ Json from_schema(const Json& schema, std::string_view name);
 // The interface of a module's bytes: the custom section, parsed; nullopt
 // when the module has none.
 std::expected<std::optional<Json>, std::string> of_module(std::span<const std::uint8_t> wasm);
+// --8<-- [end:api]
 
 // True for the built-in type names (bool, i8 … u64, f32, f64, string, bytes,
 // none, any) and list<…>/optional<…> of known types; `known` holds the

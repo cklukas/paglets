@@ -235,6 +235,7 @@ public:
 
     // Handler with a typed body: void(const T&, Message&) or int32_t(const T&, Message&).
     // A body that does not decode is answered `malformed`.
+    // --8<-- [start:router-typed]
     template <class T, class F>
     void on(std::string name, F&& f) {
         handlers_[std::move(name)] = [g = std::forward<F>(f)](Message& m) -> std::int32_t {
@@ -248,6 +249,7 @@ public:
             }
         };
     }
+    // --8<-- [end:router-typed]
 
     // Called for names without a handler (default: not handled).
     template <class F>

@@ -27,6 +27,7 @@
 
 namespace paglets::services::compute_slots {
 
+// --8<-- [start:types]
 struct SlotRequest {
     std::string job;  // the job it belongs to (for status)
     std::int64_t cores = 1;
@@ -44,6 +45,7 @@ struct Decision {
     std::int64_t position = 0;  // queued: place in the queue (0: next)
     std::string reason;
 };
+// --8<-- [end:types]
 
 struct ReleaseRequest {
     std::string lease;
@@ -96,6 +98,7 @@ struct Candidates {
     std::vector<HostSlots> hosts;  // most free slots first
 };
 
+// --8<-- [start:contract]
 struct Contract {
     static constexpr std::string_view service = "compute-slots";
     Decision request_slot(const SlotRequest&);
@@ -103,5 +106,6 @@ struct Contract {
     Status status(const StatusRequest&);
     Candidates candidates(const CandidatesRequest&);
 };
+// --8<-- [end:contract]
 
 }  // namespace paglets::services::compute_slots

@@ -20,6 +20,7 @@ public:
         calc::serve(router(), *this);
         // Asks the host's calc service and answers with its result, or with
         // "error:<status>".
+        // --8<-- [start:client]
         router().on<calc::DivRequest>("use_service", [](const calc::DivRequest& q, Message& m) -> std::int32_t {
             auto endpoint = paglets::service("calc");
             if (!endpoint) return endpoint.error();
@@ -35,14 +36,17 @@ public:
             if (!sent) return sent.error();
             return paglets::abi::handled;
         });
+        // --8<-- [end:client]
     }
 
+    // --8<-- [start:operations]
     paglets::Result<calc::AddReply> add(const calc::AddRequest& q, Message&) { return calc::AddReply{q.a + q.b}; }
 
     paglets::Result<calc::DivReply> divide(const calc::DivRequest& q, Message&) {
         if (q.b == 0) return std::unexpected(paglets::abi::invalid_argument);
         return calc::DivReply{q.a / q.b, "guest"};
     }
+    // --8<-- [end:operations]
 };
 
 }  // namespace

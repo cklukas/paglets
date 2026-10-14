@@ -294,6 +294,7 @@ std::vector<mesh::PublicKey> Node::Impl::responsible_in(const std::vector<mesh::
     return out;
 }
 
+// --8<-- [start:responsible]
 std::vector<mesh::PublicKey> Node::Impl::responsible_for(const runtime::PagletId& paglet) {
     update_view();
     if (view.size() <= replicas) return view;
@@ -306,6 +307,7 @@ std::vector<mesh::PublicKey> Node::Impl::responsible_for(const runtime::PagletId
     }
     return out;
 }
+// --8<-- [end:responsible]
 
 // -- records --------------------------------------------------------------------------------
 
@@ -663,6 +665,7 @@ void Node::Impl::process_unresolved() {
         std::lock_guard lock(unresolved_mu);
         queue.swap(unresolved);
     }
+    // --8<-- [start:unresolved]
     for (auto& m : queue) {
         auto deliver = [this](runtime::RemoteMessage& msg, const mesh::PublicKey& host) {
             msg.host = mesh::key_id(host);
@@ -691,6 +694,7 @@ void Node::Impl::process_unresolved() {
         };
         start_lookup(std::move(l));
     }
+    // --8<-- [end:unresolved]
 }
 
 // -- frames -----------------------------------------------------------------------------------------

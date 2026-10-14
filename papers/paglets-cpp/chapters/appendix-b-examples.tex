@@ -1,4 +1,1572 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+This appendix lists the five example \paglet{}s the paper refers to,
+with commentary that points at the lines that matter: four of them
+complete, pi in the sections the text discusses. The
+listings are generated from the sources in \code{cpp/examples/} by
+\code{paglets-docs-sync}: a whole file appears without its license
+header, and the \code{-{}-8<-{}-} marker comments that delimit the
+excerpts of the main text are left out. An excerpt that the main text
+already shows is referenced rather than repeated. Every example has a page in the
+documentation \cite{pagletsCppDocs} with its recorded test results; the
+tests named there run the four mesh examples on a mesh of hosts inside
+one test process, and the counter in the WebAssembly engine alone and
+through the command line. The chronicle page also records a live run on
+three machines (Section~\ref{sec:evaluation}).
+
+\subsection{Building and running a \paglet{}}\label{sec:examples-build}
+
+The build of a \paglet{} is one \code{paglets\_add\_module} call in
+\code{cpp/examples/CMakeLists.txt}; Listing~\ref{lst:app-cmake} shows the
+calls for the counter and for pi. \code{SOURCES} names the C++ file.
+\code{SCHEMA\_HEADER} and \code{SCHEMA\_NAMESPACE} name the header with the
+message types and its namespace; the build runs \code{schema\_gen} on it
+and writes \code{NAME.schema.gen.hpp}, the header the \paglet{} includes,
+with the MessagePack encoders and the schema description
+\code{paglets\_schema\_json}. \code{SERVICES} names the system services
+whose generated clients the \paglet{} uses (Section~\ref{sec:mesh}).
+\code{PATTERNS} adds the six services the headers of the patterns
+library use (\code{directory}, \code{files}, \code{grants},
+\code{locator}, \code{mesh\_info} and \code{user\_info}); the headers
+themselves are on every module's include path. The zombie pattern also
+needs \code{zombies}, which the chronicle lists itself. \code{INTERFACE}
+names the interface description (Section~\ref{sec:tools}), which the
+build puts into the module as a custom section. The module ends up as
+\code{NAME.wasm} in \path{build/<preset>/guests/}. Guests are compiled for
+\code{wasm32-wasip1} with \code{-std=c++23}, \code{-fno-exceptions} and
+\code{-fno-rtti}.
+Outside the repository, a project installs paglets/cpp with
+\code{cmake -{}-install}, calls \code{find\_package} for \code{paglets}
+0.2 and uses the same function.
+
+% hand-copied from cpp/examples/CMakeLists.txt lines 6-17
+\begin{lstlisting}[style=paglets-cmake,caption={The build of the counter and of pi \src{cpp/examples/CMakeLists.txt}},label={lst:app-cmake}]
+paglets_add_module(counter
+    SOURCES counter/counter.cpp
+    SCHEMA_HEADER counter/messages.hpp
+    SCHEMA_NAMESPACE counter_msgs
+    INTERFACE counter/interface.json)
+paglets_add_module(pi
+    SOURCES pi/pi.cpp
+    SCHEMA_HEADER pi/pi_msgs.hpp
+    SCHEMA_NAMESPACE pi_msgs
+    SERVICES mesh_info compute_slots
+    PATTERNS
+    INTERFACE pi/interface.json)
+\end{lstlisting}
+
+The counter runs on one host without a mesh (Listing~\ref{lst:app-run}).
+Message bodies on the command line are JSON; the host passes them to the
+\paglet{} as MessagePack and prints replies as JSON, enums as their names.
+With \code{-{}-state-dir} and \code{-{}-keep} the \paglet{} outlives the
+host process, and \code{call} resumes it from its last memory image in a
+new process. The other four examples need a mesh of hosts that serve
+(Section~\ref{sec:mesh}). They are launched on one host with
+\code{remote launch}, which prints the \paglet{}'s ID, and driven with
+\code{remote call}, which reaches a \paglet{} on the host the command is
+connected to only: while the journey is away, its home host answers
+\code{not\_found}, and the command is repeated until it is back
+(messages between \paglet{}s follow a move,
+Section~\ref{sec:communication}). The inventory and pi also need a
+policy rule that allows the owner's \paglet{}s the operations they use
+(\code{server-info}, and \code{files} for pi's output).
+
+% the commands of docs/examples/counter.md and docs/examples/mesh-journey.md
+\begin{lstlisting}[style=paglets-bash,caption={Running the counter locally, and the journey on a mesh},label={lst:app-run}]
+H=build/macos-arm64/host/paglets-host
+$H run build/macos-arm64/guests/counter.wasm \
+    --call increment '{"by": 5, "note": "first"}' \
+    --call increment '{"by": 3, "note": "triple", "mode": "multiply"}' \
+    --call status
+# The value is 5, then 15; status reports history_size 2 and average_step 4.
+
+$H run build/macos-arm64/guests/counter.wasm --state-dir state --keep \
+    --call increment '{"by": 5, "note": "a"}' --call increment '{"by": 2, "note": "b"}'
+$H call --state-dir state all increment '{"by": 1, "note": "c"}'   # value 8
+
+R="--connect https://lab-1:7443 --key olga.key --ledger ledger"
+ID=$($H remote launch $R build/macos-arm64/guests/journey.wasm)
+$H remote call $R $ID start '{"hosts": [], "label": ""}'
+$H remote call $R $ID journal      # not_found while it is away; the journal once it is home
+\end{lstlisting}
+
+\subsection{Counter}\label{sec:examples-counter}
+
+The counter (Listing~\ref{lst:app-counter}) keeps a value and the
+history of the steps that changed it. It shows the smallest complete
+setup: state that is ordinary C++ objects, a schema header
+(Listing~\ref{lst:counter-messages} in Section~\ref{sec:model-schemas}),
+optional start arguments, and an interface description
+(Listing~\ref{lst:counter-interface} in
+Section~\ref{sec:tools-interfaces}).
+It is the \paglet{} of the image, state-directory and move tests,
+because one \code{status} reply tells whether the state came through a
+save, a move or a restart.
+
+% snippet: cpp/examples/counter/counter.cpp [caption={The counter},label={lst:app-counter}]
+\begin{lstlisting}[style=paglets-cpp,caption={The counter \src{cpp/examples/counter/counter.cpp}},label={lst:app-counter}]
+// Counter example paglet. Its state is ordinary C++ objects on the heap and
+// in static storage; memory images move it without any serialization code.
+
+#include "counter.schema.gen.hpp"
+
+#include <paglets/paglet.hpp>
+
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace counter_msgs;
+
+class Counter : public paglets::Paglet {
+public:
+    Counter() {
+        router().on<Increment>("increment", [this](const Increment& inc, paglets::Message& m) {
+            value_ = inc.mode == Mode::add ? value_ + inc.by : value_ * inc.by;
+            history_.push_back(inc);
+            m.reply(status());
+        });
+        router().on("status", [this](paglets::Message& m) { m.reply(status()); });
+        router().on<Echo>("echo", [](const Echo& echo, paglets::Message& m) { m.reply(echo); });
+        router().on<Bloat>("bloat", [this](const Bloat& bloat, paglets::Message& m) {
+            ballast_.emplace_back(std::size_t{bloat.kilobytes} * 1024, bloat.fill);
+            m.reply(status());
+        });
+        router().on("schema", [](paglets::Message& m) { m.reply(std::string(paglets_schema_json)); });
+        router().on<std::string>("log", [this](const std::string& text, paglets::Message& m) {
+            paglets::log(text);
+            m.reply(status());
+        });
+    }
+
+    // Optional start arguments (`--args '{"value": 10}'`).
+    void on_created(paglets::Started& s) override {
+        Start start;
+        if (!s.args.empty() && s.decode_args(start)) value_ = start.value;
+    }
+
+private:
+    Status status() const {
+        Status s;
+        s.value = value_;
+        s.history_size = static_cast<std::uint32_t>(history_.size());
+        const std::size_t first = history_.size() > 3 ? history_.size() - 3 : 0;
+        for (std::size_t i = first; i < history_.size(); ++i) {
+            s.recent_notes.push_back(history_[i].note);
+        }
+        if (!history_.empty()) {
+            double sum = 0;
+            for (const auto& h : history_) sum += static_cast<double>(h.by);
+            s.average_step = sum / static_cast<double>(history_.size());
+        }
+        s.memory_pages = static_cast<std::uint32_t>(__builtin_wasm_memory_size(0));
+        return s;
+    }
+
+    std::int64_t value_ = 0;
+    std::vector<Increment> history_;
+    std::vector<std::vector<std::uint8_t>> ballast_;
+};
+
+}  // namespace
+
+PAGLETS_PAGLET(Counter)
+\end{lstlisting}
+% /snippet
+
+The constructor registers six handlers. The typed form
+\code{router().on<Increment>} decodes the body into the struct before the
+lambda runs and answers \code{malformed} when it cannot
+(Section~\ref{sec:model}); the untyped form of \code{status} gets only the
+\code{Message}. \code{on\_created} runs once, at creation, and decodes
+the start arguments if there are any (Section~\ref{sec:lifecycle}). The
+three members at the end of the class are the whole state: an integer, a
+vector of structs with strings in them, and a vector of byte vectors that
+\code{bloat} fills for experiments with the image size. Nothing in the
+file is about serialization or movement. \code{status()} reports
+\code{\_\_builtin\_wasm\_memory\_size(0)}, the size of the linear memory
+in pages of 64\,KB, which is almost all of the image a move carries; the
+rest is the exported mutable globals, here one, the stack pointer. A move
+does not carry the whole image: the destination fetches only the pages
+it lacks, each compressed (Section~\ref{sec:movement}).
+Section~\ref{sec:evaluation} records the image sizes.
+
+The schema header (Listing~\ref{lst:counter-messages}) is plain C++: an
+enum, and structs with integers of
+several widths, floating-point numbers, strings, byte vectors, vectors of
+structs and \code{std::optional} fields. \code{Echo} has a field of
+every supported kind of type and comes back unchanged, which is how the
+tests check the generated encoder of the guest against the
+reflection-based one of the host. The interface description
+(Listing~\ref{lst:counter-interface}) names the
+start type \code{Start}, marks \code{increment} and \code{log} as
+\code{both} (a one-way send or a call) and the others as \code{call},
+and defines three records itself, which is how their fields get a
+\code{doc} and a \code{default}. The build merges the other records and
+the enum of the schema header (\code{Echo}, \code{Status}, \code{Mode})
+into \code{types} when it puts the description into the module, a type
+the file defines taking precedence, so \code{paglets-web}
+(Section~\ref{sec:tools}) has a form for every message.
+
+\subsection{Mesh Journey}\label{sec:examples-journey}
+
+The journey (Listing~\ref{lst:app-journey}; its messages and journal are
+Listing~\ref{lst:app-journey-messages}) is the first \paglet{} to read
+for movement. It visits every
+host of the mesh in turn, or the hosts it is asked for, writes down each
+stop in a journal, and comes home. The journal is a \code{std::vector} of
+structs in a member and travels with the \paglet{} inside the memory
+image. The example also shows a deferred reply, the \code{mesh-info}
+service, and two of the three hooks of a move, \code{on\_arrived} and
+\code{on\_move\_failed} (\code{on\_dispatching} it does not need).
+
+% snippet: cpp/examples/journey/journey.cpp [caption={The Mesh Journey},label={lst:app-journey}]
+\begin{lstlisting}[style=paglets-cpp,caption={The Mesh Journey \src{cpp/examples/journey/journey.cpp}},label={lst:app-journey}]
+// Mesh Journey (planning/cpp-demo-paglets.md, demo 1): the "hello world" of
+// paglets/cpp. The paglet visits every host of the mesh in turn and keeps a
+// journal of where it was in an ordinary std::vector; memory images carry
+// it from host to host without serialization code. At the end it comes
+// home; the journal shows every host that can receive and run paglets.
+
+#include "journey.schema.gen.hpp"
+
+#include <paglets/patterns/services.hpp>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace journey_msgs;
+namespace svc = paglets::services;
+namespace pt = paglets::patterns;
+using paglets::Message;
+
+class Journey : public paglets::Paglet {
+public:
+    Journey() {
+        router().on<Start>("start", [this](const Start& s, Message& m) { start(s, m); });
+        router().on("journal", [this](Message& m) { (void)m.reply(journal_); });
+    }
+
+    void on_arrived(const paglets::abi::ArrivedEvent&) override { record_and_go_on(); }
+
+    void on_move_failed(const paglets::abi::MoveFailed& f) override {
+        if (journal_.state != "travelling") return;
+        journal_.skipped.push_back(f.destination + ": " + f.reason);
+        // Home out of reach: the journey ends where it is.
+        if (f.destination == home_) {
+            journal_.state = "failed";
+            return;
+        }
+        go_on();  // the next host
+    }
+
+private:
+    static std::int64_t now_ms() { return paglets::now_ns(paglets::abi::Clock::wall) / 1'000'000; }
+
+    void start(const Start& s, Message& m) {
+        if (journal_.state == "travelling") {
+            (void)m.reply(Started{false, "already travelling", itinerary_});
+            return;
+        }
+        journal_ = Journal{"travelling", {}, {}};
+        next_ = 0;
+        auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
+        // The itinerary: the hosts asked for, else every host mesh-info knows.
+        auto mi = paglets::service("mesh-info");
+        if (!mi) {
+            journal_.state = "failed";
+            (void)paglets::reply_to(*reply, Started{false, "no mesh-info", {}});
+            return;
+        }
+        svc::mesh_info::Client client{*mi};
+        auto sent = client.landscape(
+            svc::mesh_info::LandscapeRequest{},
+            [this, s, reply](paglets::Result<svc::mesh_info::Landscape> l, Message&) {
+                if (!l || l->hosts.empty()) {
+                    journal_.state = "failed";
+                    (void)paglets::reply_to(*reply, Started{false, "no landscape", {}});
+                    return;
+                }
+                home_ = l->hosts.front().host;  // this host comes first
+                itinerary_.clear();
+                for (const auto& h : l->hosts) {
+                    if (h.host == home_) continue;
+                    const bool asked = s.hosts.empty() || std::ranges::find(s.hosts, h.host_name) != s.hosts.end() ||
+                                       std::ranges::find(s.hosts, h.host) != s.hosts.end();
+                    const bool labelled =
+                        s.label.empty() || std::ranges::find(h.labels, s.label) != h.labels.end();
+                    if (asked && labelled) itinerary_.push_back(h.host);
+                }
+                // Hosts asked for by name that mesh-info does not know are skipped.
+                for (const auto& want : s.hosts) {
+                    const bool known = std::ranges::any_of(l->hosts, [&](const auto& h) {
+                        return h.host_name == want || h.host == want;
+                    });
+                    if (!known) journal_.skipped.push_back(want + ": unknown to mesh-info");
+                }
+                (void)paglets::reply_to(*reply, Started{true, {}, itinerary_});
+                record_and_go_on();  // home is the first stop
+            });
+        if (!sent) {
+            journal_.state = "failed";
+            (void)paglets::reply_to(*reply, Started{false, pt::error_text("mesh-info", sent.error()), {}});
+        }
+    }
+
+    void record_and_go_on() {
+        if (journal_.state != "travelling") return;
+        const std::int64_t arrived = now_ms();
+        pt::here([this, arrived](paglets::Result<svc::mesh_info::Snapshot> s) {
+            Stop stop;
+            stop.arrived_ms = arrived;
+            stop.transfer_ms = left_ms_ > 0 ? std::max<std::int64_t>(0, arrived - left_ms_) : 0;
+            if (s) {
+                here_ = s->host;
+                stop.host = s->host;
+                stop.host_name = pt::host_label(*s);
+                stop.os = s->os;
+                stop.architecture = s->architecture;
+                stop.load_per_cpu = s->load_per_cpu;
+            }
+            journal_.stops.push_back(std::move(stop));
+            if (!journal_.stops.empty() && journal_.stops.back().host == home_ && journal_.stops.size() > 1) {
+                journal_.state = "home";
+                return;
+            }
+            go_on();
+        });
+    }
+
+    void go_on() {
+        if (next_ >= itinerary_.size() && here_ == home_) {
+            journal_.state = "home";  // nothing (more) to visit
+            return;
+        }
+        std::string destination = next_ < itinerary_.size() ? itinerary_[next_++] : home_;
+        left_ms_ = now_ms();
+        if (auto moved = paglets::dispatch(destination); !moved) {
+            if (destination == home_) {
+                journal_.state = "failed";
+                journal_.skipped.push_back("home: " + pt::error_text("dispatch", moved.error()));
+                return;
+            }
+            journal_.skipped.push_back(destination + ": " + pt::error_text("dispatch", moved.error()));
+            go_on();
+        }
+    }
+
+    Journal journal_{"idle", {}, {}};
+    std::vector<std::string> itinerary_;
+    std::size_t next_ = 0;
+    std::string home_;
+    std::string here_;
+    std::int64_t left_ms_ = 0;
+};
+
+}  // namespace
+
+PAGLETS_PAGLET(Journey)
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/examples/journey/journey_msgs.hpp [caption={The journey's messages and journal},label={lst:app-journey-messages}]
+\begin{lstlisting}[style=paglets-cpp,caption={The journey's messages and journal \src{cpp/examples/journey/journey\_msgs.hpp}},label={lst:app-journey-messages}]
+// Messages of the Mesh Journey demo (planning/cpp-demo-paglets.md, demo 1).
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace journey_msgs {
+
+// `start`: visit `hosts` in turn (host names or key IDs; empty: every host
+// mesh-info knows, or those with `label`), then come home.
+struct Start {
+    std::vector<std::string> hosts;
+    std::string label;
+};
+
+struct Started {
+    bool accepted = false;
+    std::string reason;
+    std::vector<std::string> itinerary;  // key IDs, in order
+};
+
+// One stop of the journey.
+struct Stop {
+    std::string host;  // key ID
+    std::string host_name;
+    std::string os;
+    std::string architecture;
+    double load_per_cpu = 0;
+    std::int64_t arrived_ms = 0;   // Unix milliseconds, this host's clock
+    std::int64_t transfer_ms = 0;  // from leaving the previous host (clocks may differ)
+};
+
+struct Journal {
+    std::string state;  // idle, travelling, home, failed
+    std::vector<Stop> stops;
+    std::vector<std::string> skipped;  // hosts it could not reach, with the reason
+};
+
+}  // namespace journey_msgs
+\end{lstlisting}
+% /snippet
+
+\code{start} cannot answer at once, because the itinerary comes from
+\code{mesh-info}. It takes the reply capability out of the message with
+\code{m.defer\_reply()}, keeps it in a \code{shared\_ptr} that the
+continuation captures, and answers through \code{reply\_to} when the
+landscape is there. The host the \paglet{} runs on comes first in the
+landscape; that host is home. From then on the \paglet{} is driven by
+events, never by a handler that waits: \code{record\_and\_go\_on} asks
+\code{mesh-info} which host it is on (\code{pt::here}), records a
+\code{Stop} in the continuation, and calls \code{go\_on}, which calls
+\code{paglets::dispatch}. The move takes effect when the handler returns
+(Section~\ref{sec:movement}); a dispatch that fails at once returns an
+error code, and the journey skips the host in the same handler. A move
+that fails after the handler returned arrives as \code{on\_move\_failed}
+with the destination and the reason. On the new host, \code{on\_arrived}
+runs first and continues with the members as they were: \code{journal\_},
+\code{itinerary\_}, \code{next\_}, \code{home\_} and \code{left\_ms\_} are
+all in the image. The journal's \code{state}
+goes from \code{idle} to \code{travelling} to \code{home}, or to
+\code{failed} when \code{mesh-info} gives no landscape or home is out of
+reach; \code{journal} can be asked at any time from the host the
+\paglet{} is on (Listing~\ref{lst:app-run}).
+
+\subsection{Inventory Collector}\label{sec:examples-inventory}
+
+The inventory (Listings~\ref{lst:app-inventory}
+and~\ref{lst:app-inventory-messages}) collects every host's system
+summary, load, volumes and
+largest processes, or finds the processes with a given name on every
+host. It is the fan-out example: the \paglet{} clones itself to every
+host, each clone asks the \code{server-info} system \paglet{} of its host
+and reports to the parent, and the parent keeps the report. One module
+has both roles.
+
+% snippet: cpp/examples/inventory/inventory.cpp [caption={The Inventory Collector},label={lst:app-inventory}]
+\begin{lstlisting}[style=paglets-cpp,caption={The Inventory Collector \src{cpp/examples/inventory/inventory.cpp}},label={lst:app-inventory}]
+// Inventory Collector, Process Finder and Mesh Top
+// (planning/cpp-demo-paglets.md, demos 8, 10 and 11): a clone on every
+// host asks `server-info` (the mesh policy decides which operations) for
+// the system summary, load, volumes and processes, in the same schema on
+// macOS, Linux and Windows, and reports; the parent keeps the mesh's
+// inventory. With a process name it finds those processes everywhere.
+
+#include "inventory.schema.gen.hpp"
+
+#include <paglets/patterns/fanout.hpp>
+#include <paglets/services/server_info.gen.hpp>
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace inventory_msgs;
+namespace svc = paglets::services;
+namespace si = paglets::services::server_info;
+namespace pt = paglets::patterns;
+using paglets::Message;
+
+class Inventory : public paglets::Paglet {
+public:
+    Inventory() {
+        router().on<Collect>("start", [this](const Collect& c, Message& m) { start(c, m); });
+        router().on("report", [this](Message& m) { (void)m.reply(report_); });
+        fan_.attach(router(), [this](const pt::FanOut::Child& c) {
+            HostInventory h;
+            if (!c.ok || !paglets::decode(c.result, h)) {
+                h = HostInventory{};
+                h.error = c.error.empty() ? "no report" : c.error;
+            }
+            h.host = c.host;
+            h.host_name = c.host_name.empty() ? c.destination : c.host_name;
+            report_.hosts.push_back(std::move(h));
+            report_.finished = fan_.finished();
+            if (report_.finished) {
+                std::ranges::sort(report_.hosts, [](const auto& a, const auto& b) { return a.host_name < b.host_name; });
+            }
+        });
+    }
+
+    void on_cloned(paglets::Started& s) override {
+        Collect q;
+        if (s.caps.empty() || !s.decode_args(q)) {
+            (void)paglets::dispose();
+            return;
+        }
+        parent_ = paglets::Endpoint(s.caps[0].release());
+        query_ = q;
+        pt::lookup("server-info", [this](paglets::Result<paglets::Endpoint> ep) {
+            if (!ep) return finish(pt::error_text("server-info", ep.error()));
+            info_ = *ep;
+            summary();
+        });
+    }
+
+    void on_move_failed(const paglets::abi::MoveFailed& f) override {
+        if (!f.clone.empty()) fan_.clone_failed(f);
+    }
+
+private:
+    void start(const Collect& c, Message& m) {
+        report_ = Report{};
+        auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
+        auto go = [this, c, reply](std::vector<std::string> hosts) {
+            const auto sent = fan_.start(hosts, paglets::encode(c), c.timeout_ms);
+            (void)paglets::reply_to(*reply, Started{sent > 0, sent > 0 ? "" : "no clone went out",
+                                                    static_cast<std::int64_t>(hosts.size())});
+        };
+        if (!c.hosts.empty()) return go(c.hosts);
+        auto mi = paglets::service("mesh-info");
+        if (!mi) return go({""});
+        svc::mesh_info::Client client{*mi};
+        auto sent = client.landscape({}, [go](paglets::Result<svc::mesh_info::Landscape> l, Message&) {
+            std::vector<std::string> hosts{""};
+            if (l) {
+                for (std::size_t i = 1; i < l->hosts.size(); ++i) hosts.push_back(l->hosts[i].host);
+            }
+            go(std::move(hosts));
+        });
+        if (!sent) go({""});
+    }
+
+    // -- a clone: summary, load, volumes, processes, then the report -------------------
+
+    void summary() {
+        si::Client c{info_};
+        auto sent = c.summary({}, [this](paglets::Result<si::Summary> s, Message&) {
+            if (!s) return finish(pt::error_text("summary", s.error()));
+            inv_.os = s->os;
+            inv_.os_version = s->os_version;
+            inv_.architecture = s->architecture;
+            inv_.cpu_model = s->cpu_model;
+            inv_.cpus = s->cpu_count;
+            inv_.memory_total = static_cast<std::int64_t>(s->memory_total);
+            inv_.uptime_s = static_cast<std::int64_t>(s->uptime_s);
+            load();
+        });
+        if (!sent) finish(pt::error_text("summary", sent.error()));
+    }
+
+    void load() {
+        si::Client c{info_};
+        auto sent = c.load({}, [this](paglets::Result<si::Load> l, Message&) {
+            if (l) {
+                inv_.cpu_percent = l->cpu_percent;
+                inv_.memory_available = static_cast<std::int64_t>(l->memory_available);
+            }
+            volumes();
+        });
+        if (!sent) volumes();
+    }
+
+    void volumes() {
+        si::Client c{info_};
+        auto sent = c.volumes({}, [this](paglets::Result<si::Volumes> v, Message&) {
+            if (v) {
+                for (const auto& x : v->volumes) {
+                    inv_.volumes.push_back(VolumeInfo{x.mount_point, x.filesystem, static_cast<std::int64_t>(x.total),
+                                                      static_cast<std::int64_t>(x.available)});
+                }
+            }
+            processes();
+        });
+        if (!sent) processes();
+    }
+
+    void processes() {
+        si::Client c{info_};
+        si::ProcessesRequest q;
+        q.limit = query_.process.empty() ? static_cast<std::uint32_t>(std::max<std::int64_t>(0, query_.top)) : 10'000;
+        auto sent = c.processes(q, [this](paglets::Result<si::Processes> p, Message&) {
+            if (p) {
+                inv_.processes_total = p->total;
+                for (const auto& x : p->processes) {
+                    if (!query_.process.empty() && x.name.find(query_.process) == std::string::npos) continue;
+                    inv_.processes.push_back(ProcessInfo{x.pid, x.name, static_cast<std::int64_t>(x.memory)});
+                }
+            }
+            finish({});
+        });
+        if (!sent) finish({});
+    }
+
+    void finish(std::string error) {
+        if (!error.empty()) return pt::report_error(parent_, std::move(error));
+        pt::report(parent_, paglets::encode(inv_));
+        (void)paglets::after_raw(2000, "done", {});
+        router().on("done", [](Message&) { (void)paglets::dispose(); });
+    }
+
+    // The parent.
+    pt::FanOut fan_;
+    Report report_;
+    // A clone.
+    paglets::Endpoint parent_;
+    paglets::Endpoint info_;
+    Collect query_;
+    HostInventory inv_;
+};
+
+}  // namespace
+
+PAGLETS_PAGLET(Inventory)
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/examples/inventory/inventory_msgs.hpp [caption={The inventory's messages and report},label={lst:app-inventory-messages}]
+\begin{lstlisting}[style=paglets-cpp,caption={The inventory's messages and report \src{cpp/examples/inventory/inventory\_msgs.hpp}},label={lst:app-inventory-messages}]
+// Messages of the Inventory Collector, Process Finder and Mesh Top demos
+// (planning/cpp-demo-paglets.md, demos 8, 10 and 11).
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace inventory_msgs {
+
+// `start`: collect from every host (or `hosts`): the system summary, load,
+// volumes and the `top` largest processes; with `process`, only processes
+// whose name contains it (Process Finder).
+struct Collect {
+    std::vector<std::string> hosts;
+    std::string process;
+    std::int64_t top = 5;
+    std::int64_t timeout_ms = 20'000;
+};
+
+struct Started {
+    bool accepted = false;
+    std::string reason;
+    std::int64_t hosts = 0;
+};
+
+struct VolumeInfo {
+    std::string mount_point;
+    std::string filesystem;
+    std::int64_t total = 0;
+    std::int64_t available = 0;
+};
+
+struct ProcessInfo {
+    std::int64_t pid = 0;
+    std::string name;
+    std::int64_t memory = 0;
+};
+
+// One host, in the same shape on every operating system.
+struct HostInventory {
+    std::string host;
+    std::string host_name;
+    std::string error;
+    std::string os;
+    std::string os_version;
+    std::string architecture;
+    std::string cpu_model;
+    std::int64_t cpus = 0;
+    std::int64_t memory_total = 0;
+    std::int64_t memory_available = 0;
+    double cpu_percent = 0;
+    std::int64_t uptime_s = 0;
+    std::vector<VolumeInfo> volumes;
+    std::int64_t processes_total = 0;
+    std::vector<ProcessInfo> processes;
+};
+
+struct Report {
+    bool finished = false;
+    std::vector<HostInventory> hosts;
+};
+
+}  // namespace inventory_msgs
+\end{lstlisting}
+% /snippet
+
+Which role an instance plays is decided by the hook that runs:
+\code{on\_cloned} runs in a clone only. The clone's \code{Started}
+carries the arguments (the \code{Collect} request, encoded by the parent)
+and one capability, the parent's endpoint, which the clone takes with
+\code{s.caps[0].release()}; a clone with a destination can carry only
+endpoints to \paglet{}s and artifact capabilities
+(Section~\ref{sec:movement-clones}). The parent's side is the
+\code{FanOut} pattern: \code{fan\_.attach} registers the handlers for
+\code{fanout.report} and \code{fanout.timeout} on the router, and
+\code{fan\_.start} clones the \paglet{} to each destination with
+\code{clone\_raw(args, \{self()\}, destination)}, drops its own handle to
+the clone, and starts the deadline timer. \code{start} replies as soon
+as the clones went out, with the number of hosts asked and whether at
+least one clone went out; \code{report} returns the report at any time, with \code{finished} set once every clone reported
+or timed out. A clone that never arrives comes back as
+\code{on\_move\_failed} with the clone's ID, which
+\code{fan\_.clone\_failed} turns into a finished child with an error.
+Without a list of hosts, the parent takes every host of the landscape but
+the first, its own, addressed as the empty string.
+
+A clone looks \code{server-info} up through the directory
+(\code{pt::lookup}); a policy rule allows or denies each of its
+operations separately. The four requests follow each other, each started in
+the continuation of the previous reply: the summary is required, the
+others leave their fields empty when denied. \code{finish} reports with
+\code{pt::report}, which first asks \code{mesh-info} where the clone is,
+so that the parent can name the host, and then sends
+\code{fanout.report} through the parent's endpoint. The clone then
+disposes of itself two seconds later, through a timer and a handler
+registered at run time. The timer is not needed for the report to leave:
+a send is handed to the host inside the handler, and a \code{dispose}
+takes effect only when the handler returns, so the \code{sent} callback
+of \code{pt::report} would end the clone just as safely. Reports arrive
+at the parent in any order; the parent sorts the hosts by name when the
+last one is in.
+
+\subsection{Pi}\label{sec:examples-pi}
+
+Pi computes hexadecimal digits of $\pi$ on the hosts of the mesh with the
+Bailey--Borwein--Plouffe formula, which gives the digits at any position
+without the digits before them. The job \paglet{} stays where it was
+started, cuts the digits into chunks, and sends each chunk in a clone of
+itself to a host that \code{mesh-info} selects for at least one free
+compute slot and a load of at most 4 per CPU, or its own host when none
+fits. The clone, a worker, asks its host's \code{compute-slots} for a
+slot, computes, sends its digits to the job and ends. The job takes the
+chunks in order, writes them to files on its host when it was started
+with an output root (otherwise the digits stay in its memory), sends a
+chunk out again when no answer came in time, and at the end, unless told
+otherwise, converts the digits into decimal ones. The file is 538 lines;
+the sections below are the ones the text refers to (two of them appear
+in the main text: the worker's slot request,
+Listing~\ref{lst:pi-worker}, and the decimal conversion,
+Listing~\ref{lst:pi-convert}), and the header with the messages follows
+them whole (Listing~\ref{lst:app-pi-messages}).
+As in the inventory, one module has both roles: \code{on\_cloned} sets
+\code{worker\_}.
+
+The job sends \code{n} chunks round robin over the hosts
+\code{mesh-info} selected, each in a clone that gets its \code{Task} as
+arguments and the job's endpoint as its only capability; the empty host
+name is the job's own host, and a clone for it is made locally
+(Listing~\ref{lst:app-pi-clone}):
+
+% snippet: cpp/examples/pi/pi.cpp#clone [caption={Pi: a clone per chunk},label={lst:app-pi-clone}]
+\begin{lstlisting}[style=paglets-cpp,caption={Pi: a clone per chunk \src{cpp/examples/pi/pi.cpp}},label={lst:app-pi-clone}]
+// `n` chunks, round robin over `hosts` ("" is this host).
+void send_to(const std::vector<std::string>& hosts, std::int64_t n) {
+    std::size_t next = 0;
+    for (auto& c : chunks_) {
+        if (n <= 0) break;
+        if (c.sent || c.done) continue;
+        const std::string& host = hosts[next++ % hosts.size()];
+        Task t{c.start, c.count, ++c.attempt, params_.work_ms};
+        std::optional<std::string> destination;
+        if (!host.empty() && host != host_) destination = host;
+        auto worker = paglets::clone_raw(paglets::encode(t), {paglets::self()}, destination);
+        if (!worker) {
+            paglets::log("pi: no worker for chunk " + std::to_string(c.start) + ": " +
+                         std::string(abi::error_name(worker.error())));
+            break;
+        }
+        (void)worker->drop();  // the worker answers through its own endpoint to the job
+        c.sent = true;
+        c.sent_ms = now_ms();
+        --n;
+    }
+}
+\end{lstlisting}
+% /snippet
+
+A worker asks its host for one core and acts on the verdict
+(Listing~\ref{lst:pi-worker} in Section~\ref{sec:mesh-compute}): it runs,
+waits for \code{compute.granted}, or moves to the host the redirect names
+and asks there again from \code{on\_arrived}; a host without
+\code{compute-slots}, or a rejected request, lets it compute at once.
+
+A handler may run for at most five seconds, the host's handler budget; a
+handler that runs longer is stopped and its \paglet{} ends. So the
+worker computes in slices of about 200\,ms and continues in the next
+message, a timer to itself with no delay
+(Listing~\ref{lst:app-pi-slices}):
+
+% snippet: cpp/examples/pi/pi.cpp#slices [caption={Pi: computing in slices between messages},label={lst:app-pi-slices}]
+\begin{lstlisting}[style=paglets-cpp,caption={Pi: computing in slices between messages \src{cpp/examples/pi/pi.cpp}},label={lst:app-pi-slices}]
+// A slice of about 200 ms: a handler call may take at most 5 s, and far
+// out a single block of six digits takes seconds. The rest follows in
+// the next message.
+void compute_more() {
+    const std::int64_t began = now_ms();
+    while (static_cast<std::int64_t>(digits_.size()) < task_.count) {
+        if (block_.step(20'000)) {
+            digits_ += block_.digits();
+            const std::int64_t at = task_.start + static_cast<std::int64_t>(digits_.size());
+            const std::int64_t left = task_.start + task_.count - at;
+            if (left > 0) block_ = pi_bbp::Block(at, static_cast<int>(std::min<std::int64_t>(6, left)));
+        }
+        if (now_ms() - began >= 200 && static_cast<std::int64_t>(digits_.size()) < task_.count) {
+            (void)paglets::after_raw(0, "compute-more", {});
+            return;
+        }
+    }
+    report_digits();
+}
+\end{lstlisting}
+% /snippet
+
+The job keeps a chunk's digits only until the chunk is next in order;
+then they go into the file and into the fraction, and leave the job's
+memory, because a \paglet{}'s memory holds at most 16\,MB and a message
+at most 1\,MB (Listing~\ref{lst:app-pi-in-order}):
+
+% snippet: cpp/examples/pi/pi.cpp#in_order [caption={Pi: chunks leave the job's memory in order},label={lst:app-pi-in-order}]
+\begin{lstlisting}[style=paglets-cpp,caption={Pi: chunks leave the job's memory in order \src{cpp/examples/pi/pi.cpp}},label={lst:app-pi-in-order}]
+// Chunks that are next in order leave the job's memory: into the file,
+// and into the fraction for the decimal conversion.
+void take_in_order() {
+    while (next_ < chunks_.size() && chunks_[next_].done) {
+        Chunk& c = chunks_[next_++];
+        done_ += c.count;
+        if (shown_hex_.size() < shown_digits) shown_hex_ += c.digits.substr(0, shown_digits - shown_hex_.size());
+        if (params_.decimal) {
+            for (char h : c.digits) add_nibble(static_cast<std::uint32_t>(h <= '9' ? h - '0' : h - 'A' + 10));
+        }
+        if (dir_) {
+            hex_file_.pending += c.digits;
+            flush(hex_file_);
+        }
+        std::string().swap(c.digits);
+    }
+    if (finished() && state_ == "computing") {
+        if (params_.decimal) return start_conversion();
+        state_ = "writing";
+        maybe_done();
+    }
+}
+
+// The fraction, 8 hex digits per 32-bit limb, the most significant first.
+void add_nibble(std::uint32_t v) {
+    partial_ = (partial_ << 4) | v;
+    if (++partial_n_ == 8) {
+        limbs_.push_back(partial_);
+        partial_ = 0;
+        partial_n_ = 0;
+    }
+}
+\end{lstlisting}
+% /snippet
+
+Every 500\,ms the job checks the chunks in flight; one without an answer
+for \code{chunk\_timeout\_ms} counts as waiting again and goes out with
+the next batch, to the hosts \code{mesh-info} selects then (a host that is
+gone drops out of the selection once its last snapshot is too old;
+Listing~\ref{lst:app-pi-resend}):
+
+% snippet: cpp/examples/pi/pi.cpp#resend [caption={Pi: chunks without an answer go out again},label={lst:app-pi-resend}]
+\begin{lstlisting}[style=paglets-cpp,caption={Pi: chunks without an answer go out again \src{cpp/examples/pi/pi.cpp}},label={lst:app-pi-resend}]
+// Chunks without an answer in time go out again (their host may be gone).
+void tick() {
+    if (worker_) return;
+    const std::int64_t now = now_ms();
+    for (auto& c : chunks_) {
+        if (c.sent && !c.done && now - c.sent_ms > params_.chunk_timeout_ms) {
+            c.sent = false;
+            ++resent_;
+        }
+    }
+    send_more();
+    if (!finished()) (void)paglets::after_raw(500, "tick", {});
+}
+\end{lstlisting}
+% /snippet
+
+The conversion to decimal digits needs every hexadecimal digit, so it
+runs once at the end, as passes of multiplying the fraction by $10^9$
+whose carry is the next nine decimal digits, in slices of 200\,ms
+(Listing~\ref{lst:pi-convert} in Section~\ref{sec:discussion-weak},
+where the slicing is explained line by line).
+
+% snippet: cpp/examples/pi/pi_msgs.hpp [caption={Pi's messages: the job's parameters, a worker's task, a result and the status},label={lst:app-pi-messages}]
+\begin{lstlisting}[style=paglets-cpp,caption={Pi's messages: the job's parameters, a worker's task, a result and the status \src{cpp/examples/pi/pi\_msgs.hpp}},label={lst:app-pi-messages}]
+// Messages of the pi compute example (planning/cpp-compute.md, section 5).
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace pi_msgs {
+
+// `start`: compute `digits` hex digits of pi in chunks of `chunk` digits,
+// at most `max_in_flight` chunks at a time on hosts mesh-info selects. A
+// chunk not answered within `chunk_timeout_ms` (its host may be gone) is
+// sent again elsewhere. `work_ms` makes each chunk take at least that long
+// (for demonstrations and tests).
+//
+// With `output_root`, the digits go, in order as they come in, to files
+// below that named root of the job's host (a grant for `write` and
+// `create`): `<output_path>.hex` and, with `decimal`, `<output_path>.txt`.
+// The job then keeps only the chunks that came early, not all digits.
+// With `decimal`, the job converts the hex digits into decimal digits at the
+// end (about 1.2 per hex digit; the conversion needs every digit, so it
+// cannot run per chunk).
+struct Start {
+    std::int64_t digits = 1000;
+    std::int64_t chunk = 60;
+    std::int64_t max_in_flight = 8;
+    std::int64_t chunk_timeout_ms = 30'000;
+    std::int64_t work_ms = 0;
+    bool decimal = true;
+    std::string output_root;  // empty: the digits stay in the job's memory
+    std::string output_path = "pi";
+};
+
+struct Started {
+    bool accepted = false;
+    std::string reason;
+};
+
+// The arguments of a worker (a clone of the job paglet on another host).
+struct Task {
+    std::int64_t start = 0;
+    std::int64_t count = 0;
+    std::int64_t attempt = 0;
+    std::int64_t work_ms = 0;
+};
+
+// `result`: a worker's digits.
+struct Result {
+    std::int64_t start = 0;
+    std::int64_t count = 0;
+    std::int64_t attempt = 0;
+    std::string digits;
+    std::string host;  // key ID of the host that computed it
+    std::string host_name;
+};
+
+struct StatusRequest {};
+
+// `status`: progress. `hex` and `decimal` show at most the first `shown`
+// digits (the files have all of them).
+struct Status {
+    std::string state;        // idle, computing, converting, done, failed
+    std::int64_t digits = 0;  // hex digits asked for
+    std::int64_t done = 0;    // hex digits contiguous from the start
+    std::int64_t chunks = 0;
+    std::int64_t chunks_done = 0;
+    std::int64_t in_flight = 0;
+    std::int64_t resent = 0;  // chunks sent again (no answer in time)
+    bool finished = false;    // every hex digit is there
+    std::string hex;          // "3." followed by hex digits
+    std::int64_t decimal_digits = 0;  // decimal digits that hex `digits` give
+    std::int64_t decimal_done = 0;    // converted so far
+    std::string decimal;              // "3." followed by decimal digits
+    std::int64_t shown = 0;
+    std::vector<std::string> files;  // the files written, below `output_root`
+    std::vector<std::string> hosts;  // names of the hosts that computed chunks
+    std::string error;
+};
+
+}  // namespace pi_msgs
+\end{lstlisting}
+% /snippet
+
+A worker's result is a one-way \code{send} of a \code{Result} to the
+endpoint it was given, followed by the release of its lease and
+\code{dispose}. A late result for a chunk that is already done is
+ignored, so a chunk that was merely slow is computed twice and the first
+answer counts. The files are written through the \code{files} service
+with a directory capability the job obtained from \code{grants} at the
+start (Listing~\ref{lst:pi-grant}), dropped when the state reaches
+\code{done}. Section~\ref{sec:evaluation} has the live run of this
+example on a Mac, a Raspberry Pi~4 and a uConsole built on a Raspberry
+Pi Compute Module~5.
+
+\subsection{Mesh Chronicle}\label{sec:examples-chronicle}
+
+The chronicle is a zombie \paglet{} (Section~\ref{sec:zombies}): it has a
+replica on every host of the mesh, one replica samples the mesh and
+writes down what changed, the others take over from the latest
+checkpoint when it disappears, and when its lifetime is over the life log
+goes to a sink host exactly once. The \paglet{}
+(Listing~\ref{lst:app-chronicle}; its messages, work and journal entries
+are Listing~\ref{lst:app-chronicle-messages}) derives from
+\code{patterns::Zombie<Work>} and implements five hooks; the protocol,
+the checkpoints, the takeovers and the delivery are in the base class.
+Most of the file is \code{life\_log}, which renders the merged journal as
+Markdown.
+
+% snippet: cpp/examples/chronicle/chronicle.cpp [caption={The Mesh Chronicle},label={lst:app-chronicle},literate={–}{{--}}1]
+\begin{lstlisting}[style=paglets-cpp,caption={The Mesh Chronicle \src{cpp/examples/chronicle/chronicle.cpp}},label={lst:app-chronicle},literate={–}{{--}}1]
+// Mesh Chronicle (docs/examples/mesh-chronicle.md): a zombie paglet that
+// writes the life log of its mesh. It has a replica on every host; the main
+// samples mesh-info every few seconds and records what changed: hosts that
+// disappear and come back, connections between hosts that are lost and
+// restored (as each host reports them), and its own takeovers. Replicas
+// that ran apart during a partition merge their journals when they meet, so
+// what both sides saw ends up in one log. When its lifetime is over, the
+// life log goes to the sink as Markdown, the owner is notified, and every
+// replica ends.
+
+#include "chronicle.schema.gen.hpp"
+
+#include <paglets/patterns/notify.hpp>
+#include <paglets/patterns/zombie.hpp>
+
+#include <algorithm>
+#include <map>
+#include <numeric>
+#include <set>
+#include <string>
+#include <vector>
+
+using namespace paglets;
+using namespace chronicle_msgs;
+namespace zp = paglets::protocols::zombie;
+
+namespace {
+
+std::int64_t now_ms() {
+    return paglets::now_ns() / 1'000'000;
+}
+
+std::string two(std::int64_t v) {
+    return (v < 10 ? "0" : "") + std::to_string(v);
+}
+
+// "2026-10-13 14:05:09" (UTC).
+std::string utc(std::int64_t ms) {
+    std::int64_t secs = ms / 1000;
+    std::int64_t days = secs / 86400;
+    std::int64_t rest = secs % 86400;
+    // Days to civil date (Howard Hinnant's algorithm).
+    days += 719468;
+    const std::int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const std::int64_t doe = days - era * 146097;
+    const std::int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    std::int64_t y = yoe + era * 400;
+    const std::int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const std::int64_t mp = (5 * doy + 2) / 153;
+    const std::int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const std::int64_t m = mp < 10 ? mp + 3 : mp - 9;
+    if (m <= 2) ++y;
+    return std::to_string(y) + "-" + two(m) + "-" + two(d) + " " + two(rest / 3600) + ":" + two(rest % 3600 / 60) +
+           ":" + two(rest % 60);
+}
+
+// "1 h 02 min", "3 min 05 s", "12 s".
+std::string span(std::int64_t ms) {
+    const std::int64_t s = std::max<std::int64_t>(0, ms) / 1000;
+    if (s >= 3600) return std::to_string(s / 3600) + " h " + two(s % 3600 / 60) + " min";
+    if (s >= 60) return std::to_string(s / 60) + " min " + two(s % 60) + " s";
+    return std::to_string(s) + " s";
+}
+
+}  // namespace
+
+class Chronicle final : public patterns::Zombie<Work> {
+public:
+    Chronicle() {
+        router().on<Start>("start", [this](const Start& s, Message& m) -> std::int32_t {
+            if (!group().empty()) return abi::bad_state;
+            if (!s.sink.starts_with("host:") || s.lifetime_ms <= 0 || s.sample_ms < 1000) return abi::invalid_argument;
+            Work w;
+            w.sink = s.sink;
+            w.lifetime_ms = s.lifetime_ms;
+            w.sample_ms = s.sample_ms;
+            w.started_ms = now_ms();
+            patterns::ZombieTiming t;
+            t.step_ms = s.sample_ms;
+            if (s.beat_ms > 0) t.beat_ms = s.beat_ms;
+            if (s.suspect_ms > 0) {
+                t.suspect_ms = s.suspect_ms;
+                t.jitter_ms = s.suspect_ms / 2;
+            }
+            if (s.round_ms > 0) t.round_ms = s.round_ms;
+            if (s.expand_ms > 0) t.expand_ms = s.expand_ms;
+            t.checkpoint_ms = std::max<std::int64_t>(s.sample_ms, t.beat_ms);
+            start_group(s.sink, std::move(w), t);
+            (void)m.reply(chronicle_msgs::Started{group(), {}});
+            return abi::handled;
+        });
+        router().on("status", [this](Message& m) {
+            const auto& r = replica();
+            Status st;
+            st.group = group();
+            st.role = std::string(zp::to_string(r.role));
+            st.replica = host_of(r.self);
+            st.replicas = static_cast<std::uint32_t>(r.members.size());
+            st.main = name_of(host_of(r.leader));
+            st.samples = r.rank.progress;
+            st.started_ms = work().started_ms;
+            st.lifetime_ms = work().lifetime_ms;
+            st.events = static_cast<std::int64_t>(r.journal.entries.size());
+            (void)m.reply(st);
+        });
+        router().on("finish", [this](Message& m) {
+            FinishReply f;
+            f.accepted = acting();
+            if (f.accepted) finish_ = true;
+            const auto& r = replica();
+            f.main = name_of(host_of(r.leader));
+            (void)m.reply(f);
+        });
+    }
+
+    void step(Work& w, std::function<void(bool done)> finished) override {
+        auto mi = service("mesh-info");
+        if (!mi) return finished(false);
+        services::mesh_info::Client client{*mi};
+        services::mesh_info::LandscapeRequest q;
+        q.max_age_ms = std::max<std::int64_t>(3 * w.sample_ms, 3000);
+        auto sent = client.landscape(q, [this, &w, finished](Result<services::mesh_info::Landscape> r, Message&) {
+            if (!r) return finished(false);
+            sample(w, r->hosts);
+            const bool done = finish_ || now_ms() - w.started_ms >= w.lifetime_ms;
+            if (done) note(Event{now_ms(), "end", here_, {}, std::to_string(w.samples) + " samples"});
+            finished(done);
+        });
+        if (!sent) finished(false);
+    }
+
+    std::int64_t progress(const Work& w) const override { return w.samples; }
+
+    std::string result_name() const override { return "chronicle-" + group() + ".md"; }
+
+    void on_role(Role, Role to, Cause cause) override {
+        if (to == Role::main) {
+            takeover_ = true;
+            takeover_cause_ = std::string(zp::to_string(cause));
+        }
+        if (to == Role::delivering) {
+            patterns::notify(services::user_info::Level::info, "Mesh Chronicle " + group().substr(0, 8) + " is done",
+                             "Its life log goes to " + work().sink + ".");
+        }
+    }
+
+    Bytes result(const Work& w, const std::vector<zp::Entry>& journal) override {
+        const std::string text = life_log(w, journal);
+        return Bytes(text.begin(), text.end());
+    }
+
+private:
+    void note(Event e) { (void)observe_value(e); }
+
+    std::vector<Event> journal_events() const {
+        std::vector<Event> out;
+        for (const auto& [k, d] : replica().journal.entries) {
+            Event e;
+            if (decode(d, e)) out.push_back(std::move(e));
+        }
+        std::ranges::stable_sort(out, [](const Event& a, const Event& b) { return a.time_ms < b.time_ms; });
+        return out;
+    }
+
+    std::string name_of(const std::string& key) const {
+        const auto& w = work();
+        for (std::size_t i = 0; i < w.members.size() && i < w.names.size(); ++i) {
+            if (w.members[i] == key) return w.names[i];
+        }
+        return key.substr(0, 8);
+    }
+
+    // Compares the mesh now with the latest sample and records the changes.
+    void sample(Work& w, const std::vector<services::mesh_info::Snapshot>& hosts) {
+        const std::int64_t now = now_ms();
+        if (!hosts.empty()) here_ = hosts.front().host;
+        // Who is in the group: the replicas this main knows, with names from
+        // mesh-info. Hosts that joined the mesh got a replica meanwhile.
+        const bool first = w.members.empty();
+        for (const auto& m : members()) {
+            if (std::ranges::find(w.members, m) != w.members.end()) continue;
+            w.members.push_back(m);
+            w.names.emplace_back();
+            if (!first) note(Event{now, "joined", m, here_});
+        }
+        for (const auto& h : hosts) {
+            auto it = std::ranges::find(w.members, h.host);
+            if (it != w.members.end() && !h.host_name.empty()) w.names[it - w.members.begin()] = h.host_name;
+        }
+        if (first) {
+            std::string list;
+            for (std::size_t i = 0; i < w.members.size(); ++i)
+                list += (list.empty() ? "" : ", ") + (w.names[i].empty() ? w.members[i].substr(0, 8) : w.names[i]);
+            note(Event{now, "begin", here_, {}, list});
+        }
+        if (takeover_) {
+            takeover_ = false;
+            if (w.samples > 0) {
+                note(Event{now, "takeover", here_, {}, takeover_cause_, now - w.last_sample_ms, replica().reign});
+            }
+        }
+        // What the merged journal says now: every lineage's observations,
+        // the latest per host and per link.
+        std::map<std::string, bool> host_up;
+        std::set<std::string> down;  // "observer>other"
+        for (const auto& m : w.members) host_up[m] = true;
+        for (const auto& e : journal_events()) {
+            if (e.kind == "host_down" || e.kind == "host_up") host_up[e.host] = e.kind == "host_up";
+            if (e.kind == "link_down") down.insert(e.host + ">" + e.other);
+            if (e.kind == "link_up") down.erase(e.host + ">" + e.other);
+        }
+        std::set<std::string> fresh;
+        for (const auto& h : hosts) fresh.insert(h.host);
+        for (const auto& [h, was_up] : host_up) {
+            if (fresh.contains(h) && !was_up) note(Event{now, "host_up", h, here_});
+            if (!fresh.contains(h) && was_up) note(Event{now, "host_down", h, here_});
+        }
+        // Links as each fresh host reports them (hosts that are not fresh
+        // keep what they reported last).
+        for (const auto& h : hosts) {
+            for (const auto& l : h.links) {
+                const std::string key = h.host + ">" + l.host;
+                if (!l.up && !down.contains(key)) note(Event{now, "link_down", h.host, l.host, l.failure});
+                if (l.up && down.contains(key)) note(Event{now, "link_up", h.host, l.host});
+            }
+        }
+        if (w.samples > 0) w.alive_ms += std::min(now - w.last_sample_ms, 2 * w.sample_ms);
+        w.last_sample_ms = now;
+        ++w.samples;
+    }
+
+    // -- the life log --------------------------------------------------------------------------
+
+    std::string life_log(const Work& w, const std::vector<zp::Entry>& journal) const {
+        std::vector<Event> events;
+        for (const auto& e : journal) {
+            Event ev;
+            if (decode(e.data, ev)) events.push_back(std::move(ev));
+        }
+        std::ranges::stable_sort(events, [](const Event& a, const Event& b) { return a.time_ms < b.time_ms; });
+        // The same change reported by two lineages is one change.
+        std::vector<Event> merged;
+        for (auto& e : events) {
+            const bool repeat = std::ranges::any_of(merged, [&](const Event& m) {
+                if (e.kind == "joined") return m.kind == "joined" && m.host == e.host;  // a host joins once
+                return m.kind == e.kind && m.host == e.host && m.other == e.other && e.time_ms - m.time_ms < 2 * w.sample_ms &&
+                       e.kind != "takeover";
+            });
+            if (!repeat) merged.push_back(std::move(e));
+        }
+        auto name = [&](const std::string& key) {
+            for (std::size_t i = 0; i < w.members.size() && i < w.names.size(); ++i) {
+                if (w.members[i] == key && !w.names[i].empty()) return w.names[i];
+            }
+            return key.substr(0, 8);
+        };
+        const std::int64_t end = w.last_sample_ms;
+        std::int64_t takeovers = 0, longest_gap = 0, dead = 0;
+        for (const auto& e : merged) {
+            if (e.kind != "takeover") continue;
+            ++takeovers;
+            longest_gap = std::max(longest_gap, e.gap_ms);
+            dead += std::max<std::int64_t>(0, e.gap_ms - w.sample_ms);
+        }
+        std::string md;
+        md += "# Mesh life log\n\n";
+        md += "Written by the Mesh Chronicle, zombie group `" + group() + "`.\n\n";
+        md += "| | |\n|---|---|\n";
+        md += "| Began | " + utc(w.started_ms) + " UTC |\n";
+        md += "| Ended | " + utc(end) + " UTC |\n";
+        md += "| Lifetime | " + span(end - w.started_ms) + " |\n";
+        std::string hosts;
+        for (std::size_t i = 0; i < w.members.size(); ++i) hosts += (i ? ", " : "") + name(w.members[i]);
+        md += "| Replicas | " + std::to_string(w.members.size()) + ": " + hosts + " |\n";
+        md += "| Samples of the mesh | " + std::to_string(w.samples) + ", every " + span(w.sample_ms) + " |\n";
+        md += "| Takeovers | " + std::to_string(takeovers) + " |\n";
+        md += "| Time without a working main | " + span(dead) + " (longest gap " + span(longest_gap) + ") |\n\n";
+
+        md += "## Timeline\n\n| Time (UTC) | What happened |\n|---|---|\n";
+        for (const auto& e : merged) {
+            std::string what;
+            if (e.kind == "begin") {
+                what = "The chronicle began on " + name(e.host) + ", with replicas on " + e.text + ".";
+            } else if (e.kind == "host_down") {
+                what = "**" + name(e.host) + "** disappeared (no fresh report seen from " + name(e.other) + ").";
+            } else if (e.kind == "host_up") {
+                what = "**" + name(e.host) + "** is back (seen from " + name(e.other) + ").";
+            } else if (e.kind == "link_down") {
+                what = name(e.host) + " lost its connection to " + name(e.other) +
+                       (e.text.empty() ? "." : " (" + e.text + ").");
+            } else if (e.kind == "link_up") {
+                what = name(e.host) + " reaches " + name(e.other) + " again.";
+            } else if (e.kind == "joined") {
+                what = "**" + name(e.host) + "** joined the mesh and got a replica (seen from " + name(e.other) + ").";
+            } else if (e.kind == "takeover") {
+                what = "**" + name(e.host) + " took over as main** (" + e.text + ", reign " + std::to_string(e.term) +
+                       ") after " + span(e.gap_ms) + " without a sample.";
+            } else if (e.kind == "end") {
+                what = "The work is done on " + name(e.host) + ": " + e.text + ".";
+            } else {
+                what = e.kind;
+            }
+            md += "| " + utc(e.time_ms) + " | " + what + " |\n";
+        }
+
+        // Connections: a pair is down while either end reports it down.
+        md += "\n## Connections\n\n";
+        struct Interval {
+            std::int64_t from = 0, to = 0;
+            std::string why;
+        };
+        std::map<std::string, std::vector<Interval>> pairs;
+        std::map<std::string, std::set<std::string>> down_by;  // pair -> reporting directions
+        auto pair_key = [&](const std::string& a, const std::string& b) {
+            return name(std::min(a, b)) + " – " + name(std::max(a, b));
+        };
+        for (const auto& e : merged) {
+            if (e.kind != "link_down" && e.kind != "link_up") continue;
+            const auto key = pair_key(e.host, e.other);
+            auto& by = down_by[key];
+            const bool was = !by.empty();
+            if (e.kind == "link_down") {
+                by.insert(e.host);
+            } else {
+                by.erase(e.host);
+            }
+            if (!was && !by.empty()) pairs[key].push_back(Interval{e.time_ms, -1, e.text});
+            if (was && by.empty() && !pairs[key].empty()) pairs[key].back().to = e.time_ms;
+        }
+        if (pairs.empty()) {
+            md += "No connection was lost.\n";
+        } else {
+            md += "| Connection | Lost | Restored | For | Reason |\n|---|---|---|---|---|\n";
+            for (const auto& [key, list] : pairs) {
+                for (const auto& i : list) {
+                    md += "| " + key + " | " + utc(i.from) + " | " + (i.to < 0 ? "not restored" : utc(i.to)) + " | " +
+                          span((i.to < 0 ? end : i.to) - i.from) + " | " + (i.why.empty() ? "-" : i.why) + " |\n";
+                }
+            }
+        }
+
+        // Separations: hosts that could not see each other, from what either
+        // side reported (a host gone from a main's view, a connection lost).
+        // A side "worked" when a main there recorded something meanwhile; a
+        // crashed host stays silent, a partition has work on both sides.
+        md += "\n## Separations and partitions\n\n";
+        std::set<std::pair<std::string, std::string>> cut;  // ordered pairs
+        auto cut_pair = [&](const std::string& a, const std::string& b, bool on) {
+            const auto p = std::pair{std::min(a, b), std::max(a, b)};
+            if (on) {
+                cut.insert(p);
+            } else {
+                cut.erase(p);
+            }
+        };
+        auto components = [&]() {
+            std::vector<std::string> hs = w.members;
+            std::vector<std::size_t> parent(hs.size());
+            std::iota(parent.begin(), parent.end(), 0);
+            std::function<std::size_t(std::size_t)> find = [&](std::size_t x) {
+                return parent[x] == x ? x : parent[x] = find(parent[x]);
+            };
+            for (std::size_t a = 0; a < hs.size(); ++a) {
+                for (std::size_t b = a + 1; b < hs.size(); ++b) {
+                    if (!cut.contains({std::min(hs[a], hs[b]), std::max(hs[a], hs[b])})) parent[find(a)] = find(b);
+                }
+            }
+            std::map<std::size_t, std::vector<std::string>> groups;
+            for (std::size_t i = 0; i < hs.size(); ++i) groups[find(i)].push_back(hs[i]);
+            std::vector<std::vector<std::string>> out;
+            for (auto& [root, g] : groups) out.push_back(std::move(g));
+            return out;
+        };
+        struct Open {
+            std::int64_t since = 0;
+            std::vector<std::vector<std::string>> sides;
+            std::set<std::string> active;  // observers that recorded something
+        };
+        std::optional<Open> open;
+        std::vector<std::string> lines;
+        std::int64_t partitions = 0;
+        auto close = [&](std::int64_t at) {
+            if (!open) return;
+            if (at == open->since) {  // changes of one moment, not a separation
+                open.reset();
+                return;
+            }
+            std::string text;
+            std::size_t worked = 0;
+            for (const auto& side : open->sides) {
+                std::string names;
+                bool active = false;
+                for (const auto& h : side) {
+                    names += (names.empty() ? "" : ", ") + name(h);
+                    active |= open->active.contains(h);
+                }
+                worked += active;
+                text += (text.empty() ? "" : " / ") + std::string("{") + names + "} " + (active ? "worked" : "silent");
+            }
+            const bool partition = worked >= 2;
+            partitions += partition;
+            lines.push_back("| " + utc(open->since) + " | " + (at < 0 ? "not healed" : utc(at)) + " | " +
+                            span((at < 0 ? end : at) - open->since) + " | " + text + " | " +
+                            (partition ? "partition: both sides had a main" : "a host was gone or cut off") + " |");
+            open.reset();
+        };
+        for (const auto& e : merged) {
+            if (e.kind == "host_down") cut_pair(e.host, e.other, true);
+            if (e.kind == "host_up") cut_pair(e.host, e.other, false);
+            if (e.kind == "link_down") cut_pair(e.host, e.other, true);
+            if (e.kind == "link_up") cut_pair(e.host, e.other, false);
+            const std::string observer = e.kind == "host_down" || e.kind == "host_up" ? e.other : e.host;
+            const auto parts = components();
+            if (parts.size() < 2) {
+                close(e.time_ms);
+                continue;
+            }
+            if (!open || open->sides != parts) {
+                close(e.time_ms);
+                open = Open{e.time_ms, parts, {}};
+            }
+            open->active.insert(observer);
+        }
+        close(-1);
+        if (lines.empty()) {
+            md += "The hosts could always see each other.\n";
+        } else {
+            md += "| From | To | For | Sides | What it was |\n|---|---|---|---|---|\n";
+            for (const auto& l : lines) md += l + "\n";
+            md += "\n" + std::to_string(partitions) +
+                  " partition(s) with a main on both sides. What both sides observed is merged into this log: the "
+                  "replicas that worked apart handed over their journals when they met again; the lineage that got "
+                  "furthest went on, the others forgot their work.\n";
+        }
+        return md;
+    }
+
+    std::string here_;
+    bool takeover_ = false;
+    std::string takeover_cause_;
+    bool finish_ = false;
+};
+
+PAGLETS_PAGLET(Chronicle)
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/examples/chronicle/chronicle_msgs.hpp [caption={The chronicle's messages, work and journal entries},label={lst:app-chronicle-messages}]
+\begin{lstlisting}[style=paglets-cpp,caption={The chronicle's messages, work and journal entries \src{cpp/examples/chronicle/chronicle\_msgs.hpp}},label={lst:app-chronicle-messages}]
+// Messages of the Mesh Chronicle (docs/examples/mesh-chronicle.md): a zombie
+// paglet that writes the life log of its mesh.
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace chronicle_msgs {
+
+// `start`: begin the chronicle. It lives `lifetime_ms`, samples the mesh
+// every `sample_ms` and delivers its life log to `sink` (`host:NAME`). The
+// timing of the protocol can be shortened for tests (0: the defaults).
+struct Start {
+    std::string sink;
+    std::int64_t lifetime_ms = 24LL * 3600 * 1000;
+    std::int64_t sample_ms = 10'000;
+    std::int64_t beat_ms = 0;
+    std::int64_t suspect_ms = 0;
+    std::int64_t round_ms = 0;
+    std::int64_t expand_ms = 0;  // how often the main looks for hosts without a replica
+};
+
+struct Started {
+    std::string group;
+    std::vector<std::string> hosts;  // where the replicas are
+};
+
+// The state of the work (replicated with every checkpoint).
+struct Work {
+    std::string sink;
+    std::int64_t lifetime_ms = 0;
+    std::int64_t sample_ms = 0;
+    std::int64_t started_ms = 0;      // when the group was created
+    std::int64_t samples = 0;         // progress
+    std::int64_t last_sample_ms = 0;  // the latest sample of the lineage
+    std::int64_t alive_ms = 0;        // time with a working main, summed over samples
+    std::vector<std::string> members;     // host key IDs
+    std::vector<std::string> names;       // their names, same order
+};
+
+// One entry of the journal: something the main observed.
+struct Event {
+    std::int64_t time_ms = 0;
+    std::string kind;   // begin, joined, host_up, host_down, link_down, link_up, takeover, end
+    std::string host;   // key ID: the host it is about (takeover: the new main's host)
+    std::string other;  // links: the other end; hosts: the main that saw it
+    std::string text;   // details: a failure, the cause of a takeover
+    std::int64_t gap_ms = 0;  // takeover: time since the lineage's latest sample
+    std::uint64_t term = 0;   // takeover: the new reign
+};
+
+struct StatusRequest {};
+
+struct Status {
+    std::string group;
+    std::string role;   // of this replica
+    std::string replica;  // this replica's host (key ID)
+    std::uint32_t replicas = 0;  // replicas it knows of
+    std::string main;   // host name of the main this replica follows (itself if main)
+    std::int64_t samples = 0;
+    std::int64_t started_ms = 0;
+    std::int64_t lifetime_ms = 0;
+    std::int64_t events = 0;  // entries in this replica's journal
+};
+
+struct FinishRequest {};
+
+struct FinishReply {
+    bool accepted = false;  // only the acting main finishes; others name it
+    std::string main;
+};
+
+}  // namespace chronicle_msgs
+\end{lstlisting}
+% /snippet
+
+The \code{start} handler returns a status code instead of a reply when
+the group exists or the arguments are wrong (\code{bad\_state},
+\code{invalid\_argument}); otherwise it fills the \code{Work}, the state
+that every checkpoint replicates, shortens the protocol's timing when
+asked (the tests do), and calls \code{start\_group(sink, work, timing)}.
+The group starts after \code{mesh-info} answered, so the reply knows the
+group ID but not the hosts; \code{Started.hosts} stays empty.
+\code{status} reads the protocol state through \code{replica()}: the
+role, the members, the main it follows, the rank's progress and the
+journal.
+\code{finish} is accepted on the acting main only.
+
+The base class calls \code{step} on the acting main, with a pause of
+\code{step\_ms} between steps, which the chronicle sets to the sample
+interval (\code{t.step\_ms = s.sample\_ms}). A step may wait for a reply, as this one
+waits for the landscape; if the main stopped meanwhile, its
+\code{finished} call is ignored. \code{sample} compares the fresh
+landscape with the view derived from \code{journal\_events()}, the merged
+journal of every lineage, not with the work of the current lineage, so
+that after a partition the winner sees what the other side recorded.
+Every observation is one \code{Event} written with \code{observe\_value},
+which the base class accepts on the acting main only. \code{progress} is
+the number of samples; when lineages meet, a finished one wins, then the
+one with more progress, then the later reign (Section~\ref{sec:zombies}).
+\code{on\_role} notes a takeover for the next sample and notifies the
+owner when the replica delivers. \code{result} builds the life log from
+the final work and the merged journal: a change that two lineages both
+recorded within two sample intervals is one event, lost connections
+become intervals per pair of hosts, and the separations are the
+connected components of the hosts under the recorded cuts, each side
+marked as worked or silent, which tells a partition (a main on both
+sides) from a crash. The \code{Work} is small on purpose, names and
+counters, because the winner's work replaces the loser's after a
+partition; what must not be lost goes into the journal.

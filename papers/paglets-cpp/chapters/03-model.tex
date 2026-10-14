@@ -1,4 +1,658 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+A \paglet{} is a WebAssembly module together with one instance of it.
+This chapter takes that sentence apart: what names a \paglet{} and who
+runs it, how it receives and sends messages, how payloads are typed, how
+it reaches other \paglet{}s, and what it can and cannot do. The chapters
+that follow build on these definitions: the lifecycle
+(Section~\ref{sec:lifecycle}), moves (Section~\ref{sec:movement}),
+communication while a \paglet{} moves (Section~\ref{sec:communication})
+and the mesh (Section~\ref{sec:mesh}).
+
+\subsection{A module and one instance}\label{sec:model-instance}
+
+The \emph{module} is a core WebAssembly module for \code{wasm32}, compiled
+by clang from C++ against the guest SDK (\code{cpp/sdk/}). It has exactly
+one linear memory, exported as \code{memory}, and a small set of exports
+the host calls (Section~\ref{sec:model-imports}). The host names a module
+by the SHA-256 hash of its bytes, written in hex; adding the same bytes
+twice is a no-op, and every \paglet{} record, every sender record and
+every passport refers to its module by this hash.
+
+The \emph{instance} is one WebAssembly instance of that module. The SDK
+keeps a single static object of the \paglet{}'s class in the module's
+linear memory. That object, everything it owns on the heap, the
+registered handlers and the continuations of outstanding requests are all
+bytes of that memory. The \paglet{}'s state is therefore its linear
+memory plus the module's exported mutable globals (for C++ guests, the
+stack pointer). A \emph{memory image} of these is all a host needs to
+store a \paglet{}, to copy it, or to send it to another host
+(Section~\ref{sec:movement}); no code in a \paglet{} serializes its
+state.
+
+Three values identify a \paglet{} to its host and to the mesh:
+
+\begin{itemize}
+\item The \emph{\paglet{} ID}: 32 lowercase hex digits, 16 random bytes
+  drawn when the \paglet{} is created, or chosen in advance when a
+  passport names it.
+\item The \emph{owner}: a string the host assigns. On a single host it is
+  \code{local}; in a mesh it is the key ID of the owner whose key signed
+  the launch. Children and clones have the owner of their creator.
+\item The \emph{trust class}: \code{roaming}, \code{resident} or
+  \code{system} (Table~\ref{tab:model-trust}). The host assigns it; a
+  \paglet{} never claims its own class, and a \paglet{} that arrives from
+  another host is always roaming. Children are roaming. A clone keeps its
+  creator's class, except that a clone of a system \paglet{} is roaming;
+  a clone made on another host (Section~\ref{sec:movement}) is only
+  allowed for a roaming \paglet{}.
+\end{itemize}
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{68mm}lp{32mm}}
+\toprule
+Class & Origin & Moves & Import set \\
+\midrule
+\code{system} & \raggedright built into the host (native C++), or a module the ledger trusts for this class & never & \raggedright standard plus \code{paglets\_sys} \tabularnewline
+\code{resident} & \raggedright meant for modules an admin installs on one host; the ledger can admit modules to the class, but no command or mesh operation creates a resident \paglet{} today & no & standard \tabularnewline
+\code{roaming} & \raggedright created by an owner or by another \paglet{}, or arrived from another host & yes & standard \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{Trust classes. In the current release every system \paglet{} is native; the runtime's C++ API (\code{CreateOptions::trust}) accepts every class and the tests use it, but no command or mesh operation creates a resident \paglet{}. The classes exist in the runtime, the ledger's module trust and the sender records.}
+\label{tab:model-trust}
+\end{table}
+
+A \paglet{} launched into a mesh carries a \emph{passport}: a document
+signed by the owner's key that names the mesh, the owner, the module hash
+and the \paglet{} ID, extended by a host-signed link for every child or
+clone. A host verifies it against the ledger before it accepts the
+\paglet{}, and it travels with the \paglet{}. A \paglet{} without one,
+such as one started by \code{paglets-host run} on a single host, cannot
+move. Section~\ref{sec:mesh-passports} gives the contents and the checks.
+
+Figure~\ref{fig:model-architecture} shows where an instance runs. The host
+process, \code{paglets-host}, starts one \emph{worker process} per
+scheduler lane (two by default) and places each active \paglet{} on one of
+them. The operating system sandboxes the workers: a seccomp filter on
+Linux, a sandbox profile on macOS, a job object with a restricted token on
+Windows. A worker can neither open files nor create sockets nor start
+programs (on Windows the restricted token stops new processes and writes
+to ordinary files, but reading files and network access are not
+restricted yet); every effect of a \paglet{} passes through its host.
+Calls between the two processes go over two shared-memory rings, one per
+direction; a socket pair (two pipes on Windows) carries wake-ups and
+terminations. The embedded WAMR engine runs the instances. For tests and debugging,
+\code{--in-process} runs them inside the host process instead.
+
+\begin{figure}[htbp]
+\centering
+\pgfdeclarelayer{background}
+\pgfsetlayers{background,main}
+\begin{tikzpicture}[node distance=3.5mm and 36mm]
+  \node[plain,text width=44mm] (module) {\textbf{Paglet module} (Wasm)\\[1pt]\footnotesize linear memory: the \paglet{} object, its handlers, its continuations};
+  \node[plain,text width=44mm,below=of module] (sdk) {\textbf{Guest SDK}\\[1pt]\footnotesize \code{Paglet}, \code{Router}, \code{Message}, \code{Endpoint}, MessagePack codecs};
+  \node[plain,text width=44mm,below=of sdk] (wamr) {\textbf{WAMR engine}\\[1pt]\footnotesize instances, traps, time budgets, memory images};
+  \begin{pgfonlayer}{background}
+  \node[box,fit=(module)(sdk)(wamr),inner sep=7pt,label={[font=\small\bfseries\color{pagletsBlue}]above:Worker process (sandboxed)}] (worker) {};
+  \end{pgfonlayer}
+
+  \node[plain,text width=44mm,right=of module] (runtime) {\textbf{Runtime}\\[1pt]\footnotesize mailboxes, capability tables, timers, images, scheduler};
+  \node[plain,text width=44mm,below=of runtime] (system) {\textbf{System \paglet{}s}\\[1pt]\footnotesize files, directory, grants, mesh-info, \ldots};
+  \node[plain,text width=44mm,below=of system] (node) {\textbf{Mesh node}\\[1pt]\footnotesize moves, location records, ledger, channels};
+  \begin{pgfonlayer}{background}
+  \node[box,fit=(runtime)(system)(node),inner sep=7pt,label={[font=\small\bfseries\color{pagletsBlue}]above:Host process (\code{paglets-host})}] (host) {};
+  \end{pgfonlayer}
+
+  \draw[arrow] (host.west|-module) -- node[event,above,text width=28mm,font=\scriptsize\color{pagletsMuted}]{\code{paglets\_on\_event}\\\code{paglets\_on\_message}} (worker.east|-module);
+  \draw[arrow] (worker.east|-sdk) -- node[event,above,text width=28mm,font=\scriptsize\color{pagletsMuted}]{\code{send}, \code{request}, \code{reply}, \code{lifecycle}, \ldots} (host.west|-sdk);
+  \draw[both] (worker.east|-wamr) -- node[event,above,text width=28mm,font=\scriptsize\color{pagletsMuted}]{memory images} (host.west|-wamr);
+  \node[event,text width=60mm] at ($(worker.south east)!0.5!(host.south west)+(0,-6mm)$) {Paglet ABI v1: MessagePack documents in linear memory, carried between the processes over shared-memory rings};
+  \draw[dashedarrow] (host.east) -- ++(7mm,0) node[event,right,text width=12mm]{other hosts};
+\end{tikzpicture}
+\caption{A \paglet{} instance in a worker process and the host runtime. The host calls the module's handler exports; the SDK calls the fourteen imports of the \code{paglets} module, and the guest's C library the WASI subset of Table~\ref{tab:model-imports}. Nothing else crosses the boundary.}
+\label{fig:model-architecture}
+\end{figure}
+
+\subsection{A first \paglet{}}\label{sec:model-hello}
+
+Listing~\ref{lst:hello} is the smallest example of the repository. A
+\paglet{} is a class derived from \code{paglets::Paglet}, registered with
+\code{PAGLETS\_PAGLET} at namespace scope. Its constructor runs once,
+when the host delivers the \code{created} event, and never again: after a
+restore from a memory image the constructed object is already in the
+memory. The constructor is where handlers are registered.
+
+% snippet: cpp/examples/hello/hello.cpp [float,caption={The hello \paglet{}},label={lst:hello}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The hello \paglet{} \src{cpp/examples/hello/hello.cpp}},label={lst:hello}]
+// Smallest paglet: answers "greet" requests and counts them.
+
+#include <paglets/paglet.hpp>
+
+#include <string>
+
+namespace {
+
+class Hello : public paglets::Paglet {
+public:
+    Hello() {
+        router().on<std::string>("greet", [this](const std::string& name, paglets::Message& m) {
+            ++greetings_;
+            m.reply("hello, " + name + " (greeting " + std::to_string(greetings_) + ")");
+        });
+    }
+
+    void on_created(paglets::Started&) override {
+        auto info = paglets::self_info();
+        paglets::log("hello paglet created as " + (info ? info->id : std::string("?")));
+    }
+
+private:
+    std::uint32_t greetings_ = 0;
+};
+
+}  // namespace
+
+PAGLETS_PAGLET(Hello)
+\end{lstlisting}
+% /snippet
+
+\code{router().on<std::string>("greet", ...)} registers a handler for
+requests named \code{greet} whose body decodes as a MessagePack string.
+The handler receives the decoded body and the \code{Message}, and answers
+with \code{m.reply(...)}, which the SDK encodes as MessagePack again. The
+count of greetings is an ordinary member: nothing saves it, it is part of
+the memory image. \code{on\_created} is one of the lifecycle hooks of
+Section~\ref{sec:lifecycle}; here it asks for the \paglet{}'s own record
+with \code{self\_info()} and writes the ID to the host log, where a
+\paglet{}'s \code{stdout} and \code{stderr} go as well. One CMake call
+builds the module: \code{paglets\_add\_module(hello SOURCES hello/hello.cpp)}
+(the repository's line adds \code{INTERFACE hello/interface.json}, the
+interface description of Section~\ref{sec:tools}).
+\code{paglets-host run hello.wasm} with \code{--call greet '"world"'}
+creates a \paglet{} from it, sends the request and prints the reply as
+JSON: \code{greet -> "hello, world (greeting 1)"}. Bodies on the command
+line are JSON; the host converts them to MessagePack and the replies back.
+
+\subsection{Messages, requests and timers}\label{sec:model-messages}
+
+Every \paglet{} has a mailbox. The host delivers its messages one at a
+time, by priority (0 to 7, highest first, default 3) and in arrival order
+within a priority; a mailbox holds at most 1024 messages. A \paglet{}
+never sees two calls at once: handlers and lifecycle hooks run one after
+the other, never concurrently, and the host takes memory images only
+between two calls. A \paglet{} shares memory with nothing; its only
+effects are the messages it sends, the \paglet{}s it creates, the timers
+it sets, its log lines and the lifecycle operations it requests. A handler
+must not block, because nothing it could wait for arrives while it runs: a
+reply, a service's answer or a timer is a later message. A handler that
+runs longer than its time budget (5 seconds of elapsed time by default) is
+terminated and the \paglet{} fails.
+
+A delivered \code{Message} has a kind (\code{message}, \code{request},
+\code{reply} or \code{timer}), a name of up to 128 bytes, a payload, a
+priority, the capabilities that came with it, and for messages from other
+\paglet{}s, or from the host's own tools (ID \code{host}, trust
+\code{system}), a \emph{sender record} the host stamps on it: the
+sender's ID, owner, trust class, module hash and host. Replies, timers and
+reports from the host carry none. Three things can be sent:
+
+\begin{itemize}
+\item A \emph{message} is one-way: \code{endpoint.send(name, body)}. The
+  call fails at once with \code{denied}, \code{expired} or \code{quota}
+  when the endpoint does not allow the message, with \code{not\_found}
+  when the target has ended, and with \code{quota} when its mailbox is
+  full. With \code{SendOptions::async} the call returns as soon as the
+  document is well-formed and a failure arrives later as the hook
+  \code{on\_undelivered}; in a worker process this saves the round trip to
+  the host.
+\item A \emph{request} expects exactly one reply.
+  \code{request(name, body, on\_reply)} on an endpoint returns a
+  correlation ID and keeps \code{on\_reply}, the continuation. The
+  receiver gets the message with a one-shot \emph{reply capability}. The
+  reply arrives at priority 7 with a status: 0 and the payload for a real
+  reply; otherwise \code{timeout} (30 seconds by default),
+  \code{unknown\_message} (the receiver had no handler), \code{failed} (the
+  receiver trapped), \code{gone} (the receiver ended or dropped the reply
+  capability), or the error code the receiver's handler returned. A
+  request is never asynchronous in the sense above: the call waits for the
+  host to accept it.
+\item A \emph{timer}: \code{after(delay\_ms, name, body)} delivers a
+  message of kind \code{timer} to the \paglet{} itself after the delay.
+  The returned capability cancels the timer when dropped. A \paglet{}
+  holds at most 64 pending timers; they survive deactivation and wake a
+  deactivated \paglet{}.
+\end{itemize}
+
+The continuation is a \code{std::function} that the SDK stores in a map
+keyed by the correlation ID. The map lives in linear memory, so an
+outstanding request survives deactivation and moves: the reply reaches its
+continuation wherever the \paglet{} is when it arrives.
+Listing~\ref{lst:pingpong-bounce} shows the shape. \code{pong\_} is the
+parent's endpoint to the child, a capability
+(Section~\ref{sec:model-capabilities}); \code{pending\_run\_} holds the
+reply capability of the \code{run} request that started the rounds
+(Listing~\ref{lst:pingpong-roles}). The parent of the ping-pong example
+sends \code{ping} to its child and names the function that runs with the
+reply; that function checks the status, decodes the body and sends the
+next \code{ping}. No handler waits.
+
+% snippet: cpp/examples/ping_pong/ping_pong.cpp#bounce [float,caption={A request with a continuation, and a deferred reply answered from it},label={lst:pingpong-bounce}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A request with a continuation, and a deferred reply answered from it \src{cpp/examples/ping\_pong/ping\_pong.cpp}},label={lst:pingpong-bounce}]
+void bounce(std::uint32_t n) {
+    if (n >= target_) {
+        (void)paglets::reply_to(pending_run_, n);
+        (void)pong_.send("stop");
+        return;
+    }
+    auto sent = pong_.request("ping", n, [this](paglets::Message& reply) {
+        std::uint32_t value = 0;
+        if (!reply.ok() || !reply.decode(value)) {
+            paglets::log(paglets::abi::LogLevel::error,
+                         "ping failed: " + std::string(paglets::abi::error_name(reply.status())));
+            (void)pending_run_.drop();
+            return;
+        }
+        bounce(value);
+    });
+    if (!sent) (void)pending_run_.drop();
+}
+\end{lstlisting}
+% /snippet
+
+A request is answered once. The handler answers it directly with
+\code{reply} or \code{reply\_async} on the message, or it keeps the reply
+capability for later: \code{defer\_reply} returns it, and
+\code{reply\_to} answers with it from any later handler. This
+is the \emph{deferred reply} of Listing~\ref{lst:pingpong-roles}: the
+\code{run} handler cannot know its answer, which exists only after many
+rounds, so it defers the reply, and \code{bounce} answers it when the
+target is reached. A reply capability is an ordinary capability: it can be
+transferred to another \paglet{}, which then answers in the original
+receiver's place. Dropping it, as the error path of
+Listing~\ref{lst:pingpong-bounce} does, answers the requester \code{gone}
+at once instead of letting it wait for its timeout. A request that a
+handler handled but neither answered nor deferred is answered \code{gone}
+as well: the SDK drops the reply capability when the handler returns.
+
+% snippet: cpp/examples/ping_pong/ping_pong.cpp#roles [float,caption={The ping-pong handlers: a child from the same module, a deferred reply, an asynchronous reply},label={lst:pingpong-roles}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The ping-pong handlers: a child from the same module, a deferred reply, an asynchronous reply \src{cpp/examples/ping\_pong/ping\_pong.cpp}},label={lst:pingpong-roles}]
+PingPong() {
+    // Parent role.
+    router().on<std::uint32_t>("run", [this](std::uint32_t rounds, paglets::Message& m) -> std::int32_t {
+        if (pending_run_) return paglets::abi::bad_state;
+        auto child = paglets::create_child(std::uint32_t{0});
+        if (!child) return child.error();
+        pong_ = *child;
+        target_ = rounds;
+        pending_run_ = m.defer_reply();
+        bounce(0);
+        return paglets::abi::handled;
+    });
+    // Child role. The reply is asynchronous: in a worker process it does
+    // not wait for the host, and a failure would reach on_undelivered.
+    router().on<std::uint32_t>("ping", [](std::uint32_t n, paglets::Message& m) { m.reply_async(n + 1); });
+    router().on("stop", [](paglets::Message&) { (void)paglets::dispose(); });
+}
+\end{lstlisting}
+% /snippet
+
+\subsection{The router}\label{sec:model-router}
+
+\code{Paglet::on\_message} receives every delivery except replies that
+have a continuation and the host's reports (\code{on\_undelivered},
+\code{on\_move\_failed}, \code{on\_recovered}). Its default passes the
+message to the \paglet{}'s \code{Router}, a map from message names to
+handlers. \code{router().on(name, f)} registers \code{f} for a name;
+\code{router().otherwise(f)} catches the rest. Without either, a message
+is not handled: a one-way message is dropped, a request is answered
+\code{unknown\_message}. Timer messages go through
+the router under the name given to \code{after}. A handler either returns
+\code{void}, which counts as handled, or an \code{std::int32\_t}:
+\code{abi::handled} (0), \code{abi::not\_handled} (1), or a negative error
+code. For a request the result decides the reply when the handler has not
+replied itself: \code{not\_handled} makes the host answer
+\code{unknown\_message}, an error code is answered as that status. The
+typed form of Listing~\ref{lst:router-typed} decodes the payload into a
+\code{T} before the handler runs and answers \code{malformed} when the
+body does not decode as a complete value of that type; its handler takes
+\code{const T\&} and the \code{Message}.
+
+% snippet: cpp/sdk/include/paglets/paglet.hpp#router-typed [float,caption={The typed handler registration of the router},label={lst:router-typed}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The typed handler registration of the router \src{cpp/sdk/include/paglets/paglet.hpp}},label={lst:router-typed}]
+template <class T, class F>
+void on(std::string name, F&& f) {
+    handlers_[std::move(name)] = [g = std::forward<F>(f)](Message& m) -> std::int32_t {
+        T body{};
+        if (!m.decode(body)) return abi::malformed;
+        if constexpr (std::is_same_v<std::invoke_result_t<decltype(g)&, const T&, Message&>, void>) {
+            g(body, m);
+            return abi::handled;
+        } else {
+            return g(body, m);
+        }
+    };
+}
+\end{lstlisting}
+% /snippet
+
+\subsection{Typed payloads: schema headers and contracts}\label{sec:model-schemas}
+
+Payloads are MessagePack. The SDK encodes and decodes \code{bool}, the
+integer types, \code{float}, \code{double}, \code{std::string},
+\code{Bytes} (as MessagePack binary), \code{std::vector<T>} and
+\code{std::optional<T>} (nil when empty) by itself, which is why the hello
+and ping-pong \paglet{}s need no message definitions. Structured messages
+are plain C++ structs and enums in a \emph{schema header}: a struct is
+encoded as a map with its field names as keys, an enum as the name of its
+enumerator, and decoders skip keys they do not know, so a field added
+later keeps old senders and receivers compatible.
+Listing~\ref{lst:counter-messages} is the schema header of the counter
+example; Listing~\ref{lst:counter-handlers} shows its handlers using the
+types.
+
+% snippet: cpp/examples/counter/messages.hpp [float,caption={The counter's schema header: wire types as plain structs and enums},label={lst:counter-messages}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The counter's schema header: wire types as plain structs and enums \src{cpp/examples/counter/messages.hpp}},label={lst:counter-messages}]
+// Message types of the counter example paglet. Plain structs: the host encodes
+// them through C++26 reflection, the guest through code generated from this
+// header by schema_gen.
+
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace counter_msgs {
+
+enum class Mode { add, multiply };
+
+struct Increment {
+    std::int64_t by = 1;
+    std::string note;
+    Mode mode = Mode::add;
+};
+
+struct Status {
+    std::int64_t value = 0;
+    std::uint32_t history_size = 0;
+    std::vector<std::string> recent_notes;
+    std::optional<double> average_step;
+    std::uint32_t memory_pages = 0;
+};
+
+// Exercises every supported field type; the guest echoes it unchanged.
+struct Echo {
+    bool flag = false;
+    std::int8_t tiny = 0;
+    std::int32_t medium = 0;
+    std::uint64_t big = 0;
+    float ratio = 0.0f;
+    double precise = 0.0;
+    std::string text;
+    std::vector<std::uint8_t> blob;
+    std::vector<Increment> items;
+    std::optional<std::string> label;
+    std::optional<Status> nested;
+    Mode mode = Mode::add;
+};
+
+// Start arguments (optional): the value to begin with.
+struct Start {
+    std::int64_t value = 0;
+};
+
+// Allocates and keeps the given amount of memory (image size experiments).
+struct Bloat {
+    std::uint32_t kilobytes = 0;
+    std::uint8_t fill = 0;
+};
+
+}  // namespace counter_msgs
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/examples/counter/counter.cpp#handlers [float,caption={The counter's handlers},label={lst:counter-handlers}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The counter's handlers \src{cpp/examples/counter/counter.cpp}},label={lst:counter-handlers}]
+Counter() {
+    router().on<Increment>("increment", [this](const Increment& inc, paglets::Message& m) {
+        value_ = inc.mode == Mode::add ? value_ + inc.by : value_ * inc.by;
+        history_.push_back(inc);
+        m.reply(status());
+    });
+    router().on("status", [this](paglets::Message& m) { m.reply(status()); });
+    router().on<Echo>("echo", [](const Echo& echo, paglets::Message& m) { m.reply(echo); });
+    router().on<Bloat>("bloat", [this](const Bloat& bloat, paglets::Message& m) {
+        ballast_.emplace_back(std::size_t{bloat.kilobytes} * 1024, bloat.fill);
+        m.reply(status());
+    });
+    router().on("schema", [](paglets::Message& m) { m.reply(std::string(paglets_schema_json)); });
+    router().on<std::string>("log", [this](const std::string& text, paglets::Message& m) {
+        paglets::log(text);
+        m.reply(status());
+    });
+}
+\end{lstlisting}
+% /snippet
+
+The two sides of the wire get their codecs differently. The host is
+compiled with GCC~16 and C++26 reflection (\code{-freflection}); its codec
+(\code{wire/reflect.hpp}) walks the members of a struct at compile time
+and needs no code per type. The guest is compiled by clang for
+\code{wasm32-wasip1}, which has no reflection. So the build compiles the
+\emph{schema generator} (\code{tools/schema\_gen}) with GCC~16 once per
+schema header, named in CMake by \code{SCHEMA\_HEADER} and
+\code{SCHEMA\_NAMESPACE}; it reflects over the namespace and writes
+\code{<module>.schema.gen.hpp}, plain C++ encoders and decoders for every
+type, which the guest includes. The two codecs agree byte for byte. The
+generator also writes a JSON descriptor of the types, as
+\code{paglets\_schema\_json} in the header and as a file for tools. A host
+built without reflection (the \code{linux-host-only} preset) cannot run
+the generator and skips such modules with a warning.
+
+A \emph{contract} names a service's operations with their request and
+reply types. Listing~\ref{lst:calc-contract} declares one: a struct with a
+\code{static constexpr std::string\_view service} and one member function
+per operation, each taking the request type and returning the reply type.
+The functions are declared, never defined; they are a description. The
+system services of Section~\ref{sec:mesh} are contracts of this form in
+\code{cpp/common/include/paglets/services/}.
+
+% snippet: cpp/tests/guests/calc_contract.hpp [float,caption={A service contract},label={lst:calc-contract}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A service contract \src{cpp/tests/guests/calc\_contract.hpp}},label={lst:calc-contract}]
+// A test service contract: served natively by the host and by the calc_user
+// guest, called by both (tests/test_contract.cpp).
+
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace calc {
+
+struct AddRequest {
+    std::int64_t a = 0;
+    std::int64_t b = 0;
+};
+
+struct AddReply {
+    std::int64_t sum = 0;
+};
+
+struct DivRequest {
+    std::int64_t a = 0;
+    std::int64_t b = 0;
+};
+
+struct DivReply {
+    std::int64_t quotient = 0;
+    std::string served_by;
+};
+
+struct Contract {
+    static constexpr std::string_view service = "calc";
+    AddReply add(const AddRequest&);
+    // invalid_argument for b == 0.
+    DivReply divide(const DivRequest&);
+};
+
+}  // namespace calc
+\end{lstlisting}
+% /snippet
+
+For a contract the generator emits a \code{Client}, whose operations take
+a continuation that receives a decoded \code{Result<Reply>} together with
+the reply message (Listing~\ref{lst:calc-client}), and
+\code{serve(router, impl)}, which registers one handler per operation
+around ordinary member functions (Listing~\ref{lst:calc-operations}). The
+same header serves natively on the host;
+Section~\ref{sec:mesh-contracts} shows that side.
+
+% snippet: cpp/tests/guests/calc_user.cpp#operations [float,caption={Serving the contract: the operations the generated \code{serve} registers},label={lst:calc-operations}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Serving the contract: the operations the generated \code{serve} registers \src{cpp/tests/guests/calc\_user.cpp}},label={lst:calc-operations}]
+paglets::Result<calc::AddReply> add(const calc::AddRequest& q, Message&) { return calc::AddReply{q.a + q.b}; }
+
+paglets::Result<calc::DivReply> divide(const calc::DivRequest& q, Message&) {
+    if (q.b == 0) return std::unexpected(paglets::abi::invalid_argument);
+    return calc::DivReply{q.a / q.b, "guest"};
+}
+\end{lstlisting}
+% /snippet
+
+% snippet: cpp/tests/guests/calc_user.cpp#client [float,caption={Calling the contract through the generated client},label={lst:calc-client}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Calling the contract through the generated client \src{cpp/tests/guests/calc\_user.cpp}},label={lst:calc-client}]
+router().on<calc::DivRequest>("use_service", [](const calc::DivRequest& q, Message& m) -> std::int32_t {
+    auto endpoint = paglets::service("calc");
+    if (!endpoint) return endpoint.error();
+    paglets::Capability pending = m.defer_reply();
+    calc::Client client{*endpoint};
+    auto sent = client.divide(q, [pending](paglets::Result<calc::DivReply> r, Message&) mutable {
+        if (r) {
+            paglets::reply_to(pending, *r);
+        } else {
+            paglets::reply_to(pending, "error:" + std::string(paglets::abi::error_name(r.error())));
+        }
+    });
+    if (!sent) return sent.error();
+    return paglets::abi::handled;
+});
+\end{lstlisting}
+% /snippet
+
+\subsection{Capabilities and endpoints}\label{sec:model-capabilities}
+
+A \paglet{} has no address. Its ID names it in records and logs, but no
+import takes an ID as a destination. The only way to reach another
+\paglet{}, a service or a resource is a \emph{capability}: a positive
+\code{int32} handle into a table the host keeps for each \paglet{}. The
+guest cannot forge a handle, since the host checks every use against the
+table, and the table is host state that travels with the \paglet{} in its
+record, not inside the memory image. A capability has a kind
+(\code{endpoint}, \code{reply}, \code{timer}, and the resource kinds
+\code{dir}, \code{artifact}, \code{topic} and \code{pin} that system
+\paglet{}s hand out; the ABI also names a \code{file} kind, which no
+service of the current release hands out), a target, a list of operations, a
+transferable flag, and optionally an expiry, a number of uses left and a
+badge. \code{inspect()} returns this description.
+
+An \emph{endpoint} is a capability to send to one \paglet{} or service;
+its operations are the message names it admits, or \code{*}. A \paglet{}
+gets endpoints in a few ways only: handle 1 is always its endpoint to
+itself; \code{create\_child} and \code{clone} return an endpoint to the new
+\paglet{}; a message, a reply or the \code{Started} event of a child or
+clone can carry capabilities (\code{Message::take\_cap},
+\code{Started::caps}); every new \paglet{} receives non-transferable
+endpoints to the host's system services that offer one, listed in
+\code{self\_info().services} and found with \code{paglets::service(name)};
+and the \code{directory} service answers lookups of published names with
+endpoints. Passing a capability in a message transfers it: the sender's
+handle is invalid once the call succeeds and the receiver gets a handle of
+its own. Besides handle 1 and the service endpoints, a child gets exactly
+the capabilities its creator passes; it has no endpoint to its creator
+unless one is among them. \code{derive} makes a weaker copy: fewer operations, an
+earlier expiry, fewer uses, no transfer right, a badge the receiver sees
+on every message, or for \code{dir} capabilities a path below the
+directory; rights only shrink. \code{drop} releases a capability; dropping
+a timer cancels it, dropping a reply capability answers \code{gone}.
+Capabilities shown to a system \paglet{} for one message are \emph{lent}
+(\code{SendOptions::lend}) and stay with the sender. A \paglet{} holds at
+most 1024 capabilities. How endpoints keep working while their target
+moves is the subject of Section~\ref{sec:communication}.
+
+\subsection{What a \paglet{} can and cannot do}\label{sec:model-imports}
+
+The host checks a module statically before it instantiates it. The
+version marker \code{paglets\_abi\_v1} must be exported, and so must
+\code{memory}, the allocator pair \code{paglets\_alloc} and
+\code{paglets\_free}, and the two handlers \code{paglets\_on\_event} and
+\code{paglets\_on\_message}; every mutable global must be exported so that
+images can capture it; and every import must be in the import set of the
+trust class (Table~\ref{tab:model-imports}). A module that imports
+anything else is rejected at load time with a message naming the import.
+The import set is the whole of what a \paglet{} can do. There is no file
+system: the WASI subset preopens no directories, and \code{fd\_write} on
+\code{stdout} and \code{stderr} goes to the host log. There are no
+sockets. \code{proc\_exit} fails the \paglet{}. Host resources are reached
+by message, through the system \paglet{}s of Section~\ref{sec:mesh},
+which hand out resource capabilities under the mesh policy. The module
+\code{paglets\_sys}, meant for system \paglet{}s written as Wasm modules,
+is reserved: in the current release every system \paglet{} is native.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lp{95mm}}
+\toprule
+Module & Imports \\
+\midrule
+\code{paglets} & \raggedright \code{send}, \code{request}, \code{reply}; \code{cap\_derive}, \code{cap\_drop}, \code{cap\_inspect}, \code{cap\_list}; \code{create\_child}, \code{lifecycle} (dispose, deactivate, clone, dispatch, checkpoint, restart), \code{timer\_set}; \code{log}, \code{self\_info}, \code{now}, \code{random} \tabularnewline
+\code{wasi\_snapshot\_preview1} & \raggedright \code{args\_get}, \code{args\_sizes\_get}, \code{environ\_get}, \code{environ\_sizes\_get} (all empty); \code{clock\_res\_get}, \code{clock\_time\_get}, \code{random\_get}, \code{sched\_yield}; \code{proc\_exit}; \code{fd\_write}, \code{fd\_close}, \code{fd\_seek}, \code{fd\_fdstat\_get}, \code{fd\_prestat\_get}, \code{fd\_prestat\_dir\_name} \tabularnewline
+\code{paglets\_sys} & \raggedright reserved for system \paglet{}s as Wasm modules; a roaming or resident module that imports from it is rejected \tabularnewline
+\bottomrule
+\end{tabular}
+\caption{The import set of roaming and resident \paglet{}s: the fourteen functions of the \code{paglets} module and a WASI subset without files or sockets.}
+\label{tab:model-imports}
+\end{table}
+
+Everything a \paglet{} sends or receives is a MessagePack document in its
+own linear memory: the host copies a document into a buffer the guest
+allocates, and an import passes a pointer and a length that the host
+checks against the memory bounds. Documents are limited to 1~MB;
+Table~\ref{tab:model-limits} lists the other default limits. A trap, such
+as an out-of-bounds access, \code{unreachable}, stack exhaustion or an
+exceeded time budget, fails the \paglet{}: the host discards the instance,
+answers every request waiting on it with \code{failed}, and ends it. A
+trap is the \paglet{}'s own fault, so it does not resume from a stored
+image. When a worker process ends for another reason, the \paglet{} in
+the call fails as well; the other \paglet{}s on that worker resume from
+their last image, or fail if they have none.
+
+\begin{table}[htbp]
+\centering\small
+\begin{tabular}{lr}
+\toprule
+Limit & Default \\
+\midrule
+Message document & 1 MB \\
+Linear memory per \paglet{} & 16 MB \\
+Time per handler call (elapsed) & 5 s \\
+Mailbox length & 1024 messages \\
+Capabilities per \paglet{} & 1024 \\
+Pending timers per \paglet{} & 64 \\
+Children and clones per handler call & 16 \\
+Paglets of one owner per host & 10\,000 \\
+\bottomrule
+\end{tabular}
+\caption{Default limits of a host (\code{runtime::Config}, \code{wasm::Limits} and \code{abi::max\_document\_size}).}
+\label{tab:model-limits}
+\end{table}
+
+These rules give the model its shape. A \paglet{} is a single-threaded
+object that reacts to messages, holds its whole state in one memory, and
+reaches the outside only through handles the host gave it. The host can
+stop it between any two messages, write its memory to disk, and start it
+again elsewhere, and the \paglet{} cannot tell the difference except
+through the events of the next section.

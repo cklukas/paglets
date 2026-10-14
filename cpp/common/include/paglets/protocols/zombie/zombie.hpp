@@ -358,9 +358,11 @@ constexpr bool is_allowed(Role from, Cause cause, Role to) {
     return false;
 }
 
+// --8<-- [start:step]
 // The transition function: applies one input to a replica and returns what
 // the environment must do, in order.
 inline Outputs step(State& s, const Input& input);
+// --8<-- [end:step]
 
 // -- encoding (MessagePack arrays) ----------------------------------------------
 

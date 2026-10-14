@@ -32,6 +32,7 @@ struct Options {
     std::string program = "paglets-host";  // in shell commands
 };
 
+// --8<-- [start:app]
 class App {
 public:
     App(Options options, client::Identity identity);
@@ -49,6 +50,7 @@ public:
 
     // The current model as JSON text.
     std::string model() const;
+    // --8<-- [end:app]
 
 private:
     struct HostLink;

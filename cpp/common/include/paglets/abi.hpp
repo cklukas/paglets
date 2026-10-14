@@ -79,6 +79,7 @@ inline constexpr std::string_view error_name(std::int32_t code) {
 inline constexpr std::int32_t handled = 0;
 inline constexpr std::int32_t not_handled = 1;
 
+// --8<-- [start:events]
 enum class EventKind : std::int32_t {
     created = 1,
     activated = 2,
@@ -94,6 +95,7 @@ enum class MessageKind : std::int32_t { message = 0, request = 1, reply = 2, tim
 // v1.2: checkpoint (store an image right after this handler) and restart
 // (whether the paglet comes back after its host restarts, RestartArg).
 enum class LifecycleOp : std::int32_t { dispose = 1, deactivate = 2, clone = 3, dispatch = 4, checkpoint = 5, restart = 6 };
+// --8<-- [end:events]
 
 enum class LogLevel : std::int32_t { debug = 0, info = 1, warning = 2, error = 3 };
 
@@ -221,6 +223,7 @@ struct ChildSpec {
     std::vector<std::int32_t> caps;
 };
 
+// --8<-- [start:event-documents]
 // Event documents. `created` and `cloned` share the args/caps fields.
 struct StartEvent {
     std::vector<std::uint8_t> args;
@@ -236,6 +239,7 @@ struct ArrivedEvent {
 struct DispatchingEvent {
     std::string destination;
 };
+// --8<-- [end:event-documents]
 
 // Lifecycle arguments.
 struct DeactivateArg {
@@ -254,6 +258,7 @@ struct DispatchArg {
     std::string destination;
 };
 
+// --8<-- [start:restart]
 // v1.2: the restart policy. With `restart`, the host stores the paglet's
 // images and brings it back from the last one after a restart (the
 // default); without, the paglet ends with its host process. With
@@ -270,6 +275,7 @@ struct Recovered {
     std::int64_t image_ms = 0;      // when the image it came back from was stored (Unix milliseconds)
     std::int64_t restarted_ms = 0;  // when the host restarted (Unix milliseconds)
 };
+// --8<-- [end:restart]
 
 // v1.1: payload of `paglets.move_failed`, sent to a paglet whose dispatch,
 // or clone to another host, did not happen. After a failed dispatch the

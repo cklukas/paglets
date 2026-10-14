@@ -329,6 +329,7 @@ void Node::Impl::start_move(runtime::Departure d) {
     if (!o.passport->root().manifest.is_nil()) manifest = mesh::parse_manifest(o.passport->root().manifest);
     const mesh::Principal principal{d.state.id, d.state.owner, d.state.module, "roaming"};
     std::vector<std::string> why_not;
+    // --8<-- [start:residency]
     // Data residency (planning/cpp-residency.md): a paglet that read a root
     // whose content stays on this host does not leave.
     for (const auto& mark : d.state.marks) {
@@ -337,6 +338,7 @@ void Node::Impl::start_move(runtime::Departure d) {
         if (rule != ledger.state().residency.end() && rule->second.host_only)
             return fail("data residency: the content of root " + rule->first + " stays on this host");
     }
+    // --8<-- [end:residency]
     auto hosts = candidates(*ticket, principal, manifest, d.state.marks, why_not);
     if (hosts.empty()) {
         std::string why = "no host matches " + ticket->target;
@@ -545,6 +547,7 @@ void Node::Impl::on_move_offer(const mesh::PublicKey& from, const mesh::Fields& 
         !passport_bytes || !state_bytes || manifest == nullptr) {
         return refuse("malformed offer");
     }
+    // --8<-- [start:accept]
     if (*mesh_id != ledger.mesh() || *body_from != from || *to != key.public_key() ||
         static_cast<std::uint64_t>(*body_request) != request || (*kind != "dispatch" && *kind != "clone")) {
         return refuse("offer not for this host");
@@ -562,6 +565,7 @@ void Node::Impl::on_move_offer(const mesh::PublicKey& from, const mesh::Fields& 
     if (runtime.info(*paglet)) return refuse("paglet " + paglet->substr(0, 8) + " is here already");
     auto image = parse_image_manifest(*manifest, *module);
     if (!image) return refuse("malformed page manifest");
+    // --8<-- [end:accept]
 
     Incoming in;
     in.state = std::move(*state);

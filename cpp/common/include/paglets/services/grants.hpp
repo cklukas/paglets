@@ -21,6 +21,7 @@
 
 namespace paglets::services::grants {
 
+// --8<-- [start:request]
 struct Item {
     std::string service;           // files, server-info, ...
     std::vector<std::string> ops;  // files: rights (read, write, create, delete)
@@ -45,6 +46,7 @@ struct Answer {
     std::int64_t expires_ms = 0;
     std::string reason;
 };
+// --8<-- [end:request]
 
 struct StatusRequest {
     std::string request;

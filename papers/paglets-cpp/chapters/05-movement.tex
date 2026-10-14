@@ -1,4 +1,693 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-To be written.
+A \paglet{} moves as a memory image. This chapter says what that image
+holds and what it leaves behind, how a \paglet{} names its destination,
+what the two hosts do between the call to \code{dispatch} and the
+\code{arrived} event on the other side, and how clones, deactivation and
+host restarts use the same image. Section~\ref{sec:lifecycle} gave the
+events a \paglet{} sees around a move; here the view is the hosts'.
+
+\subsection{What moves: the memory image}\label{sec:movement-image}
+
+An instance of a WebAssembly module has three kinds of mutable state: its
+linear memory, its mutable globals, and the stack of the function calls in
+progress. A \paglet{} is the first two. The host takes an image only at a
+quiescent point, between two handler calls, when no guest function runs
+(Section~\ref{sec:model}); there is no call stack to save, and no native
+stack, register or thread belongs to the \paglet{}. Everything the
+\paglet{} keeps between messages lives in its linear memory: the
+\code{Paglet} object with its members, the heap, the C++ shadow stack. The
+host does not know what the bytes mean, and the \paglet{} writes no
+serialization code: the journey's journal of Section~\ref{sec:lifecycle}
+is a \code{std::vector} of structs in a member, and it arrives with the
+\paglet{}.
+
+% snippet: cpp/host/include/paglets/wasm/snapshot.hpp#image [float,caption={A memory image},label={lst:movement-image}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A memory image \src{cpp/host/include/paglets/wasm/snapshot.hpp}},label={lst:movement-image}]
+struct GlobalValue {
+    std::string name;       // export name
+    std::uint8_t type = 0;  // ValType byte
+    std::uint64_t bits = 0;
+};
+
+struct PageEntry {
+    bool zero = true;
+    Digest hash{};  // unset for zero pages
+};
+
+struct Snapshot {
+    Digest module_hash{};
+    std::uint32_t page_count = 0;
+    std::vector<GlobalValue> globals;
+    std::vector<PageEntry> pages;    // page_count entries
+    std::vector<std::uint8_t> data;  // non-zero pages, concatenated in order
+
+    std::uint32_t data_pages() const { return static_cast<std::uint32_t>(data.size() / page_size); }
+};
+\end{lstlisting}
+% /snippet
+
+Listing~\ref{lst:movement-image} is the image. It names the module by its
+SHA-256 hash, holds the number of 64\,KB pages of linear memory and the
+value of every mutable global by export name, and for each page either the
+mark ``zero'' or the page's SHA-256 hash with its content. The capture
+(Listing~\ref{lst:movement-capture}) leaves zero pages out, the untouched
+part of a \paglet{}'s memory, and hashes the rest. The hashes serve twice:
+the receiving host checks every page against them, and it skips pages it
+already holds (Section~\ref{sec:movement-protocol}).
+
+% snippet: cpp/host/src/wasm_snapshot.cpp#capture [float,caption={Capturing an image},label={lst:movement-capture}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Capturing an image \src{cpp/host/src/wasm\_snapshot.cpp}},label={lst:movement-capture}]
+std::expected<Snapshot, std::string> capture(Instance& instance) {
+    const ModuleInfo& info = instance.module()->info();
+    if (auto ready = check_snapshot_ready(info); !ready) {
+        return std::unexpected(ready.error());
+    }
+
+    Snapshot snap;
+    snap.module_hash = instance.module()->hash();
+    for (const Global& g : info.globals) {
+        if (!g.is_mutable || g.imported) continue;
+        auto bits = instance.global_bits(*g.export_name);
+        if (!bits) return std::unexpected(bits.error());
+        snap.globals.push_back({*g.export_name, static_cast<std::uint8_t>(g.type), *bits});
+    }
+
+    const std::span<std::uint8_t> mem = instance.memory();
+    snap.page_count = static_cast<std::uint32_t>(mem.size() / page_size);
+    snap.pages.resize(snap.page_count);
+    for (std::uint32_t p = 0; p < snap.page_count; ++p) {
+        const auto page = mem.subspan(std::size_t{p} * page_size, page_size);
+        if (is_zero_page(page)) continue;
+        snap.pages[p].zero = false;
+        snap.pages[p].hash = sha256(page);
+        snap.data.insert(snap.data.end(), page.begin(), page.end());
+    }
+    return snap;
+}
+\end{lstlisting}
+% /snippet
+
+Restoring an image instantiates the module, grows the memory to the
+image's page count, copies the pages in and sets the globals
+(\code{restore}, in the same file as the capture). The host does not call
+\code{\_initialize} for a restore, but the engine does for every module
+that imports WASI, which every guest built with the SDK does; the image
+then overwrites whatever the initializer and the C++ static constructors
+wrote. A side effect the initializer has through an import, such as a log
+line, therefore happens again on every host the \paglet{} arrives on.
+Only its first run, when the original \paglet{} was created, leaves a
+trace in memory; clones start from the original's image.
+
+\subsubsection{Globals}
+
+The host cannot tell which mutable globals carry state a guest depends on
+between handlers, and it does not try to. C and C++ guests compiled with
+clang for \code{wasm32} keep their shadow stack pointer in a mutable
+global, \code{\_\_stack\_pointer}, which is back at its initial value
+between handlers; another toolchain may keep live state in a global. So
+the rule is that every mutable global a module defines must be exported,
+and \code{wasm-ld} does not export \code{\_\_stack\_pointer} unless asked.
+The guest build (\code{cpp/cmake/PagletsGuest.cmake}) links every guest
+with \code{-Wl,--export=\_\_stack\_pointer}, and the host checks the rule
+statically when a module enters its store, before any instance exists
+(Listing~\ref{lst:movement-snapshot-ready}).
+
+% snippet: cpp/host/src/wasm_binary.cpp#snapshot_ready [float,caption={The check that a module can be imaged},label={lst:movement-snapshot-ready}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The check that a module can be imaged \src{cpp/host/src/wasm\_binary.cpp}},label={lst:movement-snapshot-ready}]
+std::expected<void, std::string> check_snapshot_ready(const ModuleInfo& info) {
+    std::string missing;
+    for (const auto& g : info.globals) {
+        if (g.is_mutable && !g.imported && !g.export_name) {
+            if (!missing.empty()) missing += ", ";
+            missing += "#" + std::to_string(g.index);
+        }
+    }
+    if (!missing.empty()) {
+        return std::unexpected("mutable globals must be exported for memory images; not exported: " + missing +
+                               " (link guests with -Wl,--export=__stack_pointer)");
+    }
+    return {};
+}
+\end{lstlisting}
+% /snippet
+
+One requirement the host cannot check: a module must not change its
+function tables at run time, because function pointers in C++ are table
+indices, and they stay meaningful across an image only while the table is
+as the module defined it. Modules produced by clang satisfy this; the ABI
+states it as a requirement (Appendix~\ref{app:abi}).
+
+\subsubsection{Size and portability}
+
+Linear memory is limited to 256 pages, 16\,MB
+(\code{wasm::Limits::max\_memory\_pages}), and \code{restore} refuses an
+image with more pages. Memory that a \paglet{} grew within the limit is
+part of the image; its page count travels. The serialized form
+(\code{PGIMG001}) is the same bytes on every host, and
+\code{deserialize} checks every page hash before it returns. An image is
+independent of CPU architecture and operating system because the module
+is: the live mesh of Section~\ref{sec:evaluation} moves \paglets{}
+between macOS on arm64 and Linux on aarch64 hosts without any step that
+depends on either.
+
+\subsection{What does not move}\label{sec:movement-record}
+
+Besides the image, the host keeps a record for every \paglet{}: its ID,
+module, trust class and owner, the capability table, the handle and
+correlation counters, timers, requests in flight, residency marks and the
+restart policy. Handles are host state: the \paglet{} holds an \code{i32},
+the host holds what it stands for (Section~\ref{sec:model}). For a move
+the record becomes the travelling state of
+Listing~\ref{lst:movement-travel-state}, which the source host sends
+beside the image.
+
+% snippet: cpp/host/include/paglets/runtime/mobility.hpp#travel_state [float,caption={The state that travels beside the image},label={lst:movement-travel-state}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The state that travels beside the image \src{cpp/host/include/paglets/runtime/mobility.hpp}},label={lst:movement-travel-state}]
+// A paglet's state apart from its memory image, as it travels.
+struct TravelState {
+    PagletId id;
+    std::string module;  // hex hash
+    std::string trust;   // roaming, resident
+    std::string owner;
+    std::int32_t next_handle = 2;
+    std::uint64_t next_correlation = 1;
+    std::uint64_t next_timer = 1;
+    std::int64_t checkpoint_ms = -1;
+    std::vector<std::pair<std::string, std::int32_t>> services;   // default service endpoints: name, handle
+    std::vector<std::pair<std::int32_t, Cap>> caps;               // every capability, endpoints with host hints
+    std::vector<std::pair<std::uint64_t, std::int64_t>> pending;  // requests in flight: correlation, ms left
+    std::vector<std::string> marks;                               // data residency marks
+    bool restart = true;                                          // restart policy (abi::RestartArg)
+    bool notify_recovered = false;
+};
+\end{lstlisting}
+% /snippet
+
+A capability may stand for a resource of the host it was made on. The
+destination therefore rebuilds the capability table entry by entry (the
+runtime's \code{prepare\_arrival}); Table~\ref{tab:movement-caps} says
+what becomes of each kind. The handle
+numbers stay the same, so handles the \paglet{} stored in its memory
+remain valid. An entry the destination cannot rebuild is dropped, and the
+\code{arrived} event lists it in \code{lost}, as
+\code{handle 7: dir data/docs}, so the \paglet{} can ask for it again or
+give up on that work.
+
+\begin{table}[htbp]
+\centering\small
+\caption{Capabilities on arrival (\code{Runtime::prepare\_arrival}, \code{Node::Impl::recreate}).}
+\label{tab:movement-caps}
+\begin{tabular}{p{0.40\linewidth}p{0.52\linewidth}}
+\toprule
+Capability & On the destination \\
+\midrule
+Endpoint to a \paglet{} & kept; it names the host its target is on \\
+Default endpoint to a system service & replaced by the destination's endpoint to the same service, under the same handle; lost when the destination does not run the service \\
+Reply capability & kept \\
+Timer & re-armed for its time \\
+Resource from a grant (a \code{dir} of the \code{files} service, an endpoint to a system service that a grant gave) & re-created from the grant when the grant is the \paglet{}'s own, not expired and covers the destination; narrowings the \paglet{} made stay \\
+Pin & kept: it refers to the pinned \paglet{}, and every host has a locator \\
+Artifact & kept: it names the host that holds the content \\
+Anything else & lost; listed in \code{ArrivedEvent::lost} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two host resources are outside the table. The key-value store of the
+\code{storage} service is a directory of the host; the runtime removes it,
+together with the \paglet{}'s scratch directory, when a move commits
+(\code{finish\_departure} in \code{cpp/host/src/runtime.cpp}). A \paglet{}
+that needs data on the next host carries it in memory or shares it as an
+artifact (Section~\ref{sec:mesh}). The compiled form of the module does
+not move either: every host translates the module for its own engine.
+
+\subsection{Transfer tickets}\label{sec:movement-tickets}
+
+\code{paglets::dispatch(destination)} takes a transfer ticket, a string
+of the form
+\begin{center}
+\code{TARGET[?retries=N\&arrival=active|inactive]}
+\end{center}
+(Table~\ref{tab:movement-tickets}). The call returns at once; the move
+begins when the handler returns. It returns an error without moving
+anything when the host is not in a mesh (\code{unsupported}), when the
+\paglet{} is a system or resident \paglet{} (\code{denied}; only roaming
+\paglets{} move), when another lifecycle operation is already pending in
+this handler (\code{bad\_state}), or while the \paglet{} is pinned
+(\code{pinned}, Section~\ref{sec:communication}).
+
+\begin{table}[htbp]
+\centering\small
+\caption{Transfer tickets (\code{parse\_ticket} and \code{candidates} in \code{cpp/host/src/node/movement.cpp}).}
+\label{tab:movement-tickets}
+\begin{tabular}{p{0.30\linewidth}p{0.62\linewidth}}
+\toprule
+Target & Hosts it names \\
+\midrule
+a host name, a key ID, or a prefix of a key ID of at least 8 hex digits & that host \\
+\code{label:L} & every host with label \code{L}, in random order \\
+\code{offer:S} or \code{offer:S.OP} & the hosts that offer service \code{S} (operation \code{OP}), the least loaded first \\
+\code{any} & every other host, in random order \\
+\midrule
+\code{?retries=N} & try at most \code{N} of the matching hosts, 1 to 16 (default 3) \\
+\code{?arrival=inactive} & store the \paglet{} on arrival; it runs when its next message comes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The source host turns the ticket into a list of candidates. It takes the
+enrolled hosts other than itself that match the target and leaves out
+hosts that run another mesh protocol or paglet ABI, or an older minor ABI
+version (the \paglet{} may use newer imports). It then applies the mesh's
+rules: a host where an item of the \paglet{}'s manifest would be denied is
+skipped unless a grant for that host covers it, and a host that a
+residency rule excludes is skipped (Section~\ref{sec:movement-code}).
+Hosts that are up come first, and the list is cut to \code{retries}. Every
+host left out is remembered with its reason; when no candidate remains,
+the \paglet{} sees them all: \code{no host matches label:gpu; host lab-2:
+the manifest's files access is denied there}. When candidates remain and
+every one refuses, the failure names the refusals
+(Section~\ref{sec:movement-protocol}).
+
+The journey's \code{go\_on} (Listing~\ref{lst:lifecycle-journey-go-on}
+in Section~\ref{sec:lifecycle-moves}) is its step from one host to the
+next. The itinerary is a vector of key IDs that the \paglet{} filled
+from the landscape of \code{mesh-info} on its home host; \code{next\_},
+\code{home\_} and \code{left\_ms\_} are members like any other, and they
+are the same values on the next host. \code{dispatch} fails at once only
+for an empty destination or a \paglet{} that may not move (the cases
+listed above). A malformed ticket
+(\code{retries=0}, an unknown parameter) is found when the move starts,
+after the handler returned, and reported like a destination that no host
+matches: through \code{on\_move\_failed} on the old host, while a
+successful move ends with \code{on\_arrived} on the new one.
+
+\subsection{The move protocol}\label{sec:movement-protocol}
+
+A move is a conversation between two hosts, with the hosts that keep the
+\paglet{}'s location record as a third party
+(Figure~\ref{fig:movement-protocol}). The code is
+\code{cpp/host/src/node/movement.cpp} on both sides; the runtime's part is
+\code{Runtime::finish\_departure}, \code{prepare\_arrival} and
+\code{commit\_arrival}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \node[box] (S) at (0,0) {source host};
+  \node[box] (D) at (7.4,0) {destination host};
+  \node[box] (L) at (13.0,0) {location holders};
+  \draw[lifeline] (S.south) -- ++(0,-9.4);
+  \draw[lifeline] (D.south) -- ++(0,-9.4);
+  \draw[lifeline] (L.south) -- ++(0,-9.4);
+  \node[event,anchor=west,align=left] at (0.15,-0.75) {\code{dispatching} event, image taken, messages held};
+  \draw[msg] (0,-1.4) -- node[above]{\code{move-offer}: signed envelope, state, page manifest} (7.4,-1.4);
+  \node[event,anchor=west,align=left,text width=4.9cm] at (7.55,-2.05) {checks: enrolled sender, signature, passport, module trust, not here yet};
+  \draw[dashedarrow] (7.4,-2.75) -- node[above,font=\footnotesize,color=pagletsMuted]{\code{module-want} / \code{module-part}, if the module is missing} (0,-2.75);
+  \draw[msg] (7.4,-3.45) -- node[above]{\code{move-want}: the pages not in its cache} (0,-3.45);
+  \draw[msg] (0,-4.15) -- node[above]{\code{move-pages}: compressed, checked against the manifest} (7.4,-4.15);
+  \node[event,anchor=west,align=left,text width=4.9cm] at (7.55,-4.8) {prepared: owner quota, capabilities rebuilt, not yet running};
+  \draw[msg] (7.4,-5.5) -- node[above]{\code{move-ready}} (0,-5.5);
+  \draw[msg] (0,-6.2) -- node[above,pos=0.8]{\code{loc-set}: the new record} (13.0,-6.2);
+  \draw[msg] (13.0,-6.9) -- node[above,pos=0.26]{\code{loc-ack} from a majority} (0,-6.9);
+  \node[event,anchor=west,align=left] at (0.15,-7.5) {decision on disk; held messages follow};
+  \draw[msg] (0,-8.2) -- node[above]{\code{move-commit}} (7.4,-8.2);
+  \node[event,anchor=west,align=left,text width=4.9cm] at (7.55,-8.85) {stored, then started with \code{arrived}};
+  \node[event,anchor=north west,align=left,text width=13.6cm] at (-0.6,-10.0) {At any step: \code{move-refused}, or no answer within 30\,s (\code{move-abort}), and the source offers the \paglet{} to the next candidate. A prepared destination that hears nothing asks \code{move-query} until the source answers.};
+\end{tikzpicture}
+\caption{A move between two hosts. Solid arrows are frames on the encrypted host channels; the dashed one happens only when the destination lacks the module.}
+\label{fig:movement-protocol}
+\end{figure}
+
+\subsubsection{Departure}
+
+When the handler that called \code{dispatch} returns, the runtime
+delivers the \code{dispatching} event, takes the image, and checks that
+no pin arrived meanwhile. It then releases the instance and holds every
+message that arrives for the \paglet{}; until the mesh reports the
+outcome the \paglet{} exists only as its image and record. The node
+attaches the \paglet{}'s passport, the signed chain from an enrolled
+owner that says who launched it (Section~\ref{sec:mesh}); a \paglet{}
+without one does not move (\code{no passport: only paglets of enrolled
+owners move}). Before it looks at candidates, the node applies the
+residency rule that forbids leaving at all
+(Listing~\ref{lst:movement-residency}).
+
+% snippet: cpp/host/src/node/movement.cpp#residency [float,caption={Data that stays on its host keeps the \paglet{} there},label={lst:movement-residency}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Data that stays on its host keeps the \paglet{} there \src{cpp/host/src/node/movement.cpp}},label={lst:movement-residency}]
+// Data residency (planning/cpp-residency.md): a paglet that read a root
+// whose content stays on this host does not leave.
+for (const auto& mark : d.state.marks) {
+    if (!mark.starts_with("root:")) continue;
+    auto rule = ledger.state().residency.find(mark.substr(5));
+    if (rule != ledger.state().residency.end() && rule->second.host_only)
+        return fail("data residency: the content of root " + rule->first + " stays on this host");
+}
+\end{lstlisting}
+% /snippet
+
+\subsubsection{The offer and the checks}
+
+The offer is a canonical map: protocol version, mesh, source and
+destination keys, request number, kind (\code{dispatch} or \code{clone}),
+\paglet{} ID, passport, travelling state, the page manifest (page count,
+globals, and per page a hash or nil), the arrival mode, the move counter
+after this move, and the time. The source signs the SHA-256 of the body
+with its host key under the domain string \code{paglets move offer v1}, so
+the destination can check who sent it independent of the channel the
+frame came through, which matters for relayed hosts. Before any page
+moves, the destination refuses unless everything in
+Listing~\ref{lst:movement-accept} holds: the sender is an enrolled host
+and the signature verifies, the offer names this host and this mesh, the
+state decodes and agrees with the offer, the passport verifies for this
+\paglet{} and module (its owner is enrolled and the passport has not
+expired; for clones and children, every link is signed by an enrolled
+host), the module may run as a roaming \paglet{} in this mesh, and the
+\paglet{} is not here already.
+
+% snippet: cpp/host/src/node/movement.cpp#accept [float,caption={What the destination checks before any page moves},label={lst:movement-accept}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={What the destination checks before any page moves \src{cpp/host/src/node/movement.cpp}},label={lst:movement-accept}]
+if (*mesh_id != ledger.mesh() || *body_from != from || *to != key.public_key() ||
+    static_cast<std::uint64_t>(*body_request) != request || (*kind != "dispatch" && *kind != "clone")) {
+    return refuse("offer not for this host");
+}
+auto state = runtime::decode_state(*state_bytes);
+if (!state) return refuse(state.error());
+auto module = mesh::parse_key_id(state->module);
+if (!module || state->id != *paglet) return refuse("offer and state disagree");
+auto passport = mesh::Passport::decode(*passport_bytes);
+if (!passport) return refuse("passport: " + passport.error());
+if (auto ok = mesh::verify_passport(*passport, st, *paglet, *module, mesh::unix_ms()); !ok) {
+    return refuse("passport: " + ok.error());
+}
+if (auto verdict = mesh::check_module(st, *module, "roaming"); !verdict.allowed) return refuse(verdict.reason);
+if (runtime.info(*paglet)) return refuse("paglet " + paglet->substr(0, 8) + " is here already");
+auto image = parse_image_manifest(*manifest, *module);
+if (!image) return refuse("malformed page manifest");
+\end{lstlisting}
+% /snippet
+
+\subsubsection{The module and the pages}
+
+A destination that lacks the module fetches it by hash: from its module
+sources (directories the host was started with), then from the source
+host, then from every other host of the mesh, in parts of at most 1\,MB
+(\code{need\_module} in \code{cpp/host/src/node/node\_impl.hpp}). Whatever
+arrives is verified against the hash and checked as a \paglet{} module
+before it is stored; a host that sends something else or does not answer
+within 10\,s is skipped for the next. Modules are at most 64\,MB. A host
+that still holds the module, because it ran it before or received it with
+an earlier move, fetches nothing; a module without a \paglet{} is kept for
+24 hours (Section~\ref{sec:movement-code}).
+
+Pages are transferred only when needed. Every host keeps the pages of
+images it sent or received in a cache of 256\,MB, least recently used
+out, keyed by page hash. The destination compares the manifest against
+the cache and asks (\code{move-want}) only for the page indices it lacks;
+the source answers with those pages, each compressed with zstd, in frames
+of about 1\,MB (a frame is closed once its compressed pages reach that
+size). A \paglet{} that returns to a host it visited, or whose
+memory changed little since its last move, transfers only the pages that
+changed. Every page received is decompressed to exactly 64\,KB and hashed;
+a page that does not match the signed manifest ends the arrival
+(\code{damaged page}).
+
+With all pages present, the destination prepares the arrival: the runtime
+creates the \paglet{} without running it, checks the module's admission
+as a roaming \paglet{} and the owner's quota on this host (10\,000
+\paglets{} of one owner per host), rebuilds the capability table
+(Table~\ref{tab:movement-caps}), re-arms timers and the timeouts of
+requests in flight, and keeps the \code{arrived} event ready. Then it
+answers \code{move-ready}.
+
+\subsubsection{Commit}
+
+Only the source decides. On \code{move-ready} it first sends the
+\paglet{}'s new location record, with the incremented move counter, to the
+hosts responsible for it (three of the hosts that are up, chosen by
+consistent hashing, or all of them when three or fewer are up,
+Section~\ref{sec:communication}) and waits for a majority of
+acknowledgements. Then it writes the decision to its state directory,
+tells the runtime, and sends \code{move-commit}. The runtime forwards the
+held messages to the new host, remembers for ten minutes where the
+\paglet{} went (a tombstone, so endpoints with a stale location keep
+working), removes the \paglet{}'s record, image and directories, and
+reports the outcome to anyone waiting. The destination, on
+\code{move-commit}, writes the \paglet{} and its passport to disk at once
+and starts it with \code{arrived}, or keeps it stored until a message
+comes when the ticket said \code{arrival=inactive}.
+
+The order protects the invariant that a \paglet{} runs on at most one
+host. The destination never starts a prepared \paglet{} on its own: when
+it hears nothing within the move timeout of 30\,s it asks
+\code{move-query}, and keeps asking, and the source answers from its
+recorded decisions (kept for an hour) with \code{move-commit} or
+\code{move-abort}. A source that crashed after writing the decision
+answers the same way when it comes back. If the location records cannot
+be updated within the move timeout, the source aborts the move. A
+responsible host that answers with a newer record (a counter lost in a
+crash) makes the source record again above it, at most three times, and
+then abort as well. An aborted move overwrites the records with a higher
+counter that names the source: the \paglet{} stays.
+
+\subsubsection{Failure}
+
+The destination may refuse, with the reason (\code{move-refused}), or
+stay silent for 30\,s, after which the source sends \code{move-abort};
+either moves the offer to the next candidate of the ticket, each offer
+with a new request number so late answers do not match. When no candidate is left the move fails; the
+runtime makes the \paglet{} ready again with its held messages and
+delivers \code{paglets.move\_failed} with the destination it asked for and
+the reason of every host tried, such as \code{host lab-2: quota: its
+owner has as many paglets here as one owner may have}. Nothing of the
+\paglet{} is lost in any of these cases, because the image on the source
+is the \paglet{} until the commit.
+
+\subsubsection{From the command line}
+
+An owner or admin moves a \paglet{} with \code{paglets-host remote
+dispatch}, which sends the ticket to the host the \paglet{} is on and
+waits for the outcome through the same hook the runtime calls at the end
+of a move (Listing~\ref{lst:movement-cli}; the session options are those
+of Section~\ref{sec:tools-cli}):
+
+\begin{lstlisting}[style=paglets-bash,caption={Moving a \paglet{} from the command line (\code{paglets-host remote}).},label={lst:movement-cli}]
+H=paglets-host
+S="--connect https://lab-1:7443 --key olga.key --ledger ledger"
+ID=$($H remote launch $S build/macos-arm64/guests/journey.wasm)
+$H remote dispatch $S $ID lab-2            # moved to lab-2 2f8e1c0b94a7d3e1
+$H remote dispatch $S $ID "label:gpu?retries=2"
+# the move failed, the paglet stays: no host matches label:gpu
+$H remote locate $S $ID                    # host:  lab-2 2f8e1c0b94a7d3e1...
+                                           # moves: 1
+\end{lstlisting}
+
+\code{remote dispatch} waits at most 120\,s for the outcome and exits
+with status 1 and the reason when the move failed.
+\code{paglets-web} offers the same move (Section~\ref{sec:tools}).
+
+\subsection{Clones on other hosts}\label{sec:movement-clones}
+
+\code{clone\_raw(args, caps, destination)} makes a copy of the \paglet{}
+with the same image, and with a destination the copy is made on another
+host. The image is the one taken when the handler returns, so all clones
+of one handler call share it; at most 16 children and clones may be made
+per call. A remote clone leaves as a departure of its own, with the
+clone's ID in the travelling state. It keeps the original's transferable
+endpoints and its default service endpoints under the same handle numbers
+(so handles in the copied memory stay meaningful), but no requests in
+flight; \code{caps} may hold only endpoints to \paglets{} and artifacts,
+the capabilities that are meaningful on every host
+(\code{invalid\_argument} otherwise). The original continues;
+\code{clone\_raw} returns an endpoint
+to the clone at once, which reaches it wherever it lands. On the
+destination the clone goes through the same offer, checks and commit as a
+move, with a passport link that the source host signed to extend the
+original's passport, and starts with \code{cloned} (the arguments, the
+capabilities and the original's ID) instead of \code{arrived}. If no host
+takes it, the original receives \code{on\_move\_failed} with the clone's
+ID in \code{MoveFailed::clone}.
+
+The inventory example uses this for a fan-out: one clone per host, each
+asks its host's \code{server-info} and reports to the parent. The parent
+starts the fan-out with the hosts from \code{mesh-info}'s landscape and
+passes a failed clone to the pattern (Listing~\ref{lst:movement-fanout});
+the \code{FanOut} pattern of the SDK's patterns library
+(\code{patterns/fanout.hpp}) clones the \paglet{} to each destination with
+the parent's own endpoint as
+the only capability, and arms a timer for the deadline.
+
+% snippet: cpp/examples/inventory/inventory.cpp#fanout [float,caption={The inventory's fan-out},label={lst:movement-fanout}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={The inventory's fan-out \src{cpp/examples/inventory/inventory.cpp}},label={lst:movement-fanout}]
+    void on_move_failed(const paglets::abi::MoveFailed& f) override {
+        if (!f.clone.empty()) fan_.clone_failed(f);
+    }
+
+private:
+    void start(const Collect& c, Message& m) {
+        report_ = Report{};
+        auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
+        auto go = [this, c, reply](std::vector<std::string> hosts) {
+            const auto sent = fan_.start(hosts, paglets::encode(c), c.timeout_ms);
+            (void)paglets::reply_to(*reply, Started{sent > 0, sent > 0 ? "" : "no clone went out",
+                                                    static_cast<std::int64_t>(hosts.size())});
+        };
+        if (!c.hosts.empty()) return go(c.hosts);
+        auto mi = paglets::service("mesh-info");
+        if (!mi) return go({""});
+        svc::mesh_info::Client client{*mi};
+        auto sent = client.landscape({}, [go](paglets::Result<svc::mesh_info::Landscape> l, Message&) {
+            std::vector<std::string> hosts{""};
+            if (l) {
+                for (std::size_t i = 1; i < l->hosts.size(); ++i) hosts.push_back(l->hosts[i].host);
+            }
+            go(std::move(hosts));
+        });
+        if (!sent) go({""});
+    }
+\end{lstlisting}
+% /snippet
+
+A clone finds itself on the new host in \code{on\_cloned}
+(Listing~\ref{lst:movement-clone}). Its first capability is the parent's
+endpoint; it looks up \code{server-info} on the host it is on, asks it,
+reports through the endpoint and disposes itself.
+
+% snippet: cpp/examples/inventory/inventory.cpp#clone [float,caption={A clone on its host},label={lst:movement-clone}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={A clone on its host \src{cpp/examples/inventory/inventory.cpp}},label={lst:movement-clone}]
+void on_cloned(paglets::Started& s) override {
+    Collect q;
+    if (s.caps.empty() || !s.decode_args(q)) {
+        (void)paglets::dispose();
+        return;
+    }
+    parent_ = paglets::Endpoint(s.caps[0].release());
+    query_ = q;
+    pt::lookup("server-info", [this](paglets::Result<paglets::Endpoint> ep) {
+        if (!ep) return finish(pt::error_text("server-info", ep.error()));
+        info_ = *ep;
+        summary();
+    });
+}
+\end{lstlisting}
+% /snippet
+
+The parent sees each child once, when it reported, when its clone could
+not be made or did not arrive, or when the deadline passed without a
+report (Listing~\ref{lst:movement-collect}). An inventory is therefore
+complete even when a host is down: that host's entry carries the error.
+
+% snippet: cpp/examples/inventory/inventory.cpp#collect [float,caption={Collecting the reports},label={lst:movement-collect}]
+\begin{lstlisting}[style=paglets-cpp,float,caption={Collecting the reports \src{cpp/examples/inventory/inventory.cpp}},label={lst:movement-collect}]
+fan_.attach(router(), [this](const pt::FanOut::Child& c) {
+    HostInventory h;
+    if (!c.ok || !paglets::decode(c.result, h)) {
+        h = HostInventory{};
+        h.error = c.error.empty() ? "no report" : c.error;
+    }
+    h.host = c.host;
+    h.host_name = c.host_name.empty() ? c.destination : c.host_name;
+    report_.hosts.push_back(std::move(h));
+    report_.finished = fan_.finished();
+    if (report_.finished) {
+        std::ranges::sort(report_.hosts, [](const auto& a, const auto& b) { return a.host_name < b.host_name; });
+    }
+});
+\end{lstlisting}
+% /snippet
+
+\subsection{Deactivation, checkpoints and restarts}\label{sec:movement-disk}
+
+The image that moves a \paglet{} also parks it. \code{deactivate()} takes
+effect when the handler returns: the \code{deactivating} event is
+delivered, the image is taken, and the instance is released, so an
+inactive \paglet{} holds no memory and no compiled code. On a host with a
+state directory the image is written to \code{paglets/<id>.paglet}
+together with the record, to a temporary file first and then renamed, so
+a crash leaves the old file or the new one; without a state directory the
+image stays in the host's memory. The next message, timer or wake-up
+restores the instance from the image and delivers \code{activated}
+before it (Section~\ref{sec:lifecycle-deactivation}).
+
+The same file is the \paglet{}'s checkpoint. With a state directory, the
+runtime stores an image after a handler when the last one is older than
+the checkpoint interval (1\,s by default, per \paglet{}), at once after
+\code{checkpoint()}, and at once when a moved or cloned \paglet{} is
+committed, so a crash right after a commit finds the \paglet{} on the
+destination. The restart policy of Section~\ref{sec:lifecycle-restart}
+(\code{set\_restart(false)}) turns this off.
+
+When a host starts, it reads every \code{.paglet} file and re-creates the
+\paglets{} with the restart policy: the record with its capabilities,
+timers re-armed for their time, and the image to be restored on the first
+delivery (\code{Runtime::Impl::recover} in \code{cpp/host/src/runtime.cpp}).
+Requests that were in flight at the crash are answered \code{timeout}, so
+the handlers waiting for them run and can retry. A \paglet{} that asked
+for it receives \code{recovered} first (Section~\ref{sec:lifecycle}). A
+\paglet{} whose module is no longer in the store is dropped with a log
+line. A crashed worker process takes the same path for its \paglets{}:
+they resume from their last image, except the one whose handler was
+running.
+
+\subsection{Code mobility and its limits}\label{sec:movement-code}
+
+Code is named by content. A \paglet{}'s record names its module by SHA-256
+hash, the image is bound to that hash, and every host that runs the
+\paglet{} holds the module under that hash in its store, verified when it
+arrived and again whenever it is read from disk. A module that a host
+fetched for one arrival serves every later one; modules without a
+\paglet{} are collected after 24 hours. Hosts send modules only to
+enrolled hosts.
+
+Whether a module may run is a decision of the mesh, recorded in the
+ledger (Section~\ref{sec:mesh}). Signers vouch for a module with a
+signature record; admins trust a signer, or a module hash, for the
+classes roaming, resident and system; revoking the signer's key, the
+signature or the module hash takes the trust back. By default roaming
+modules need no trust (\code{module-policy any}); with
+\code{module-policy trusted} the destination refuses a module that no
+trust record covers before any page moves, and a host ends the
+\paglets{} of a module that loses trust while they run. An arriving \paglet{} is always checked as
+roaming, whatever it was: resident and system \paglets{} do not move.
+
+Data residency follows the data into the \paglet{}. When a \paglet{} reads
+from a named root through the \code{files} service, its host marks it
+\code{root:NAME}; the mark is never removed, travels with the \paglet{}
+and passes to its children and clones. A residency rule in the ledger
+makes the mark bind: \code{host-only} keeps the \paglet{} where it is
+(Listing~\ref{lst:movement-residency}: the host where it read, unless
+the rule came after a later move), \code{hosts}
+limits the candidates of every ticket to the hosts a selector names, by
+key or label. A rule made after the read applies, because the mark names
+the root, not the rule. The content exchange between hosts obeys the
+same rules for artifacts and shared files.
+
+The design has these limits:
+
+\begin{itemize}
+\item Only roaming \paglets{} of enrolled owners move, only within one
+  mesh, and only to hosts that run the same major and at least the same
+  minor ABI version.
+\item A \paglet{} never changes code while it lives. The image belongs to
+  one module hash; a new version is a new module, and its \paglets{}
+  start fresh. There is no state migration between versions.
+\item Moves happen between handlers. A computation that takes longer than
+  one handler (5\,s) must be split into messages the \paglet{} sends to
+  itself, and it can move only between them. This is weak mobility in the
+  sense of Section~\ref{sec:background}, by design.
+\item A \paglet{} is at most 16\,MB of memory, images included. Larger
+  data stays on hosts and travels as artifacts.
+\item Capabilities that stand for host resources are re-created only from
+  grants; the \code{storage} store and the scratch directory do not
+  follow the \paglet{}.
+\item The host cannot verify that a module leaves its tables alone; a
+  module that does not satisfies the ABI only on paper.
+\end{itemize}
+
+Section~\ref{sec:evaluation} measures what these decisions cost: image
+sizes, the time to capture and restore an image, the pages a repeated
+move sends, moves between two hosts in one process, and the transfer
+rates between the hosts of the live mesh. A move between two real
+machines is exercised there but not timed.

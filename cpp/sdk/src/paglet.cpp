@@ -324,6 +324,7 @@ PAGLETS_EXPORT(paglets_on_event)
 std::int32_t paglets_on_event(std::int32_t kind, const std::uint8_t* ptr, std::uint32_t len) {
     namespace abi = paglets::abi;
     paglets::Paglet& p = paglets::detail::paglet();
+    // --8<-- [start:on_event]
     switch (static_cast<abi::EventKind>(kind)) {
         case abi::EventKind::created:
         case abi::EventKind::cloned: {
@@ -354,6 +355,7 @@ std::int32_t paglets_on_event(std::int32_t kind, const std::uint8_t* ptr, std::u
         case abi::EventKind::disposing: p.on_disposing(); return abi::handled;
     }
     return abi::not_handled;
+    // --8<-- [end:on_event]
 }
 
 PAGLETS_EXPORT(paglets_on_message)
@@ -373,6 +375,7 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
         }
     }
 
+    // --8<-- [start:reports]
     // Reports of asynchronous sends and replies come from the host (no sender).
     if (m.kind() == abi::MessageKind::message && m.name() == abi::move_failed_message && !m.sender()) {
         abi::MoveFailed f;
@@ -392,6 +395,7 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
         paglets::detail::paglet().on_undelivered(u);
         return abi::handled;
     }
+    // --8<-- [end:reports]
 
     const std::int32_t result = paglets::detail::paglet().on_message(m);
     // A handled request that was neither answered nor deferred is answered

@@ -55,6 +55,7 @@ struct RemoteMessage {
     std::int32_t hops = 0;    // forwards so far (limited)
 };
 
+// --8<-- [start:travel_state]
 // A paglet's state apart from its memory image, as it travels.
 struct TravelState {
     PagletId id;
@@ -72,6 +73,7 @@ struct TravelState {
     bool restart = true;                                          // restart policy (abi::RestartArg)
     bool notify_recovered = false;
 };
+// --8<-- [end:travel_state]
 Bytes encode_state(const TravelState& state);
 std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_t> bytes);
 Bytes encode_remote(const RemoteMessage& message);

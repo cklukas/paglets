@@ -366,6 +366,7 @@ public:
                  for (const auto& s : w.sinks) accepted += s.accepted >= 0;
                  return accepted <= 1 + w.redirects;
              }},
+            // --8<-- [start:invariant]
             {"best_progress_kept",
              "while the group lives, some replica durably holds the best checkpoint ever made durable",
              [](const State& w) {
@@ -375,6 +376,7 @@ public:
                  }
                  return false;
              }},
+            // --8<-- [end:invariant]
             {"observations_kept",
              "while the group lives, every observation that was ever durable is durable on some replica",
              [](const State& w) {
