@@ -61,17 +61,14 @@ serialized fields.
 
 ## The paper
 
-*Paglets: Mobile Agents as Migrating WebAssembly Instances* introduces the
-C++ edition as a whole: the model, the lifecycle and event semantics,
-movement as memory images, the mesh, the zombie paglets and their checked
-protocol, the tools, and the measurements on a three-machine mesh, with
-code excerpts throughout and the complete examples in its appendix. The
-PDF is built from the `cpp-paper` branch and published with every change:
-[paglets-cpp.pdf](https://cklukas.github.io/paglets/cpp/paglets-cpp.pdf)
-(also on the
-[releases page](https://github.com/cklukas/paglets/releases), tagged
-`cpp-paper-*`). The Python edition has its own
-[application note](https://cklukas.github.io/paglets/paglets-application-note.pdf).
+A paper on the C++ edition, *Paglets: Mobile Agents as Migrating
+WebAssembly Instances*, is in preparation on the `cpp-paper` branch of the
+repository: the model, the lifecycle and event semantics, movement as
+memory images, the mesh, the zombie paglets and their checked protocol,
+the tools, and the measurements on a three-machine mesh, with code
+excerpts throughout and the complete examples in its appendix. It will be
+published as a PDF next to this documentation. The Python edition has its
+own [application note](https://cklukas.github.io/paglets/paglets-application-note.pdf).
 
 ## Wire formats and interoperability
 
