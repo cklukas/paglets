@@ -2,10 +2,12 @@
 # Licensed under the MIT License. See LICENSE for details.
 
 # The paper on the C++ edition (papers/paglets-cpp, branch cpp-paper). Every
-# push checks that the paper's generated excerpts and tables are current,
-# builds the PDF, publishes it to the release cpp-paper-YYYY-MM-DD (the
-# Python note's releases are paper-*), and starts the C++ docs workflow,
-# which puts the newest cpp-paper-* PDF on the documentation site.
+# push checks that the paper's generated excerpts and tables are current
+# and builds the PDF as a workflow artifact (for review). Publication is an
+# explicit step: a tag cpp-paper-v* (or a manual run with publish=true)
+# publishes the PDF to the release cpp-paper-YYYY-MM-DD (the Python note's
+# releases are paper-*) and starts the C++ docs workflow, which puts the
+# newest cpp-paper-* PDF on the documentation site.
 
 name: Paper (paglets/cpp)
 
@@ -13,6 +15,8 @@ on:
   push:
     branches:
       - cpp-paper
+    tags:
+      - "cpp-paper-v*"
     paths:
       - ".github/workflows/cpp-paper.yml"
       - "papers/paglets-cpp/**"
@@ -22,6 +26,15 @@ on:
     paths:
       - "papers/paglets-cpp/**"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the PDF as a release and refresh the docs site"
+        type: boolean
+        default: false
+
+# A tag cpp-paper-v* or a manual run with publish=true publishes.
+env:
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/cpp-paper-v') || (github.event_name == 'workflow_dispatch' && inputs.publish == true) }}
 
 permissions:
   actions: write
@@ -73,7 +86,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish the paper release
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PDF: papers/paglets-cpp/build/paglets-cpp.pdf
@@ -83,7 +96,7 @@ jobs:
           date=$(date -u +%F)
           tag="cpp-paper-$date"
           title="Paglets C++ edition: paper $date"
-          notes="Paper PDF built from cpp-paper commit ${GITHUB_SHA} (papers/paglets-cpp). Not a software release; the Python application note is published as paper-*."
+          notes="Paper PDF built from cpp-paper commit ${GITHUB_SHA} (papers/paglets-cpp), published from ${GITHUB_REF_NAME}. Not a software release; the Python application note is published as paper-*."
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$PDF" --clobber
             gh release edit "$tag" --title "$title" --notes "$notes" --latest=false
@@ -93,7 +106,7 @@ jobs:
           echo "published $PDF to release $tag"
 
       - name: Refresh the documentation site
-        if: github.event_name != 'pull_request'
+        if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run cpp-docs.yml --ref cpp
