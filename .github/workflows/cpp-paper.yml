@@ -1,0 +1,92 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+# The paper on the C++ edition (papers/paglets-cpp, branch cpp-paper). Every
+# push checks that the paper's generated excerpts and tables are current,
+# builds the PDF, publishes it to the release cpp-paper-YYYY-MM-DD (the
+# Python note's releases are paper-*), and starts the C++ docs workflow,
+# which puts the newest cpp-paper-* PDF on the documentation site.
+
+name: Paper (paglets/cpp)
+
+on:
+  push:
+    branches:
+      - cpp-paper
+    paths:
+      - ".github/workflows/cpp-paper.yml"
+      - "papers/paglets-cpp/**"
+      - "docs/results/**"
+      - "cpp/**"
+  pull_request:
+    paths:
+      - "papers/paglets-cpp/**"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  build:
+    name: Build the paper
+    runs-on: ubuntu-24.04
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install TeX and tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            gnuplot-nox jq latexmk lmodern \
+            texlive-fonts-extra texlive-bibtex-extra texlive-fonts-recommended \
+            texlive-latex-base texlive-latex-extra texlive-latex-recommended \
+            texlive-pictures poppler-utils
+
+      - name: The excerpts and tables are current
+        run: |
+          mkdir -p "$RUNNER_TEMP/sync"
+          g++ -std=c++23 -O1 -I cpp/host/include -I cpp/common/include \
+            cpp/tools/docs_sync/docs_sync.cpp cpp/host/src/json.cpp -o "$RUNNER_TEMP/sync/paglets-docs-sync"
+          "$RUNNER_TEMP/sync/paglets-docs-sync" --root "$PWD" --check
+
+      - name: Build the PDF
+        run: make -C papers/paglets-cpp
+
+      - name: Report
+        run: |
+          pdfinfo papers/paglets-cpp/build/paglets-cpp.pdf | grep -E "Pages|Title"
+          grep -c "Warning" papers/paglets-cpp/build/paglets-cpp.log || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paglets-cpp
+          path: papers/paglets-cpp/build/paglets-cpp.pdf
+          if-no-files-found: error
+
+      - name: Publish the paper release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PDF: papers/paglets-cpp/build/paglets-cpp.pdf
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          date=$(date -u +%F)
+          tag="cpp-paper-$date"
+          title="Paglets C++ edition: paper $date"
+          notes="Paper PDF built from cpp-paper commit ${GITHUB_SHA} (papers/paglets-cpp). Not a software release; the Python application note is published as paper-*."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$PDF" --clobber
+            gh release edit "$tag" --title "$title" --notes "$notes" --latest=false
+          else
+            gh release create "$tag" "$PDF" --target "$GITHUB_SHA" --title "$title" --notes "$notes" --latest=false
+          fi
+          echo "published $PDF to release $tag"
+
+      - name: Refresh the documentation site
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run cpp-docs.yml --ref cpp
