@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(paglets_cpp
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "paglets/cpp: mobile Wasm paglets with memory-image mobility"
     LANGUAGES C CXX ASM)
 

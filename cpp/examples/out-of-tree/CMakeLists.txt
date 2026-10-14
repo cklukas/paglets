@@ -13,7 +13,7 @@
 cmake_minimum_required(VERSION 3.28)
 project(paglets_out_of_tree LANGUAGES CXX)
 
-find_package(paglets 0.1 REQUIRED CONFIG)
+find_package(paglets 0.2 REQUIRED CONFIG)
 
 # A plain paglet: the guest SDK and SHA-256 (<paglets/sha256.hpp>), with an
 # interface description (docs/interface-descriptions.md).

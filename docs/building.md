@@ -177,7 +177,7 @@ A project that uses it calls `find_package` in its top-level
 cmake_minimum_required(VERSION 3.28)
 project(my_paglets LANGUAGES CXX)
 
-find_package(paglets 0.1 REQUIRED CONFIG)
+find_package(paglets 0.2 REQUIRED CONFIG)
 
 # A plain paglet: the guest SDK and SHA-256 (<paglets/sha256.hpp>).
 paglets_add_module(greeter SOURCES greeter.cpp SHA256)

@@ -57,7 +57,7 @@ paglets-host remote ...
 Example output of `--info`:
 
 ```text
-paglets-host 0.1.0
+paglets-host 0.2.0
   platform:   macos arm64
   compiler:   gcc 16.1.0
   reflection: yes
