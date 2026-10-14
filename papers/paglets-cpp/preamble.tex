@@ -1,0 +1,145 @@
+% Copyright (c) 2026 by C. Klukas.
+% Licensed under the MIT License. See LICENSE for details.
+%
+% The preamble of paglets-cpp.tex, shared with tools/check-chapter.sh.
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{libertinus}
+\usepackage{microtype}
+\usepackage[a4paper,margin=26mm,headheight=22pt]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{needspace}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{listings}
+\usepackage{titlesec}
+\usepackage{appendix}
+\usepackage{hyperref}
+\usepackage{url}
+\usetikzlibrary{arrows.meta,fit,positioning,shapes.misc,calc,decorations.pathreplacing}
+
+\definecolor{pagletsBlue}{HTML}{1F5A85}
+\definecolor{pagletsInk}{HTML}{1F2933}
+\definecolor{pagletsMuted}{HTML}{5F6B76}
+\definecolor{pagletsRule}{HTML}{B8C7D3}
+\definecolor{pagletsCode}{HTML}{F6F8FA}
+\definecolor{pagletsGreen}{HTML}{1B7F4B}
+\definecolor{pagletsAmber}{HTML}{A86400}
+\definecolor{pagletsRed}{HTML}{C0352B}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=pagletsBlue,
+  citecolor=pagletsBlue,
+  urlcolor=pagletsBlue,
+  pdftitle={Paglets: Mobile Agents as Migrating WebAssembly Instances},
+  pdfauthor={Christian Klukas}
+}
+
+\AtBeginDocument{\color{pagletsInk}}
+
+\titleformat{\section}
+  {\Large\bfseries\color{pagletsBlue}}
+  {\thesection}{0.75em}{}
+\titleformat{\subsection}
+  {\large\bfseries\color{pagletsBlue!85!black}}
+  {\thesubsection}{0.65em}{}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{pagletsBlue!75!black}}
+  {\thesubsubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{2.6ex plus 0.6ex minus 0.2ex}{1.2ex}
+\titlespacing*{\subsection}{0pt}{2.0ex plus 0.4ex minus 0.2ex}{0.8ex}
+\titlespacing*{\subsubsection}{0pt}{1.6ex plus 0.3ex minus 0.2ex}{0.6ex}
+
+\captionsetup{
+  font=small,
+  labelfont={bf,color=pagletsBlue},
+  labelsep=period
+}
+
+\setlist{itemsep=0.25em,topsep=0.45em}
+\renewcommand{\arraystretch}{1.05}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textsc{Paglets: the C++ edition}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.25pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{pagletsRule}\leaders\hrule height \headrulewidth\hfill}}
+\renewcommand{\footrulewidth}{0pt}
+
+\renewenvironment{abstract}
+  {\begin{center}\begin{minipage}{0.92\linewidth}\small\noindent\textbf{Abstract.}\quad}
+  {\end{minipage}\end{center}\vspace{0.6em}}
+
+% -- code -----------------------------------------------------------------
+% paglets-docs-sync renders snippets as lstlisting blocks of these styles,
+% and puts the source path into a caption with \src.
+\newcommand{\src}[1]{{\normalfont\footnotesize\color{pagletsMuted}(\texttt{#1})}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\lstdefinestyle{paglets-base}{
+  basicstyle=\footnotesize\ttfamily,
+  keywordstyle=\color{pagletsBlue},
+  commentstyle=\color{pagletsMuted}\itshape,
+  stringstyle=\color{green!35!black},
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  backgroundcolor=\color{pagletsCode},
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{pagletsRule},
+  columns=fullflexible,
+  keepspaces=true,
+  tabsize=4,
+  captionpos=b,
+  aboveskip=0.8em,
+  belowskip=0.6em,
+  xleftmargin=0.2em,
+  xrightmargin=0.2em
+}
+\lstdefinestyle{paglets-cpp}{
+  style=paglets-base,
+  language=C++,
+  morekeywords={override,final,constexpr,consteval,nullptr,noexcept,co_await,co_return,requires,concept,
+                int8_t,int16_t,int32_t,int64_t,uint8_t,uint16_t,uint32_t,uint64_t,size_t,
+                string,string_view,vector,optional,expected,unique_ptr,shared_ptr,function}
+}
+\lstdefinestyle{paglets-cmake}{style=paglets-base,language=[Visual]Basic,keywords={}}
+\lstdefinestyle{paglets-bash}{style=paglets-base,language=bash}
+\lstdefinestyle{paglets-json}{style=paglets-base,language={},keywords={}}
+\lstdefinestyle{paglets-yaml}{style=paglets-base,language={},keywords={}}
+\lstdefinestyle{paglets-text}{style=paglets-base,language={},keywords={}}
+\lstset{style=paglets-cpp}
+\renewcommand{\lstlistingname}{Listing}
+
+% -- figures --------------------------------------------------------------
+\tikzset{
+  box/.style={draw=pagletsRule,fill=pagletsCode,rounded corners=2pt,line width=0.45pt,align=center,
+              inner xsep=7pt,inner ysep=6pt,font=\small},
+  plain/.style={draw=pagletsRule,fill=white,rounded corners=2pt,line width=0.45pt,align=center,
+                inner xsep=6pt,inner ysep=5pt,font=\small},
+  state/.style={draw=pagletsBlue,fill=white,rounded corners=4pt,line width=0.6pt,align=center,
+                inner xsep=8pt,inner ysep=6pt,font=\small},
+  event/.style={font=\footnotesize\color{pagletsMuted},align=center},
+  arrow/.style={-{Latex[length=2.1mm,width=1.6mm]},draw=pagletsBlue,line width=0.55pt},
+  both/.style={{Latex[length=2.1mm,width=1.6mm]}-{Latex[length=2.1mm,width=1.6mm]},draw=pagletsBlue,line width=0.55pt},
+  dashedarrow/.style={-{Latex[length=2.1mm,width=1.6mm]},draw=pagletsMuted,line width=0.5pt,dashed},
+  lifeline/.style={draw=pagletsRule,line width=0.5pt,dashed},
+  msg/.style={-{Latex[length=1.9mm,width=1.4mm]},draw=pagletsBlue,line width=0.5pt,font=\footnotesize}
+}
+
+\newcommand{\paglets}{Paglets}
+\newcommand{\paglet}{paglet}
+
