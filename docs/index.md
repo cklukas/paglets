@@ -71,7 +71,7 @@ and the [cross-platform milestone results](https://github.com/cklukas/paglets/bl
 
 ## The paper
 
-The paper [*Paglets: Mobile Agents as Migrating WebAssembly Instances*](https://github.com/cklukas/paglets/releases/download/cpp-paper-2026-10-16/paglets-cpp.pdf)
+The paper [*Paglets: Mobile Agents as Migrating WebAssembly Instances*](https://cklukas.github.io/paglets/cpp/paglets-cpp.pdf)
 explains state capture between handler calls, migration with host-managed
 permissions, separate compute jobs and the replicated-agent protocol. It uses
 short implementation excerpts and reports the scope and limits of the
