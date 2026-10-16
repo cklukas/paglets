@@ -63,6 +63,62 @@ fs::path temp_root(const std::string& name) {
 
 }  // namespace
 
+PAGLETS_TEST("patterns: files cross document boundaries without losing bytes") {
+    const fs::path src = temp_root("chunk-src");
+    const fs::path dst = temp_root("chunk-dst");
+    struct Cleanup {
+        fs::path src, dst;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove_all(src, ec);
+            fs::remove_all(dst, ec);
+        }
+    } cleanup{src, dst};
+    for (std::size_t size : {std::size_t{0}, std::size_t{512 * 1024 + 17},
+                            std::size_t{1024 * 1024}, std::size_t{2 * 1024 * 1024 + 13}}) {
+        std::string bytes(size, '\0');
+        for (std::size_t i = 0; i < size; ++i) bytes[i] = static_cast<char>((i * 17 + i / 251) % 256);
+        {
+            std::ofstream out(src / "chunk.bin", std::ios::binary);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            REQUIRE(out.good());
+        }
+        fs::remove(dst / "chunk.bin");
+        ps::ServicesConfig sa, sb;
+        sa.roots["src"] = src;
+        sb.roots["dst"] = dst;
+        Mesh net;
+        auto& a = net.add_host("a", sa);
+        auto& b = net.add_host("b", sb);
+        net.enroll_all();
+        net.admin_record("policy-rule", data::policy_rule({"read src", Decision::allow, "files", {"read"}, {},
+            Scope{std::vector<std::string>{"src"}, std::nullopt}, std::nullopt, 0}));
+        net.admin_record("policy-rule", data::policy_rule({"write dst", Decision::allow, "files", {"write", "create"}, {},
+            Scope{std::vector<std::string>{"dst"}, std::nullopt}, std::nullopt, 0}));
+        REQUIRE(net.settle([&] { return net.converged() && a.node->landscape().size() == 2u; }));
+        const auto module = a.f->module("patterns_demo.wasm");
+        auto created = a.node->create(module, net.passport(module, paglet_id('6')));
+        REQUIRE_OK(created);
+        const auto id = *created;
+        (void)ask<CarryStatus>(*a.f, id, "carry", CarryRequest{"src", "chunk.bin", "b", "dst", "chunk.bin"});
+        REQUIRE(net.settle([&] { return b.f->runtime->info(id).has_value() && !a.f->runtime->info(id); }, 1000));
+        CarryStatus result;
+        REQUIRE(net.settle([&] {
+            result = ask<CarryStatus>(*b.f, id, "carry_status");
+            return result.state == "failed" || result.state == "delivered";
+        }, 1000));
+        if (result.state != "delivered") std::cerr << "    file size " << size << ": " << result.error << "\n";
+        REQUIRE(result.state == "delivered");
+        CHECK_EQ(result.size, static_cast<std::int64_t>(size));
+        std::ifstream in(dst / "chunk.bin", std::ios::binary);
+        REQUIRE(in.good());
+        const std::string received(std::istreambuf_iterator<char>(in), {});
+        CHECK_EQ(received.size(), bytes.size());
+        CHECK(received == bytes);
+        CHECK(b.f->runtime->marks(id) == std::vector<std::string>{"root:src"});
+    }
+}
+
 PAGLETS_TEST("patterns: tasks, typed operations, fan-out, file mobility, locate and pin, notifications (WP18)") {
     const fs::path src = temp_root("src");
     const fs::path dst = temp_root("dst");

@@ -43,6 +43,8 @@ struct Mesh {
     struct Port final : GossipTransport {
         Mesh* net = nullptr;
         PublicKey self{};
+        std::size_t frame_bytes = std::numeric_limits<std::size_t>::max();
+        std::size_t frame_limit() const override { return frame_bytes; }
         // Runtime threads send too (deliveries and departures).
         void send(const PublicKey& to, Bytes frame) override {
             std::lock_guard lock(net->queue_mu);
@@ -166,12 +168,13 @@ struct Mesh {
         return true;
     }
 
-    void deliver() {
+    std::size_t deliver() {
+        std::size_t delivered = 0;
         while (true) {
             std::tuple<PublicKey, PublicKey, Bytes> next;
             {
                 std::lock_guard lock(queue_mu);
-                if (queue.empty()) return;
+                if (queue.empty()) return delivered;
                 next = std::move(queue.front());
                 queue.pop_front();
             }
@@ -179,19 +182,35 @@ struct Mesh {
             ++sent[frame_type(frame)];
             if (filter && !filter(from, to, frame)) continue;
             if (Host* src = find(from); src != nullptr && src->down) continue;
-            if (Host* h = find(to); h != nullptr && !h->down) h->node->receive(from, frame);
+            if (Host* h = find(to); h != nullptr && !h->down) {
+                h->node->receive(from, frame);
+                ++delivered;
+            }
         }
     }
 
-    // Delivers and ticks until `done` holds (or rounds run out).
+    // A round is a 2 ms waiting budget. Active delivery does not sleep or
+    // spend an idle round; processing time also bounds a busy network.
+    // Counting every immediate poll exhausted the budget before workers could
+    // start when gossip kept producing frames. The predicate may synchronously
+    // call a paglet, so its own wait does not spend the fixture's poll budget.
     bool settle(const std::function<bool()>& done, int rounds = 200) {
-        for (int i = 0; i < rounds; ++i) {
-            deliver();
+        using Clock = std::chrono::steady_clock;
+        auto budget = std::chrono::duration_cast<Clock::duration>(2ms * std::max(rounds, 0));
+        for (int idle = 0; idle < rounds && budget > Clock::duration::zero();) {
+            const auto began = Clock::now();
+            const auto delivered = deliver();
+            const auto checking = Clock::now();
             if (done()) return true;
+            const auto resumed = Clock::now();
             for (auto& h : hosts) {
                 if (!h->down) h->node->tick();
             }
-            std::this_thread::sleep_for(2ms);
+            if (delivered == 0) {
+                std::this_thread::sleep_for(2ms);
+                ++idle;
+            } else std::this_thread::yield();
+            budget -= (checking - began) + (Clock::now() - resumed);
         }
         deliver();
         return done();

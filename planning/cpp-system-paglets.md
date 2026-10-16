@@ -107,20 +107,10 @@ contracts are in `cpp/common/include/paglets/services/`, so guests get
 typed clients with `paglets_add_module(... SERVICES files server_info ...)`
 and `#include <paglets/services/<service>.gen.hpp>`.
 
-| Service | Default endpoint | Operations | Notes |
-|---|---|---|---|
-| `directory` | yes | lookup, publish, unpublish, list | Service lookups reply with a non-transferable endpoint carrying the operations the policy allows (default: all; WP9 installs the ledger's). Published names: same owner or `is_public`; removed when the paglet ends; kept in the state directory |
-| `storage` | yes | get, put, remove, list | Per paglet (by host-stamped sender), in the paglet's storage directory, quota per paglet; keys stored as hex file names, so keys differing in case stay apart on macOS and Windows |
-| `user-info` | yes | notify | Kept per owner (bounded), logged, passed to the host's sink |
-| `files` | via directory | list, stat, find, read, write, mkdir, move, remove | Acts on a lent `dir` capability; rights `read`, `write`, `create`, `delete`; at most 4 MB per read/write |
-| `server-info` | via directory | summary, load, volumes, processes | Platform layer; CPU use since the previous `load` |
-| `artifacts` | via directory | put, get, stat | Content-addressed (SHA-256); `put` replies with an `artifact` capability |
-| `pubsub` | via directory | create, publish, subscribe, unsubscribe | Topics reached only through `topic` capabilities; publications are messages named by the subscriber, badge = topic name; host-local until WP14 |
-| `mesh-info` | yes | snapshot, landscape, select, find_offers | Registered by the mesh node (WP16, planning/cpp-compute.md): snapshots of every host (load, memory, compute slots, service offers) by gossip |
-| `compute-slots` | yes | request_slot, release_slot, status, candidates | Registered by the mesh node (WP16): admission of compute work on this host; queue, grants (`compute.granted`) and redirects (`compute.redirect`) to hosts with free slots |
-| `web` | via directory | capabilities, fetch, extract_text, download, search | Gateway hosts only (WP17, planning/cpp-web-ai.md): GET/HEAD for paglets; internal destinations refused unless allowed; the policy decides per URL (root: the URL's host, path: its path); downloads become artifacts |
-| `ai` | via directory | capabilities, summarize, classify, extract, generate, embed, describe_image | Hosts with an inference backend (WP17): Ollama or `test`; replies when done; quotas per owner; the policy decides per operation and model |
-| `locator` | yes | locate, locate_and_pin, release | Registered by the mesh node (WP13, planning/cpp-location.md): finds paglets anywhere in the mesh through a lent endpoint; pins are `pin` capabilities; the policy decides who may pin, and for how long |
+The maintained operation and endpoint table is in
+[System paglets](../docs/system-paglets.md#services), including `grants`,
+`zombies`, content exchange and mesh-wide pubsub. It is the current
+reference; this design does not duplicate an older work-package snapshot.
 
 Every system paglet also answers `describe` with its schema descriptor.
 

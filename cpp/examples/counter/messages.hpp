@@ -14,6 +14,7 @@
 
 namespace counter_msgs {
 
+// --8<-- [start:types]
 enum class Mode { add, multiply };
 
 struct Increment {
@@ -29,7 +30,9 @@ struct Status {
     std::optional<double> average_step;
     std::uint32_t memory_pages = 0;
 };
+// --8<-- [end:types]
 
+// --8<-- [start:extra_types]
 // Exercises every supported field type; the guest echoes it unchanged.
 struct Echo {
     bool flag = false;
@@ -56,5 +59,6 @@ struct Bloat {
     std::uint32_t kilobytes = 0;
     std::uint8_t fill = 0;
 };
+// --8<-- [end:extra_types]
 
 }  // namespace counter_msgs

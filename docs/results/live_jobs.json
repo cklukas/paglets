@@ -1,0 +1,191 @@
+{
+  "topic": "live_jobs",
+  "tests": [
+    {
+      "test": "mac",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 0.438,
+      "platform": "Darwin arm64, Mac13,1, 10 CPUs",
+      "build": "RelWithDebInfo",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "5",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "438",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "433 to 448",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "mac",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.0845,
+      "platform": "Darwin arm64, Mac13,1, 10 CPUs",
+      "build": "RelWithDebInfo",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "4",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "84.5",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "83 to 86",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0.0",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 1.5585,
+      "platform": "Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "20",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "1558.5",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "1508 to 2929",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0.0",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.116,
+      "platform": "Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "4",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "116.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "116 to 117",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0.0",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 0.635,
+      "platform": "Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "17",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "635",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "588 to 646",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.045,
+      "platform": "Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "samples",
+          "value": "4",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "45.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "45 to 45",
+          "unit": "ms"
+        },
+        {
+          "name": "median queued",
+          "value": "0.0",
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

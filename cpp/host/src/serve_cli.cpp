@@ -8,6 +8,7 @@
 // of admins and owners.
 
 #include "serve_cli.hpp"
+#include "cli_integer.hpp"
 
 #if PAGLETS_HAVE_REFLECTION
 
@@ -50,15 +51,20 @@ int usage() {
     std::cerr << "usage: paglets-host serve --key HOST-KEY --ledger DIR --state DIR [--listen HOST:PORT]\n"
                  "                          [--advertise URL] [--peer KEY-ID=URL]... [--root NAME=DIR]...\n"
                  "                          [--module-source DIR]... [--tls-cert FILE --tls-key FILE] [--tls-ca FILE]\n"
-                 "                          [--threads N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
+                 "                          [--threads N] [--memory-mb N] [--in-process] [--no-sandbox] [--stop-file FILE]\n"
                  "                          [--join URL]... [--no-beacon] [--beacon-port N] [--no-listen]\n"
-                 "                          [--slots N] [--web [--web-internal URL-PREFIX]... [--web-no-internet]\n"
+                 "                          [--slots N] [--aot-compiler FILE | --no-aot]\n"
+                 "                          [--web [--web-internal URL-PREFIX]... [--web-no-internet]\n"
                  "                          [--web-proxy URL] [--web-search URL] [--web-ca FILE]]\n"
                  "                          [--ai ollama|test [--ai-url URL] [--ai-model NAME]...]\n"
                  "Runs a host of the mesh whose ledger is in DIR (the host key must be enrolled, or the host\n"
                  "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
                  "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
                  "--no-listen: no inbound port (behind NAT); other hosts relay for this one.\n"
+                 "--memory-mb: linear-memory cap per paglet (1-4096 MB, default 256); separate from compute-job limits.\n"
+                 "--slots: cores for compute work (leases and compute jobs; default: the CPUs). Job modules are\n"
+                 "compiled for this CPU with paglets-wamrc next to this program (--aot-compiler: another one;\n"
+                 "--no-aot: jobs run in the interpreter).\n"
                  "--web: offer the `web` system paglet (internal destinations only with --web-internal; the\n"
                  "proxy defaults to HTTPS_PROXY); --ai: offer the `ai` system paglet through Ollama (or `test`).\n"
                  "Stops on SIGINT/SIGTERM, or when the stop file appears.\n";
@@ -72,18 +78,22 @@ int fail(const std::string& message) {
 
 struct Options {
     std::optional<std::string> key, ledger, state, advertise, tls_cert, tls_key, tls_ca, stop_file;
-    std::string listen = "127.0.0.1:0";
+    std::string listen_host = "127.0.0.1";
+    int listen_port = 0;
     std::vector<std::pair<std::string, std::string>> peers;
     std::map<std::string, std::string> roots;
     std::vector<std::string> sources;
     std::vector<std::string> joins;
     unsigned threads = 2;
+    unsigned memory_mb = 256;
     bool in_process = false;
     bool no_sandbox = false;
     bool beacon = true;
     int beacon_port = 0;
     bool inbound = true;
     std::int64_t slots = 0;
+    std::optional<std::string> aot_compiler;
+    bool aot = true;
     bool web = false;
     bool web_internet = true;
     std::vector<std::string> web_internal;
@@ -122,7 +132,14 @@ std::optional<Options> parse(int argc, char** argv) {
         } else if (a == "--listen") {
             auto v = next();
             ok = v.has_value();
-            if (ok) o.listen = *v;
+            if (ok) {
+                const auto colon = v->rfind(':');
+                if (colon == std::string::npos) return std::nullopt;
+                auto port = decimal_integer<int>(std::string_view(*v).substr(colon + 1));
+                if (!port || *port < 0 || *port > 65535) return std::nullopt;
+                o.listen_host = v->substr(0, colon);
+                o.listen_port = *port;
+            }
         } else if (a == "--advertise") {
             ok = set(o.advertise);
         } else if (a == "--peer") {
@@ -145,31 +162,29 @@ std::optional<Options> parse(int argc, char** argv) {
             ok = set(o.tls_ca);
         } else if (a == "--stop-file") {
             ok = set(o.stop_file);
+        } else if (a == "--memory-mb") {
+            const auto v = next();
+            auto n = v ? decimal_integer<unsigned>(*v) : std::nullopt;
+            ok = n && *n >= 1 && *n <= 4096;
+            if (ok) o.memory_mb = *n;
         } else if (a == "--threads") {
             auto v = next();
-            ok = v.has_value();
-            if (ok) {
-                try {
-                    o.threads = static_cast<unsigned>(std::stoul(*v));
-                } catch (const std::exception&) {
-                    ok = false;
-                }
-            }
+            auto n = v ? decimal_integer<unsigned>(*v) : std::nullopt;
+            ok = n.has_value();
+            if (ok) o.threads = *n;
         } else if (a == "--join") {
             auto v = next();
             ok = v.has_value();
             if (ok) o.joins.push_back(*v);
         } else if (a == "--slots") {
             auto v = next();
-            ok = v.has_value();
-            if (ok) {
-                try {
-                    o.slots = std::stoll(*v);
-                } catch (const std::exception&) {
-                    ok = false;
-                }
-                ok = ok && o.slots > 0;
-            }
+            auto n = v ? decimal_integer<std::int64_t>(*v) : std::nullopt;
+            ok = n && *n > 0;
+            if (ok) o.slots = *n;
+        } else if (a == "--aot-compiler") {
+            ok = set(o.aot_compiler);
+        } else if (a == "--no-aot") {
+            o.aot = false;
         } else if (a == "--web") {
             o.web = true;
         } else if (a == "--web-no-internet") {
@@ -198,15 +213,9 @@ std::optional<Options> parse(int argc, char** argv) {
             o.beacon = false;
         } else if (a == "--beacon-port") {
             auto v = next();
-            ok = v.has_value();
-            if (ok) {
-                try {
-                    o.beacon_port = std::stoi(*v);
-                } catch (const std::exception&) {
-                    ok = false;
-                }
-                ok = ok && o.beacon_port > 0 && o.beacon_port < 65536;
-            }
+            auto n = v ? decimal_integer<int>(*v) : std::nullopt;
+            ok = n && *n > 0 && *n <= 65535;
+            if (ok) o.beacon_port = *n;
         } else if (a == "--in-process") {
             o.in_process = true;
         } else if (a == "--no-sandbox") {
@@ -234,15 +243,9 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     const mesh::RecordId mesh_id = ledger->mesh();
     const std::string key_id = key->id();
 
-    const auto colon = o.listen.rfind(':');
-    if (colon == std::string::npos) return fail("--listen is HOST:PORT");
     net::TransportConfig tc;
-    tc.listen_host = o.listen.substr(0, colon);
-    try {
-        tc.listen_port = std::stoi(o.listen.substr(colon + 1));
-    } catch (const std::exception&) {
-        return fail("--listen is HOST:PORT");
-    }
+    tc.listen_host = o.listen_host;
+    tc.listen_port = o.listen_port;
     if (o.tls_cert) tc.tls_cert = *o.tls_cert;
     if (o.tls_key) tc.tls_key = *o.tls_key;
     if (o.tls_ca) tc.tls_ca = *o.tls_ca;
@@ -253,15 +256,32 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     rt::Config rc;
     rc.host_name = key_id.substr(0, 16);
     rc.threads = std::max(1u, o.threads);
+    rc.limits.max_memory_pages = o.memory_mb * 16;
     rc.state_dir = fs::path(*o.state) / "runtime";
     rc.sandbox_workers = !o.no_sandbox;
-    if (!o.in_process && !self.empty()) {
+    if (!o.in_process) {
+        if (self.empty()) return fail("cannot locate paglets-worker; use --in-process explicitly");
         auto worker = self.parent_path() / "paglets-worker";
 #ifdef _WIN32
         worker += ".exe";
 #endif
+        rc.worker_executable = worker;
+    }
+    // Compute jobs: modules compiled for this CPU, cached in the state.
+    if (o.aot) {
+        fs::path compiler = o.aot_compiler ? fs::path(*o.aot_compiler) : fs::path();
+        if (compiler.empty() && !self.empty()) {
+            compiler = self.parent_path() / "paglets-wamrc";
+#ifdef _WIN32
+            compiler += ".exe";
+#endif
+        }
         std::error_code ec;
-        if (fs::exists(worker, ec)) rc.worker_executable = worker;
+        if (!compiler.empty() && fs::exists(compiler, ec)) {
+            rc.aot_compiler = compiler;
+        } else if (o.aot_compiler) {
+            return fail("no AOT compiler " + *o.aot_compiler);
+        }
     }
     rc.log = [](const rt::LogRecord& r) {
         std::cerr << "[" << (r.paglet.empty() ? std::string("host") : r.paglet.substr(0, 8)) << "] " << r.text << "\n";

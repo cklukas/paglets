@@ -182,11 +182,16 @@ trust a module signer, revoke a grant, force-release a pin.
 
 Every paglet carries:
 
-- **Paglet ID**: unique, stable across moves.
+- **Paglet ID**: 128 bits, stable across moves. New root IDs bind the mesh,
+  owner and owner-local launch nonce with domain-separated SHA-256 (first
+  16 bytes); another owner cannot select a victim's ID in a valid v2 root.
+  Owners use a fresh nonce for each new paglet.
 - **Module hash**: SHA-256 of its Wasm module.
 - **Owner**: the enrolled owner key that launched it.
 - **Passport**: a certificate signed by the owner key: owner, module hash, root
-  paglet ID, declared capability manifest (section 7.2), expiry. Children and
+  paglet ID, nonce, format version, declared capability manifest (section 7.2),
+  expiry. New roots require v2; saved v1 passports remain readable for
+  recovery and authenticated host-to-host moves under mesh protocol 2. Children and
   clones inherit the owner and carry a passport chain back to it. Hosts verify
   passports on creation and arrival.
 - **Lineage**: parent ID, clone-of ID, origin host (informational only; the
@@ -631,7 +636,7 @@ reached by messaging a system paglet.
 | Paglet pinned forever to block it | Pins need the `pin` right, have a policy maximum, and admins can force-release |
 | Stolen admin key | Admin set change by quorum removes it; its later records are ignored |
 | Rogue host joining | Hosts must be enrolled by an admin; unenrolled keys cannot open channels |
-| Compromised enrolled host | Can read and modify paglets it runs; cannot forge admin records. Admins revoke its enrollment; owners can restrict paglets to host labels |
+| Compromised enrolled host | Can read and modify paglets it runs; cannot forge admin records. Admins revoke its enrollment; admin residency and module-trust rules bound where paglets run. Passports carry no owner-signed host restriction |
 | Sensitive file content carried to the wrong host | Data residency marks on paglets and artifacts (7.4) |
 | Web gateway used to reach intranet services (SSRF) | Private, loopback and link-local destinations refused by default; redirects and DNS results re-checked |
 | Paglet exfiltrates data to the internet through a web host | Grants with URL scopes (GET-only fetch and download in release 1, no uploads); residency marks keep restricted content away from web hosts |
@@ -657,10 +662,13 @@ Decided by the owner:
 - The mesh locates paglets dynamically; `locate_and_pin` pins a paglet for a
   requested duration.
 - No command execution service; host services are portable system paglets.
+- `mesh create` defaults admin-set changes to two signatures with three or
+  more initial admins, otherwise one; explicit thresholds take precedence.
+  Other admin records default to one signature. Creation warns when multiple
+  admins share an admin-set quorum of one; existing ledgers keep their thresholds.
 
 Still open:
 
-1. Default quorum for admin set changes (1, or 2 when three or more admins).
-2. How long tombstones for moved paglets are kept (proposal: 10 minutes).
-3. Whether a paglet's grants may optionally extend to its children and clones
+1. How long tombstones for moved paglets are kept (proposal: 10 minutes).
+2. Whether a paglet's grants may optionally extend to its children and clones
    by default, or only when the grant says so (proposal: only when stated).

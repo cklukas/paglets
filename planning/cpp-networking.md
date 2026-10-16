@@ -94,8 +94,9 @@ tests in `cpp/tests/test_mobility.cpp` join two runtimes directly.
 - **Host hints**: endpoint and reply capabilities whose target is on
   another host carry that host's key ID (`Cap::host`). A capability that
   leaves a host (in a message, or with a moving paglet) gets the ID of the
-  host its target is on; endpoints to system paglets get none, since every
-  host has its own.
+  host its target is on. System endpoints have no host hint: they do not
+  travel in messages, and a moving paglet's default service endpoints are
+  recreated on arrival.
 - **Remote messages**: sends, requests and replies to paglets elsewhere
   leave through the mesh's delivery hook as `RemoteMessage`s (target, host,
   name, payload, priority, the host-stamped sender record, badge, endpoint
@@ -103,7 +104,15 @@ tests in `cpp/tests/test_mobility.cpp` join two runtimes directly.
   the timeout; for replies the correlation and status) and arrive through
   `Runtime::deliver_remote`. Requests time out on the requester's host;
   requests that cannot be delivered (unknown paglet, full mailbox, a system
-  paglet) are answered with the error. Only endpoints to paglets travel with
+  paglet) are answered with the error. Asynchronous one-way sends carry an
+  optional failure route (source paglet, source host, original endpoint
+  handle). Receiving-host refusals and failed location lookups return a
+  separate host-only undelivered report with no capabilities or sender
+  authority. Both routes survive forwarding and held-mailbox moves; reports
+  follow the sender through bounded redirects and lookup, and never report
+  another report's failure. Ordinary remote messages still reject reserved
+  names. Old peers may omit the route or reject the added report kind, so
+  reporting remains best effort. Only endpoints to paglets travel with
   messages; lending needs a system paglet on the same host.
 - **Tombstones**: a host remembers for 10 minutes (`Config::tombstone_ttl`)
   where a departed paglet went and forwards messages and replies for it
@@ -117,17 +126,42 @@ tests in `cpp/tests/test_mobility.cpp` join two runtimes directly.
   the paglet receives `dispatching`, its image is taken, and the runtime
   hands its travelling state (`TravelState`: ID, module, owner, handle and
   correlation counters, services, every capability with host hints,
-  requests in flight with their remaining time) and image to the mesh. The
-  paglet waits inactive; messages to it are held.
+  requests in flight with their remaining time) and image to the mesh.
+  Already accepted replies (including completed jobs and timeouts), queued
+  timers and host reports travel atomically in `TravelState::ready`, with
+  portable capability and residency metadata. This uses state version 2
+  when nonempty, so a version-1-only destination refuses rather than losing
+  continuations. With unresolved requests, state version 3 additionally
+  carries `pending_captured_ms`: the Unix time at which remaining budgets
+  were captured. Arrival subtracts nonnegative elapsed time, then runs those
+  remaining budgets on a local monotonic clock, including the commit wait.
+  This bounds them by the captured durations even with future timestamps;
+  host clocks share the same Unix-time assumption as timers. Repeated moves
+  cannot restart the remaining duration. Unsupported versions are refused.
+  Legacy versions 1/2 remain readable with their original remaining-time
+  semantics. Without timed requests or ready messages, state keeps version 1. The source bounds the
+  serialized notifications with `Config::move_ready_bytes` (64 MB); the
+  node checks the full signed offer against the transport's `frame_limit()`.
+  Either refusal leaves source notifications intact. Timers still held as
+  capabilities do not fire on a source preparing or awaiting a move.
+  The paglet waits inactive; later messages to it are held.
 - The mesh reports the outcome with `finish_departure`: on success the
   held messages follow the paglet, a tombstone records where it went, its
   stored record and host directories here are removed, and system paglets
   hear that it ended here. On failure it continues here with its state and
   receives `paglets.move_failed`.
+- A final failed-move diagnostic keeps attempted-host errors, preflight
+  exclusions and hosts skipped by the ticket's retry limit. It is bounded
+  to 8 KB, retaining whole reason fragments and counting omitted reasons.
+  No matching enrolled destination remains distinct from all matching
+  destinations being excluded.
 - An **arrival** is two-phase: `prepare_arrival` creates the paglet without
   running it (module present, admission check, handles preserved, timers
   and request timeouts re-armed, capabilities re-created or listed as
-  lost); `commit_arrival` stores it at once and starts it with `arrived`;
+  lost; ready notification metadata validated and staged without guest
+  authority); `commit_arrival` stores it at once and starts it with `arrived`
+  before ready notifications. Stored ready reply correlations remain
+  outstanding for timeout delivery after restart;
   `abort_arrival` discards it. The mesh commits on the destination only
   when the source has agreed (section 6), so a paglet never runs twice.
 - A **clone for another host** leaves as a departure with the clone's ID,
@@ -142,8 +176,8 @@ The node's side (`cpp/host/src/node/movement.cpp`; tests in
 
 **Transfer tickets.** A destination is a ticket:
 `<target>[?retries=N&arrival=active|inactive]`, where the target is a host
-name, a key ID (or a prefix of at least 8 digits), `label:<label>` or
-`any`. The source picks up to `retries` (default 3) enrolled hosts other
+name, a key ID (or a prefix of at least 8 hex digits), `label:<label>`,
+`offer:<service>[.<operation>]` or `any`. The source picks up to `retries` (default 3) enrolled hosts other
 than itself that match, and skips hosts where an item of the paglet's
 manifest (in its passport) is denied and no grant of the paglet covers it
 (preflight, cpp-policy.md, section 6). It offers the paglet to one host
@@ -217,6 +251,13 @@ host-local handles do not:
 | Reply capability | Kept |
 | Timer | Re-armed for its time |
 | Anything else | Lost: listed in the `arrived` event |
+
+Re-creating a granted capability rebinds its provider, preserving its ID,
+revocation ancestry, narrowed rights/path, expiry, remaining uses, transfer
+flag and badge. A resource outside the grant's directory or of another
+resource type is lost rather than replaced with the full grant. Hosts apply
+the revocations they know; local capability-ID revocations are not replicated
+by this re-creation step.
 
 ## 8. Hosts on the network and CLI sessions
 

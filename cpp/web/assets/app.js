@@ -1025,7 +1025,7 @@ function launchPanel(panel, m, hostKey) {
   const types = (iface && iface.types) || [];
   const launchType = iface && iface.launch ? iface.launch.type : (iface ? 'none' : 'any');
   const shell = shellBox('Shell');
-  const id = h('input', { type: 'text', placeholder: 'random', size: 34, 'aria-label': 'paglet ID' });
+  const nonce = h('input', { type: 'text', placeholder: 'random', size: 34, 'aria-label': 'launch nonce' });
   const hours = h('input', { type: 'number', min: 1, max: 720, value: 24, size: 5, 'aria-label': 'hours' });
   const update = () => {
     const host = hostByKey(target.value);
@@ -1033,11 +1033,11 @@ function launchPanel(panel, m, hostKey) {
     let args = null;
     try { args = editorRef.get(); } catch (e) { args = '…'; }
     shell.setCommand(conn + ' ' + shQuote(m.upload ? m.upload.name : m.file ? state.moduleDir.replace(/\/$/, '') + '/' + m.file : m.hash) + (args === null ? '' : ' --args ' + shQuote(args)) +
-      (id.value ? ' --id ' + shQuote(id.value) : '') + (Number(hours.value) !== 24 ? ' --hours ' + Number(hours.value) : ''));
+      (nonce.value ? ' --nonce ' + shQuote(nonce.value) : '') + (Number(hours.value) !== 24 ? ' --hours ' + Number(hours.value) : ''));
   };
   const editorRef = launchType === 'none' ? { el: h('p', { class: 'muted small', text: 'It takes no start arguments.' }), get: () => null }
     : payloadEditor(launchType, types, iface && iface.launch ? iface.launch.example : undefined, update);
-  for (const el of [target, id, hours]) el.addEventListener('input', update);
+  for (const el of [target, nonce, hours]) el.addEventListener('input', update);
   const result = h('div', { class: 'result' });
   const push = m.file || m.upload ? h('button', { type: 'button', onclick: async () => {
     try {
@@ -1059,7 +1059,7 @@ function launchPanel(panel, m, hostKey) {
     const what = m.upload ? ',"name":' + JSON.stringify(m.upload.name) + ',"data":' + JSON.stringify(m.upload.data)
       : m.file ? ',"file":' + JSON.stringify(m.file) : ',"module":' + JSON.stringify(m.hash);
     const text = '{"host":' + JSON.stringify(target.value) + what +
-      (args !== null ? ',"args":' + args : '') + (id.value ? ',"id":' + JSON.stringify(id.value) : '') + ',"hours":' + Number(hours.value || 24) + '}';
+      (args !== null ? ',"args":' + args : '') + (nonce.value ? ',"nonce":' + JSON.stringify(nonce.value) : '') + ',"hours":' + Number(hours.value || 24) + '}';
     result.className = 'result';
     fill(result, h('p', { class: 'muted small', text: 'Launching…' }));
     try {
@@ -1079,7 +1079,7 @@ function launchPanel(panel, m, hostKey) {
     h('div', { class: 'form' },
       h('div', { class: 'field' }, h('label', { text: 'Host' }), target),
       h('div', { class: 'field' }, h('label', null, 'Arguments', h('span', { class: 'type', text: launchType })), editorRef.el),
-      h('div', { class: 'field' }, h('label', { text: 'Paglet ID' }), id),
+      h('div', { class: 'field' }, h('label', { text: 'Nonce (optional)' }), nonce),
       h('div', { class: 'field' }, h('label', { text: 'Passport valid' }), h('div', null, hours, ' hours')),
       h('div', { class: 'row' }, h('button', { type: 'button', class: 'primary', onclick: go, text: 'Launch' }), push)),
     result, shell);

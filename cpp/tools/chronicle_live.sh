@@ -25,11 +25,16 @@
 #       [--local-name mac] [--build cpp/build/macos-arm64] [--port 7443] [--lifetime-min 10]
 #       [--no-failures] [--keep] [--late NAME]
 #
-# --late NAME: that host joins the mesh only after a minute (its host process
-# starts then); the chronicle's main makes a replica there.
+# Needs Bash 4+, jq and SSH; remote hosts are Linux. --keep leaves the mesh
+# running; --no-failures disables the fault schedule. --late NAME joins at
+# 10% of the lifetime (one minute of ten), then receives a replica.
+# --results-dir DIR and --log-file FILE override the recorded output paths;
+# custom outputs do not trigger repository documentation synchronization.
 
 set -euo pipefail
+(( BASH_VERSINFO[0] >= 4 )) || { echo "bash 4 or newer is required" >&2; exit 2; }
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
+source "$repo/cpp/tools/live_process.sh"
 build="$repo/cpp/build/macos-arm64"
 local_name="mac"
 port=7443
@@ -37,8 +42,10 @@ lifetime_min=10
 failures=true
 keep=false
 late=""
+results_root="$repo/docs/results"
+log_output="$repo/docs/examples/mesh-chronicle-log.md"
 names=()
-declare -A ssh_of bin_of ip_of key_of pid_of
+declare -A ssh_of bin_of ip_of key_of pid_of prepared run_dir
 while [ $# -gt 0 ]; do
     case "$1" in
         --remote)
@@ -52,44 +59,113 @@ while [ $# -gt 0 ]; do
         --no-failures) failures=false; shift ;;
         --keep) keep=true; shift ;;
         --late) late="$2"; shift 2 ;;
+        --results-dir) results_root="$2"; shift 2 ;;
+        --log-file) log_output="$2"; shift 2 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
 [ ${#names[@]} -ge 2 ] || { echo "at least two --remote NAME=SSH:BIN_DIR" >&2; exit 2; }
-build="$(cd "$build" && pwd)"
+[[ "$local_name" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo "invalid local name" >&2; exit 2; }
+[[ "$port" =~ ^[0-9]{1,5}$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || { echo "invalid port" >&2; exit 2; }
+declare -A seen
+seen[$local_name]=true
+for h in "${names[@]}"; do
+    [[ "$h" =~ ^[a-zA-Z0-9_-]+$ ]] && [ -z "${seen[$h]:-}" ] || { echo "invalid or duplicate host name: $h" >&2; exit 2; }
+    [[ "${ssh_of[$h]}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$ ]] &&
+        [[ "${bin_of[$h]}" =~ ^/[a-zA-Z0-9_./+-]+$ ]] || { echo "remote needs SSH name and absolute BIN_DIR without shell metacharacters" >&2; exit 2; }
+    seen[$h]=true
+done
+build="$(cd "$build" && pwd -P)"
 H="$build/host/paglets-host"
 [ -f "$build/guests/chronicle.wasm" ] || { echo "build $build first (guests)" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq is needed" >&2; exit 1; }
 
 all=("$local_name" "${names[@]}")
-rwork="paglets-chronicle"  # below the remote home directories
+if [ "$(uname -s)" = Darwin ]; then
+    tmp_mount="$(df -P "${TMPDIR:?Set a temporary workspace first}" | awk 'NR == 2 {print $6}')"
+    case "${TMPDIR:-}" in
+        /Volumes/S8T/tmp/*) [ "$tmp_mount" = /Volumes/S8T ] || exit 2 ;;
+        /Volumes/PRO-BLADE/tmp/*) [ "$tmp_mount" = /Volumes/PRO-BLADE ] || exit 2 ;;
+        *) echo "Set TMPDIR below a mounted S8T/tmp or PRO-BLADE/tmp" >&2; exit 2 ;;
+    esac
+fi
 work="$(mktemp -d "${TMPDIR:-/tmp}/paglets-chronicle.XXXXXX")"
+rwork="tmp/$(basename "$work")"  # unique, below each remote home
+[[ "$work" =~ ^/[a-zA-Z0-9_./+-]+$ ]] && [[ "$build" =~ ^/[a-zA-Z0-9_./+-]+$ ]] || {
+    rmdir "$work"; echo "workspace and build paths must not contain shell metacharacters or spaces" >&2; exit 2;
+}
+export TMPDIR="$work"
+run_dir[$local_name]="$work"
+prepared[$local_name]=true
 t0=$(date +%s)
 say() { printf '%5ds  %s\n' $(( $(date +%s) - t0 )) "$*"; }
 
 on() {
     local h="$1"; shift
-    if [ "$h" = "$local_name" ]; then bash -c "$*"; else ssh -n "${ssh_of[$h]}" "$*"; fi
+    if [ "$h" = "$local_name" ]; then bash -c "$*";
+    else ssh -n -o BatchMode=yes -o ConnectTimeout=10 "${ssh_of[$h]}" "$*"; fi
 }
-dir_of() { if [ "$1" = "$local_name" ]; then echo "$work"; else echo "\$HOME/$rwork"; fi; }
+dir_of() { echo "${run_dir[$1]}"; }
 
-logs="${TMPDIR:-/tmp}/paglets-chronicle-logs"
+logs="${work}-logs"
+active_host() {
+    local h="$1" expected
+    if [ "$h" = "$local_name" ]; then expected="$H"; else expected="${bin_of[$h]}/paglets-host"; fi
+    live_process_state "$h" "${pid_of[$h]:-}" "$expected" "--stop-file ${run_dir[$h]}/stop"
+}
 cleanup() {
+    local h state running failed=false
     if $keep; then echo "kept: $work (hosts still running)" >&2; return; fi
     for h in "${all[@]}"; do
-        on "$h" "pkill -CONT -f \"paglets-host serve --key $(dir_of "$h")/host.key\" ; touch $(dir_of "$h")/stop" 2>/dev/null || true
+        [ "${prepared[$h]:-}" = true ] || continue
+        if active_host "$h"; then on "$h" "kill -CONT ${pid_of[$h]}" 2>/dev/null || failed=true;
+        else state=$?; [ "$state" = 1 ] || failed=true; fi
+        on "$h" "touch $(dir_of "$h")/stop" 2>/dev/null || failed=true
     done
-    sleep 3
+    for _ in $(seq 10); do
+        running=false
+        for h in "${all[@]}"; do
+            [ "${prepared[$h]:-}" = true ] || continue
+            if active_host "$h"; then running=true;
+            else state=$?; [ "$state" = 1 ] || failed=true; fi
+        done
+        $running || break
+        sleep 1
+    done
+    $running && failed=true
     mkdir -p "$logs"
-    for h in "${all[@]}"; do on "$h" "cat $(dir_of "$h")/host.log" > "$logs/$h.log" 2>/dev/null || true; done
+    for h in "${all[@]}"; do
+        [ "${prepared[$h]:-}" = true ] || continue
+        on "$h" "cat $(dir_of "$h")/host.log" > "$logs/$h.log" 2>/dev/null || true
+    done
     echo "host logs: $logs" >&2
-    for h in "${names[@]}"; do on "$h" "rm -rf $rwork" 2>/dev/null || true; done
+    if $failed; then echo "cleanup unconfirmed; retained $work and remote $rwork" >&2; return 1; fi
+    for h in "${names[@]}"; do
+        [ "${prepared[$h]:-}" = true ] || continue
+        on "$h" "rm -rf $(dir_of "$h")" || { echo "cleanup failed on $h; retained $work" >&2; return 1; }
+    done
     rm -rf "$work"
 }
-trap cleanup EXIT
+trap 'status=$?; cleanup || status=1; exit "$status"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+host_configs="[]"
+for h in "${all[@]}"; do
+    existing="$(on "$h" "ps -eo pid,args | awk '\$2 ~ /(^|\/)paglets-host\$/ && \$3 == \"serve\" {print}'")"
+    [ -z "$existing" ] || { echo "$h already has a paglets-host serve process: $existing" >&2; exit 1; }
+    if [ "$h" != "$local_name" ]; then
+        bin_of[$h]="$(on "$h" "readlink -f '${bin_of[$h]}'")"
+        [[ "${bin_of[$h]}" =~ ^/[a-zA-Z0-9_./+-]+$ ]] || exit 2
+    fi
+    if [ "$h" = "$local_name" ]; then info="$("$H" --info)";
+    else info="$(on "$h" "${bin_of[$h]}/paglets-host --info")"; fi
+    config="$(jq -nc --arg host "$h" --arg info "$info" -f "$repo/cpp/tools/live_host_info.jq")"
+    host_configs="$(jq -nc --argjson all "$host_configs" --argjson h "$config" '$all + [$h]')"
+done
 
 first="${names[0]}"
-ip_of[$local_name]="$(ssh -n "${ssh_of[$first]}" 'echo $SSH_CLIENT' | cut -d' ' -f1)"
+ip_of[$local_name]="$(on "$first" 'echo $SSH_CLIENT' | cut -d' ' -f1)"
 for h in "${names[@]}"; do ip_of[$h]="$(on "$h" "ip -4 route get 1.1.1.1 | grep -o 'src [0-9.]*' | cut -d' ' -f2")"; done
 
 say "mesh of ${all[*]}"
@@ -105,9 +181,13 @@ for h in "${all[@]}"; do
 done
 "$H" ledger enroll "${L[@]}" owner "$olga" olga >/dev/null
 for h in "${names[@]}"; do
-    on "$h" "rm -rf $rwork; mkdir -p $rwork"
-    scp -q -r "$work/ledger" "${ssh_of[$h]}:$rwork/ledger"
-    scp -q "$work/$h.key" "${ssh_of[$h]}:$rwork/host.key"
+    remote_home="$(on "$h" 'printf "%s" "$HOME"')"
+    [[ "$remote_home" =~ ^/[a-zA-Z0-9_./+-]+$ ]] || { echo "unsupported remote home path" >&2; exit 2; }
+    run_dir[$h]="$remote_home/$rwork"
+    on "$h" "mkdir -p '$remote_home/tmp' && mkdir '${run_dir[$h]}'"
+    prepared[$h]=true
+    scp -q -o BatchMode=yes -o ConnectTimeout=10 -r "$work/ledger" "${ssh_of[$h]}:$rwork/ledger"
+    scp -q -o BatchMode=yes -o ConnectTimeout=10 "$work/$h.key" "${ssh_of[$h]}:$rwork/host.key"
 done
 cp -R "$work/ledger" "$work/ledger-$local_name"
 cp "$work/$local_name.key" "$work/host.key"
@@ -122,14 +202,19 @@ serve() {
         "$H" serve --key "$work/host.key" --ledger "$work/ledger-$h" --state "$work/state" \
             --listen "0.0.0.0:$port" --advertise "https://${ip_of[$h]}:$port" $peers \
             --stop-file "$work/stop" --no-beacon >> "$work/host.log" 2>&1 &
+        pid_of[$h]=$!
     else
-        on "$h" "rm -f $rwork/stop; nohup ${bin_of[$h]}/paglets-host serve --key $d/host.key --ledger $rwork/ledger \
-            --state $rwork/state --listen 0.0.0.0:$port --advertise https://${ip_of[$h]}:$port $peers \
-            --stop-file $rwork/stop --no-beacon >> $rwork/host.log 2>&1 < /dev/null &"
+        pid_of[$h]="$(on "$h" "rm -f $d/stop; TMPDIR=$d nohup ${bin_of[$h]}/paglets-host serve --key $d/host.key --ledger $d/ledger \
+            --state $d/state --listen 0.0.0.0:$port --advertise https://${ip_of[$h]}:$port $peers \
+            --stop-file $d/stop --no-beacon >> $d/host.log 2>&1 < /dev/null & echo \$!")"
     fi
+    for _ in $(seq 20); do active_host "$h" && break; sleep 0.05; done
+    active_host "$h" || { echo "$h did not start the expected executable" >&2; exit 1; }
+    printf '%s\t%s\t%s\n' "$h" "${pid_of[$h]}" "$(dir_of "$h")" >> "$logs-processes.tsv"
 }
-signal() {  # host signal (the pattern is expanded on the host: $HOME)
-    on "$1" "pkill -$2 -f \"paglets-host serve --key $(dir_of "$1")/host.key\"" || true
+signal() {  # only the recorded PID, after checking its executable
+    if active_host "$1"; then on "$1" "kill -$2 ${pid_of[$1]}";
+    else local state=$?; [ "$state" = 1 ]; fi
 }
 stop_host() { on "$1" "touch $(dir_of "$1")/stop"; }
 for h in "${all[@]}"; do [ "$h" = "$late" ] || serve "$h"; done
@@ -254,12 +339,14 @@ for h in "${all[@]}"; do
     "$H" remote zombies list $(R_of "$h") 2>/dev/null | grep "^$group" | grep -q 'replica -' || remaining=$((remaining + 1))
 done
 
-out="$repo/docs/examples/mesh-chronicle-log.md"
+out="$log_output"
+mkdir -p "$(dirname "$out")" "$results_root"
 {
-    echo "# A life log of three hosts"
+    echo "# A life log of ${#all[@]} hosts"
     echo
-    echo "The [Mesh Chronicle](mesh-chronicle.md) on this machine (mac) and two"
-    echo "Raspberry Pi class Linux hosts (pi, uconsole), with failures on schedule"
+    echo "The [Mesh Chronicle](mesh-chronicle.md) on ${all[*]}."
+    if $failures; then echo "Host failures followed the schedule below."
+    else echo "No host failures were scheduled."; fi
     echo "(\`cpp/tools/chronicle_live.sh${late:+ --late $late}\`). This is the life log it delivered, as it is."
     echo
     echo "What happened to the hosts (seconds after the start):"
@@ -283,11 +370,13 @@ values="$(jq -nc --arg hosts "${#all[@]}" --arg tk "$takeovers" --arg pt "${part
       {name: "partitions with a main on both sides", value: $pt, unit: ""},
       {name: "protocol steps checked against the specification", value: $rec, unit: ""},
       {name: "replicas left after the end", value: $rem, unit: ""}]')"
+scenario="without scheduled host failures"
+$failures && scenario="with freezes, crashes and restarts"
 jq -nc --arg outcome "$outcome" --argjson seconds $((ended - began)) --arg date "$(date +%Y-%m-%d)" --argjson values "$values" \
-    --arg name "Mesh Chronicle, $lifetime_min minutes with ${late:+a host joining, }freezes, crashes and restarts" \
-    '{topic: "live_chronicle", tests: [{test: $name,
-      mode: "LAN, worker processes", outcome: $outcome, seconds: $seconds, platform: "macOS arm64, 2 × Linux arm64",
-      build: "Release", date: $date, values: $values}]}' > "$repo/docs/results/live_chronicle.json"
-"$build/tools/docs_sync/paglets-docs-sync" --root "$repo"
+    --argjson hosts "$host_configs" --arg name "Mesh Chronicle, lifetime $lifetime_min min ${late:+with a host joining, }$scenario" \
+    -f "$repo/cpp/tools/chronicle_results.jq" > "$results_root/live_chronicle.json"
+if [ "$results_root" = "$repo/docs/results" ] && [ "$log_output" = "$repo/docs/examples/mesh-chronicle-log.md" ]; then
+    "$build/tools/docs_sync/paglets-docs-sync" --root "$repo"
+fi
 say "done: $outcome"
 [ "$outcome" = passed ]

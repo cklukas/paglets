@@ -65,6 +65,9 @@ struct ModuleInfo {
     std::vector<Global> globals;  // imported and defined, in index order
     std::optional<MemoryLimits> memory;
     bool has_start_function = false;
+    bool mutable_tables = false;
+    bool mutable_segments = false;
+    bool snapshot_instructions_checked = true;
 
     const Export* find_export(std::string_view name) const;
 };

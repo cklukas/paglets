@@ -10,8 +10,9 @@
 // the owner cancels or redirects. Messages travel in one ordered channel
 // per sender and receiver, as the transport's queues per peer do; loss can
 // hit any of them. A message equal to one still queued on its channel is
-// merged with it (periodic resends; double delivery is a fault of its own). Timers fire at any time: safety
-// does not depend on timing.
+// merged with it (periodic resends; double delivery is a fault of its own).
+// Timers fire at their deadlines, except when the world explicitly budgets
+// early timeouts as faults. Timing safety is checked under that world.
 //
 // Recovery steps are not faults: restarting a host, healing a link, a sink
 // coming back, the registries gossiping, timers, delivery, work. The goals
@@ -30,6 +31,18 @@
 #include <tuple>
 
 namespace paglets::protocols::zombie {
+
+// Check the reported chain, including legitimate self-transitions, against
+// the state before and after a step. A missing or disconnected report fails.
+inline bool role_changes_match(Role before, Role after, const Outputs& outputs) {
+    for (const auto& output : outputs) {
+        if (const auto* transition = std::get_if<Transition>(&output)) {
+            if (transition->from != before) return false;
+            before = transition->to;
+        }
+    }
+    return before == after;
+}
 
 struct ModelConfig {
     std::uint32_t replicas = 3;
@@ -614,7 +627,9 @@ private:
     // Applies an input to a replica and carries out the outputs.
     void apply(State& w, ReplicaId r, const Input& input) const {
         Host& h = w.hosts[r];
+        const auto before = h.replica.role;
         const Outputs out = step(h.replica, input);
+        if (!role_changes_match(before, h.replica.role, out)) w.illegal = true;
         for (const auto& o : out) {
             if (const auto* send = std::get_if<Send>(&o)) {
                 if (send->to < w.hosts.size() && w.hosts[send->to].joined && w.hosts[send->to].up &&

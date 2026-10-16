@@ -2,29 +2,24 @@
 % Licensed under the MIT License. See LICENSE for details.
 
 \begin{abstract}
-Mobile agents carry their code and their state to the data they work
-on. WebAssembly gives the idea what it lacked: a portable, sandboxed
-unit of execution whose state a host can capture without the agent's
-help. This paper presents \paglets{}/cpp, a C++ programming model,
-runtime and mesh in which a \paglet{} is a WebAssembly module plus one
-instance of it. The \paglet{}'s whole state is the instance's linear
-memory, so a host stores, copies or moves it as a memory image taken
-between two handler calls. A \paglet{} is written as handlers for
-messages and lifecycle events; the host makes one call at a time and
-reports failures as events, not as exceptions. Hosts form a mesh held
-together by a signed, gossiped ledger of keys, trusted modules and
-policy rules; \paglet{}s reach host resources only through system
-\paglet{}s under that policy, and endpoints keep working while their
-targets move. Zombie \paglet{}s keep a replica on every host, survive
-crashes and partitions, and deliver exactly one result; an
-explicit-state checker explores their protocol completely for ten
-two-replica worlds. The paper describes the model, the move protocol,
-the mesh and the tools, and measures the implementation on a mesh of a
-Mac Studio, a Raspberry Pi~4 and a uConsole: a 128\,KB image for a
-counter, 1.2--5.2\,ms round trips between hosts, transfers at
-20--40\,MB/s, 100\,000 hexadecimal digits of $\pi$ on all three
-machines in 313\,s, and a ten-minute run of a zombie \paglet{} that
-delivered its log through two takeovers and one partition. The limits,
-from the 16\,MB image to the bounded check of three replicas, are
-stated with the results.
+Mobile agents need a way to carry their execution state between hosts
+while keeping access to host resources under host control. We present
+\paglets{}/cpp, a runtime in which each agent runs as one WebAssembly
+instance. It captures the instance's memory and mutable global variables
+between handler calls. Host-managed permissions travel in a separate
+record. The destination prepares the instance but starts it only after
+the source commits the transfer of ownership. Message endpoints remain
+usable after a move. Long computations run as separate, cancellable jobs,
+optionally compiled for the executing host's CPU. A replication protocol
+orders saved execution states, merges recorded observations and detects
+duplicate results. The same protocol code runs in the software library
+and a model checker that explores possible execution states. In tests on
+three machines on one local network, 480 moves exercised four image sizes
+and page-cache reuse; a 16\,MB return move sent two pages instead of 258.
+Ten two-replica model configurations were explored completely; two
+three-replica configurations were checked only to a search depth of
+11 steps. These results
+demonstrate feasibility and identify costs and failure limits. They do
+not establish an advantage over remote calls, native execution or other
+fault-tolerant systems.
 \end{abstract}

@@ -936,8 +936,11 @@ PAGLETS_TEST("gateway: Release Watcher stays on the web host, tells its owner ab
     CHECK_EQ(st.updates[0].from, std::string("v1.4.2"));
     CHECK_EQ(st.updates[0].to, std::string("v1.5.0"));
     CHECK(st.sleeps >= 1);  // inactive between checks
-    const auto notes = gateway.services->notifications(net.owner.id());
-    CHECK(std::ranges::any_of(notes, [](const auto& n) { return n.title == "tool v1.5.0 is out"; }));
+    // Observing the update does not wait for the fire-and-forget notification.
+    REQUIRE(net.settle([&] {
+        const auto notes = gateway.services->notifications(net.owner.id());
+        return std::ranges::any_of(notes, [](const auto& n) { return n.title == "tool v1.5.0 is out"; });
+    }, 2000));
 
     // A courier for the release file, delivered to the host the watcher started on.
     auto fetched = gateway.f->runtime->call(id, "fetch", wire::to_msgpack(watcher_msgs::Fetch{"tool"}), 20s);

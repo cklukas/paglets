@@ -1,657 +1,153 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-A \paglet{} of the previous chapters lives on one host at a time; when that
-host goes down, the \paglet{} is down with it (Section~\ref{sec:movement}).
-A \emph{zombie \paglet{}} cannot die while one host of its mesh is alive,
-which is what the name says: it keeps coming back. It has a replica on
-every host. One replica, the \emph{main}, works; the
-others sleep, hold the main's latest checkpoint and take over when the main
-disappears. After a partition, the replicas agree on the one that got
-furthest, and what both sides observed is merged. After the whole mesh was
-down, the most advanced replica goes on. When the work is done, exactly one
-result reaches the sink, and every replica ends. This chapter describes the
-protocol, the SDK class that runs it, and what was checked about it.
+\subsection{Ordering checkpoints and merging observations}\label{sec:zombies-design}
 
-\subsection{Ground rules}\label{sec:zombies-rules}
+A \emph{zombie paglet} has copies, called \emph{replicas}, on several
+hosts. Its group can continue after a member host fails. One replica normally acts
+as \emph{main} and advances the work; the others keep checkpoints.
+A network partition can leave several mains running at once. The protocol
+therefore separates work state from observations; it does not impose
+one global order on every action during a partition.
 
-A replica that hears nothing cannot tell dead hosts from a cut network, so
-the protocol does not try to keep a single main at all times. Four rules
-follow~\cite{pagletsCppDocs}:
+\emph{Work} follows a chain of checkpoints. A rank compares checkpoints
+by completion status, progress, leadership counter (called \emph{reign}),
+checkpoint number and author ID, in that order. The first differing
+field decides: completed work and larger progress or counter values
+rank higher; a lower author ID breaks the final tie. A new main chooses a reign above
+all it has seen, saves a checkpoint and announces its rank. Replicas
+adopt higher-ranked checkpoints. Work on a losing chain is discarded.
 
-\begin{itemize}
-\item \textbf{Several mains may run for a while.} A cut-off replica takes
-  over after a timeout; during a partition each side may have its own main.
-\item \textbf{One result counts.} Uniqueness is decided where it can be
-  decided atomically: at the sink, which accepts the first result for a
-  group and answers every later one with \emph{already delivered}.
-\item \textbf{Mains that meet agree on one.} The one further along wins.
-  The other forgets its work, sleeps and takes checkpoints from the winner.
-  Its observations are not lost: journals are merged.
-\item \textbf{Work repeats from the last checkpoint.} A replica that takes
-  over continues from the checkpoint it holds, so work since then is done
-  again (at least once). Side effects other than the result should be
-  idempotent.
-\end{itemize}
+\emph{Observations} are separate journal entries identified by observer,
+restart number and entry number. Journals merge by taking the union of
+their entries. Version vectors summarize the entries held for each
+observer and restart, allowing missing entries to be
+requested~\cite{parker1983versionVectors}. Concurrent observations can
+therefore survive a merge even when only one chain of work continues.
 
-The protocol is a pure C++ state machine: the replica state, the messages,
-and \code{step()}, the transition function of one replica. It makes no ABI
-call and reads no clock. The same code is run by the guest SDK and explored
-by the model checker and the simulator; recorded traces are checked against
-its transition table and its order on ranks. The excerpts below are taken from its header,
-\path{cpp/common/include/paglets/protocols/zombie/zombie.hpp}.
+Applications must respect this distinction. Work progress must not
+decrease along a checkpoint chain. Effects other than the final result
+should be safe to repeat (\emph{idempotent}) or protected separately by
+the application. The protocol does not make all operations appear to
+occur in a single order consistent with real time (\emph{linearizability}).
+An observation saved only on a crashed host may be absent from a result
+delivered before that host returns. Saving an observation durably does
+not guarantee that other replicas have already received it.
 
-\subsection{Replicas, roles and ranks}\label{sec:zombies-roles}
+\subsection{Saving state before externally visible actions}\label{sec:zombies-durability}
 
-A \emph{group} is one zombie \paglet{}: a 128-bit group ID, a sink, and a
-replica on every host. A replica is named by its host, by the first 8 bytes
-of the host's key ID (\code{replica\_id()}), so names are stable, the same
-on every replica, and do not depend on which main made the replica. (Two
-hosts whose key IDs share their first 16 hex digits would get the same
-name; the SDK then makes no replica on the second one and logs a warning.)
-A replica is in one of six roles:
+The protocol is implemented by
+\code{step(State\&, Input) -> Outputs}. Given a state and input, this
+function changes the state and returns an ordered list of requested
+actions: send a message, save state, change a timer, do work or deliver
+a result. It makes no network or ABI calls itself. This separation lets
+the runtime and checker execute the same protocol code.
+Listing~\ref{lst:zombie-persist-order} shows a new main saving its
+checkpoint before announcing it. A reign resembles a leadership number
+in Raft~\cite{ongaro2014raft}; the partition behavior and journal merging,
+however, do not implement Raft consensus.
 
-% snippet: cpp/common/include/paglets/protocols/zombie/zombie.hpp#roles
-\begin{lstlisting}[style=paglets-cpp]
-enum class Role : std::uint8_t {
-    recovering,  // restored after a restart; listens before it may run for election
-    sleeping,    // follows a main, holds its latest checkpoint
-    candidate,   // the main went silent (or a worse one appeared): asks everybody
-    main,        // works; sends beats and checkpoints
-    delivering,  // the work is done; delivers the result to the sink
-    ended,       // the group ended here (delivered or cancelled)
-};
+% snippet: cpp/common/include/paglets/protocols/zombie/zombie_impl.hpp#paper_persist_order [caption={Saving a new main's checkpoint before announcing it},label={lst:zombie-persist-order}]
+\begin{lstlisting}[style=paglets-cpp,caption={Saving a new main's checkpoint before announcing it \src{cpp/common/include/paglets/protocols/zombie/zombie\_impl.hpp}},label={lst:zombie-persist-order}]
+become(s_.done ? Role::delivering : Role::main, cause);
+persist();
+broadcast(beat());
+set(Timer::beat);
 \end{lstlisting}
 % /snippet
 
-\noindent A replica that came back from a memory image after its host
-restarted is \emph{recovering}: it listens for beats first and does not
-resume as main on its own. A \emph{delivering} replica is a main whose work
-is done; it sends the result to the sink and resends it with every beat.
+The code that carries out these actions must preserve their order and
+finish each requested save before the next externally visible action.
+The SDK cannot save an image during a handler. It instead requests a
+checkpoint, stores the remaining actions in guest memory and sends
+itself a message to continue on the next call
+(Listing~\ref{lst:zombie-barrier}). After a restart it discards old deferred
+actions and rejoins in the recovering role. If a required durable write
+fails, the runtime must end the paglet as failed. Checking the transition
+function alone does not verify these SDK and storage requirements.
 
-Which of two replicas is further along is decided by a \emph{rank}, a
-total order on checkpoints (Listing~\ref{lst:zombie-rank}).
-\code{progress} is a number the \paglet{} defines; it only grows within one
-lineage, that is, along a chain of mains that each took over from the
-previous one's checkpoint. \code{term} is the \emph{reign} of the main that
-made the checkpoint, an epoch number in the sense of Raft's
-terms~\cite{ongaro2014raft}. A replica that becomes main takes a term above every
-term it has seen; its checkpoint keeps its content, gets the new reign, and
-is made durable before the first beat (\code{become\_main} in
-\code{zombie\_impl.hpp}). So the same content under a newer main ranks
-higher, and replicas follow the newer main. Replicas that hold the same
-checkpoint have equal ranks, because the author is part of the rank.
-
-% snippet: cpp/common/include/paglets/protocols/zombie/zombie.hpp#rank [float,caption={The rank of a checkpoint: a total order on how far a lineage got},label={lst:zombie-rank}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={The rank of a checkpoint: a total order on how far a lineage got \src{cpp/common/include/paglets/protocols/zombie/zombie.hpp}},label={lst:zombie-rank}]
-// How far a lineage got. Ranks are compared lexicographically: a finished
-// lineage beats any other, then more progress, then a later reign and
-// checkpoint, then the author with the lower host key ID (lower replica
-// ID). The author is the main that made the checkpoint, so replicas
-// holding the same checkpoint have equal ranks.
-struct Rank {
-    bool done = false;
-    std::int64_t progress = 0;
-    std::uint64_t term = 0;  // the reign of the author that made the checkpoint
-    std::uint64_t seq = 0;   // checkpoint number within that reign
-    ReplicaId author = 0;
-
-    friend std::strong_ordering operator<=>(const Rank& a, const Rank& b) {
-        if (auto c = a.done <=> b.done; c != 0) return c;
-        if (auto c = a.progress <=> b.progress; c != 0) return c;
-        if (auto c = a.term <=> b.term; c != 0) return c;
-        if (auto c = a.seq <=> b.seq; c != 0) return c;
-        return b.author <=> a.author;  // lower author ranks higher
+% snippet: cpp/sdk/include/paglets/patterns/zombie.hpp#paper_persist_barrier [caption={Saving a checkpoint before carrying out remaining actions},label={lst:zombie-barrier}]
+\begin{lstlisting}[style=paglets-cpp,caption={Saving a checkpoint before carrying out remaining actions \src{cpp/sdk/include/paglets/patterns/zombie.hpp}},label={lst:zombie-barrier}]
+if (std::holds_alternative<zp::Persist>(o)) {
+    (void)checkpoint();
+    deferred_.insert(deferred_.end(), outs.begin() + static_cast<std::ptrdiff_t>(i) + 1, outs.end());
+    if (!flush_pending_) {
+        flush_pending_ = true;
+        SendOptions options;
+        options.async = true;
+        (void)self().send("zombie.flush", std::move(options));
     }
-    friend bool operator==(const Rank&, const Rank&) = default;
-};
-\end{lstlisting}
-% /snippet
-
-Every role change the protocol makes is one of a fixed table of
-\emph{(from, cause, to)} triples (Listing~\ref{lst:zombie-transitions},
-Figure~\ref{fig:zombie-roles}). The transition function makes no other
-change, and the model checker confirms that every entry occurs in some
-reachable state: an unlisted change is a safety violation, and a listed one
-that never occurs fails the full suite (\code{protocol\_check.cpp}).
-
-% snippet: cpp/common/include/paglets/protocols/zombie/zombie.hpp#transitions [float,caption={Every role change of the protocol},label={lst:zombie-transitions}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={Every role change of the protocol \src{cpp/common/include/paglets/protocols/zombie/zombie.hpp}},label={lst:zombie-transitions}]
-// Every role change the protocol makes (from, cause, to). step() makes no
-// other; the model checker confirms that each one occurs.
-struct Allowed {
-    Role from;
-    Cause cause;
-    Role to;
-};
-inline constexpr std::array allowed_transitions = {
-    Allowed{Role::sleeping, Cause::created, Role::main},
-    Allowed{Role::recovering, Cause::suspect, Role::candidate},
-    Allowed{Role::sleeping, Cause::suspect, Role::candidate},
-    Allowed{Role::recovering, Cause::beat, Role::sleeping},
-    Allowed{Role::candidate, Cause::beat, Role::sleeping},
-    Allowed{Role::recovering, Cause::adopted, Role::sleeping},
-    Allowed{Role::candidate, Cause::adopted, Role::sleeping},
-    Allowed{Role::recovering, Cause::worse_main, Role::candidate},
-    Allowed{Role::sleeping, Cause::worse_main, Role::candidate},
-    Allowed{Role::main, Cause::better_main, Role::sleeping},
-    Allowed{Role::candidate, Cause::round_won, Role::main},
-    Allowed{Role::candidate, Cause::round_won, Role::delivering},
-    Allowed{Role::candidate, Cause::round_lost, Role::sleeping},
-    Allowed{Role::recovering, Cause::takeover, Role::main},
-    Allowed{Role::recovering, Cause::takeover, Role::delivering},
-    Allowed{Role::sleeping, Cause::takeover, Role::main},
-    Allowed{Role::sleeping, Cause::takeover, Role::delivering},
-    Allowed{Role::candidate, Cause::takeover, Role::main},
-    Allowed{Role::candidate, Cause::takeover, Role::delivering},
-    Allowed{Role::main, Cause::done, Role::delivering},
-    Allowed{Role::sleeping, Cause::recovered, Role::recovering},
-    Allowed{Role::recovering, Cause::recovered, Role::recovering},
-    Allowed{Role::candidate, Cause::recovered, Role::recovering},
-    Allowed{Role::main, Cause::recovered, Role::recovering},
-    Allowed{Role::delivering, Cause::recovered, Role::recovering},
-    Allowed{Role::recovering, Cause::delivered, Role::ended},
-    Allowed{Role::sleeping, Cause::delivered, Role::ended},
-    Allowed{Role::candidate, Cause::delivered, Role::ended},
-    Allowed{Role::delivering, Cause::delivered, Role::ended},
-    Allowed{Role::recovering, Cause::tomb, Role::ended},
-    Allowed{Role::sleeping, Cause::tomb, Role::ended},
-    Allowed{Role::candidate, Cause::tomb, Role::ended},
-    Allowed{Role::main, Cause::tomb, Role::ended},
-    Allowed{Role::delivering, Cause::tomb, Role::ended},
-};
-\end{lstlisting}
-% /snippet
-
-\begin{figure}[htbp]
-\centering
-\resizebox{\linewidth}{!}{%
-\begin{tikzpicture}
-  \node[plain] (anyrec) at (-5.0,2.4) {any role but ended};
-  \node[state] (rec) at (0,2.4) {recovering};
-  \node[state] (cand) at (4.4,4.2) {candidate};
-  \node[state] (sleep) at (4.4,0.6) {sleeping};
-  \node[state] (deliv) at (10.0,3.4) {delivering};
-  \node[state] (main) at (10.0,0.6) {main};
-  \node[draw=pagletsMuted,dashed,rounded corners=4pt,fit=(main)(deliv),inner sep=8pt,
-        label={[event]below:leading}] (lead) {};
-  \node[plain] (anyend) at (3.6,-2.2) {any role but ended};
-  \node[state] (ended) at (10.0,-2.2) {ended};
-
-  \draw[dashedarrow] (anyrec) -- node[event,above] {recovered} (rec);
-  \draw[arrow] (rec) -- node[event,above,sloped,pos=0.45] {suspect, worse\_main} (cand);
-  \draw[arrow] (rec) -- node[event,below,sloped,pos=0.45] {beat, adopted} (sleep);
-  \draw[arrow] (sleep) to[bend right=22] node[event,right] {suspect, worse\_main} (cand);
-  \draw[arrow] (cand) to[bend right=22] node[event,left,align=center] {beat, adopted,\\round\_lost} (sleep);
-  \draw[arrow] (cand) -- node[event,above,sloped] {round\_won, takeover} (lead.west |- deliv);
-  \draw[arrow] (sleep) -- node[event,above] {created, takeover} (lead.west |- main);
-  \draw[arrow] (main.south west) to[bend left=28] node[event,below] {better\_main} (sleep.south east);
-  \draw[arrow] (rec.north) to[out=70,in=110,looseness=1.1] node[event,above] {takeover} (lead.north);
-  \draw[arrow] (main) -- node[event,right] {done} (deliv);
-  \draw[dashedarrow] (anyend) -- node[event,above] {tomb} node[event,below] {delivered (every role but main)} (ended);
-\end{tikzpicture}}
-\caption{The roles and the transitions of Listing~\ref{lst:zombie-transitions}. An arrow carries the causes of the change. An arrow into the dashed box ends in \code{main}, or in \code{delivering} when the checkpoint taken over is already final. \code{recovered} leads from every role but \code{ended} to \code{recovering}; \code{tomb} leads from every role but \code{ended} to \code{ended}, \code{delivered} from every role but \code{main} and \code{ended}.}
-\label{fig:zombie-roles}
-\end{figure}
-
-\subsection{Beats, elections and takeovers}\label{sec:zombies-takeover}
-
-Replicas exchange seven messages (Table~\ref{tab:zombie-messages}). Every
-message carries a term, and a receiver raises its own highest term to it.
-Four timers drive the rest: \code{beat}, \code{checkpoint}, \code{suspect}
-(a sleeping or recovering replica has heard no beat for a while) and
-\code{round} (an election round ends; a main's pause ends).
-
-\begin{table}[htbp]
-\centering\small
-\caption{The messages of the protocol (\code{zombie.hpp}).}
-\label{tab:zombie-messages}
-\begin{tabular}{lp{4.3cm}p{7.6cm}}
-\toprule
-Message & From, to & Content \\
-\midrule
-\code{beat} & main to every member & rank of its checkpoint, version vector of its journal, its membership \\
-\code{ack} & replica to the main whose beat it heard & its rank and version vector, when it lacks something \\
-\code{checkpoint} & main to one replica & the work (if the replica is behind) and the entries it lacks \\
-\code{entries} & replica to main & entries the main lacks \\
-\code{status?} & candidate to every member & asks for role and rank \\
-\code{status} & the answer & role, rank, highest term seen \\
-\code{takeover} & candidate to the best replica of its round & take over as main \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\textbf{Suspicion and election.} A sleeping replica that hears no beat for
-\code{suspect\_ms} (10\,s) plus a random jitter of up to \code{jitter\_ms}
-(5\,s) becomes a candidate and broadcasts \code{status?}. When its round
-ends after \code{round\_ms} (4\,s), it picks the best of itself and every
-replica that answered: the higher rank; among equal ranks a replica that
-already leads; then the lower replica ID. If it is best itself, it becomes
-main with a new reign. Otherwise it sends \code{takeover} to the best
-replica, unless that one leads already, and follows it (\code{decide()}).
-A candidate that hears a beat of a main at least as far as itself goes
-back to sleep at once. A main that is asked for its status checkpoints
-first and pauses its work for one round, so the rank it reported stays
-true while the round is open.
-
-\textbf{Two mains meet.} When a partition heals, each main hears the
-other's beat. The one behind steps down at once: it stops its work, becomes
-sleeping, acknowledges the other's checkpoint and hands over the journal
-entries the other lacks. The one ahead answers with its own beat and pauses
-for a round, so its rank stays what the other compares with
-(\code{meet()} in \code{zombie\_impl.hpp}). The conflict is settled in at
-most two exchanges, even while both keep working. Because the order on
-ranks is total, two mains that meet always agree on the same one. That any
-number of mains converge to one, whatever the order of meetings, is the
-goal \code{one\_main} of Section~\ref{sec:zombies-model}: checked in full
-for two replicas, and for three replicas only by the timed runs.
-
-\textbf{Restarts.} After its host restarts, a replica comes back from its
-memory image as \code{recovering}, whatever it was, with a new incarnation
-and the working state beyond its checkpoint dropped. It listens for the
-suspect timeout before it may run for election. A former main does not
-resume on its own; if nobody is further along, it wins the election with
-its checkpoint. After a shutdown of the whole mesh, the group is down until
-hosts come back; then the most advanced replica among them continues.
-
-\textbf{Membership growth.} The membership is a set of replica IDs that
-only grows. Beats carry it, and a message from a replica not in the set
-adds the sender. Every \code{expand\_ms} (30\,s) the acting main asks
-\code{mesh-info} for the hosts of the mesh, clones itself to every host
-that offers the \code{zombies} service and holds no replica of the group,
-and adds the new replicas (input \code{AddMembers}); a host that joins the
-mesh later is occupied this way within about a minute. If the mains of two
-sides of a partition both make a replica on the same new host, that host's
-registry refuses the second one, which ends. A host that leaves stays a
-member; messages to it are lost.
-
-\subsection{Journals and checkpoints}\label{sec:zombies-journals}
-
-The state of a zombie has two parts. The \emph{work} is the job's state:
-the winning lineage keeps its work, the others drop theirs. The
-\emph{journal} holds the observations the \paglet{} made with
-\code{observe()}; it is merged, never dropped. An entry is keyed by the
-observing replica, its incarnation (raised on every restart, so numbers are
-never reused) and a number counting from~1. Journals merge by union, which
-is commutative, associative and idempotent: replicas that exchanged their
-entries hold the same journal, whatever the order of exchanges. A
-\emph{version vector}~\cite{parker1983versionVectors} summarizes a journal
-by the gap-free prefix it holds
-per observer and incarnation. A beat carries the main's version vector; a
-replica that hears it asks for what it lacks (\code{ack}, answered with a
-\code{checkpoint} message) and hands over what the main lacks
-(\code{entries}).
-
-A checkpoint is the main's working state and its journal, recorded with a
-new rank. The main makes one, if anything changed since the last, when
-the \code{checkpoint} timer fires (\code{checkpoint\_ms}, 10\,s), when it
-is asked for its status and when it meets another main; and always when
-the work is done. A
-sleeping replica that receives a checkpoint message further along than its
-own replaces its work with it; the entries are merged in any case. One rule
-binds every environment that runs the state machine: \emph{durable before
-visible}. The outputs of a step are carried out in order, and a
-\code{Persist} output completes, the replica's state being durable, before
-any later output of the same step takes effect. A main's checkpoint is
-therefore stored before any replica hears of it, and a replica that adopts
-a checkpoint or merges entries stores them before it answers. Not
-everything a beat says is durable yet: its version vector names the
-observations the main made since its last checkpoint, and its membership
-the hosts it occupied since; both become durable with the main's next
-checkpoint, or on a replica that asks for the entries.
-
-\subsection{Exactly one result: the sink}\label{sec:zombies-sink}
-
-The sink of a group is \code{host:NAME}, a host of the mesh by its ledger
-name or its key ID (or a prefix of it of at least 8 hex digits). Its
-\code{zombies} system \paglet{} (Section~\ref{sec:mesh}) accepts the first
-result per group and sink number, stores it on that host before it
-answers, and answers every later delivery with \code{accepted: false}.
-Results are limited to 4\,MB: a larger one is refused by the delivering
-host's own \code{zombies} service with the error \code{quota}, which the
-SDK treats like an unreachable sink, so the main tries again with every
-beat and the group does not end until the owner cancels it (a limit of the
-current implementation). Whatever the sink answers, the group is done: the
-delivering main outputs a \code{Tombstone} and ends with cause
-\code{delivered}. Its host records the tombstone, and every host sends
-what it knows about ended and redirected groups to every other host every
-5\,s, and a new tombstone or redirect at once, so the tombstone reaches every host,
-also one that was offline and comes back later; a replica learns of it from
-its own host (input \code{RegistryUpdate}) and ends with cause \code{tomb}.
-Tombstones are kept for 30 days. During a partition both sides may finish
-and deliver; the sink accepts one, the other main learns \emph{already
-delivered} and ends too.
-
-The owner can end a group at any time (\code{paglets-host remote zombies
-cancel GROUP}), which writes a tombstone of its own. If the sink cannot
-come back, the owner can \emph{redirect} the group to another host, which
-raises the group's \emph{sink number}. Sink numbers spread like tombstones,
-every replica keeps the highest it has seen, and a delivering main delivers
-to the highest it knows. A redirect is the owner's statement that the old
-sink accepted nothing; if it had, two sinks hold a result. The checked
-property is therefore \emph{at most one result, plus one for every
-redirect}.
-
-\subsection{The state machine and the SDK}\label{sec:zombies-sdk}
-
-The specification is the transition function \code{Outputs step(State\&,
-const Input\&)}: it applies one input to a replica and returns what the
-environment must do, in order. An \code{Input} is a timer that fired, a
-message that arrived,
-the \paglet{}'s work (\code{Worked}, \code{Observed}), the sink's answer, a
-change of the host's registry, new members, the start of the group, or a
-restart (\code{Recovered}). An \code{Output} is a message to send,
-\code{Persist}, a timer to set or stop, \code{StartWork} and
-\code{StopWork}, \code{Deliver}, \code{Tombstone}, \code{End}, or a
-\code{Transition} record. \code{State} and the messages have MessagePack
-encodings.
-
-The guest SDK runs this function in the class template
-\code{paglets::patterns::Zombie<Work>}, header \code{patterns/zombie.hpp}
-of the SDK. A \paglet{} derives from it and provides three things:
-\code{step(work, finished)}, one step of the work on the acting main, which
-calls \code{finished(done)} once, also after waiting for replies;
-\code{progress(work)}, a number that only grows; and \code{result(work,
-journal)}, the bytes for the sink. It may override \code{result\_name()}
-(default \code{result.bin}), \code{on\_role()}, which reports every role
-change, and \code{on\_zombie\_failed()}. \code{Work} is any type with \code{paglets\_encode} and \code{paglets\_decode}, for
-example one from a schema header. The creator calls
-\code{start\_group(sink, work, timing)}, typically from a request handler;
-it starts as the main, asks \code{mesh-info} for the hosts, which must all
-offer \code{zombies}, and clones itself to every other host. The Mesh
-Chronicle's step asks \code{mesh-info} for the landscape and records what
-changed (Listing~\ref{lst:chronicle-step}); \code{note()}, not shown,
-calls \code{observe\_value()}, which puts an entry into the journal on the
-acting main only. \code{finished(false)} on a failed request means: not
-done, try again after \code{step\_ms}.
-
-% snippet: cpp/examples/chronicle/chronicle.cpp#step [float,caption={The Mesh Chronicle's step: one sample of the mesh, taken on the acting main},label={lst:chronicle-step}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={The Mesh Chronicle's step: one sample of the mesh, taken on the acting main \src{cpp/examples/chronicle/chronicle.cpp}},label={lst:chronicle-step}]
-void step(Work& w, std::function<void(bool done)> finished) override {
-    auto mi = service("mesh-info");
-    if (!mi) return finished(false);
-    services::mesh_info::Client client{*mi};
-    services::mesh_info::LandscapeRequest q;
-    q.max_age_ms = std::max<std::int64_t>(3 * w.sample_ms, 3000);
-    auto sent = client.landscape(q, [this, &w, finished](Result<services::mesh_info::Landscape> r, Message&) {
-        if (!r) return finished(false);
-        sample(w, r->hosts);
-        const bool done = finish_ || now_ms() - w.started_ms >= w.lifetime_ms;
-        if (done) note(Event{now_ms(), "end", here_, {}, std::to_string(w.samples) + " samples"});
-        finished(done);
-    });
-    if (!sent) finished(false);
+    return;
 }
 \end{lstlisting}
 % /snippet
 
-A step may wait, and the main may stop meanwhile: it met a main further
-along, or a candidate's round paused it. The base class fences the step
-with a generation, so a late \code{finished} of a stopped main is ignored:
+A periodic status message, called a \emph{beat}, can include membership
+information or observations not yet saved durably. These are saved at a
+later checkpoint or by a replica that fetches them. This does not change
+the rule that a new checkpoint is saved before being announced. It does
+mean that a message can contain other information that is not yet durable
+everywhere.
 
-% snippet: cpp/sdk/include/paglets/patterns/zombie.hpp#run_step
-\begin{lstlisting}[style=paglets-cpp]
-void run_step(std::uint64_t gen) {
-    step(work_, [this, gen](bool done) {
-        if (gen != work_gen_ || !acting()) return;  // stopped meanwhile: the result is void
-        run(zp::Worked{progress(work_), done, encode(work_)});
-        if (!done && gen == work_gen_ && acting()) schedule_step();
-    });
-}
-\end{lstlisting}
-% /snippet
+\subsection{Failure detection and result acceptance}\label{sec:zombies-recovery}
 
-\noindent The base class carries out the outputs. Messages go to the other
-replicas through endpoints from the host's \code{zombies} registry (every
-host tells the others which replica of a group it holds; apart from the
-endpoint to its creator that a clone receives, no capability is passed
-between replicas, and after a restart the endpoints are asked from the
-registry again); timers are \code{after()} messages
-to itself, fenced by a generation too; a \code{Transition} is recorded as a
-trace on the host and reported through \code{on\_role()}. \code{Persist}
-is where ABI v1.2 (Section~\ref{sec:lifecycle}, Appendix~\ref{app:abi})
-comes in: \code{checkpoint()} stores the \paglet{}'s memory image right
-after the current handler, before its next message. The base class calls it
-for a \code{Persist} output and defers the remaining outputs of that step to
-its next handler, which it reaches by an asynchronous message to itself
-(Listing~\ref{lst:zombie-carry-out}). This is how \emph{durable before
-visible} is kept in the guest.
+A replica suspects a silent main after ten seconds plus a random delay
+of up to five seconds. It collects status reports and selects the best
+rank, preferring an existing leader and then the lower replica ID in a
+tie. A restarted replica first listens in the recovering role. When two
+mains communicate, the less advanced one passes on its observations
+and steps down; the other may pause work while ranks settle. The timers
+balance recovery delay against false suspicions. They cannot prevent
+concurrent mains during a network partition.
 
-% snippet: cpp/sdk/include/paglets/patterns/zombie.hpp#carry_out [float,caption={Durable before visible in the SDK: after a \code{Persist}, the rest of a step waits for the next handler, when the image is stored},label={lst:zombie-carry-out}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={Durable before visible in the SDK: after a \code{Persist}, the rest of a step waits for the next handler, when the image is stored \src{cpp/sdk/include/paglets/patterns/zombie.hpp}},label={lst:zombie-carry-out}]
-// Carries out the outputs from `i` on. After a Persist the rest waits
-// for the next handler, when the image is stored.
-void carry_out(const zp::Outputs& outs, std::size_t i) {
-    for (; i < outs.size(); ++i) {
-        const auto& o = outs[i];
-        if (std::holds_alternative<zp::Persist>(o)) {
-            (void)checkpoint();
-            deferred_.insert(deferred_.end(), outs.begin() + static_cast<std::ptrdiff_t>(i) + 1, outs.end());
-            if (!flush_pending_) {
-                flush_pending_ = true;
-                SendOptions options;
-                options.async = true;
-                (void)self().send("zombie.flush", std::move(options));
-            }
-            return;
-        }
-        if (!deferred_.empty()) {  // keep the order behind earlier deferred outputs
-            deferred_.push_back(o);
-            continue;
-        }
-        apply(o);
-    }
-}
-\end{lstlisting}
-% /snippet
+A \emph{sink} receives and stores results. It saves the first accepted
+result for a group and sink number before acknowledging it. Repeated
+delivery of that result succeeds without storing another result.
+The owner can redirect delivery to another sink, increasing the sink
+number; each redirect can therefore allow one more accepted result.
+The checked bound is one accepted result plus at most one per redirect.
+It assumes the model's sink can save and accept a result atomically.
+Permanent rejection for policy, size or format ends the group as failed
+and notifies the paglet. Temporary transport or storage failures can
+be retried.
 
-The base class calls \code{set\_restart(true, true)}
-(Section~\ref{sec:lifecycle}) when the group starts and when a clone
-arrives, so that a replica comes back from its last image after a host
-restart and receives \code{on\_recovered} first. The base class answers it
-with the \code{Recovered} input, drops the deferred outputs and
-timers of before the restart, asks the registry for endpoints and for what
-it learnt meanwhile, and the replica comes back as \code{recovering}.
+New hosts offering the service can join the group, with at most one
+replica per group on each host. There is no safe removal of old members.
+Repeated joins and departures therefore increase both retained membership
+and the messages sent per beat. The implementation is linked as
+\sourcefile{cpp/common/include/paglets/protocols/zombie/zombie.hpp}{protocol types},
+\sourcefile{cpp/common/include/paglets/protocols/zombie/zombie_impl.hpp}{transitions}
+and \sourcefile{cpp/sdk/include/paglets/patterns/zombie.hpp}{SDK actions}.
 
-\subsection{Checking the protocol}\label{sec:zombies-check}
+\subsection{What the model checker verifies}\label{sec:zombies-check}
 
-The protocol is checked in three ways: two run the transition function,
-the third checks live traces against its transition table and rank order.
-The first two are run by \code{paglets-protocol-check}
-(\path{cpp/tools/protocol_check}); the third runs on live meshes.
+The checker explores possible execution states by running the same
+transition function as the library. Each model configuration, called a
+\emph{world}, adds hosts, saved state, registries, ordered message channels
+and limits on faults. Breadth-first search checks four safety invariants,
+properties that must hold in every explored state: the result-count bound
+under redirects; preservation of the best durably saved progress;
+preservation of durable observations somewhere until the group ends; and reporting of every role change, with only permitted changes allowed.
 
-\subsubsection{The model checker}\label{sec:zombies-model}
+The first recovery goal is a single main whose followers share its
+checkpoint and journal, or a replica that has already entered the ended
+state. The second is termination of all joined replicas after result
+acceptance or owner cancellation. From each reachable state, there must
+be some sequence of fault-free steps leading to each goal. This property,
+written AG EF, proves that recovery remains possible. It does not prove
+that every execution eventually recovers, even if continuously enabled
+actions are eventually taken (\emph{weak fairness}).
 
-\code{paglets::verify} (\code{verify/explorer.hpp} next to the protocol)
-is an explicit-state model checker for protocols written as pure transition
-functions. A model gives it a finite world: the initial state, the
-successors of a state, each labelled and marked as a fault or not, a
-canonical encoding, invariants and goals. \code{explore()} visits every
-reachable state breadth-first, one level at a time on all hardware threads,
-and checks the invariants on every state; a violation comes with the
-shortest sequence of steps that leads to it. Goals are checked on the graph
-of fault-free steps by backward reachability from the goal states: from
-every reachable state, a goal state must be reachable without further
-faults. In the terms of temporal logic this is $\mathrm{AG}\,\mathrm{EF}\,
-\mathit{goal}$, with AG over every reachable state and EF over fault-free
-steps only; for a single goal state it is the home-state property of
-Petri-net analysis~\cite{murata1989petri}, for a set of goal states its
-generalization to a home space: no dead end and no trap, so that whatever the faults did, once
-they stop, the goal stays reachable, and any scheduler that takes every
-enabled step with positive probability reaches it with probability~1. It is
-not a liveness proof under fairness; that is future work (below).
-
-The zombie model (\code{protocols/zombie/model.hpp}) is a few hosts, each
-with one replica, its durable state and its registry entry (tombstone, sink
-number); the sinks; the links; and the messages in flight, in one ordered
-channel per sender and receiver, as the transport keeps one queue per peer.
-Faults are steps like any other, limited by a budget per world: a host
-crashes (losing what was not durable, and the messages to it); a link is
-cut; a message is lost or delivered twice; a sink goes down; the owner
-cancels or redirects; a timeout fires early, that is, while what it detects
-is not true. Timers may fire at any time otherwise, so safety does not
-depend on timing. Restarting, healing, gossip, delivery and the work are
-not faults. The job in these worlds is one progress step and one
-observation. Four invariants and two goals are checked
-(Table~\ref{tab:zombie-properties}); Listing~\ref{lst:zombie-property}
-shows one invariant.
-
-\begin{table}[htbp]
-\centering\small
-\caption{The properties of the zombie model (\code{model.hpp}).}
-\label{tab:zombie-properties}
-\begin{tabular}{llp{8.6cm}}
-\toprule
-Property & Kind & Meaning \\
-\midrule
-\code{one\_result} & invariant & at most one sink holds a result, one more for every redirect \\
-\code{best\_progress\_kept} & invariant & while the group lives, some replica durably holds the best checkpoint that was ever durable \\
-\code{observations\_kept} & invariant & while the group lives, every observation that was ever durable is durable on some replica \\
-\code{legal\_transitions} & invariant & every role change is in the table \\
-\code{one\_main} & goal & a single main, followed by every other replica with its checkpoint, journal and membership (or the group ends) \\
-\code{group\_ends} & goal & every replica ended, after a sink accepted the result (or the owner cancelled) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-% snippet: cpp/common/include/paglets/protocols/zombie/model.hpp#invariant [float,caption={An invariant of the model: the best durable checkpoint is never lost. \code{w.best} is a ghost variable, the best rank that was ever durable on any host},label={lst:zombie-property}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={An invariant of the model: the best durable checkpoint is never lost. \code{w.best} is a ghost variable, the best rank that was ever durable on any host \src{cpp/common/include/paglets/protocols/zombie/model.hpp}},label={lst:zombie-property}]
-{"best_progress_kept",
- "while the group lives, some replica durably holds the best checkpoint ever made durable",
- [](const State& w) {
-     if (tombed(w)) return true;
-     for (const auto& h : w.hosts) {
-         if (h.durable.role != Role::ended && h.durable.rank >= w.best) return true;
-     }
-     return false;
- }},
-\end{lstlisting}
-% /snippet
-
-The canonical encoding keeps the state space finite. Terms are only
-compared, raised to a maximum and incremented, so the encoding renames
-them: the terms that occur anywhere in a world are mapped in order onto
-small numbers, with gaps shrunk to~2 (\code{canonicalize()} in
-\code{model.hpp}), and two worlds that differ only in the absolute values
-of their terms get the same encoding. Messages to a replica that ended are
-dropped from the encoding too, since they can have no effect. Hash
-compaction keeps the visited set small: states are identified by a 128-bit
-hash of their encoding~\cite{stern1995hashCompaction}; the set of visited
-states holds hashes, and only the states of the current level are kept as
-encodings. The probability that two distinct states of a
-run share a hash is about $n^2/2^{129}$ for $n$ states, below $10^{-24}$
-for the largest world below; an exact mode is planned (below).
-
-Table~\ref{tab:zombie-results} shows what was checked. Each two-replica
-world is explored completely: every reachable state within its fault
-budget, with all six properties. The three-replica worlds are explored to a
-depth of 11 steps from the initial state (with at most two messages in
-flight per channel): the invariants hold on every state within that depth,
-and the goals are not checked there, because backward reachability needs
-the complete graph. Across the full suite, every entry of the transition
-table occurs.
-
-% hand-copied from docs/results/zombie_protocol.json (recorded 2026-10-13):
-% the `% results: zombie_protocol` marker renders one float holding a wide
-% table and thirteen per-test tables, which is too large for a page; see the
-% refinement plan. Replace this table with the marker once paglets-docs-sync
-% has a compact layout for LaTeX results tables. Until then keep these
-% numbers in step with the JSON (checked 2026-10-14).
-\begin{table}[htbp]
-\centering\small
-\caption{Model checking of the zombie protocol: the exhaustive worlds of the full suite, as recorded on 2026-10-13 (Darwin arm64, Release build). Every world has two replicas unless stated, a job of one step and one observation, and at most three messages in flight per channel (three replicas: two). Every named fault may occur once (two crashes: twice). Depth is the longest shortest path from the initial state, or the bound of a bounded exploration. The suite is \code{paglets-protocol-check --suite full}; the numbers are those of \code{docs/results/zombie\_protocol.json}.}
-\label{tab:zombie-results}
-\begin{tabular}{lrrrr}
-\toprule
-World & States & Steps & Depth & Time (s) \\
-\midrule
-crash, cut & 12\,908\,826 & 50\,102\,693 & 47 & 565.9 \\
-crash, loss & 3\,961\,354 & 17\,259\,715 & 43 & 182.8 \\
-crash, duplicate & 4\,380\,410 & 18\,416\,904 & 40 & 205.8 \\
-crash, early timeout & 7\,807\,220 & 30\,116\,664 & 47 & 308.0 \\
-two crashes & 22\,356\,397 & 81\,063\,681 & 53 & 519.2 \\
-cut, loss, early timeout & 4\,000\,767 & 19\,983\,567 & 41 & 85.1 \\
-crash, cancel & 3\,935\,759 & 19\,606\,519 & 41 & 54.9 \\
-sink down, redirect & 378\,252 & 1\,698\,056 & 30 & 5.0 \\
-one joining later: crash, cut & 13\,205\,168 & 51\,296\,859 & 49 & 215.5 \\
-one joining later: crash, early timeout & 8\,051\,595 & 31\,115\,057 & 49 & 102.6 \\
-\midrule
-three replicas: crash, cut (bounded) & 9\,188\,336 & 24\,420\,885 & 11 & 79.3 \\
-three replicas: two crashes (bounded) & 5\,461\,027 & 14\,745\,614 & 11 & 40.7 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsubsection{Timed runs}\label{sec:zombies-sim}
-
-The exhaustive check abstracts time away. A simulator
-(\code{protocols/zombie/sim.hpp}) adds it back: the same \code{step()}
-under virtual clocks, with the real timer durations, message latency of
-1--50\,ms, a worker that makes one progress step per second for 300 steps
-and an observation every ten, and random faults: crashes with a restart
-after 5--60\,s, cuts healed after 5--90\,s, 2\% loss and 1\% duplication,
-during a fault phase of 180\,s with a mean of 15\,s between faults. Three
-replicas take part, one on a host that joins during the run. Each run has
-a sink that, like the real one, accepts the first result and refuses later
-ones; the run checks that a result was delivered, that every replica ends,
-that the delivered journal holds every observation that was durable anywhere at
-delivery, that every role change is in the table, and that a takeover
-after the main crashed, with nothing else happening until a main worked
-again, took at most $\mathit{suspect} + \mathit{jitter} + 2\,\mathit{round}
-+ \mathit{beat} + 4\,\mathit{latency}_{\max}$, which is 25.2\,s with the
-defaults. Every run is reproducible from its seed (\code{--trace SEED}
-prints its role changes and faults). The 10\,000 runs recorded with
-Table~\ref{tab:zombie-results} contain 119\,289 faults and 3\,370 measured
-takeovers, the longest of 18.9\,s, and no failure. These runs sample
-instead of enumerating, and they check a different, partly weaker, set of
-properties than the model; they are an addition, not the proof.
-
-\subsubsection{Live conformance}\label{sec:zombies-traces}
-
-Replicas record their protocol steps on their hosts through the
-\code{zombies} service: every role change with its cause and the replica's
-rank, and every answer of a sink. \code{paglets-host remote zombies check
-GROUP} collects these records from every live host and checks them against
-the specification (\code{protocols/zombie/trace.hpp}): every role change is
-in the table, no replica's rank falls except across a restart, nothing is
-recorded after a replica ended, and at most one result was accepted, one
-more for every redirect. This check connects the live system to the model,
-and it marks what the model leaves out. The model carries the protocol's
-messages but not the transport that moves them; it reduces the hosts'
-gossip to a merge of tombstone and sink number between two live hosts, the
-\code{zombies} service to a registry entry per host and an atomic register
-per sink, and the SDK's carrying out of outputs (timers, endpoints, clones
-to new hosts, the memory image) to steps of its own. The trace check, in
-turn, sees only role changes, ranks and sink answers, not the messages. The
-in-process tests and the live run of the Mesh Chronicle
-(Section~\ref{sec:evaluation}) end with this check, and passed it.
-
-\subsubsection{What is verified, and what is not}\label{sec:zombies-claims}
-
-To state it precisely: in every two-replica world of
-Table~\ref{tab:zombie-results}, the four invariants of
-Table~\ref{tab:zombie-properties} hold in every reachable state, and from
-every reachable state each of the two goals is reachable over fault-free
-steps, under the fault budgets of those worlds (for example one crash and one cut, or two
-crashes), a job of one step and one observation, at most three messages in
-flight per channel, and up to the hash compaction's omission probability.
-The four invariants hold in every state within 11 steps of the three-replica
-worlds. Longer jobs, more faults and three or more replicas over their
-whole state space are covered only by the timed runs and the live checks.
-The model has limits of its own: it reduces the registry's gossip to a
-merge step between two live hosts, and it treats a sink as a single atomic
-register.
-
-Several tightenings are planned so that these claims become sharp. An
-exact mode of the checker without hash compaction for the two-replica
-worlds, so that those results are exact and the omission probability is
-quoted only for larger worlds. A fair-cycle check (every bottom strongly
-connected component of the fault-free graph contains a goal state), which
-gives liveness under weak fairness next to the recoverability result. A
-mutation suite: known bugs seeded into the protocol (a dropped hand-over,
-a stale beat accepted, the sink number skipped on a redirect), each shown
-to be caught with a counterexample. A written soundness argument for the
-term renaming, with an assertion in the model that a transition never does
-more with a term than compare, maximize and increment. And three replicas
-in full, by partial-order reduction or disk-backed state storage, or a
-cutoff argument that $n$ replicas behave like two or three.
+To limit memory use, the checker records visited-state identities as
+128-bit hashes instead of retaining full states for comparison. This
+technique is called \emph{hash compaction}~\cite{stern1995hashCompaction}. It also renames leadership
+counters while keeping their order and whether values are consecutive.
+This gives equivalent states a finite representation. It uses explicit-state search like Murphi and
+TLC~\cite{yu1999tlc}, but does not include a general temporal-logic engine,
+fairness checking or reduction of redundant event orderings.
+Hash collisions could hide a state, and incorrect counter renaming could
+merge distinct behavior. The estimated omission probability is below
+$10^{-24}$ for the largest recorded world if hashes behave randomly.
+Correctness of the renaming is assumed, not mechanically proved.
+Section~\ref{sec:evaluation-zombies} reports the worlds and search limits,
+separately from simulations and physical tests.

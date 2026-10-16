@@ -1,0 +1,113 @@
+{
+  "topic": "live_three_host_benchmark",
+  "tests": [
+    {
+      "test": "mac",
+      "mode": "in a compute slot, worker processes",
+      "outcome": "passed",
+      "seconds": 3.3,
+      "platform": "macos arm64, 10 CPUs",
+      "build": "RelWithDebInfo",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "integer",
+          "value": "355",
+          "unit": "Mops"
+        },
+        {
+          "name": "floating point",
+          "value": "483",
+          "unit": "Mflops"
+        },
+        {
+          "name": "memory copying",
+          "value": "35211",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage write, 8 MB",
+          "value": "380",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage read, 8 MB",
+          "value": "75",
+          "unit": "MB/s"
+        }
+      ]
+    },
+    {
+      "test": "uconsole",
+      "mode": "in a compute slot, worker processes",
+      "outcome": "passed",
+      "seconds": 3.4,
+      "platform": "linux arm64, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "integer",
+          "value": "191",
+          "unit": "Mops"
+        },
+        {
+          "name": "floating point",
+          "value": "327",
+          "unit": "Mflops"
+        },
+        {
+          "name": "memory copying",
+          "value": "4662",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage write, 8 MB",
+          "value": "367",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage read, 8 MB",
+          "value": "52",
+          "unit": "MB/s"
+        }
+      ]
+    },
+    {
+      "test": "pi",
+      "mode": "in a compute slot, worker processes",
+      "outcome": "passed",
+      "seconds": 4.2,
+      "platform": "linux arm64, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "integer",
+          "value": "67",
+          "unit": "Mops"
+        },
+        {
+          "name": "floating point",
+          "value": "101",
+          "unit": "Mflops"
+        },
+        {
+          "name": "memory copying",
+          "value": "2341",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage write, 8 MB",
+          "value": "85",
+          "unit": "MB/s"
+        },
+        {
+          "name": "storage read, 8 MB",
+          "value": "20",
+          "unit": "MB/s"
+        }
+      ]
+    }
+  ]
+}

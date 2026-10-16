@@ -55,4 +55,21 @@ struct Ranking {
     std::vector<std::string> errors;
 };
 
+// `jobs`: repeat the same integer kernel locally. Every sample reports
+// its actual execution mode; a host without a compiler stays interpreted.
+struct JobBench {
+    std::int64_t iterations = 3'000'000;
+    std::int64_t samples = 20;
+};
+struct JobSample {
+    bool aot = false;
+    std::int64_t elapsed_ms = 0;
+    std::int64_t queued_ms = 0;
+    std::uint64_t check = 0;
+};
+struct JobComparison {
+    std::vector<JobSample> samples;
+    std::string error;
+};
+
 }  // namespace benchmark_msgs

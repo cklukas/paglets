@@ -177,6 +177,10 @@ public:
     // artifact's); returns its hash.
     Result<std::string> store(std::span<const std::uint8_t> data, std::string_view media_type,
                               const std::vector<std::string>& marks);
+    // The content of an artifact capability (fetched from its host if need
+    // be), up to `max` bytes, for compute jobs; `done` may run on another thread.
+    void load(const runtime::Cap& cap, std::uint64_t max,
+              std::function<void(std::expected<runtime::JobArtifactInput, std::int32_t>)> done);
 
     // Content exchange between hosts (planning/cpp-content-exchange.md).
     struct Ref {

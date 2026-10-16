@@ -64,11 +64,14 @@ PAGLETS_TEST("roundtrip: host reflection -> guest generated code -> host") {
     in.mode = Mode::multiply;
 
     Echo out;
-    REQUIRE(inst.call("echo", wire::to_msgpack(in), out));
+    const auto encoded = wire::to_msgpack(in);
+    auto reply = inst.harness->call("echo", encoded);
+    REQUIRE(reply && reply->status == 0);
+    REQUIRE(wire::from_msgpack(reply->payload, out));
 
     // Byte-identical: the guest's generated encoder matches the host's
     // reflection encoder.
-    CHECK(wire::to_msgpack(out) == wire::to_msgpack(in));
+    CHECK(reply->payload == encoded);
     CHECK(out.items.size() == 20 && out.items[19].note == "item19" && out.items[19].mode == Mode::multiply);
     CHECK(!out.label.has_value());
     CHECK(out.blob.size() == 70'000);

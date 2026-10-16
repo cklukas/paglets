@@ -36,6 +36,9 @@ public:
         router().on("stop", [this](Message&) { hiding_ = false; });
     }
 
+private:
+    // -- the hider ----------------------------------------------------------------------
+
     // --8<-- [start:hider]
     void on_created(paglets::Started& s) override {
         // Created by a seeker: hide (args: the hop interval).
@@ -53,9 +56,6 @@ public:
     void on_move_failed(const paglets::abi::MoveFailed&) override {
         if (hiding_) (void)paglets::after_raw(hop_ms_, "hop", {});  // pinned, or nowhere to go: later
     }
-
-private:
-    // -- the hider ----------------------------------------------------------------------
 
     void hop() {
         if (!hiding_) return;

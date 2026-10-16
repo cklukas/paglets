@@ -194,7 +194,7 @@ struct Start {
     Output output;
     std::string model;  // empty: the AI host's default
     std::int64_t max_images = 50;
-    // The images travel in the paglet's memory (at most 16 MB), and each
+    // The images travel in the paglet's memory (default ceiling 256 MB), and each
     // goes to the `ai` system paglet in one request (by default at most
     // 256 KB of input).
     std::int64_t max_image_bytes = 256 * 1024;
@@ -270,7 +270,7 @@ $H remote call $R $ID start '{"sources": [{"host": "photos", "root": "pics", "pa
 ```
 
 > [!NOTE]
-> The images travel in the paglet's memory, which holds at most 16 MB,
+> The images travel in the paglet's memory, whose default ceiling is 256 MB,
 > and each image goes to the `ai` system paglet in one request. That
 > system paglet takes at most 256 KB of input per request by default
 > (`AiConfig::max_input_bytes`), and a message holds at most 1 MB. The
@@ -312,6 +312,6 @@ The root `pics` on `photos` holds `a.png` (1000 bytes), `trip/b.JPG`
 <!-- results: describer -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | images described | images skipped (too large) | host-only root: kept off the AI host |
 |---|---|---|---|---|---|---|---|---|
-| gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue | in-process | passed | 20.4 s | Darwin arm64, Release build | 2026-10-12 | 2 | 1 | yes |
-| gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue | worker processes | passed | 30.4 s | Darwin arm64, Release build | 2026-10-12 | 2 | 1 | yes |
+| gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue | in-process | passed | 30.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 1 | yes |
+| gateway: Image Describer reads images on their host, describes them where ai can see, writes a catalogue | worker processes | passed | 40.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 1 | yes |
 <!-- /results -->

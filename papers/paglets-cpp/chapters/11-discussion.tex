@@ -1,288 +1,55 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-The preceding sections describe what \paglets{}/cpp does. This section
-says what it costs, what it does not do, and where its guarantees end.
-Every limit below is stated as the code enforces it today.
+\paragraph{Benefits and costs of capturing instance state.}
+Capturing one memory image removes custom state-export code and
+preserves pointers and continuations without inspecting C++ object
+layouts. The runtime must instead reject state it cannot capture, scan
+all grown memory, restore only the matching module version, and define
+how to reconnect host resources. It cannot automatically upgrade saved
+state to a new module version. Interpreted agent code remains portable;
+separate AOT jobs can improve compute speed while leaving their stacks
+on the executing host. Suspending and moving an active handler would
+require additional engine support and rules for its resources.
 
-\subsection{The trust model}\label{sec:discussion-trust}
+\paragraph{Different operations have different failure guarantees.}
+Recovery from a checkpoint can repeat effects that occurred after it was
+saved. An endpoint can remain valid across a move without guaranteeing
+message delivery. Arrival can fail after ownership transfers. A job lost
+with its host is not recovered like a replicated agent. The zombie
+service selects one ranked chain of work and merges observations, but
+does not impose one global order on external actions during partitions.
+The number of accepted results also depends on sink redirects.
+These distinctions matter: a successful local call does not imply that
+an operation took effect exactly once across the whole system.
 
-A mesh has four kinds of keys: admins, owners, signers and hosts
-(Section~\ref{sec:mesh}). Admins decide who belongs to the mesh and what
-its policy is; owners launch \paglet{}s; signers vouch for modules; hosts
-run \paglet{}s. Every decision is a signed ledger record, and the mesh
-trusts the ledger, not any host. A record that needs a quorum carries the
-signatures of as many admins as the quorum of its epoch demands: the
-genesis record sets the two numbers, admin-set records change them, and
-the separate one applies to changes of the admin set itself. A stolen
-admin key is removed by the remaining admins; removals win in every
-conflict, and a removed admin's later records have no effect. A mesh that
-must survive a stolen admin key therefore needs an admin-set quorum of at
-least two; with the default of one, a single admin can remove all others.
+\paragraph{Trust and isolation.}\label{sec:discussion-trust}
+Module checks, capabilities and worker sandboxes restrict what untrusted
+guest code can do to a host. They do not protect an agent from the host
+that holds its unencrypted image. An enrolled malicious host can read or
+alter that image and act in the agent's name. Revocation, module policy
+and residency restrictions therefore assume an organization that trusts
+its hosts. They do not provide Byzantine fault tolerance, which includes
+arbitrary dishonest behavior, or confidential computing, which protects
+state from the executing host. Windows workers use Less Privileged
+AppContainers without network capabilities, plus restricted security
+tokens and job objects to limit processes. Isolation differs by platform
+and has not received an independent security review.
 
-The sandbox protects the host from the \paglet{}; nothing protects the
-\paglet{} from its host. A roaming \paglet{} reaches only the imports of
-its trust class, the capabilities it holds and the quotas of
-Table~\ref{tab:model-limits}; by default it runs in a worker process that
-the operating system confines (\code{paglets-host} falls back to its own
-process when \code{paglets-worker} is not found next to it, and
-\code{-{}-in-process} and \code{-{}-no-sandbox} switch the confinement off
-for debugging). The confinement differs by platform: on Linux a seccomp
-filter refuses the system calls that open files, create sockets or start
-programs (a deny list; an allow list is planned); on macOS a sandbox
-profile denies forking, executing, networking, writing files and reading
-file contents; on Windows the worker runs in a job object with a
-restricted token at low integrity, without processes or writes to the
-user's files, but with network access, which is not restricted yet
-(\code{cpp/host/src/sandbox.cpp}). A test, \code{paglets-worker
--{}-check-sandbox}, verifies on each platform that the sandbox refuses
-what it must.
+\paragraph{What stronger verification would require.}
+Using the implementation in the checker avoids a separate protocol
+model, but the surrounding environment and search simplifications still
+need justification. Future work includes comparing full states instead
+of hashes, proving counter renaming correct, deliberately inserting bugs
+to assess the tests, and completing three-replica exploration or proving
+that a smaller search suffices.
 
-A host that runs a \paglet{} holds its memory image in plain form, in the
-worker and, on a host with a state directory, on disk; a compromised
-enrolled host can read and change the state of every \paglet{} it runs,
-speak in their names (hosts stamp the sender record of every message), and
-keep the \paglet{}s it receives. It cannot issue admin records
-(enrollments, policy rules, module trust, admin-set changes), because it
-has no admin key; the records a host key signs are enrollment requests,
-grants under an allow rule, grant releases and audit entries. It cannot
-read what passes through it for other hosts, because channels are
-encrypted end to end. The defenses are administrative: admins revoke the
-host's enrollment, owners send \paglet{}s only to hosts with a given label
-(a transfer ticket names \code{label:<label>}), and admins bind marked data
-to hosts by residency rules (Section~\ref{sec:mesh}). Images are not
-encrypted at rest. The mesh is, as in the Python edition
-\cite{klukas2026pagletsNote}, a set of hosts one organization trusts; what
-is new is that one owner's \paglet{} cannot harm another's or the host,
-and that the host is told what a \paglet{} may do. By default any enrolled
-owner may launch any module; \code{module-policy trusted} makes roaming
-modules need module trust as well, a \code{module-trust} record that names
-their signer or their hash. Neither the cryptographic protocol (Noise XX
-channels, record and passport signatures) nor the sandboxes have been
-reviewed outside the project.
-
-\subsection{Images, the memory limit and growth}\label{sec:discussion-memory}
-
-A \paglet{}'s linear memory is at most 256 pages, 16\,MB
-(\code{wasm::Limits::max\_memory\_pages}). The limit is a compiled-in
-default of the host, not a choice of the \paglet{}. Guests are built
-without exceptions (\code{-fno-exceptions}), so there is no
-\code{bad\_alloc} to catch: an allocation beyond the limit aborts, an abort
-is a trap, and a trap ends the \paglet{}. Messages are at most 1\,MB and
-the storage service gives 16\,MB per \paglet{}. The limits are there so
-that no owner can take a host over, and they shape how a \paglet{} is
-written: large data belongs in files and artifacts, which move between
-hosts as capabilities of a few bytes; the \paglet{} carries the handle, not
-the content. The pi example keeps only the chunks that arrive early and
-writes every chunk that is next in order to a file, so that 100\,000
-digits need little memory.
-
-Images have a cost that serialization does not. WebAssembly memory grows
-and never shrinks, and the allocator does not zero what it frees. A
-\paglet{} that once held a 10\,MB vector keeps a 10\,MB image after the
-vector is gone, because the pages are no longer zero and the image elides
-only zero pages. The page manifest limits what this costs in motion: a
-host that has seen the \paglet{} before receives only the pages that
-changed, and a clone fanned out to a host that holds the parent's pages
-sends mostly hashes, because the page cache of a host is keyed by page
-hash, not by \paglet{}. Image capture hashes every non-zero page with SHA-256; in the
-feasibility measurements this dominated the capture time (1\,ms for two
-pages on a Mac; 6.5\,ms on a Raspberry Pi 4 that was busy with a compiler
-build on all four cores at the time), and the hash is still the portable
-C++ implementation in \code{cpp/host/src/sha256.cpp}.
-
-The image is bound to its module's hash. A new version of a module cannot
-take over an old image, and the runtime has no state migration between
-versions: a \paglet{} that must survive a code change has to hand its
-state to its successor in messages, or write it to storage. A
-reflection-derived export and import of state for this case is foreseen in
-the plan and not built.
-
-What images buy is the absence of serialization code and of the bugs
-that come with it: nothing is forgotten in a move, pointers inside the
-heap stay valid, and the \paglet{} is any C++ object graph.
-Section~\ref{sec:evaluation} gives the sizes and times of real images.
-
-\subsection{Interpreter speed}\label{sec:discussion-speed}
-
-\paglet{}s run in WAMR's fast interpreter. AOT and JIT are turned off in
-the build (\code{PagletsWamr.cmake} in \code{cpp/cmake}): no LLVM in the
-host, and no compiled code that would have to be cached per CPU
-architecture. The feasibility measurements in
-\code{planning/cpp-m0-results.md} put the fast interpreter at about ten
-times the message throughput of the classic interpreter, a host-to-guest
-call at 0.4\,\textmu{}s and a message round trip through MessagePack at
-6.5\,\textmu{}s on a Mac. The live benchmark of
-Section~\ref{sec:evaluation} measures about 250 million integer operations
-per second on a Mac Studio and 67 million on a Raspberry Pi 4, in
-\paglet{} code.
-
-For what \paglet{}s mostly do, moving, messaging and calling services, the
-interpreter is not the bottleneck: a move runs guest code only in its two
-hooks, and its time goes into capturing, transferring and restoring the
-image, which the benchmark test of Section~\ref{sec:evaluation-images}
-measures as a whole, between two hosts in one process, and does not
-split. For compute the interpreter counts: the pi example needs 313\,s for
-100\,000 hexadecimal digits on three hosts. How much of this is the
-interpreter was not measured: no native run of the same \code{bbp.hpp} is
-recorded, and the 313\,s also contain the chunk round trips across the
-mesh. A \paglet{} is the right place for the coordination of such work and
-a poor place for its inner loop. The way out within the model is a system
-paglet that does the heavy part outside the interpreter (the \code{ai}
-gateway, for instance, hands inference to an Ollama server); AOT with a
-per-architecture cache, keyed by module hash and WAMR version, is the
-planned alternative and was not measured.
-
-\subsection{What weak mobility does not solve}\label{sec:discussion-weak}
-
-A \paglet{} moves only between handlers. There is no migration in the
-middle of a computation: no stack is captured, and a handler that runs
-longer than the budget of 5\,s is stopped and its \paglet{} ends. Every
-long computation must therefore be sliced by its author. The pi example
-converts its hexadecimal fraction into decimal digits in slices of
-200\,ms, each started by a timer of zero delay, and keeps its progress in
-members between the slices (Listing~\ref{lst:pi-convert}). In the listing
-the loop condition \code{now\_ms() - began < 200} bounds the slice, the
-members \code{limbs\_} and \code{decimal\_done\_} carry the progress, and
-\code{after\_raw(0, "convert", \{\})} near the end schedules the next
-slice; everything in between is the arithmetic. Between two slices the
-\paglet{} can be moved, checkpointed or deactivated; inside a slice it
-cannot.
-
-% snippet: cpp/examples/pi/pi.cpp#convert [float,caption={Pi's decimal conversion, sliced into handler calls of 200\,ms},label={lst:pi-convert}]
-\begin{lstlisting}[style=paglets-cpp,float,caption={Pi's decimal conversion, sliced into handler calls of 200\,ms \src{cpp/examples/pi/pi.cpp}},label={lst:pi-convert}]
-// A slice of the conversion: passes of multiplying the fraction by 10^9,
-// whose overflow above the point is the next nine decimal digits.
-void convert() {
-    if (state_ != "converting") return;
-    const std::int64_t began = now_ms();
-    std::string digits;
-    while (decimal_done_ + static_cast<std::int64_t>(digits.size()) < decimal_total_ && now_ms() - began < 200) {
-        // Only the precision the remaining digits need (and two limbs more).
-        const std::int64_t remaining = decimal_total_ - decimal_done_ - static_cast<std::int64_t>(digits.size());
-        const auto need = static_cast<std::size_t>(static_cast<double>(remaining) * 3.3219280949 / 32.0) + 2;
-        if (limbs_.size() > need) limbs_.resize(need);
-        std::uint64_t carry = 0;
-        for (std::size_t i = limbs_.size(); i-- > 0;) {
-            const std::uint64_t t = static_cast<std::uint64_t>(limbs_[i]) * 1'000'000'000ULL + carry;
-            limbs_[i] = static_cast<std::uint32_t>(t);
-            carry = t >> 32;
-        }
-        char nine[16];
-        std::snprintf(nine, sizeof nine, "%09u", static_cast<unsigned>(carry));
-        digits.append(nine, static_cast<std::size_t>(std::min<std::int64_t>(9, remaining)));
-    }
-    decimal_done_ += static_cast<std::int64_t>(digits.size());
-    if (shown_dec_.size() < shown_digits) shown_dec_ += digits.substr(0, shown_digits - shown_dec_.size());
-    if (dir_) {
-        dec_file_.pending += digits;
-        flush(dec_file_);
-    }
-    if (decimal_done_ < decimal_total_) {
-        (void)paglets::after_raw(0, "convert", {});
-        return;
-    }
-    std::vector<std::uint32_t>().swap(limbs_);
-    state_ = "writing";
-    maybe_done();
-}
-\end{lstlisting}
-% /snippet
-
-The slicing is visible in the code and is the author's responsibility; the
-runtime cannot do it for a loop it does not see. Suspending a handler in
-the middle (Asyncify or Wasm stack switching; WP-R1 in the plan) would
-remove the slicing. It would not change what moves: a pending service
-call, a timer or a reply capability lives on the host, not in linear
-memory, and each follows its own rule on a move
-(Section~\ref{sec:movement}) whether the handler was suspended or not.
-
-\subsection{Platforms and editions}\label{sec:discussion-platforms}
-
-\paglets{}/cpp is built and tested in CI on Linux x86-64 and arm64, on
-macOS arm64, and under AddressSanitizer, UndefinedBehaviorSanitizer and
-ThreadSanitizer. Windows is experimental: the job builds with MinGW-w64
-GCC in MSYS2, runs with guest modules built by the Linux job, uses
-software bound checks because MinGW cannot build WAMR's guard-page
-checks, and may fail without failing the workflow
-(\code{continue-on-error} in \code{.github/workflows/cpp.yml}). The
-worker sandbox on Windows is the weaker one described above. On the
-Raspberry Pi, kernels with a 39-bit address space hold about 60 instances
-per process with guard-page checks, because each instance reserves 8\,GB
-of address space. Configuring with
-\code{PAGLETS\_WAMR\_HW\_BOUND\_CHECK=OFF} removes the limit (the default
-is on everywhere but MinGW); software bound checks made message handling
-about 2.5 times slower on macOS in the feasibility measurements.
-
-The two editions of \paglets{} do not interoperate. They share concepts
-(hosts, \paglet{}s, messages, meshes, services, compute slots) and no
-format: transport, authentication, framing, movement and code differ
-throughout \cite{pagletsCppDocs}. A Python host and a C++ host cannot talk
-to each other, and a \paglet{} of one edition cannot run on the other.
-
-\subsection{Three systems compared}\label{sec:discussion-comparison}
-
-Table~\ref{tab:background-editions} placed the three systems next to
-each other by what moves and how it runs;
-Table~\ref{tab:discussion-editions} adds what each one pays for it. The
-price of \paglets{}/cpp is the one this section
-described: a fixed memory limit, an interpreter, sliced handlers, one
-guest language, and a trust model that needs administration. What it buys
-over the Python edition is that hosts need no application code, that a
-\paglet{} cannot reach past its capabilities, and that a job survives the
-loss of hosts.
-
-\begin{table}[htbp]
-\centering\small
-\caption{What each system pays for an agent.}
-\label{tab:discussion-editions}
-\begin{tabular}{p{0.16\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.25\linewidth}}
-\toprule
- & \raggedright Aglets \cite{lange1997aglets,ferrari2004manual} & \raggedright \paglets{}, Python \cite{klukas2026pagletsNote} & \raggedright \paglets{}/cpp \tabularnewline
-\midrule
-\raggedright State on the wire & \raggedright the Java object, serialized; classes with it, or fetched from the codebase & \raggedright a dataclass, serialized; no code & \raggedright the non-zero 64\,KB pages the destination lacks, compressed; modules by SHA-256, fetched on demand \tabularnewline
-\raggedright Memory per agent & \raggedright a share of the server's JVM heap & \raggedright a Python process per active \paglet{} & \raggedright at most 16\,MB of linear memory; an image keeps every page that was ever non-zero \tabularnewline
-\raggedright Execution & \raggedright the JVM & \raggedright CPython & \raggedright a Wasm interpreter, no JIT or AOT \tabularnewline
-\raggedright Long computations & \raggedright a thread per aglet & \raggedright a handler in the \paglet{}'s process; its mailbox waits & \raggedright sliced handlers; a budget of 5\,s per handler \tabularnewline
-\raggedright Fault tolerance & \raggedright --- & \raggedright deactivated \paglet{}s come back from disk after a host restart; active ones are lost & \raggedright restart from the last image; zombie replicas on every host that offers \code{zombies} \tabularnewline
-\raggedright Sandbox & \raggedright the Java platform & \raggedright none; a \paglet{} reaches what its process reaches & \raggedright Wasm instance, import set per trust class, sandboxed worker processes \tabularnewline
-\raggedright Administration & \raggedright a Tahiti server per host & \raggedright a shared API key & \raggedright keys for every party, a signed ledger with quorums, policy, module trust, residency \tabularnewline
-\raggedright Tooling & \raggedright the Tahiti server & \raggedright a CLI & \raggedright CLI, web UI, interface descriptions, protocol checker \tabularnewline
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Open problems}\label{sec:discussion-open}
-
-\begin{itemize}
-\item \emph{Verification of the zombie protocol.} The exhaustive check is
-  complete for two replicas and bounded to a depth of 11 steps for three
-  (Section~\ref{sec:zombies}). Every world is explored with hash
-  compaction (states identified by a 128-bit hash of their encoding,
-  \code{verify/explorer.hpp}), so even the two-replica results carry a
-  small omission probability, and the timed random runs sample timer
-  values and takeover times instead of enumerating them. An exact mode, a
-  fairness check of the fault-free graph, a mutation suite that shows the
-  checker catches seeded bugs, and either a full three-replica exploration
-  or a cutoff argument are planned; the repository tracks these items. The
-  model also leaves out the transport, the gossip and the \code{zombies}
-  service itself; the replay of recorded live traces is the conformance
-  check between them.
-\item \emph{Mesh size.} The live mesh has three hosts. The tests run
-  meshes of four hosts in one process and a gossip test of five hosts
-  under random partitions. Nothing has been measured beyond that: how the
-  location records, the ledger gossip and \code{mesh-info} snapshots
-  behave with tens of hosts is not known.
-\item \emph{Relays and NAT.} Hosts without an inbound port take part
-  through relays, and the test suite exercises this with hosts that do not
-  listen, including two such hosts reaching each other and a relay going
-  down (\code{cpp/tests/test\_discovery.cpp}). No live run has crossed a
-  NAT or a firewall; the live hosts share one LAN.
-\end{itemize}
-
-The limits of the sections above are open as well: the security review,
-state migration between module versions (foreseen in the plan, not
-built), AOT compilation with a per-host cache, and the research items
-WP-R1 (mid-handler migration) and WP-R2 (other guest languages: the ABI
-is core WebAssembly, so a second language is a matter of an SDK, not of
-the host).
+A further goal is eventual recovery on every weakly fair execution:
+actions that remain continuously possible must eventually run, and recovery must
+then complete. This corresponds to checking AG AF with a search for
+nonterminating fair cycles. The current AG EF check only shows that a
+path to recovery exists from each reachable state. A cycle with an exit
+can pass that check even if execution keeps taking the cycle.
+Larger meshes, real NAT paths and comparisons using equivalent
+applications are also needed before making broader performance or
+availability claims.

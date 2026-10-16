@@ -1,375 +1,238 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-This section reports what was measured: memory images, messages and
-transfers between real machines, compute work on those machines, how many
-\paglet{}s one host holds, the Mesh Chronicle under failures, and the
-test suite behind the earlier sections. Every number comes from a
-recorded result in the repository (\path{docs/results/*.json}, written
-by the tests and the live scripts themselves) or from the milestone
-reports under \code{planning/}, with one stated exception; the figures
-are drawn from those files by \code{figures/data.sh}. Where a number is
-from a single run, this is said; where something was not measured, this
-is said too.
+We evaluate four questions: can an instance resume on a different kind
+of host; what does migration cost and how much does page reuse save;
+how do AOT jobs change computation time; and which replication properties
+do the checks establish? Appendix~\ref{app:reproduce} links raw records,
+build configurations and scripts. Each experiment retains its original
+build information; measurements from different builds are not combined
+into one performance claim.
 
-\subsection{Setup}\label{sec:evaluation-setup}
+\subsection{Setup and measurement scope}\label{sec:evaluation-setup}
 
-Two kinds of results appear. The \emph{test results} come from the test
-suite on the development machine, a Mac Studio (\code{Mac13,1}, macOS,
-arm64, 10 CPUs), in Release builds on 2026-10-12 (the protocol checks of
-2026-10-13 ran on the same machine; the checker does not record its build
-type). Each test runs twice: with \paglet{}s inside the test process
-(\emph{in-process}) and with \paglet{}s in sandboxed worker processes
-(\emph{worker processes}, Section~\ref{sec:model}); meshes of several
-hosts live in one test process and are connected by an in-memory
-transport. The \emph{live results} come from a mesh of three real
-machines on the author's LAN, listed in Table~\ref{tab:eval-hosts}: the
-same Mac (\emph{mac}), a Raspberry Pi~4 Model~B (\emph{pi}, Linux arm64,
-4 CPUs) and a uConsole built on a Raspberry Pi Compute Module~5
-(\emph{uconsole}, Linux arm64, 4 CPUs). All three run \code{paglets-host
-serve} built from the same sources (the Mac in a Release build; the
-script records only the Mac's build type), with \paglet{}s in worker
-processes and HTTPS channels between the hosts. Plain TCP between the
-machines, measured with \code{iperf3} by the same script, is
-934--941\,Mbit/s between mac and pi and 317--341\,Mbit/s on every pair
-that includes uconsole, which is on a slower link. The script
-\path{cpp/tools/mesh_bench.sh} makes a fresh mesh of the three, measures
-the network, runs the File Courier, the Latency Map, the Mesh Benchmark
-and Pi, and writes \path{docs/results/live_*.json};
-\path{cpp/tools/chronicle_live.sh} does the same for the Mesh Chronicle.
-Appendix~\ref{app:reproduce} says how to run them. Each live number is
-from 2026-10-12 (the chronicle: 2026-10-13); the script runs each
-transfer, each benchmark and the pi job once (the Latency Map reports the
-mean and the fastest of 20 pings; \code{iperf3} runs for 5\,s), so no
-variance is reported.
+The performance tests use three machines on one local area network (LAN):
+a Mac Studio (Mac13,1, arm64, 10 CPUs), a Raspberry Pi~4 and a uConsole
+with Compute Module~5 (CM5; both Linux arm64, four CPUs). For the
+2026-10-15 movement tests, the Mac used GCC~16.2 RelWithDebInfo with
+hardware bounds checks; both Pis used GCC~16.1 Release with software
+bounds checks. These checks prevent memory accesses outside the guest's
+allowed range. Mobile instances used WAMR~2.4.5's fast interpreter in
+sandboxed workers. Jobs compiled in the later tests used explicit
+software bounds checks on all three hosts. These configuration differences
+mean that timing differences cannot be attributed to CPU hardware alone.
 
-% results: live_hosts [caption={The hosts of the live mesh, as \code{mesh\_bench.sh} recorded them},label={tab:eval-hosts}]
+Durations use local monotonic clocks, which do not jump with changes
+to system time. We never calculate an interval by subtracting timestamps
+from different hosts. The source's measurement ends when it receives the
+arrival-hook acknowledgement, including the return network trip.
+Individual phase medians do not sum to this total: phases can overlap,
+and destination activation includes fetching the module and selecting a
+worker as well as restoring state. The move table gives ten samples per
+row, with median phase times and the minimum and maximum acknowledgement
+times. The ranges describe observed samples; they are not confidence
+intervals.
+
+\subsection{Portability and state representation}\label{sec:evaluation-images}
+
+The counter snapshot test restores a 131\,212-byte image (about 128\,KB):
+two 64\,KB pages plus 140 bytes for metadata and the mutable global.
+The restored instance returns the expected accumulated count while the
+original continues independently. This checks a C++ object containing
+pointers without custom state-serialization code. It does not test every
+guest compiler or WebAssembly extension.
+
+The current performance tests move between macOS and Linux, but both
+ends use arm64 CPUs. Evidence for moves between CPU architectures comes
+from the earlier M0 milestone, using ABI version~0: one counter module
+resumed in four transfers involving macOS arm64, Linux arm64 and macOS
+x86-64 under Rosetta~2. This supports the image representation used at
+that milestone; it is not a current performance test on native x86.
+Later correctness tests added a physical Windows~11 x86-64 host. Those
+basic functional tests are not Windows performance measurements.
+
+\subsection{Physical migration and page reuse}\label{sec:evaluation-moves}
+
+The 2026-10-15 tests completed 480 moves across all six directed pairs
+of the three machines. Each pair used 0, 1, 4 and 16\,MB of added test
+data (\emph{ballast}), filled with a uniform nonzero byte value. There
+were ten outbound/return pairs per size. Page caches were cleared before
+each outbound trial (the \emph{cold} move); module caches remained after
+first use. Each move checked state, memory size, move counters and
+successful arrival. Table~\ref{tab:eval-live-move} shows Mac-to-Pi results.
+The source records retain every direction and sample, phase definitions
+and executable identities. In the table, ACK is the elapsed time from
+capture until the source receives the arrival-hook acknowledgement.
+
+% results: live_move [layout={compact},test-prefix={mac → pi, },strip-prefix={mac → pi, },columns={test|capture, median|destination activation/restore, median|capture to arrival-hook acknowledgement, median|capture to arrival-hook acknowledgement, minimum|capture to arrival-hook acknowledgement, maximum|pages sent, median},headers={Trial|Capture|Restore|ACK|Min|Max|Pages},widths={0.24|0.11|0.11|0.11|0.1|0.1|0.07},caption={Mac-to-Pi physical moves, ten samples per row. Times in ms: Capture, Restore and ACK are medians; Min and Max are the observed ACK range. Phase columns do not sum to ACK. Pages is the median count sent.},label={tab:eval-live-move}]
 \begin{table}[htbp]
 \centering\small
-\caption{The hosts of the live mesh, as \code{mesh\_bench.sh} recorded them}
-\label{tab:eval-hosts}
-\begin{tabular}{lrr}
+\caption{Mac-to-Pi physical moves, ten samples per row. Times in ms: Capture, Restore and ACK are medians; Min and Max are the observed ACK range. Phase columns do not sum to ACK. Pages is the median count sent.}
+\label{tab:eval-live-move}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.24\linewidth}p{0.11\linewidth}p{0.11\linewidth}p{0.11\linewidth}p{0.1\linewidth}p{0.1\linewidth}p{0.07\linewidth}}
 \toprule
-Test & Platform & Recorded \\
+Trial & Capture & Restore & ACK & Min & Max & Pages \\
 \midrule
-mac & Darwin arm64, Mac13,1, 10 CPUs & 2026-10-12 \\
-pi & Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs & 2026-10-12 \\
-uconsole & Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs & 2026-10-12 \\
+0 MB ballast, cold pages & 1.98 & 7.45 & 30.75 & 21.55 & 48.1 & 2 \\
+0 MB ballast, return & 1.95 & 6.93 & 26.34 & 24.06 & 31.29 & 2 \\
+1 MB ballast, cold pages & 17.43 & 33.32 & 85.55 & 83.59 & 149.28 & 18 \\
+1 MB ballast, return & 17.83 & 26.71 & 57.93 & 56.68 & 92.95 & 2 \\
+4 MB ballast, cold pages & 65.02 & 122.02 & 297.49 & 289.65 & 362.6 & 66 \\
+4 MB ballast, return & 65.18 & 100.57 & 193.28 & 186.88 & 246.28 & 2 \\
+16 MB ballast, cold pages & 268.96 & 474.23 & 1181.85 & 1122.15 & 1267.97 & 258 \\
+16 MB ballast, return & 257.02 & 471.33 & 845.13 & 821.93 & 905.15 & 2 \\
 \bottomrule
 \end{tabular}
 \end{table}
 % /results
 
-Older numbers come from three reports under \code{planning/}:
-\code{cpp-m0-results.md}, the WAMR spike of milestone M0 (September
-2026); \code{cpp-m1-results.md}, the runtime measurements of M1 on Linux
-x86-64 with 4 vCPUs in a cloud container; and \code{cpp-benchmarks.md},
-the benchmark tests on Linux x86-64 with 4 CPUs (2026-10-09). Their
-machines differ from the live mesh, and this is said with each number.
+For 16\,MB of ballast, cold moves sent 258 pages and return moves sent
+two, reusing 256 pages. Median acknowledgement time fell from 1181.85 to
+845.13\,ms. Capture still took about 260\,ms and destination activation
+and restoration about 470\,ms. Reusing pages reduces network traffic,
+but the source still scans and hashes memory, and the destination still
+creates and restores the instance. Sending fewer bytes therefore need
+not reduce move time proportionally. Uniform ballast compresses well;
+these results do not measure bulk throughput for incompressible state.
 
-\subsection{Memory images}\label{sec:evaluation-images}
+Earlier LAN tests on 2026-10-12 measured mean request times of
+1.16--5.16\,ms over 20 pings per directed pair and File Courier transfer
+rates of 20.4--39.6\,MB/s for 16--256\,MB artifacts. These measurements
+describe the network context. They neither measure migration time nor
+compare mobility with remote calls for the same application. We do not
+infer that moving code is faster than leaving it in place.
 
-A \paglet{} moves as its memory image (Section~\ref{sec:movement}): the
-non-zero 64\,KB pages of its linear memory, each with a SHA-256 hash, and
-its exported mutable globals. The Counter example (Appendix~\ref{app:examples})
-is the smallest useful case. Its test captures the image after ten
-increments, serializes it, reads it back and restores it into a new
-instance; the restored \paglet{} answers with the sum 55 and both copies
-go on independently. The serialized image is 131\,212 bytes
-(\path{docs/results/counter.json}): two 64\,KB pages of content and 140 bytes
-for the header, the page table and the one global (the stack pointer),
-and nothing of the module, which travels separately by hash. The module
-itself, \code{counter.wasm}, is 110\,KB (112\,820 bytes) in the macOS
-build of 2026-10-14; the other example modules of that build, with the
-SDK and the C++ standard library linked in, are between 96\,KB (Hello)
-and 828\,KB (Mesh Chronicle). These sizes are read from the build
-directory and are the one exception above: they are not recorded with the
-results.
+\subsection{Compute jobs}\label{sec:evaluation-compute}
 
-Images are independent of the host's CPU and operating system. In M0, one
-build of \code{counter.wasm} (the ABI~v0 version, 67\,KB) was run,
-captured and resumed in four transfers between macOS arm64, Linux arm64
-(the Pi~4) and macOS x86-64 (Rosetta~2), with images of 128--640\,KB; in
-every transfer the count was intact and the \paglet{} continued counting
-(\code{cpp-m0-results.md}, section ``Cross-architecture memory
-images''). The same report gives the cost of the primitives with WAMR
-2.4.5 in a RelWithDebInfo build: capturing a two-page image takes 1.0\,ms
-on the Mac and restoring it 0.05\,ms; on the Pi~4, 6.5\,ms and 0.9\,ms,
-measured while a compiler build was using all four cores. The capture is
-dominated by the SHA-256 of every page, a portable C++ implementation.
-Instantiating a module, running its initializer and destroying the
-instance takes 36\,$\mu$s on the Mac; a call from the host into the guest
-0.4\,$\mu$s.
+Table~\ref{tab:eval-jobs} compares the same integer job in interpreted
+and warm AOT modes on 2026-10-15, using three million iterations per
+sample. Returned checksums were compared. Warm execution excludes
+compilation and queueing, which were recorded separately. Dividing the
+interpreter median by the AOT median gives ratios of approximately 2.3
+on the Mac, 6.8 on the Pi and 6.7 on the CM5. These ratios apply to this
+workload and configuration, not to arbitrary C++ code or the Pi algorithm.
+There is no native-C++ baseline.
 
-The benchmark cases of the test suite (\code{bench:}, at full size with
-\code{PAGLETS\_BENCH=1}) measure the runtime's operations around the
-engine: request and reply, activation, memory per \paglet{} and moves. On
-Linux x86-64 with 4 CPUs (\code{cpp-benchmarks.md}): a request and reply
-to an active \paglet{} 15\,500 times per second with a median of 0.06\,ms
-in-process (15\,200 per second, 0.05\,ms with worker processes); the
-activation of an inactive \paglet{}, that is loading its image, placing
-the instance and delivering the message, a median of 0.64\,ms in-process
-and 5.9\,ms with workers, where the image has to reach the worker; a move
-between two hosts of one process over the in-memory transport, with
-4\,MB of unchanging memory in the \paglet{}, a median of 31\,ms
-in-process and 93\,ms with workers. The move test also records page
-reuse: 66 pages travel on the first move and 2.2 on average on later
-ones, because the receiving host keeps the pages it has seen by hash and
-skips them (Section~\ref{sec:movement-protocol}). The 4\,MB ballast is
-sent once.
-
-\subsection{Messages and transfers between real hosts}\label{sec:evaluation-mesh}
-
-Two example \paglet{}s measure the live mesh from the inside. The Latency
-Map places a probe on every host; each probe sends a \code{ping} request
-to each other probe 20 times, one at a time, and records the mean and the
-fastest round trip (Section~\ref{sec:communication},
-Table~\ref{tab:comm-latency}). Figure~\ref{fig:eval-latency} shows the
-six ordered pairs. A round trip passes both runtimes, the worker process
-boundary on both sides and the encrypted channel between the hosts. The
-means are 1.16--5.16\,ms and the fastest round trips 0.79--1.92\,ms. The
-two Pi-class hosts talk fastest with each other (1.16 and 1.34\,ms mean),
-on the pair whose TCP throughput is the lower one; every pair with the
-Mac is slower (2.84--5.16\,ms), so the Mac side adds about 2\,ms to a
-round trip. The recorded data do not say why, and the measurement was not
-repeated. (The same example inside one test process reports 7--10\,ms,
-\path{docs/results/latency.json}; that measures the test fixture, which
-delivers frames in rounds with a 2\,ms pause, not the runtimes.)
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\linewidth]{build/figures/latency.pdf}
-\caption{Round trips of a request between Latency Map probes on the live
-mesh, per ordered pair of hosts: the mean of 20 pings and the fastest one.
-From \code{docs/results/live\_latency.json}, 2026-10-12.}
-\label{fig:eval-latency}
-\end{figure}
-
-The File Courier, an example \paglet{} that uses the \code{share} and
-\code{save} operations of the \code{files} service and the artifact
-capabilities of Section~\ref{sec:mesh}, carries files between named roots
-of two hosts. It does not copy the content into its memory: it shares the
-files on the source host as artifacts and saves them on the destination,
-whose host fetches every part directly from the source over the channel
-between the hosts, checks the SHA-256 and writes the file.
-\code{mesh\_bench.sh} lets a courier carry payloads of 16, 64 and 256\,MB
-of random bytes for every ordered pair of hosts and records two times
-that the courier measures itself: \emph{sharing} on the source (reading
-and hashing the files) and \emph{saving} on the destination (fetching,
-checking, writing). The transfer rate is the payload divided by the saving
-time. Figures~\ref{fig:eval-transfer-time} and \ref{fig:eval-transfer-rate}
-show the 18 transfers. Saving 16\,MB takes 0.48--0.78\,s, 64\,MB
-1.6--2.9\,s and 256\,MB 9.4--12.3\,s; the rates are 20.4--39.6\,MB/s, most
-of them between 20 and 28\,MB/s, and they do not grow with the payload.
-Against the TCP baseline this is 18--35\,\% of the link between mac and
-pi (941\,Mbit/s, about 112\,MB/s) and 54--68\,\% of the links with
-uconsole (317--341\,Mbit/s, 38--41\,MB/s). On the gigabit link the
-exchange is bound by the hosts, not by the network; the recorded data do
-not split the saving time into its parts (the HTTPS channel, the parts of
-1\,MB, the hash check and the file writes), so where the time goes is a
-question for profiling. Sharing shows the cost of reading and hashing
-alone: 17--23\,ms for 16\,MB and 194--388\,ms for 256\,MB on mac and
-uconsole, but 120--181\,ms and 1.8\,s on the Pi~4, about 140\,MB/s.
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\linewidth]{build/figures/transfer_time.pdf}
-\caption{Time the destination host took to save a File Courier's payload
-(fetching every part from the source, checking the SHA-256, writing the
-file), by payload size and ordered pair of hosts; both axes logarithmic.
-From \code{docs/results/live\_transfer.json}, 2026-10-12, one run per
-point.}
-\label{fig:eval-transfer-time}
-\end{figure}
-
-\begin{figure}[htbp]
-\centering
-\includegraphics[width=\linewidth]{build/figures/transfer_rate.pdf}
-\caption{The same transfers as rates: payload divided by the saving time.
-Plain TCP between the hosts (\code{iperf3}) is 941\,Mbit/s between mac
-and pi and 317--341\,Mbit/s on the pairs with uconsole.}
-\label{fig:eval-transfer-rate}
-\end{figure}
-
-What these numbers do not give is the time of a \paglet{}'s move between
-two real machines. The move protocol runs over the same channel as the
-content exchange, and an image is at most 16\,MB of pages, so the
-transfer part of a move is within what the courier numbers show; what a
-move costs on top (capturing and hashing the image, its way through the
-worker processes on both sides, the protocol's round trips,
-Figure~\ref{fig:movement-protocol}, and, when the destination does not
-hold the module, the module itself) is not measured between real
-machines. \code{mesh\_bench.sh} does not time a move; the only timed moves
-are those of the benchmark test on the in-memory transport above. Moves
-over HTTPS are exercised, not timed: by the \code{host\_serve\_move} test
-between two host processes on the loopback interface of one machine, and
-between real machines by the Pi job's clones and by the Mesh Chronicle.
-Timing them is listed as open in \code{cpp-benchmarks.md}.
-
-\subsection{Compute on the mesh}\label{sec:evaluation-compute}
-
-The Mesh Benchmark sends a clone of itself to every host. Each clone takes
-a compute slot (Section~\ref{sec:mesh}), runs integer, floating-point and
-memory-copying loops in its own WebAssembly code for one second each, and
-writes and reads 8\,MB through its storage service in blocks of 256\,KB.
-Table~\ref{tab:eval-benchmark} is the live run. The CPU numbers are of
-the WAMR fast interpreter running the \paglet{}, not of native code: 250
-million integer operations per second on the Mac, 180 on the uconsole and
-67 on the Pi~4; the floating-point loop is faster on the uconsole (331
-Mflops) than on the Mac (266). Memory copying in the \paglet{}'s linear
-memory reaches 27\,000\,MB/s on the Mac. The storage path is the slowest part
-on the Mac: 45\,MB/s for writing, with every 256\,KB block one request
-from the worker process to the host that writes it, against 397\,MB/s on
-the uconsole; this difference is not explained by the recorded data and
-is a candidate for profiling.
-
-% The values are copied from docs/results/live_benchmark.json (2026-10-12),
-% transposed because the generated table is wider than the page; replace
-% this by a generated results table once the generator can transpose.
+% results: live_three_host_jobs [layout={compact},columns={test|mode|samples|median elapsed|elapsed range},headers={Host|Mode|Samples|Median (ms)|Range (ms)},widths={0.12|0.3|0.1|0.13|0.2},caption={Repeated identical integer jobs. Warm AOT excludes compilation; unequal interpreter sample counts reflect repeated collection.},label={tab:eval-jobs}]
 \begin{table}[htbp]
 \centering\small
-\caption{The Mesh Benchmark on the live mesh: every host measured by a clone of the \paglet{} in a compute slot of its own, CPU and memory tests of 1\,s each inside the \paglet{} (WAMR fast interpreter), 8\,MB in blocks of 256\,KB through its storage service. The hosts have 10, 4 and 4 CPUs. One run, 2026-10-12, from \code{docs/results/live\_benchmark.json}.}
-\label{tab:eval-benchmark}
-\begin{tabular}{lrrr}
+\caption{Repeated identical integer jobs. Warm AOT excludes compilation; unequal interpreter sample counts reflect repeated collection.}
+\label{tab:eval-jobs}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.12\linewidth}p{0.3\linewidth}p{0.1\linewidth}p{0.13\linewidth}p{0.2\linewidth}}
 \toprule
- & mac & pi & uconsole \\
+Host & Mode & Samples & Median (ms) & Range (ms) \\
 \midrule
-integer operations (Mops) & 250 & 67 & 180 \\
-floating point (Mflops) & 266 & 102 & 331 \\
-memory copying (MB/s) & 27\,275 & 2\,344 & 4\,973 \\
-storage write, 8\,MB (MB/s) & 45 & 89 & 397 \\
-storage read, 8\,MB (MB/s) & 102 & 68 & 194 \\
-\midrule
-the clone's tests on the host, wall time (s) & 3.5 & 3.9 & 3.3 \\
+mac & AOT job & 5 & 31.0 & 30.0 to 32.0 \\
+mac & interpreter job & 10 & 72.0 & 68.0 to 82.0 \\
+pi & AOT job & 5 & 27.0 & 27.0 to 29.0 \\
+pi & interpreter job & 75 & 184.0 & 174.0 to 239.0 \\
+uconsole & AOT job & 5 & 11.0 & 11.0 to 11.0 \\
+uconsole & interpreter job & 40 & 74.0 & 68.0 to 97.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
+% /results
 
-Pi puts the slots to work. The job cuts the hexadecimal digits of $\pi$
-into chunks, asks \code{mesh-info} for hosts with free slots, clones
-itself with one chunk onto each, takes the answers in order into a file
-on its host, sends a chunk out again when it is not answered in time, and
-converts the result into decimal digits at the end
-(Section~\ref{sec:mesh}, \path{docs/examples/pi.md}). On the live mesh it
-computed 100\,000 hexadecimal digits in 200 chunks of 500, with at most 32
-in flight, on all three hosts with one slot per CPU: the hexadecimal
-digits took 313\,s, the conversion into 120\,409 decimal digits less than
-a second at the one-second resolution of the script's polling, and the
-first 100 decimal digits were checked against the known value
-(\path{docs/results/live_pi.json}, 2026-10-12). The test of the example
-is smaller and harder: three hosts in one process with two slots each,
-1\,200 digits in 40 chunks, and the third host is shut down while one of
-its workers runs. The job finishes with all 40 chunks, and the chunks it
-sent again after the loss are counted: 6 in-process and 3 with worker
-processes in the recorded runs (\path{docs/results/pi.json}; 6.1\,s and
-4.2\,s).
+The Pi integration test used jobs to compute 100\,000 hexadecimal digits
+of $\pi$, with all three hosts contributing. It finished in 69\,s,
+including one-second status polling. The decimal-output check verifies
+the known first 100 digits, not the entire result. This tests the
+integration of mobile coordination, jobs and artifact output, rather
+than measuring a controlled AOT speedup. Windows correctness tests used
+interpreted jobs only.
 
-\subsection{Many paglets on one host}\label{sec:evaluation-density}
+\subsection{Replication: model, simulation and physical test}\label{sec:evaluation-zombies}
 
-How many \paglet{}s a host holds was measured first in M0 with
-\code{paglets-spike} on the Counter module and the WAMR runtime alone. On
-the Mac, 1\,000 live instances in one process were tested, with 137\,KB
-of resident memory per instance. On the Pi~4 the first run stopped at 59
-instances: WAMR's hardware bound checks reserve 8\,GB of virtual address
-space per instance, and the Pi's kernel has a 39-bit address space; with
-software bound checks the Pi also held 1\,000 instances at 89\,KB each
-(\code{cpp-m0-results.md}, finding 2). The Linux CI jobs repeat this
-measurement with 1\,000 instances of the Counter on every push to the
-\code{cpp} branch (\path{.github/workflows/cpp.yml}); the output is
-printed, not recorded. With the runtime, M1 measured 23\,000--56\,500
-host requests per second spread over 200 \paglet{}s on Linux x86-64 with
-4 vCPUs, depending on lanes and mode (\code{cpp-m1-results.md}, section
-``Measurements''). The benchmark tests put the host's resident memory
-per \paglet{} at 134\,KB in-process and 46\,KB with worker processes,
-where the instances live in the workers (\code{cpp-benchmarks.md}).
+On 2026-10-16 the checker explored ten two-replica worlds completely and
+two three-replica worlds to depth~11, considering at most 11 steps from
+the initial state (Table~\ref{tab:zombie-results}).
+Each job has one work step and one observation. Each channel holds at
+most three messages, or two in the three-replica worlds. Fault budgets
+limit crashes, network cuts, message loss and duplication, early
+timeouts (for example, suspecting a healthy reachable main), sink
+failure, cancellation and redirection.
 
-\subsection{Fault tolerance in practice}\label{sec:evaluation-chronicle}
+The model also simplifies executions. A send to an unavailable host or
+full channel is lost without consuming the message-loss budget. Identical
+queued resends are combined. Once the crash budget is exhausted, running
+hosts' current state is treated as durable. These assumptions limit what
+the checked properties imply about the deployed system.
 
-The Mesh Chronicle (Section~\ref{sec:zombies}, Appendix~\ref{app:examples})
-is a zombie \paglet{} that keeps a life log of its mesh and delivers it as
-Markdown when its lifetime is over. \code{chronicle\_live.sh -{}-late uconsole}
-ran it for ten minutes on the live mesh on 2026-10-13 with failures on a
-schedule: at 60\,s the uconsole joined the mesh and got a replica; at
-92\,s the host of the main (pi) was frozen with \code{SIGSTOP}, cut off
-with its state intact, and thawed at 180\,s, so that two mains met; at
-271\,s pi was killed and at 360\,s restarted from its state; at 420\,s
-the uconsole was killed for 90\,s; at 525\,s the sink's host, the Mac,
-shut down normally and came back at 555\,s. The life log it delivered is
-reproduced in \path{docs/examples/mesh-chronicle-log.md};
-\path{docs/results/live_chronicle.json} records the outcome the script
-checked (three replicas, two takeovers, one partition with a main on both
-sides, 20 protocol steps conformant, no replica left), and the script
-fetched the log from the sink, the Mac, once. The log shows two
-takeovers: the Mac took over as main at 17:16:33 after 38\,s without a
-sample from the frozen pi, and pi took over again at 17:23:44 while the
-Mac was down; one partition with a main on both sides for 1\,min 15\,s
-(the frozen pi's main and the Mac's), whose journals were merged into one
-log when the sides met; 55 samples of the mesh at 10\,s intervals; 53\,s
-in all without a working main, the longest gap 38\,s; and the log
-delivered to the sink. The 20 protocol steps that the three hosts
-recorded were replayed through the specification of
-Section~\ref{sec:zombies} and conform to it.
+% results: zombie_protocol [layout={compact},columns={test|reachable states|steps|longest shortest path|explored to (bounded)},headers={World|States|Transitions|Depth|Bound},test-prefix={zombie protocol, exhaustive: },strip-prefix={zombie protocol, exhaustive: |two replicas: },widths={0.42|0.16|0.16|0.07|0.07},caption={Finite-model coverage. Complete worlds check four safety invariants and two recovery goals; bounded worlds check only the four invariants. Depth counts steps on a shortest path to a state, taking the maximum over states; Bound is the search cutoff.},label={tab:zombie-results}]
+\begin{table}[htbp]
+\centering\small
+\caption{Finite-model coverage. Complete worlds check four safety invariants and two recovery goals; bounded worlds check only the four invariants. Depth counts steps on a shortest path to a state, taking the maximum over states; Bound is the search cutoff.}
+\label{tab:zombie-results}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.42\linewidth}p{0.16\linewidth}p{0.16\linewidth}p{0.07\linewidth}p{0.07\linewidth}}
+\toprule
+World & States & Transitions & Depth & Bound \\
+\midrule
+three replicas: crash, cut & 9188336 & 24420885 &  & 11 \\
+three replicas: two crashes & 5461027 & 14745614 &  & 11 \\
+crash, cancel & 3935759 & 19606519 & 41 &  \\
+crash, cut & 12908826 & 50102693 & 47 &  \\
+crash, duplicate & 4380410 & 18416904 & 40 &  \\
+crash, early timeout & 7807220 & 30116664 & 47 &  \\
+crash, loss & 3961354 & 17259715 & 43 &  \\
+cut, loss, early timeout & 4000767 & 19983567 & 41 &  \\
+one joining later: crash, cut & 13205168 & 51296859 & 49 &  \\
+one joining later: crash, early timeout & 8051595 & 31115057 & 49 &  \\
+sink down, redirect & 378252 & 1698056 & 30 &  \\
+two crashes & 22356397 & 81063681 & 53 &  \\
+\bottomrule
+\end{tabular}
+\end{table}
+% /results
 
-The run is one run, and the schedule is the one the script has; it is
-evidence that the protocol behaves on real machines as the model says,
-not a measurement of availability. What the model checker establishes,
-and its numbers, are in Section~\ref{sec:zombies}
-(Table~\ref{tab:zombie-results}): ten two-replica worlds explored
-completely, two three-replica worlds to depth 11, and 10\,000 timed
-random runs without a failure. The twelve explored worlds took 39 minutes
-on the Mac and the random runs 28\,s (\path{docs/results/zombie_protocol.json},
-2026-10-13); the random runs sum to 213\,901\,s of simulated time with
-two working mains, which is the price of the partition tolerance the live
-run shows. The limits of these checks (hash compaction in every world,
-with an omission probability of about $n^2/2^{129}$ for $n$ states; the
-depth bound for three replicas; and what the model leaves out) are
-stated in Section~\ref{sec:zombies}.
+Only three of the ten two-replica worlds allow an early timeout, at most
+once each. In the others, the relevant failure-detection timers are
+accurate. Recovery goals are not checked on searches stopped at a depth
+limit. The results therefore do not prove correctness under arbitrary
+timing, unbounded channels or faults, or complete three-replica
+executions. The full suite also requires every declared role transition
+to be reached somewhere in the tests.
 
-\subsection{The test suite as evidence}\label{sec:evaluation-tests}
+A deterministic simulator adds virtual clocks, message delays and
+checkpoint intervals to the same protocol function. In 10\,000 recorded
+three-replica runs with random fault schedules, it selected 119\,289
+crash or network-cut events and observed 3370 leadership takeovers.
+Some selected events had no effect. The longest measured takeover
+without a further disturbance was 18.9\,s, below the configured 25.2\,s
+bound. The result-journal check covers observations saved durably on
+hosts that are running when the sink accepts the result. The simulated
+sink accepts once by construction; it does not independently test atomic
+updates in distributed storage.
 
-The claims of Sections~\ref{sec:model} to \ref{sec:tools} rest on the
-test suite more than on the numbers above. At the time of writing,
-\code{cpp/tests/} registers 252 test cases with \code{PAGLETS\_TEST},
-from the codecs and the engine through the runtime (47 cases), the mesh
-(19), movement, location, policy, services, the network and the gateways
-to the example \paglet{}s (12) and the zombie protocol (9). \code{ctest}
-runs them twice: as \code{unit} in-process and as \code{unit\_workers}
-with \code{PAGLETS\_TEST\_WORKER} set, so that every case also runs with
-sandboxed worker processes. Thirteen more \code{ctest} cases drive the
-binaries from outside, among them the worker's sandbox check, image save and resume
-across two processes, the host's state directory across two processes,
-\code{host\_serve\_move} (a Counter moved between two hosts over HTTPS on
-loopback and back), \code{host\_mesh\_discovery}, the ledger CLI, an
-out-of-tree package build, and \code{docs\_sync}, which fails while a
-documentation page or this paper is not current with the sources. The
-multi-host tests run several hosts in one process, connected by the
-in-memory transport or by HTTPS on loopback; they cover the mesh, moves,
-location, relays, the content exchange, the examples and the gateways.
-Eight \code{fuzz:} cases mutate valid inputs for every decoder of data
-from outside, from MessagePack values and ledger records to modules,
-images and the frames between hosts. CI runs the suite on Linux x86-64
-and arm64 with GCC~16, on macOS arm64, under AddressSanitizer with
-UndefinedBehaviorSanitizer and under ThreadSanitizer, and on Windows
-x86-64 with MinGW-w64 as an experimental job whose failure does not fail
-the workflow (\path{.github/workflows/cpp.yml}).
+The ten-minute Mesh Chronicle test on 2026-10-13 introduced a late join,
+a frozen host, restarts, a network partition and sink downtime. It
+delivered a merged life log through two takeovers and one partition.
+Recorded roles and ranks passed the trace checker. This is one physical
+execution with a chosen failure schedule, not a measurement of general
+availability or a proof that recovery always completes. The pure protocol
+model omits real transport, SDK action scheduling and storage behavior.
+The physical test and host regression tests cover some of these gaps.
 
-The result tables of the documentation come from the example tests: most
-run their example on a mesh of several hosts in one process, the smallest
-(Hello, Ping Pong, the Counter's image test) on one runtime; all run in
-both modes, check what the example must show, and with
-\code{PAGLETS\_RESULTS\_DIR} set write what they measured to
-\path{docs/results/<example>.json} (Appendix~\ref{app:reproduce}).
+\subsection{Test coverage and limits of the evidence}\label{sec:evaluation-tests}
 
-\subsection{What is not measured}\label{sec:evaluation-gaps}
+The test suite exercises execution inside the host process and in
+sandboxed workers. A saved full-suite run passed all 18 Mac and 17
+Windows CTest entries. Later focused tests cover changed runtime, mesh,
+job and example behavior on Mac, Windows, CM5 and Pi. The latest
+lifecycle/checkpoint tests passed 136 matched cases across both execution
+modes and all four hosts. Each run has its own version record; we do not
+claim that every later revision reran every earlier test. Continuous
+integration (CI) configurations for detecting memory and concurrency
+errors, and decoder tests with malformed inputs, provide further
+engineering checks. They do not prove that races or vulnerabilities
+are absent.
 
-No move between real machines is timed, only moves over the in-memory
-transport. The live numbers are single runs on three machines of one LAN,
-without variance, and no mesh is larger than five hosts in the tests or
-three real ones. Only WAMR's fast interpreter was measured, not its AOT
-or JIT modes (Section~\ref{sec:discussion}). The density numbers are of a
-\code{paglets-spike} process and of a cloud container, not of a real
-mesh, and no run holds thousands of \paglet{}s for hours. The Windows
-build is an experimental CI job whose failure does not fail the workflow;
-at the time of writing it does not pass, and it has no recorded numbers.
-Relays and the gateways (Section~\ref{sec:mesh}) are tested, not
-measured.
+The evidence is limited by the small LAN, different host configurations,
+different historical builds, selected workloads and bounded fault
+models. We did not compare mobile coordination with equivalent remote
+calls, the Python edition or native C++. Performance tests used at most
+three machines and did not exercise real NAT or relay deployments.
+The results demonstrate feasibility and specific costs. Comparative
+benefit and behavior at larger scales remain unestablished.

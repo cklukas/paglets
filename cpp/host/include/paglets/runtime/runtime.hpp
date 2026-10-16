@@ -50,6 +50,8 @@ struct LogRecord {
 using LogFunction = std::function<void(const LogRecord&)>;
 
 struct Config {
+    // Identity shown without mobility; a mesh uses MobilityHooks::host_id
+    // for SelfInfo.host and sender records instead.
     std::string host_name = "local";
     unsigned threads = 2;  // scheduler lanes; a paglet stays on one lane while active
     // Durable state (modules, images, paglet records). Empty: in memory only.
@@ -57,7 +59,8 @@ struct Config {
     // Worker process executable (paglets-worker): one worker per lane runs
     // the paglet instances. Empty: paglets run in the host process.
     std::filesystem::path worker_executable;
-    // OS sandbox for worker processes (Linux: seccomp; elsewhere not yet).
+    // OS sandbox for worker processes (Linux seccomp, macOS SBPL, Windows
+    // restricted token and job object; see docs for platform limits).
     bool sandbox_workers = true;
     wasm::Limits limits{};
     std::chrono::milliseconds handler_budget{5000};
@@ -65,6 +68,9 @@ struct Config {
     // when its last image is older than this (0: after every handler).
     std::chrono::milliseconds checkpoint_interval{1000};
     std::size_t mailbox_limit = 1024;
+    // Serialized ready notifications captured with a move, not upfront RAM.
+    // Refusal keeps the paglet and its notifications on the source host.
+    std::size_t move_ready_bytes = 64u * 1024 * 1024;
     std::size_t cap_limit = 1024;
     std::size_t timer_limit = 64;
     std::size_t spawn_limit_per_call = 16;
@@ -84,10 +90,79 @@ struct Config {
     std::chrono::milliseconds module_gc_grace{std::chrono::hours(24)};
     std::chrono::milliseconds module_gc_interval{std::chrono::minutes(10)};
     LogFunction log;  // default: stderr
+    // Compute jobs (ABI v1.3): cores for jobs (0: the machine's CPUs; the
+    // mesh sets it to the host's compute slots), wall time (default, cap),
+    // linear memory (default, cap) and queued or running jobs per owner.
+    unsigned job_slots = 0;
+    std::chrono::milliseconds job_default_time{std::chrono::hours(1)};
+    std::chrono::milliseconds job_max_time{std::chrono::hours(24)};
+    std::uint32_t job_memory_mb = 1024;      // 1 GB ceiling, not an initial allocation
+    std::uint32_t job_max_memory_mb = 1024;
+    std::size_t job_owner_limit = 256;
+    // The AOT compiler (paglets-wamrc) for job modules; empty: jobs run in
+    // the interpreter. Compiled code is cached in `aot_cache` (default:
+    // `aot/` in the state directory, else a temporary directory).
+    std::filesystem::path aot_compiler;
+    std::filesystem::path aot_cache;
+};
+
+// A job a paglet sends to another host (JobHooks::submit_remote): the
+// mesh picks the host and runs it there with Runtime::submit_job.
+struct RemoteJob {
+    PagletId paglet;
+    std::string requester_host;  // key ID of this host
+    std::uint64_t correlation = 0;
+    abi::SenderRecord sender;
+    std::string module;  // hex hash
+    abi::JobSpec spec;   // with its input
+    std::optional<Cap> input_artifact;  // instead of inline input (a mesh artifact)
+    std::vector<std::string> marks;
+};
+
+// A job to run on this host for a paglet here or on another host.
+struct IncomingJob {
+    PagletId paglet;
+    std::string requester_host;  // empty: a paglet on this host
+    std::uint64_t correlation = 0;
+    std::string owner;
+    std::string module;  // hex hash; must be in the module store
+    std::string function;
+    std::vector<std::uint8_t> input;
+    std::int64_t cores = 1;
+    std::int64_t max_ms = 0;
+    std::int64_t memory_mb = 0;
+    std::vector<std::string> marks;
+    std::optional<Cap> input_artifact;  // the input is loaded from it first
+};
+
+struct JobHooks {
+    // Whether `caller` may submit the job; the effective wall-time cap
+    // (0: the host's), or an abi::Error. Called with the runtime's lock held:
+    // it must not call the runtime (nor wait for locks that do).
+    std::function<std::expected<std::int64_t, std::int32_t>(const abi::SenderRecord& caller, const abi::JobSpec& spec)>
+        admit;
+    // Jobs for other hosts (spec.hosts not empty); without the runtime's lock.
+    std::function<void(RemoteJob)> submit_remote;
+    std::function<void(const PagletId& paglet, std::uint64_t correlation)> cancel_remote;
+};
+
+// Large job inputs and outputs as artifacts (the system services install it).
+struct JobArtifactInput {
+    std::vector<std::uint8_t> data;
+    std::vector<std::string> marks;
+};
+struct JobArtifacts {
+    std::function<std::expected<Cap, std::int32_t>(std::span<const std::uint8_t> data, std::vector<std::string> marks)>
+        store;
+    std::function<void(Cap artifact, std::uint64_t max_bytes,
+                       std::function<void(std::expected<JobArtifactInput, std::int32_t>)> done)>
+        load;
 };
 
 struct CreateOptions {
     Bytes args;
+    // Non-roaming classes are for embedders and tests. On a mesh the
+    // installed module admission hook decides which classes are allowed.
     TrustClass trust = TrustClass::roaming;
     std::string owner = "local";
     // A paglet ID chosen in advance (32 lowercase hex digits), for example
@@ -115,6 +190,24 @@ struct PagletInfo {
     int lane = -1;              // scheduler lane while placed, -1 otherwise
     bool restart = true;        // comes back after a restart (abi::RestartArg)
     std::int64_t image_ms = 0;  // when its last image was stored (Unix milliseconds), 0: none
+};
+
+// A compute job on this host (ABI v1.3): queued or running.
+struct JobInfo {
+    std::uint64_t id = 0;
+    PagletId paglet;             // the paglet that submitted it
+    std::string requester_host;  // key ID of its host; empty: this host
+    std::uint64_t correlation = 0;  // of the paglet's job (its reply)
+    std::string owner;
+    std::string module;  // hex SHA-256
+    std::string function;
+    std::string state;  // queued, running
+    std::int64_t cores = 1;
+    std::int64_t done = 0;  // progress, as the job reports it
+    std::int64_t total = 0;
+    std::int64_t queued_ms = 0;
+    std::int64_t elapsed_ms = 0;
+    bool aot = false;
 };
 
 // Why a paglet ended.
@@ -146,15 +239,23 @@ public:
     // Creates a paglet; `created` is its first delivery.
     std::expected<PagletId, std::string> create(std::string_view module, CreateOptions options = {});
 
-    // Messages from the host itself (sender "host"). Errors are abi::Error codes.
+    // Host-tool messages use id/trust "host". A trusted embedder may pass
+    // sender_owner (default "local"); mesh sessions pass their authenticated
+    // actor's key ID. Native system paglets keep their own sender records.
+    // Errors are abi::Error codes.
     std::expected<void, std::int32_t> send(const PagletId& to, std::string_view name, Bytes payload = {},
-                                           std::int32_t priority = 3);
+                                           std::int32_t priority = 3, std::string_view sender_owner = "local");
     std::future<Reply> request(const PagletId& to, std::string_view name, Bytes payload = {},
-                               std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
+                               std::string_view sender_owner = "local");
     // Blocking request.
     Reply call(const PagletId& to, std::string_view name, Bytes payload = {},
-               std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+               std::chrono::milliseconds timeout = std::chrono::milliseconds(30000),
+               std::string_view sender_owner = "local");
 
+    // Lifecycle controls return bad_state during end hooks, while a
+    // dispatch is pending, or while ownership is moving/arriving. Retry
+    // after the transition; terminate can interrupt an end hook.
     std::expected<void, std::int32_t> deactivate(const PagletId& id);
     std::expected<void, std::int32_t> dispose(const PagletId& id);
     // Ends a paglet as failed without running it again (for example when its
@@ -227,6 +328,43 @@ public:
 
     // Process IDs of the running worker processes (none in-process).
     std::vector<int> worker_processes() const;
+
+    // -- compute jobs (ABI v1.3, planning/cpp-compute-jobs.md) --
+
+    std::vector<JobInfo> jobs() const;
+    // Cancels a job on this host (admins, owners); its paglet gets `cancelled`.
+    bool cancel_job(std::uint64_t id);
+    void set_job_slots(unsigned slots);
+    // Atomic reservations for compute-slot leases, sharing job admission.
+    bool reserve_compute_slots(std::int64_t cores);
+    bool reserve_compute_slots_for(std::int64_t cores, std::chrono::steady_clock::time_point queued_at);
+    // The oldest external lease waiter; zero clears it. Later native work
+    // leaves enough capacity for it as running allocations finish.
+    void set_compute_waiter(std::int64_t cores, std::chrono::steady_clock::time_point queued_at = {});
+    void release_compute_slots(std::int64_t cores);
+    unsigned job_slots() const;
+    std::int64_t job_cores_running() const;
+    std::size_t jobs_queued() const;
+    // True if job modules are compiled ahead of time on this host.
+    bool job_aot() const;
+    // Compiles a module for jobs now (benchmarks); true when compiled code
+    // is ready within `timeout`.
+    bool compile_job_module(const std::string& module, std::chrono::milliseconds timeout);
+    bool wait_jobs_idle(std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
+    void set_job_hooks(JobHooks hooks);
+    void set_job_artifacts(JobArtifacts artifacts);
+    // Runs a job here for a paglet of this or another host (the mesh calls
+    // it for remote jobs); its result goes to the paglet as the reply.
+    std::expected<std::uint64_t, std::int32_t> submit_job(IncomingJob job);
+    // Cancels the job a paglet (here or elsewhere) submitted, by correlation.
+    bool cancel_job_of(const PagletId& paglet, std::uint64_t correlation, const std::string& requester_host);
+    // Where a remote job of a paglet here is (job_status answers with it).
+    void note_job(const PagletId& paglet, std::uint64_t correlation, abi::JobStatus status);
+    // A remote job of a paglet here is lost (its host went away): the
+    // paglet gets `status`.
+    void fail_job(const PagletId& paglet, std::uint64_t correlation, std::int32_t status);
+    // Remote jobs of paglets here that wait for a result: (paglet, correlation).
+    std::vector<std::pair<PagletId, std::uint64_t>> remote_jobs() const;
 
     // Registers a native system paglet (system.hpp) under `system.<name>`.
     // Paglets created afterwards receive its default endpoint, if it has

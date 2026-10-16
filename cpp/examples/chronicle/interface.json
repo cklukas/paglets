@@ -4,7 +4,7 @@
   "summary": "A zombie paglet that keeps a life log of the mesh on every host and delivers it once",
   "launch": {"type": "none"},
   "messages": [
-    {"name": "start", "kind": "call", "summary": "Starts the replica group; the log goes to the sink when the lifetime ends",
+    {"name": "start", "kind": "call", "summary": "Waits for creator admission and replies with accepted and reason; other replicas form asynchronously",
      "request": "Start", "reply": "Started", "example": {"sink": "host:mac", "lifetime_ms": 3600000, "sample_ms": 10000}},
     {"name": "status", "kind": "call", "summary": "Role, replicas, main and progress of this replica", "request": "none", "reply": "Status"},
     {"name": "finish", "kind": "call", "summary": "Ends the work early: the main delivers the log", "request": "none",

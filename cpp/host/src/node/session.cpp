@@ -76,6 +76,18 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
     const bool admin = role == "admin";
     const std::string peer_id = mesh::key_id(peer);
 
+    // Authentication proves the key, not continuing membership. A channel
+    // may have been opened before this owner/admin was removed.
+    {
+        std::lock_guard lock(impl_->mu);
+        const auto& state = impl_->ledger.state();
+        if (role == "admin") {
+            if (!state.is_admin(peer)) return refusal("not a current admin of this mesh");
+        } else if (role == "owner") {
+            if (!state.is_owner(peer)) return refusal("not a current owner of this mesh");
+        } else return refusal("invalid session role");
+    }
+
     // May this session act on the paglet? Its owner and admins may.
     auto may_act = [&](const runtime::PagletId& paglet) -> std::expected<void, std::string> {
         auto info = impl_->runtime.info(paglet);
@@ -83,6 +95,29 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         if (!admin && info->owner != peer_id) return std::unexpected(std::string("not the paglet's owner"));
         return {};
     };
+
+    if (*type == "moves") {
+        const auto* clear = f.get("clear_cache");
+        if (clear && (!clear->as_bool() || (*clear->as_bool() && !admin)))
+            return refusal("only an admin may clear the page cache");
+        std::lock_guard lock(impl_->mu);
+        if (clear && *clear->as_bool()) {
+            if (!impl_->outgoing.empty() || !impl_->incoming.empty()) return refusal("a move is in progress");
+            impl_->pages.clear();
+        }
+        const auto& s = impl_->move_stats;
+        const auto n = [](std::uint64_t x) { return mesh::Value(static_cast<std::int64_t>(x)); };
+        return answer(mesh::Map{{"moves_out", n(s.moves_out)}, {"moves_in", n(s.moves_in)},
+            {"moves_failed", n(s.moves_failed)}, {"pages_sent", n(s.pages_sent)},
+            {"pages_received", n(s.pages_received)}, {"pages_reused", n(s.pages_reused)},
+            {"bytes_sent", n(s.bytes_sent)}, {"image_pages", n(s.image_pages)},
+            {"capture_ns", n(s.capture_ns)}, {"ready_ns", n(s.ready_ns)},
+            {"prepare_ns", n(s.prepare_ns)}, {"commit_ns", n(s.commit_ns)},
+            {"destination_activation_ns", n(s.destination_activation_ns)},
+            {"arrival_acks", n(s.arrival_acks)}, {"arrival_failures", n(s.arrival_failures)},
+            {"arrival_ack_ns", n(s.arrival_ack_ns)}, {"cached_page_bytes", n(impl_->pages.bytes())},
+            {"memory_limit_pages", n(impl_->runtime.config().limits.max_memory_pages)}});
+    }
 
     if (*type == "status") {
         // The paglets here (native system paglets are listed by name in
@@ -157,6 +192,42 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
             return answer(mesh::Map{{"hosts", mesh::Value(std::move(list))}});
         }
         return answer(mesh::Map{{"status", mesh::Value(wire::to_msgpack(compute_status()))}});
+    }
+
+    if (*type == "jobs") {
+        // Compute jobs on this host (planning/cpp-compute-jobs.md): owners
+        // see and cancel their jobs, admins all.
+        const std::string owner = admin ? std::string() : peer_id;
+        auto jobs = impl_->runtime.jobs();
+        std::erase_if(jobs, [&](const runtime::JobInfo& j) { return !owner.empty() && j.owner != owner; });
+        if (f.str("op").value_or("list") == "cancel") {
+            const auto id = f.integer("id");
+            auto it = std::ranges::find_if(jobs, [&](const runtime::JobInfo& j) {
+                return id && j.id == static_cast<std::uint64_t>(*id);
+            });
+            if (it == jobs.end()) return refusal("no such job of yours on this host");
+            return answer(mesh::Map{{"cancelled", mesh::Value(impl_->runtime.cancel_job(it->id))}});
+        }
+        mesh::Array list;
+        for (const auto& j : jobs) {
+            list.emplace_back(mesh::Map{{"id", mesh::Value(static_cast<std::int64_t>(j.id))},
+                                        {"paglet", mesh::Value(j.paglet)},
+                                        {"requester", mesh::Value(j.requester_host)},
+                                        {"owner", mesh::Value(j.owner)},
+                                        {"module", mesh::Value(j.module)},
+                                        {"function", mesh::Value(j.function)},
+                                        {"state", mesh::Value(j.state)},
+                                        {"cores", mesh::Value(j.cores)},
+                                        {"done", mesh::Value(j.done)},
+                                        {"total", mesh::Value(j.total)},
+                                        {"queued_ms", mesh::Value(j.queued_ms)},
+                                        {"elapsed_ms", mesh::Value(j.elapsed_ms)},
+                                        {"aot", mesh::Value(j.aot)}});
+        }
+        return answer(mesh::Map{{"jobs", mesh::Value(std::move(list))},
+                                {"slots", mesh::Value(static_cast<std::int64_t>(impl_->runtime.job_slots()))},
+                                {"running", mesh::Value(impl_->runtime.job_cores_running())},
+                                {"aot", mesh::Value(impl_->runtime.job_aot())}});
     }
 
     if (*type == "zombies") {
@@ -262,7 +333,7 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         if (auto ok = may_act(*paglet); !ok) return refusal(ok.error());
         const auto timeout = std::chrono::milliseconds(f.integer("timeout_ms").value_or(30000));
         const runtime::Reply r =
-            impl_->runtime.call(*paglet, *name, f.bin("payload").value_or(runtime::Bytes{}), timeout);
+            impl_->runtime.call(*paglet, *name, f.bin("payload").value_or(runtime::Bytes{}), timeout, peer_id);
         return answer(mesh::Map{{"status", mesh::Value(static_cast<std::int64_t>(r.status))},
                                 {"payload", mesh::Value(r.payload)}});
     }
@@ -274,7 +345,7 @@ runtime::Bytes Node::answer_session(const mesh::PublicKey& peer, std::string_vie
         if (!paglet || !name) return refusal("malformed request");
         if (auto ok = may_act(*paglet); !ok) return refusal(ok.error());
         const auto priority = static_cast<std::int32_t>(std::clamp<std::int64_t>(f.integer("priority").value_or(3), 0, 7));
-        if (auto ok = impl_->runtime.send(*paglet, *name, f.bin("payload").value_or(runtime::Bytes{}), priority); !ok) {
+        if (auto ok = impl_->runtime.send(*paglet, *name, f.bin("payload").value_or(runtime::Bytes{}), priority, peer_id); !ok) {
             return refusal(std::string(abi::error_name(ok.error())));
         }
         return answer({});

@@ -77,8 +77,10 @@ Default endpoint of every paglet: `request(item, duration, reason)`,
   service with ambient authority (server-info) becomes an endpoint with the
   operations. Capabilities carry the grant, so the runtime refuses them
   once the grant is revoked or released on any host (revocation tree).
-- Grants of a paglet materialize on every host the grant's host selector
-  covers, so they follow the paglet (M3).
+- Admin grants materialize on every host their host selector covers,
+  including after a move. A grant derived by a host from an allow rule
+  covers only the issuing host. After moving, the paglet asks again on the
+  destination, where the policy is evaluated again.
 
 ## 5. Services with ambient authority
 
@@ -87,6 +89,10 @@ lends, and `directory`, `storage`, `user-info` and `grants` only on the
 caller's own things; their endpoints need no policy. `server-info` reads
 host state without a capability: its endpoint from the directory carries
 only the operations the rules allow (`SystemPaglet::ambient()`).
+`web` and `ai` instead expose their directory endpoints and decide each
+request against the URL host/path, or the operation/model. An allowed
+lookup does not admit the subsequent request. Treating them as ambient
+operation-only lookups would lose the scope needed for these decisions.
 
 ## 6. Manifests
 
@@ -123,13 +129,13 @@ approval reaches host A, which hands the paglet its `dir` capability; the
 paglet reads the file. The admin revokes the grant on host B and the
 capability fails with `revoked` on host A. An `allow` rule grants at once
 for at most its duration; the capability fails with `expired` afterwards,
-and the host-derived grant is valid on host B as well. Both hosts hold the
+and host B accepts the signed grant record, while its authority remains
+scoped to host A. The paglet asks again after a move to B; B evaluates its
+policy rather than materializing A's derived grant. Both hosts hold the
 same audit log: deny, ask, allow.
 
 ## 10. Open
 
-- Grants follow paglets to other hosts with M3 (materialization on arrival
-  is the same code path as approvals).
 - Rate limits for requests and audit records per paglet (WP21).
 - The host's named roots come from its configuration; moving them into the
   host's enrollment record (security design, section 3.2) comes with WP12.

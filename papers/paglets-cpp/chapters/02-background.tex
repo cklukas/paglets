@@ -1,276 +1,63 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-\paglets{} revisits a programming model from the 1990s with a runtime that
-did not exist then. This chapter places it: the Aglets lifecycle it keeps,
-the kinds of mobility that mobile-agent systems and process migration
-offer, the actor systems that solved placement differently, and
-WebAssembly as the unit that moves. It ends with the Python edition of
-\paglets{} and what the C++ edition changes.
+\paragraph{Mobile agents and mobility.}
+Aglets represented a mobile agent as a Java object with callbacks for
+creation, cloning, departure, arrival and
+deactivation~\cite{lange1997aglets,lange1998aglets}. Java serialization
+determined which connected objects could travel; communication used
+proxies. \paglets{} retains these lifecycle operations but captures an
+accepted instance's memory instead of requiring each object to support
+serialization. In the terminology of code
+mobility~\cite{fuggetta1998mobility}, this is weak mobility: execution
+resumes at a handler boundary. Strong mobility instead resumes at an
+arbitrary instruction, as in Agent Tcl~\cite{gray1996agentTcl}.
+Making handler boundaries part of the programming model avoids the need
+to reconstruct an active call stack.
 
-\subsection{Aglets and the agent lifecycle}\label{sec:background-aglets}
+\paragraph{Process migration and actors.}
+Migrating an operating-system process requires preserving its external
+resources and operating-system state as well as its
+memory~\cite{milojicic2000migration,criu}. A paglet exposes less state,
+but cannot transparently retain an open host file or socket. Actor
+systems also process messages one at a time to control access to local
+state~\cite{hewitt1973actor,armstrong2003thesis}. Orleans separates an
+actor's identity (a \emph{grain}) from the instance currently running it
+and the host chosen for that instance~\cite{bernstein2014orleans}.
+In \paglets{}, the agent or its owner chooses placement, and a move
+transfers the instance's current state. Messages and permissions must
+remain valid across that transfer. This difference in placement does
+not itself imply better throughput or availability.
 
-Aglets, developed at IBM's Tokyo Research Laboratory, made mobile agents
-Java objects \cite{lange1997aglets,lange1998aglets}. An aglet lives in an
-\emph{aglet context}, the execution environment a server such as Tahiti
-offers \cite{ferrari2004manual}. Other code never holds the aglet itself;
-it holds an \emph{aglet proxy}, which shields the aglet and forwards
-messages to it wherever it is. The programming model is a small set of
-lifecycle operations with a callback for each \cite{langeOshimaAgletApi}:
+\paragraph{WebAssembly snapshots.}
+WebAssembly provides portable instructions, isolated program memory
+(called \emph{linear memory}) and explicit declarations of functions or
+state supplied by the host (\emph{imports})~\cite{haas2017wasm}.
+Wizer saves initialized memory and globals so that a module can start
+from a prepared state~\cite{wizer}. Initialization may use the
+WebAssembly System Interface (WASI) or custom function imports, but
+Wizer's documented restrictions exclude imported memories, tables and
+globals. \paglets{} captures state repeatedly after handlers and also
+transfers host records that WebAssembly itself does not describe.
+Restoring active computations across CPU architectures needs additional
+support: Tamura et al. use stack maps, which describe how to rebuild
+the call stack at selected points in compiled
+code~\cite{tamura2025crossisa}. \paglets{} avoids this requirement by
+allowing migration only after a handler returns.
 
-\begin{itemize}
-\item \emph{creation} and \emph{cloning} (\code{onCreation},
-  \code{onClone});
-\item \emph{dispatch} to another context and \emph{retraction} back
-  from it (\code{onDispatching}, \code{onArrival} and
-  \code{onReverting});
-\item \emph{deactivation} to secondary storage and \emph{activation}
-  from it (\code{onDeactivating}, \code{onActivation});
-\item \emph{disposal} (\code{onDisposing});
-\item \emph{messages}, handled by \code{handleMessage}, sent through the
-  proxy synchronously, as a future or one-way.
-\end{itemize}
+Faasm uses WebAssembly isolation and snapshots for efficient stateful
+serverless execution~\cite{shillaker2020faasm}. \paglets{} instead manages
+an agent that persists between calls, has a stable message endpoint and
+carries permissions between hosts. We report no performance comparison
+with Faasm. The WebAssembly Micro Runtime (WAMR) provides an interpreter
+and optional ahead-of-time (AOT) compilation~\cite{wamr}. These support
+the portable agent and CPU-specific compute-job paths in one runtime.
 
-After creation, cloning, activation or arrival the runtime calls
-\code{run()}, the aglet's own thread of control. An aglet moves as a
-Java-serialized object over the Agent Transfer Protocol; the thread does
-not move, so \code{run()} starts again from its beginning on the new
-host. IBM's own researchers had asked in 1995 whether mobile agents are a
-good idea at all \cite{harrison1995mobileAgents}; Lange and Oshima later
-answered with seven reasons to move computation rather than data
-\cite{lange1999seven}. The design space of such systems, from code
-shipping to security, is surveyed by Karnik and Tripathi
-\cite{karnik1998design}. Aglets was later released as an open-source
-project on SourceForge \cite{agletsSourceForge}.
-
-\paglets{} keeps this vocabulary. A \paglet{} is created or cloned,
-dispatched, deactivated and activated, disposed; it arrives; it handles
-messages; and every Aglets callback except \code{onReverting} has a
-counterpart among its hooks: \code{on\_created}, \code{on\_cloned},
-\code{on\_dispatching}, \code{on\_arrived}, \code{on\_deactivating},
-\code{on\_activated} and \code{on\_disposing}
-(Section~\ref{sec:lifecycle}). \paglets{} adds \code{on\_move\_failed},
-\code{on\_undelivered} and \code{on\_recovered}, reports for which Aglets
-has no callback. Two things differ at this level. There is no
-\code{run()}: a \paglet{} has no thread of its own, and all its code runs
-in handlers that the host calls one at a time. And there is no retraction
-as a named operation: a \paglet{} that should come back is dispatched
-again, by itself or by its owner from the command line
-(Section~\ref{sec:tools}). The proxy survives as the \emph{endpoint}, a
-capability that reaches a \paglet{} wherever it is
-(Section~\ref{sec:communication}).
-
-\subsection{Weak and strong mobility}\label{sec:background-mobility}
-
-Fuggetta, Picco and Vigna separate the state of a running program into
-its code, its data (the heap and the variables) and its execution state
-(the stack and the program counter), and classify mobility by what moves
-\cite{fuggetta1998mobility}. \emph{Strong} mobility moves all three: the
-program continues on the new host with the statement after the jump.
-Agent Tcl does this by capturing the interpreter's state \cite{gray1996agentTcl}.
-\emph{Weak} mobility moves code and data only; execution restarts at an
-entry point. Java systems on the standard virtual machine are weak,
-because the virtual machine does not expose the state of a thread;
-Aglets' restart of \code{run()} is the visible consequence.
-Table~\ref{tab:mobility-kinds} puts these kinds next to process migration
-and the two \paglets{} editions.
-
-\begin{table}[htbp]
-\centering\small
-\caption{Kinds of mobility by what moves and where execution resumes.}
-\label{tab:mobility-kinds}
-\begin{tabular}{p{0.19\linewidth}p{0.35\linewidth}p{0.19\linewidth}p{0.15\linewidth}}
-\toprule
-Kind & What moves & Resumes at & Examples \\
-\midrule
-Process migration & the address space, registers, kernel state (files, sockets) & the interrupted instruction & CRIU \cite{criu}, the systems in \cite{milojicic2000migration} \\
-Strong mobile agents & code, data, interpreter stack and program counter & the statement after the jump & Agent Tcl \cite{gray1996agentTcl} \\
-Weak mobile agents & code (or a reference to it) and serialized object fields & \code{run()} & Aglets \cite{lange1998aglets} \\
-Explicit state & a declared state record; code installed on every host & a lifecycle hook & \paglets{}, Python edition \cite{klukas2026pagletsNote} \\
-Memory image & the module (by hash) and the linear memory with its globals, as bytes & \code{on\_arrived}, then the next handler & \paglets{}/cpp (this paper) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-In these terms \paglets{}/cpp is weak mobility: a \paglet{} moves only
-between two handler calls, when no code of the \paglet{} is running, and
-it resumes with the next event or message. What distinguishes it is the
-data that moves. It is not a record the author declared, but the whole
-linear memory of the WebAssembly instance together with its exported
-mutable globals, taken as bytes. The heap, every C++ object, and the
-C/C++ shadow stack that the compiler keeps in linear memory are in it.
-Nothing in memory is serialized, and nothing in memory can be left
-behind, because there is no list of what to take; what lives outside
-memory is the subject of Section~\ref{sec:movement}. The Wasm operand
-stack and the native call stack hold values only during a call, and at
-the moment of the move there is no call. Moving inside a handler would
-need the stack as well; the Asyncify transformation
-\cite{zakai2019asyncify} and the proposed stack-switching instructions
-could provide it, and mid-handler moves are a research item, not a
-feature (Section~\ref{sec:discussion}).
-
-\subsection{Process migration and actors}\label{sec:background-actors}
-
-Process migration moves a whole operating-system process: its address
-space, registers and, as far as possible, its kernel state
-\cite{milojicic2000migration}. CRIU does this on Linux today, as
-checkpoint and restore of process trees from user space \cite{criu}. The
-unit is transparent to the program, which is its strength, and bound to
-one kernel, one architecture and the same installed libraries, which is
-its limit. A \paglet{} is a smaller unit with an explicit boundary: the
-paglet ABI (Appendix~\ref{app:abi}). What a \paglet{} holds outside its
-memory, such as an endpoint to another \paglet{} or a grant for a host
-resource, is a capability with a defined mobility rule; the host
-re-creates it on the destination or reports it lost
-(Section~\ref{sec:movement}). The image is independent of the CPU and
-the operating system; the project's feasibility milestone moved images
-between macOS and Linux hosts, and between arm64 hosts and an x86-64
-build of the host run under Rosetta~2, without translation
-(\cite{pagletsCpp}; the milestone record in the repository's planning
-documents, and Section~\ref{sec:evaluation}).
-
-The actor model gives the other half of the lineage. An actor handles one
-message at a time, creates actors and sends messages to the actors it
-knows \cite{hewitt1973actor}. Erlang made this an engineering practice:
-isolated processes with their own heaps, message passing as the only
-interaction, supervision trees, and the rule that a failed process is
-restarted rather than repaired \cite{armstrong2003thesis}. Orleans'
-\emph{virtual actors} (grains) remove placement from the programmer: a
-grain always exists, the runtime activates it on some server when a
-message arrives and deactivates it when idle; its state can be persisted
-and reloaded, and in the design as published a grain is never moved as a
-running object \cite{bernstein2014orleans}. Later releases added the
-migration of an idle activation to another server, its in-memory state
-dehydrated on one side and rehydrated on the other
-\cite{orleansGrainMigration}.
-
-A \paglet{} is an actor in the first sense: one handler at a time, and
-other \paglets{} reachable only through endpoints it was given. It
-differs from grains in that placement is a decision of the \paglet{} or
-its owner, who name the destination in a transfer ticket (a host, a
-label, a service offer or \code{any}; for the last three the host picks a
-matching host), not of a scheduler that moves \paglets{} on its own, and
-the state moves as a running instance's memory rather than through a
-store. An inactive \paglet{} resembles a deactivated grain: an image on
-disk, restored when a message or a timer arrives. Fault tolerance
-follows Erlang rather than Orleans: a zombie \paglet{}
-(Section~\ref{sec:zombies}) has a replica on every host of the mesh that
-offers the \code{zombies} service, and the replicas run a protocol to
-take over, instead of relying on a shared store. The host restarts no
-\paglet{} that trapped: as in Erlang, a crash ends the process, and
-recovery is the job of another one.
-
-\subsection{WebAssembly as the unit that moves}\label{sec:background-wasm}
-
-WebAssembly is a portable binary instruction format with a formal
-semantics, designed so that a module validates and compiles fast and runs
-inside a sandbox \cite{haas2017wasm}. A paglet module declares functions,
-globals, tables and exactly one linear memory (the paglet ABI requires
-it, exported as \code{memory}), a contiguous array of bytes that the
-module addresses with 32-bit offsets; an instance is the module together
-with that memory, its globals and its tables. A C++ program compiled with
-the WASI toolchain keeps its heap and its shadow stack in linear memory;
-the only other state that outlives a call is the stack pointer, a mutable
-Wasm global (the single mutable global of a C/C++ guest). This is the
-fact on which \paglets{}/cpp rests: between two calls into the instance,
-the linear memory and the mutable globals are the complete state, and the
-specification defines both without reference to the host.
-
-Runtimes differ in how they execute a module. Wasmtime, the Bytecode
-Alliance's runtime, compiles modules with Cranelift and implements the
-WASI system interface \cite{wasmtime,wasi}. WAMR (WebAssembly Micro
-Runtime) is a small C runtime for embedding, with a classic and a fast
-interpreter and optional ahead-of-time and just-in-time modes
-\cite{wamr}. \paglets{}/cpp embeds WAMR in its worker processes and runs
-the fast interpreter by default (the classic interpreter is a build
-option); neither the ahead-of-time nor the just-in-time modes are built
-(\code{cpp/cmake/PagletsWamr.cmake}). The interpreter costs speed
-(Section~\ref{sec:evaluation}). It is the portable default: WAMR's
-ahead-of-time mode needs an LLVM-based compiler (\code{wamrc}) and has
-not been measured, and the design keeps compiled forms, where they exist,
-in a per-host cache that is never sent between hosts \cite{pagletsCpp}.
-The image is independent of the execution mode either way: it holds the
-linear memory and the globals, and no code. Of WASI a \paglet{} may
-import only a subset, listed in Appendix~\ref{app:abi}; everything else
-it reaches through the \code{paglets} import module.
-
-The idea of treating an instance's memory as a snapshot is not new. Wizer
-runs a module's initialization ahead of time and writes the resulting
-memory and globals into the data segments of a new module, so that the
-module starts initialized \cite{wizer}. It uses the same observation for
-a different purpose; the initialization it snapshots may not call
-imported functions (WASI calls only when explicitly allowed), and the
-module may not import globals, tables or memories. Research on
-checkpointing and migrating running Wasm programs attacks the harder
-case: Tamura et al. instrument ahead-of-time compiled code and record
-stack maps, so that at designated program points the machine state can
-be turned back into Wasm state (operand stack and locals) and restored on
-another instruction set \cite{tamura2025crossisa}. \paglets{} needs none
-of this because it moves at quiescent points only; it trades the ability
-to move mid-computation for an image that is a plain copy of memory. Long
-computations are therefore written in steps, as the examples in
-Sections~\ref{sec:zombies} and \ref{sec:evaluation} show; the host
-enforces this with a time budget per handler call (5~s by default), after
-which the \paglet{} fails.
-
-\subsection{The Python edition and what the C++ edition changes}\label{sec:background-python}
-
-The first edition of \paglets{} is a Python package
-\cite{pagletsSoftware,klukas2026pagletsNote}. Its mobile state is a
-dataclass the author declares, and a move carries that state with the
-names of the paglet and state classes, which every host must be able to
-import; code is never uploaded. Each active paglet runs in a child
-process of the host, and the hosts of a mesh trust each other and may
-share an API key.
-
-The C++ edition keeps the concepts (hosts, paglets, messages, a mesh,
-services, compute slots) and none of the formats; the two editions do not
-exchange paglets \cite{pagletsCppDocs}. It changes five things.
-
-\begin{enumerate}
-\item \emph{Modules are the unit of code.} A \paglet{}'s code is a
-  WebAssembly module, named by its SHA-256 hash. A host that lacks a
-  module fetches it from the source host or any peer and verifies the
-  hash; hosts do not need the same code installed
-  (Section~\ref{sec:movement}).
-\item \emph{State is the memory image.} There is no state class. The
-  author's objects live in linear memory, and a move sends the pages
-  that changed since the destination last saw them, compressed.
-\item \emph{Paglets run sandboxed.} Instances live in worker processes
-  that the operating system confines (seccomp on Linux, a sandbox
-  profile on macOS, a job object with a restricted token on Windows).
-  A \paglet{} cannot open a file or a socket; it reaches host resources
-  through system paglets, within the mesh policy
-  (Section~\ref{sec:mesh}).
-\item \emph{A signed ledger replaces the API key.} Hosts, admins, owners
-  and signers have Ed25519 keys. Membership, module trust, policy rules
-  and grants are signed records, spread by gossip; hosts talk inside
-  mutually authenticated, end-to-end encrypted channels
-  (Section~\ref{sec:mesh}).
-\item \emph{Fault tolerance with a checked protocol.} Zombie paglets
-  replicate a job on every host of the mesh that offers the
-  \code{zombies} service and hand it over when the main replica
-  disappears. The protocol is a C++ state machine that the guest SDK runs
-  and that an explicit-state model checker explores for small worlds
-  (Section~\ref{sec:zombies}).
-\end{enumerate}
-
-Table~\ref{tab:background-editions} places the three systems next to each
-other by concept; Section~\ref{sec:discussion-comparison} does it again
-by what each one pays, with the limits that the evaluation shows.
-
-\begin{table}[htbp]
-\centering\small
-\caption{Aglets and the two \paglets{} editions, by concept.}
-\label{tab:background-editions}
-\begin{tabular}{p{0.16\linewidth}p{0.23\linewidth}p{0.23\linewidth}p{0.23\linewidth}}
-\toprule
- & Aglets & \paglets{}, Python & \paglets{}/cpp \\
-\midrule
-Mobile unit & Java object & dataclass state plus class names & Wasm instance: module hash plus memory image \\
-Execution & \code{run()} thread, restarted after a move & a \code{run()} hook in the child process, plus handlers, serial per paglet & handlers, one at a time; no thread \\
-Reaching others & proxies & proxies & endpoint capabilities only \\
-Failure & --- & an active paglet is lost with its host; an inactive one survives as persisted dataclass state & a trap ends the paglet; after a host restart it resumes from its last image (default policy); zombie replicas \\
-\bottomrule
-\end{tabular}
-\end{table}
+\paragraph{Earlier edition.}
+The Python edition of \paglets{} transfers explicitly declared state
+and requires application code to be installed on each
+host~\cite{klukas2026pagletsNote}. The C++ edition captures instance state
+and transfers modules identified by their hashes. Host-managed
+permissions and the replicated-agent protocol are additional mechanisms.
+The editions do not interoperate. We compare their state representation
+and deployment requirements, but do not measure a speedup between them.

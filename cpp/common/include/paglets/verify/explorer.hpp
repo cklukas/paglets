@@ -14,9 +14,11 @@
 // - goals on the graph of fault-free steps: from every reachable state, a
 //   state that satisfies the goal is reachable without further faults. On a
 //   finite graph this means no dead end and no trap: whatever the faults
-//   did, once they stop, the goal stays reachable; under any scheduler that
-//   picks every enabled step with positive probability, it is reached with
-//   probability 1.
+//   did, once they stop, the goal stays reachable. A fixed, memoryless
+//   scheduler on the finite graph, with time-independent positive
+//   probability for every enabled step, reaches it
+//   with probability 1; history-dependent scheduling or fairness alone is
+//   not a liveness proof provided by this checker.
 //
 // States are identified by a 128-bit hash of their encoding (hash
 // compaction; a collision needs about 2^64 states). The states still to be
@@ -80,6 +82,7 @@ struct Report {
     bool complete = true;  // false if a limit stopped the search
     double seconds = 0;
     std::vector<std::string> invariants_checked;
+    std::vector<std::string> goals_declared;  // predicates supplied by the model, including incomplete exploration
     std::vector<std::string> goals_checked;
     std::vector<Violation> violations;
     bool ok() const { return complete && violations.empty(); }
@@ -131,7 +134,7 @@ Report explore(const M& model, Limits limits = {}) {
     const auto invariants = model.invariants();
     const auto goals = model.goals();
     for (const auto& p : invariants) report.invariants_checked.push_back(p.name);
-    for (const auto& p : goals) report.goals_checked.push_back(p.name);
+    for (const auto& p : goals) report.goals_declared.push_back(p.name);
 
     std::unordered_map<detail::Hash128, std::uint32_t, detail::Hash128Hasher> index;
     struct Parent {
@@ -309,6 +312,7 @@ Report explore(const M& model, Limits limits = {}) {
                     }
                 }
             }
+            report.goals_checked.push_back(goals[g].name);
             // The shallowest state that cannot reach the goal.
             std::uint32_t worst = 0;
             bool found_bad = false;

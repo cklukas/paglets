@@ -2,10 +2,12 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 #include <paglets/wasm/engine.hpp>
+#include "wasm_address_space.hpp"
 
 #include <paglets/abi.hpp>
 
 #include <wasm_export.h>
+#include <sodium.h>
 
 #include <algorithm>
 #include <array>
@@ -16,7 +18,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
-#include <random>
+#include <cstdlib>
 
 // Not in wasm_export.h: copies the exception under the instance's exception
 // lock (wasm_runtime_get_exception reads it without the lock, which races with
@@ -139,6 +141,47 @@ std::int32_t native_timer_set(wasm_exec_env_t env, std::int64_t delay_ms, const 
     return h->timer_set(delay_ms, bytes_of(msg, len));
 }
 
+std::int64_t native_job_submit(wasm_exec_env_t env, const void* spec, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (document_too_large(len)) return abi::too_large;
+    return h->job_submit(bytes_of(spec, len));
+}
+
+std::int32_t native_job_cancel(wasm_exec_env_t env, std::int64_t correlation) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? h->job_cancel(correlation) : abi::unsupported;
+}
+
+std::int32_t native_job_status(wasm_exec_env_t env, std::int64_t correlation, void* out, std::uint32_t cap) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? write_document(h->job_status(correlation), out, cap) : abi::unsupported;
+}
+
+std::int32_t native_job_input(wasm_exec_env_t env, std::int64_t offset, void* out, std::uint32_t cap) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (offset < 0) return abi::invalid_argument;
+    return h->job_input(offset, std::span<std::uint8_t>(static_cast<std::uint8_t*>(out), cap));
+}
+
+std::int32_t native_job_output(wasm_exec_env_t env, const void* data, std::uint32_t len) {
+    HostImports* h = imports_of(env);
+    if (h == nullptr) return abi::unsupported;
+    if (len > abi::job_chunk) return abi::too_large;
+    return h->job_output(bytes_of(data, len));
+}
+
+std::int32_t native_job_progress(wasm_exec_env_t env, std::int64_t done, std::int64_t total) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? h->job_progress(done, total) : abi::unsupported;
+}
+
+std::int32_t native_job_cancelled(wasm_exec_env_t env) {
+    HostImports* h = imports_of(env);
+    return h != nullptr ? h->job_cancelled() : abi::unsupported;
+}
+
 std::int64_t native_now(wasm_exec_env_t, std::int32_t clock) {
     using namespace std::chrono;
     if (clock == static_cast<std::int32_t>(abi::Clock::wall)) {
@@ -170,6 +213,13 @@ const NativeSymbol paglets_natives_template[] = {
     {"timer_set", reinterpret_cast<void*>(native_timer_set), "(I*~)i", nullptr},
     {"now", reinterpret_cast<void*>(native_now), "(i)I", nullptr},
     {"random", reinterpret_cast<void*>(native_random), "(*~)i", nullptr},
+    {"job_submit", reinterpret_cast<void*>(native_job_submit), "(*~)I", nullptr},
+    {"job_cancel", reinterpret_cast<void*>(native_job_cancel), "(I)i", nullptr},
+    {"job_status", reinterpret_cast<void*>(native_job_status), "(I*~)i", nullptr},
+    {"job_input", reinterpret_cast<void*>(native_job_input), "(I*~)i", nullptr},
+    {"job_output", reinterpret_cast<void*>(native_job_output), "(*~)i", nullptr},
+    {"job_progress", reinterpret_cast<void*>(native_job_progress), "(II)i", nullptr},
+    {"job_cancelled", reinterpret_cast<void*>(native_job_cancelled), "()i", nullptr},
 };
 static_assert(std::size(paglets_natives_template) == std::size(abi::import_names),
               "every import of abi::import_names needs a native");
@@ -221,14 +271,16 @@ std::string error_text(const char* buf) {
 }  // namespace
 
 void fill_random(std::span<std::uint8_t> out) {
-    static thread_local std::random_device device;
-    std::size_t i = 0;
-    while (i < out.size()) {
-        const auto word = device();
-        for (std::size_t b = 0; b < sizeof word && i < out.size(); ++b, ++i) {
-            out[i] = static_cast<std::uint8_t>(word >> (8 * b));
+    if (out.empty()) return;
+    static const bool ready = [] {
+        if (sodium_init() < 0) {
+            std::cerr << "paglets: secure entropy initialization failed\n";
+            std::abort();
         }
-    }
+        return true;
+    }();
+    (void)ready;
+    randombytes_buf(out.data(), out.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -270,10 +322,32 @@ std::int32_t HostImports::lifecycle(std::int32_t, std::span<const std::uint8_t>)
 std::int32_t HostImports::timer_set(std::int64_t, std::span<const std::uint8_t>) {
     return abi::unsupported;
 }
+std::int64_t HostImports::job_submit(std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::job_cancel(std::int64_t) {
+    return abi::unsupported;
+}
+HostImports::Document HostImports::job_status(std::int64_t) {
+    return std::unexpected(abi::unsupported);
+}
+std::int32_t HostImports::job_input(std::int64_t, std::span<std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::job_output(std::span<const std::uint8_t>) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::job_progress(std::int64_t, std::int64_t) {
+    return abi::unsupported;
+}
+std::int32_t HostImports::job_cancelled() {
+    return abi::unsupported;
+}
 
 void ensure_runtime() {
     static std::once_flag once;
     std::call_once(once, [] {
+        std::cerr << detail::startup_address_space_warning();
         RuntimeInitArgs args;
         std::memset(&args, 0, sizeof args);
         args.mem_alloc_type = Alloc_With_System_Allocator;
@@ -372,6 +446,42 @@ std::expected<std::shared_ptr<Module>, std::string> Module::load(std::vector<std
     return m;
 }
 
+std::expected<std::shared_ptr<Module>, std::string> Module::load_aot(std::vector<std::uint8_t> wasm,
+                                                                     std::vector<std::uint8_t> aot,
+                                                                     const ImportPolicy& policy) {
+    ensure_runtime();
+    if (!aot_supported()) return std::unexpected(std::string("this build cannot run AOT code"));
+    auto info = parse_module(wasm);
+    if (!info) return std::unexpected("invalid module: " + info.error());
+    if (auto ok = policy.check(*info); !ok) return std::unexpected(ok.error());
+    std::shared_ptr<Module> m(new Module());
+    m->hash_ = sha256(wasm);
+    m->info_ = std::move(*info);
+    m->original_ = std::move(wasm);
+    m->aot_ = aot;
+    m->bytes_ = std::move(aot);
+    char error[256] = {};
+    {
+        std::lock_guard lock(loader_mutex());
+        m->module_ =
+            wasm_runtime_load(m->bytes_.data(), static_cast<std::uint32_t>(m->bytes_.size()), error, sizeof error);
+    }
+    if (m->module_ == nullptr) return std::unexpected("WAMR AOT load failed: " + error_text(error));
+    if (wasm_runtime_get_module_package_type(m->module_) != Wasm_Module_AoT) {
+        return std::unexpected(std::string("not AOT code"));
+    }
+    wasm_runtime_set_wasi_args(m->module_, nullptr, 0, nullptr, 0, nullptr, 0, nullptr, 0);
+    return m;
+}
+
+bool Module::aot_supported() {
+#if PAGLETS_WAMR_AOT
+    return true;
+#else
+    return false;
+#endif
+}
+
 Module::~Module() {
     if (module_ != nullptr) {
         std::lock_guard lock(loader_mutex());
@@ -447,6 +557,23 @@ std::expected<std::uint64_t, std::string> Instance::call(std::string_view name, 
     if (args.size() > argv.size()) {
         return std::unexpected("too many arguments");
     }
+    // WAMR writes the export's actual results back into argv. Validate the
+    // ABI before the call, including multi-value/reference/vector results,
+    // so an untrusted export cannot overrun the fixed host buffer.
+    const auto parameters = wasm_func_get_param_count(fn, inst_);
+    const auto results = wasm_func_get_result_count(fn, inst_);
+    if (parameters != args.size() || result_cells > 2 || results != (result_cells == 0 ? 0u : 1u))
+        return std::unexpected("export signature mismatch: " + std::string(name));
+    std::array<wasm_valkind_t, 16> types{};
+    wasm_func_get_param_types(fn, inst_, types.data());
+    if (std::any_of(types.begin(), types.begin() + parameters, [](auto type) { return type != WASM_I32; }))
+        return std::unexpected("export parameters must be i32: " + std::string(name));
+    if (results != 0) {
+        wasm_valkind_t type{};
+        wasm_func_get_result_types(fn, inst_, &type);
+        if (type != (result_cells == 1 ? WASM_I32 : WASM_I64))
+            return std::unexpected("export result type mismatch: " + std::string(name));
+    }
     std::copy(args.begin(), args.end(), argv.begin());
 
     // An execution environment records the native stack of the thread that
@@ -459,11 +586,18 @@ std::expected<std::uint64_t, std::string> Instance::call(std::string_view name, 
     }
     // Clearing searches every cluster of the thread manager; only do it
     // when there is something to clear.
-    if (wasm_runtime_copy_exception(inst_, nullptr)) wasm_runtime_clear_exception(inst_);
+    {
+        std::lock_guard lock(termination_mu_);
+        if (terminated_) return std::unexpected("terminated by user");
+        if (wasm_runtime_copy_exception(inst_, nullptr)) wasm_runtime_clear_exception(inst_);
+    }
     if (!wasm_runtime_call_wasm(exec_env_, fn, static_cast<std::uint32_t>(args.size()), argv.data())) {
         std::array<char, exception_buffer_size> ex{};
         std::string message = wasm_runtime_copy_exception(inst_, ex.data()) ? std::string(ex.data()) : "unknown trap";
-        wasm_runtime_clear_exception(inst_);
+        {
+            std::lock_guard lock(termination_mu_);
+            if (!terminated_) wasm_runtime_clear_exception(inst_);
+        }
         flush_output();
         return std::unexpected(message);
     }
@@ -516,6 +650,8 @@ std::expected<std::int32_t, std::string> Instance::call_with_data(std::string_vi
 }
 
 void Instance::terminate() {
+    std::lock_guard lock(termination_mu_);
+    terminated_ = true;
     wasm_runtime_terminate(inst_);
 }
 
@@ -546,6 +682,8 @@ std::expected<std::uint64_t, std::string> Instance::global_bits(std::string_view
     if (!wasm_runtime_get_export_global_inst(inst_, n.c_str(), &g)) {
         return std::unexpected("exported global not found: " + n);
     }
+    if (g.kind != WASM_I32 && g.kind != WASM_I64 && g.kind != WASM_F32 && g.kind != WASM_F64)
+        return std::unexpected("global is not a numeric scalar: " + n);
     std::uint64_t bits = 0;
     const std::size_t width = (g.kind == WASM_I64 || g.kind == WASM_F64) ? 8 : 4;
     std::memcpy(&bits, g.global_data, width);
@@ -558,6 +696,8 @@ std::expected<void, std::string> Instance::set_global_bits(std::string_view name
     if (!wasm_runtime_get_export_global_inst(inst_, n.c_str(), &g)) {
         return std::unexpected("exported global not found: " + n);
     }
+    if (g.kind != WASM_I32 && g.kind != WASM_I64 && g.kind != WASM_F32 && g.kind != WASM_F64)
+        return std::unexpected("global is not a numeric scalar: " + n);
     const std::size_t width = (g.kind == WASM_I64 || g.kind == WASM_F64) ? 8 : 4;
     std::memcpy(g.global_data, &bits, width);
     return {};
@@ -612,6 +752,10 @@ std::expected<void, std::string> write_file(const std::string& path, std::span<c
     if (!out) return std::unexpected("cannot write " + path);
     out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
     if (!out) return std::unexpected("write failed: " + path);
+    // Small writes may still be buffered: detect flush/close errors before
+    // a caller renames the file or acknowledges successful persistence.
+    out.close();
+    if (!out) return std::unexpected("close failed: " + path);
     return {};
 }
 

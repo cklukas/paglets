@@ -322,6 +322,7 @@ std::optional<Node::Impl::LocRecord> Node::Impl::held_record(const runtime::Pagl
 void Node::Impl::note_created(const runtime::PagletId& paglet) {
     held[paglet] = Held{0, mesh::unix_ms()};
     if (auto rec = held_record(paglet)) publish(paglet, *rec, 0, responsible_for(paglet));
+    save();
 }
 
 // Sends a record to hosts (this host applies it itself); with a request,
@@ -504,7 +505,7 @@ void Node::Impl::lookup_answer(std::uint64_t id, const mesh::PublicKey& from, co
         return lookup_records(id);
     }
     if (type == "pin-busy") {
-        if (++l.hops > max_busy) return finish_lookup(id, LookupResult{abi::timeout, "the paglet keeps moving"});
+        if (++l.busy_waits > max_busy) return finish_lookup(id, LookupResult{abi::timeout, "the paglet keeps moving"});
         l.phase = Lookup::Phase::wait;
         l.deadline = Clock::now() + busy_wait;
         return;
@@ -682,7 +683,14 @@ void Node::Impl::process_unresolved() {
         l.paglet = m.target;
         l.done = [this, m = std::move(m), deliver](const LookupResult& r) mutable {
             if (r.status == abi::ok) return deliver(m, r.where.host);
-            if (m.kind != runtime::RemoteMessage::Kind::request) return;
+            if (m.kind != runtime::RemoteMessage::Kind::request) {
+                if (m.kind == runtime::RemoteMessage::Kind::message) {
+                    const auto name = abi::valid_message_name(m.name) ? m.name : "<invalid name>";
+                    warn("remote one-way message refused: " + name + " (not_found)");
+                }
+                if (auto report = runtime::undelivered_report(m, abi::not_found)) send_remote(std::move(*report));
+                return;
+            }
             // Nobody has it: the requester hears so.
             runtime::RemoteMessage answer;
             answer.kind = runtime::RemoteMessage::Kind::reply;

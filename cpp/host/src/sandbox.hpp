@@ -3,14 +3,15 @@
 
 // Operating-system sandbox of worker processes (plan, section 3.4). Workers
 // only compute and talk to the host over already open sockets; the sandbox
-// takes away everything else, so that a guest escaping WAMR still cannot
-// open files, create sockets, run programs or start processes.
+// restricts access outside that computation even if a guest escapes WAMR.
 //
-// Linux: a seccomp filter (no_new_privs, denylist returning EPERM, process
+// Linux: a seccomp filter (no_new_privs, allow list returning EPERM for other calls, process
 // creation refused while threads are allowed). macOS: an SBPL profile
 // (sandbox_init). Windows: job objects (no processes, no UI; the host's job
-// ends workers with the host) and a restricted token (no privileges,
-// integrity level Low); network access is not restricted there yet.
+// ends workers with the host), a Low token with no privileges, and a unique
+// LPAC identity. It has only registryRead for Winsock bootstrap, no network
+// capabilities, and read/execute access to a protected runtime bundle. Windows
+// still permits OS resources and the AppContainer's own private storage.
 
 #pragma once
 
@@ -25,5 +26,10 @@ std::expected<void, std::string> sandbox_worker();
 // Checks inside a sandboxed process that forbidden operations fail;
 // returns a description of the first one that succeeded.
 std::expected<void, std::string> check_sandbox();
+#ifdef _WIN32
+// Initializes the Winsock provider before token privileges are removed,
+// then proves that the LPAC has no IP socket/connect authority.
+std::expected<void, std::string> check_windows_network();
+#endif
 
 }  // namespace paglets::runtime

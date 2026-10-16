@@ -87,7 +87,7 @@ public:
         const mesh::Record* r = node_.ledger.find(*id);
         if (r == nullptr || r->type() != "grant-request") return std::unexpected(abi::not_found);
         auto request = mesh::parse_grant_request(*r);
-        if (!request || request->principal.paglet != caller->id) return std::unexpected(abi::denied);
+        if (!request || request->principal != Node::Impl::principal_of(*caller)) return std::unexpected(abi::denied);
         const mesh::LedgerState& st = node_.ledger.state();
         g::Answer a;
         a.request = q.request;
@@ -97,7 +97,7 @@ public:
             return a;
         }
         for (const auto& [gid, grant] : st.grants) {
-            if (grant.request == *id) {
+            if (grant.request == *id && grant.principal == Node::Impl::principal_of(*caller) && grant.expires > mesh::unix_ms()) {
                 a.status = g::Status::granted;
                 a.grant = hex(gid);
                 a.expires_ms = grant.expires;
@@ -116,7 +116,7 @@ public:
         const auto& grants = node_.ledger.state().grants;
         auto it = grants.find(*id);
         if (it == grants.end()) return g::ReleaseReply{false};
-        if (it->second.principal.paglet != caller->id) return std::unexpected(abi::denied);
+        if (it->second.principal != Node::Impl::principal_of(*caller)) return std::unexpected(abi::denied);
         if (auto r = node_.issue("grant-release", mesh::data::grant_release(*id)); !r) return fail(op, r.error());
         node_.sync_if_dirty();
         return g::ReleaseReply{true};
@@ -129,7 +129,7 @@ public:
         g::ListReply reply;
         const std::int64_t now = mesh::unix_ms();
         for (const auto& [id, grant] : node_.ledger.state().grants) {
-            if (grant.principal.paglet == caller->id && grant.expires > now) {
+            if (grant.principal == Node::Impl::principal_of(*caller) && grant.expires > now) {
                 reply.grants.push_back(g::GrantInfo{hex(id), to_contract(grant.item), grant.expires});
             }
         }
@@ -184,8 +184,13 @@ Node::Node(runtime::Runtime& runtime, std::shared_ptr<services::SystemServices> 
 Node::~Node() {
     impl_->runtime.set_module_admission({});
     impl_->runtime.set_mobility({});
+    impl_->runtime.set_job_hooks({});
     impl_->services->set_content_exchange({});
     std::lock_guard lock(impl_->mu);
+    impl_->runtime.set_compute_waiter(0);
+    for (const auto& [id, lease] : impl_->compute.leases) impl_->runtime.release_compute_slots(lease.cores);
+    impl_->compute.leases.clear();
+    impl_->compute.queue.clear();
     while (!impl_->pulls.empty()) {
         impl_->finish_pull(impl_->pulls.begin()->first, {abi::failed, "the host stops", 0, {}});
     }
@@ -223,6 +228,7 @@ std::expected<void, std::string> Node::start() {
         return impl->admit(module, trust);
     });
     impl_->install_mobility();
+    impl_->install_jobs();
     return {};
 }
 
@@ -247,7 +253,7 @@ bool Node::allows(const abi::SenderRecord& caller, const mesh::Item& item) const
     const std::int64_t now = mesh::unix_ms();
     return std::ranges::any_of(st.grants, [&](const auto& e) {
         const mesh::Grant& g = e.second;
-        return g.principal.paglet == principal.paglet && g.expires > now && mesh::selects(st, g.hosts, self) &&
+        return g.principal == principal && g.expires > now && mesh::selects(st, g.hosts, self) &&
                g.item.service == item.service &&
                std::ranges::all_of(item.ops,
                                    [&](const std::string& op) { return std::ranges::find(g.item.ops, op) != g.item.ops.end(); }) &&
@@ -268,6 +274,7 @@ void Node::add_seed(const mesh::PublicKey& peer) {
 
 void Node::receive(const mesh::PublicKey& from, std::span<const std::uint8_t> frame) {
     std::lock_guard lock(impl_->mu);
+    if (impl_->ledger.state().revoked_keys.contains(from)) return;
     impl_->heard(from);
     if (!impl_->handle_node_frame(from, frame)) impl_->replica->receive(from, frame);
     impl_->process_unresolved();
@@ -285,6 +292,7 @@ void Node::tick() {
     impl_->registry_tick();
     impl_->compute_tick();
     impl_->zombies_tick();
+    impl_->jobs_tick();
 }
 
 std::expected<mesh::AddResult, std::string> Node::submit(const mesh::Record& record) {

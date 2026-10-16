@@ -57,6 +57,10 @@ inline void granted_dir(std::string root, std::string path, std::vector<std::str
 
 namespace detail {
 
+// Leave room for the service record and the enclosing ABI message. A
+// document-sized data chunk makes write requests exceed the import limit.
+inline constexpr std::size_t file_chunk_size = abi::max_document_size / 2;
+
 struct ReadState {
     Endpoint files;
     Capability dir;
@@ -66,10 +70,9 @@ struct ReadState {
 };
 
 inline void read_chunk(std::shared_ptr<ReadState> s) {
-    constexpr std::uint64_t chunk = 1024 * 1024;
     services::files::Client client{s->files};
     auto sent = client.read(
-        services::files::ReadRequest{s->file.name, s->file.data.size(), chunk},
+        services::files::ReadRequest{s->file.name, s->file.data.size(), file_chunk_size},
         [s](Result<services::files::ReadReply> r, Message&) {
             if (!r) return s->next(std::unexpected(r.error()));
             if (r->size > s->max_bytes) return s->next(std::unexpected(abi::too_large));
@@ -91,8 +94,7 @@ struct WriteState {
 };
 
 inline void write_chunk(std::shared_ptr<WriteState> s) {
-    constexpr std::size_t chunk = 1024 * 1024;
-    const std::size_t n = std::min(chunk, s->data.size() - s->at);
+    const std::size_t n = std::min(file_chunk_size, s->data.size() - s->at);
     services::files::WriteRequest q;
     q.path = s->path;
     q.data.assign(s->data.begin() + static_cast<std::ptrdiff_t>(s->at),

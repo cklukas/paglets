@@ -25,17 +25,21 @@ transfer_wide() {  # field
       | (map(.pair) | unique) as $pairs
       | (["size"] + $pairs | @tsv),
         (group_by(.size)[] | sort_by(.pair) as $g
-         | [$g[0].size] + [$pairs[] as $p | ($g[] | select(.pair == $p) | .[$field])] | @tsv)
+         | [$g[0].size] + [$pairs[] as $p | ([$g[] | select(.pair == $p) | .[$field]][0] // "NaN")] | @tsv)
     ' "$results/live_transfer.json"
 }
 transfer_wide mbs > "$out/transfer_rate.tsv"
 transfer_wide save_s > "$out/transfer_time.tsv"
 
 # The TCP baseline of every ordered pair (iperf3, Mbit/s), once per pair.
+# Match the measurement exactly: provenance fields such as its date are
+# strings too. Missing/legacy-empty baselines are unknown, never zero.
 jq -r '
   [.tests[]
    | (.test | capture("^(?<pair>.+), (?<size>[0-9]+) MB$")) as $c
-   | {pair: $c.pair, tcp: ([.values[] | select(.name | startswith("TCP")) | .value | tonumber][0])}]
+   | {pair: $c.pair, tcp: ([.values[]
+       | select(.name == "TCP between the hosts (iperf3)" and .unit == "Mbit/s")
+       | .value | tonumber? | select(. > 0)][0] // "NaN")}]
   | unique_by(.pair) | sort_by(.pair)
   | (["pair", "tcp_mbit"] | @tsv), (.[] | [.pair, .tcp] | @tsv)
 ' "$results/live_transfer.json" > "$out/transfer_tcp.tsv"

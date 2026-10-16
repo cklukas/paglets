@@ -1,58 +1,15 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-This paper has made one unit of execution carry a mobile agent: a
-WebAssembly module plus one instance, whose whole state is its linear
-memory and its exported mutable globals. Because the host calls into the
-instance one handler at a time, it takes that memory as an image between
-two calls, and the image is enough to store, copy and move the \paglet{}
-(Sections~\ref{sec:model} to \ref{sec:movement}). The \paglet{} writes no
-serialization code; what it gives up is strong mobility, so a long
-computation is sliced by its author (Section~\ref{sec:discussion-weak}).
-The rest follows from this unit: lifecycle events and failure reports
-are deliveries ordered with the messages (Section~\ref{sec:lifecycle}); a
-move ends in location records, so endpoints keep working while their
-targets move (Section~\ref{sec:communication}); hosts share a signed
-ledger and nothing else, and a \paglet{} reaches resources only through
-system \paglet{}s under policy (Section~\ref{sec:mesh}); a zombie
-\paglet{} keeps a replica on every host and delivers exactly one result
-(Section~\ref{sec:zombies}); and the interface description in the module
-lets the CLI and the web client talk to any \paglet{}
-(Section~\ref{sec:tools}).
-
-The evaluation supports these claims at the scale it was tried
-(Section~\ref{sec:evaluation}). The Counter's image is 131\,212 bytes, and
-one module was captured and resumed across macOS arm64, Linux arm64 and
-macOS x86-64 under Rosetta~2. On the live mesh of three machines, round
-trips between \paglet{}s take 1.2--5.2\,ms, content moves at
-20--40\,MB/s, 100\,000 hexadecimal digits of $\pi$ take 313\,s on all
-three hosts, and the Mesh Chronicle delivers its log after two takeovers
-and a partition with a main on both sides. Behind the numbers stand 252
-test cases run in-process and with sandboxed workers, and the check of
-the zombie protocol: ten two-replica worlds explored completely, two
-three-replica worlds to depth 11, 10\,000 timed runs without a failure.
-What the evaluation does not support is equally plain: no move between
-real machines is timed, the live numbers are single runs on one LAN, no
-mesh is larger than three real or five tested hosts, and nothing was
-measured with AOT or JIT, through a relay, across a NAT, or on Windows.
-
-The next steps are the ones Sections~\ref{sec:zombies-claims} and
-\ref{sec:discussion-open} name. For the zombie protocol: a checker mode
-without hash compaction, a fair-cycle check for liveness, a mutation
-suite, a soundness argument for the term renaming, and three replicas in
-full or a cutoff argument. For the mesh: tens of hosts, relays and NAT.
-For the runtime: a security review, state migration between module
-versions, AOT with a per-architecture cache, suspending a handler
-mid-computation, and a second guest language on the same ABI.
-
-\paglets{}/cpp is free software under the MIT License. The sources are the
-branch \code{cpp} of the repository \cite{pagletsCpp}, released as
-\code{cpp-v0.2.0}; on macOS the Homebrew tap \code{cklukas/homebrew-paglets}
-builds the latest release (\code{brew install cklukas/paglets/paglets});
-the documentation, with the examples and the recorded results, is
-published at \cite{pagletsCppDocs}, and the paper's workflow puts the
-PDF of every published version beside it. The excerpts and result
-tables in this paper are generated from the sources and the recorded
-results by the tool that keeps the documentation current
-(Appendix~\ref{app:reproduce}); a test fails whenever either falls behind
-the code.
+\paglets{}/cpp moves agents by capturing WebAssembly state between
+handler calls. The implementation combines memory capture with
+host-managed permissions, destination preparation and endpoints that
+remain usable after a move. Separate compute jobs allow CPU-specific
+execution without making active job stacks part of the mobile state.
+The replicated-agent protocol uses the same transition function in the
+library, model checker and timed simulator; physical tests exercise its
+host integration. The experiments demonstrate operation on the tested
+hosts and identify the costs of capture and restoration, as well as
+limits imposed by failure assumptions. An open research question is
+when moving stateful agents provides a measurable advantage over keeping
+computation on fixed hosts, under comparable workloads and failures.

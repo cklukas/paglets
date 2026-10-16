@@ -5,6 +5,9 @@
 // other (WP12), they work on a local ledger directory.
 
 #include "mesh_cli.hpp"
+#include "time_arithmetic.hpp"
+#include "cli_integer.hpp"
+#include "host_address.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/client/client.hpp>
@@ -72,15 +75,17 @@ int usage() {
            "       paglets-host ledger residency --ledger DIR --admin KEY... ROOT host-only|none\n"
            "       paglets-host ledger residency --ledger DIR --admin KEY... ROOT hosts [HOST]... [--host-label L]...\n"
            "       paglets-host remote status --connect URL --key KEY --ledger DIR [--host-key KEY-ID]\n"
+           "       paglets-host remote moves [clear-cache] --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote push --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote launch --connect URL --key OWNER-KEY --ledger DIR MODULE\n"
-           "                                  [--args JSON] [--id PAGLET-ID] [--hours N]\n"
-           "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT]\n"
+           "                                  [--args JSON] [--nonce NONCE] [--hours N]\n"
+           "       paglets-host remote call --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--expect TEXT] [--timeout SECONDS]\n"
            "       paglets-host remote send --connect URL --key KEY --ledger DIR PAGLET NAME [JSON] [--priority N]\n"
            "       paglets-host remote describe --connect URL --key KEY --ledger DIR PAGLET|--module HASH [--json]\n"
            "       paglets-host remote dispatch --connect URL --key KEY --ledger DIR PAGLET DESTINATION\n"
            "       paglets-host remote hosts --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote landscape|slots --connect URL --key KEY --ledger DIR\n"
+           "       paglets-host remote jobs [cancel JOB] --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote zombies list|cancel GROUP|redirect GROUP SINK|traces GROUP|check GROUP|result GROUP\n"
            "                    --connect URL --key KEY --ledger DIR\n"
            "       paglets-host remote locate --connect URL --key KEY --ledger DIR PAGLET\n"
@@ -95,12 +100,15 @@ int usage() {
            "       paglets-host remote push-module --connect URL --key KEY --ledger DIR MODULE.wasm\n"
            "       paglets-host remote dispose --connect URL --key KEY --ledger DIR PAGLET\n"
            "       paglets-host remote terminate --connect URL --key ADMIN-KEY --ledger DIR PAGLET [--reason TEXT]\n"
+           "mesh create: --admin-quorum defaults to 2 with three or more admins, otherwise 1;\n"
+           "--quorum defaults to 1 for other admin records. Explicit quorum options override these defaults.\n"
            "MODULE is a .wasm file or a module hash. Trust classes (--class) are roaming, resident and\n"
            "system; 'module-policy trusted' makes roaming modules need trust as well. residency keeps\n"
            "the content of a named root on the host it was read on (host-only) or on some hosts: a paglet\n"
            "that read the root moves only there (none lifts the rule).\n"
            "remote: a session with a host over an end-to-end channel, as the admin or owner of KEY; the\n"
-           "host must be enrolled in the ledger copy (or be --host-key). push sends the records of the\n"
+           "host must be enrolled in the ledger copy (or be --host-key); known revocations are refused.\n"
+           "push sends the records of the\n"
            "ledger copy, launch starts a paglet of the owner on the host (its passport is signed here;\n"
            "MODULE is a .wasm file, or the hash of a module the host has),\n"
            "call sends a request to a paglet of the owner and prints the reply, send a one-way message\n"
@@ -110,7 +118,8 @@ int usage() {
            "hosts lists the enrolled hosts as the host knows them (address, online, versions; one-way:\n"
            "the host hears from it but cannot send to it, `send failed` says why);\n"
            "landscape shows mesh-info's view of every host (load, memory, compute slots), slots the\n"
-           "compute slots of the host (leases, queue);\n"
+           "compute slots of the host (leases, queue); jobs the compute jobs on the host (an owner's,\n"
+           "or all for admins; cancel JOB stops one);\n"
            "locate finds a paglet anywhere in the mesh, pin keeps it where it is (default 10 minutes),\n"
            "pins lists the pins on the host, unpin ends pins wherever the paglet is (admins).\n"
            "pull brings the host's ledger records into the ledger copy; requests, approve, deny and audit\n"
@@ -140,7 +149,7 @@ struct Options {
     std::vector<std::string> remove;
     std::vector<std::string> ops, owners, modules, trust, host_labels, roots, paths, classes, signers;
     std::optional<std::string> role, name, out, ledger, key, passphrase_file, reason, kdf, decision, service, version;
-    std::optional<std::string> connect, host_key, args, id, expect, pin;
+    std::optional<std::string> connect, host_key, args, id, nonce, expect, pin, timeout;
     bool json = false;
     std::optional<std::int64_t> hours, minutes;
     std::optional<std::int64_t> admin_quorum, quorum, max_duration, priority;
@@ -165,16 +174,15 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             if (v) list.push_back(*v);
             return v.has_value();
         };
-        auto number = [&](std::optional<std::int64_t>& field) {
+        auto integer = [&](std::optional<std::int64_t>& field, bool positive) {
             auto v = next();
             if (!v) return false;
-            try {
-                field = std::stoll(*v);
-            } catch (const std::exception&) {
-                return false;
-            }
-            return *field > 0;
+            auto parsed = decimal_integer<std::int64_t>(*v);
+            if (!parsed || (positive && *parsed <= 0)) return false;
+            field = *parsed;
+            return true;
         };
+        auto number = [&](std::optional<std::int64_t>& field) { return integer(field, true); };
         bool ok = true;
         if (a == "--role") {
             ok = set(o.role);
@@ -238,8 +246,12 @@ std::optional<Options> parse(int first, int argc, char** argv) {
             ok = set(o.args);
         } else if (a == "--id") {
             ok = set(o.id);
+        } else if (a == "--nonce") {
+            ok = set(o.nonce);
         } else if (a == "--expect") {
             ok = set(o.expect);
+        } else if (a == "--timeout") {
+            ok = set(o.timeout);
         } else if (a == "--pin") {
             ok = set(o.pin);
         } else if (a == "--minutes") {
@@ -255,13 +267,7 @@ std::optional<Options> parse(int first, int argc, char** argv) {
         } else if (a == "--max-duration") {
             ok = number(o.max_duration);
         } else if (a == "--priority") {
-            auto v = next();
-            try {
-                ok = v.has_value();
-                if (ok) o.priority = std::stoll(*v);
-            } catch (const std::exception&) {
-                ok = false;
-            }
+            ok = integer(o.priority, false);
         } else if (a.starts_with("--")) {
             ok = false;
         } else {
@@ -400,11 +406,15 @@ int mesh_create(const Options& o) {
     }
     std::vector<const SigningKey*> signers;
     for (const auto& k : keys) signers.push_back(&k);
-    const Quorum quorum{o.admin_quorum.value_or(1), o.quorum.value_or(1)};
+    const Quorum quorum{o.admin_quorum.value_or(signers.size() >= 3 ? 2 : 1), o.quorum.value_or(1)};
     auto genesis = make_genesis(*o.name, signers, quorum, unix_ms());
     if (!genesis) return fail(genesis.error());
     auto ledger = Ledger::create(*genesis, *o.ledger);
     if (!ledger) return fail(ledger.error());
+    if (signers.size() > 1 && quorum.admin_set == 1) {
+        std::cerr << "paglets-host: note: any one admin can change the admin set; "
+                     "give --admin-quorum 2 or more to require multiple signatures\n";
+    }
     std::cout << record_id_hex(ledger->mesh()) << "\n";
     return 0;
 }
@@ -590,7 +600,7 @@ int ledger_approve(const Options& o) {
         const GrantRequest request = *g;
         HostSelector hosts;
         if (o.host_only && !request.by_owner) hosts.keys.push_back(request.host);
-        const std::int64_t expires = unix_ms() + request.duration_ms;
+        const std::int64_t expires = time_detail::saturating_add(unix_ms(), request.duration_ms);
         for (const auto& item : request.items) {
             if (int rc = s->issue("grant", data::grant(request.principal, item, hosts, expires, request.id,
                                                        std::nullopt, std::nullopt));
@@ -790,11 +800,10 @@ int ledger_residency(const Options& o) {
     HostSelector hosts{{}, o.host_labels};
     for (std::size_t i = 2; i < o.positional.size(); ++i) {
         const std::string& name = o.positional[i];
-        std::optional<PublicKey> found;
-        for (const auto& [k, h] : s->ledger.state().hosts) {
-            if (h.name == name || key_id(k) == name) found = k;
-        }
-        if (!found) return fail("no enrolled host " + name);
+        const auto found = host_detail::resolve_host_address(s->ledger.state(), name, true);
+        if (!found) return fail(found.error() == host_detail::HostAddressError::ambiguous
+                                   ? "ambiguous host address " + name + "; use a full key ID"
+                                   : "no enrolled host " + name);
         hosts.keys.push_back(*found);
     }
     if (rule == "hosts" && hosts.all()) return fail("the rule 'hosts' needs hosts or --host-label");
@@ -891,6 +900,18 @@ int remote_status(const Options& o) {
         std::cout << "  " << p.id << "  " << p.state << "  module " << p.module.substr(0, 16) << "  owner "
                   << p.owner.substr(0, 16) << (p.trust.empty() ? "" : "  " + p.trust) << "\n";
     }
+    return 0;
+}
+
+int remote_moves(const Options& o) {
+    if (o.positional.size() > 1 || (!o.positional.empty() && o.positional[0] != "clear-cache")) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    auto result = r->ask(Map{{"t", Value("moves")}, {"clear_cache", Value(!o.positional.empty())}});
+    if (!result) return fail(result.error());
+    auto json = paglets::wire::msgpack_to_json(encode(Value(*result)));
+    if (!json) return fail("malformed move statistics");
+    std::cout << json->dump() << "\n";
     return 0;
 }
 
@@ -1087,6 +1108,7 @@ int remote_dispose(const Options& o) {
 
 int remote_launch(const Options& o) {
     if (o.positional.size() != 1) return usage();
+    if (o.id) return fail("--id is no longer accepted: use --nonce for an owner-local launch nonce; the printed global ID binds it to the owner and mesh");
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
     // A module file, or the hash of a module the host has.
@@ -1103,15 +1125,42 @@ int remote_launch(const Options& o) {
     }
     auto args = json_body(o.args);
     if (!args) return fail(args.error());
-    auto id = r->session.launch(r->identity, hash, std::move(module), std::move(*args), o.id.value_or(""),
+    auto id = r->session.launch(r->identity, hash, std::move(module), std::move(*args), o.nonce.value_or(""),
                                 o.hours.value_or(24));
     if (!id) return fail(id.error());
     std::cout << *id << "\n";
     return 0;
 }
 
+// Decimal seconds with millisecond precision, without locale or floating
+// point rounding. The web UI uses the same 100..120000 ms interval.
+std::optional<std::int64_t> call_timeout(std::string_view text) {
+    const auto dot = text.find('.');
+    const auto whole = text.substr(0, dot);
+    std::int64_t seconds = 0;
+    if (whole.empty() || !std::all_of(whole.begin(), whole.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        return std::nullopt;
+    const auto [end, error] = std::from_chars(whole.data(), whole.data() + whole.size(), seconds);
+    if (error != std::errc{} || end != whole.data() + whole.size() || seconds > 120) return std::nullopt;
+    std::int64_t milliseconds = seconds * 1000;
+    if (dot != std::string_view::npos) {
+        const auto fraction = text.substr(dot + 1);
+        if (fraction.empty() || fraction.size() > 3) return std::nullopt;
+        std::int64_t place = 100;
+        for (const char c : fraction) {
+            if (c < '0' || c > '9') return std::nullopt;
+            milliseconds += (c - '0') * place;
+            place /= 10;
+        }
+    }
+    if (milliseconds < 100 || milliseconds > 120000) return std::nullopt;
+    return milliseconds;
+}
+
 int remote_call(const Options& o) {
     if (o.positional.size() < 2 || o.positional.size() > 3) return usage();
+    const auto timeout_ms = call_timeout(o.timeout.value_or("30"));
+    if (!timeout_ms) return fail("timeout must be 0.1 to 120 seconds, with at most three decimal places");
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
     auto body = json_body(o.positional.size() == 3 ? std::optional<std::string>(o.positional[2]) : std::nullopt);
@@ -1119,7 +1168,8 @@ int remote_call(const Options& o) {
     auto a = r->ask(Map{{"t", Value("call")},
                         {"paglet", Value(o.positional[0])},
                         {"name", Value(o.positional[1])},
-                        {"payload", Value(std::move(*body))}});
+                        {"payload", Value(std::move(*body))},
+                        {"timeout_ms", Value(*timeout_ms)}});
     if (!a) return fail(a.error());
     const Fields f{*a};
     const auto status = static_cast<std::int32_t>(f.integer("status").value_or(0));
@@ -1168,7 +1218,7 @@ void print_interface(const paglets::wire::Json& d) {
                       << (str(m, "request").empty() ? "none" : str(m, "request"));
             if (kind != "send") std::cout << " -> " << (str(m, "reply").empty() ? "none" : str(m, "reply"));
             if (const auto* danger = m.find("danger"); danger != nullptr && danger->is_bool() && danger->as_bool()) {
-                std::cout << "  (asks first)";
+                std::cout << "  (web confirmation)";
             }
             if (!str(m, "summary").empty()) std::cout << "  " << str(m, "summary");
             std::cout << "\n";
@@ -1229,7 +1279,7 @@ int remote_dispatch(const Options& o) {
     // that it started).
     const Fields f{*a};
     const Value* moved = f.get("moved");
-    if (f.get("pending") != nullptr) {
+    if (const auto* pending = f.get("pending"); pending && *pending->as_bool()) {
         return fail("the move has not ended after 120 s; `remote locate` shows where the paglet is");
     }
     if (moved == nullptr || moved->as_bool() == nullptr) {
@@ -1306,30 +1356,42 @@ int remote_hosts(const Options& o) {
 }
 
 #if PAGLETS_HAVE_REFLECTION
+template <class T>
+std::expected<std::vector<T>, std::string> decoded_rows(const Fields& f, std::string_view name) {
+    const auto* rows = f.array(name);
+    if (!rows) return std::unexpected(std::string("malformed answer"));
+    std::vector<T> result;
+    result.reserve(rows->size());
+    for (const auto& row : *rows) {
+        const auto* bytes = row.as_bin();
+        T value;
+        if (!bytes || !paglets::wire::from_msgpack(*bytes, value)) return std::unexpected(std::string("malformed answer"));
+        result.push_back(std::move(value));
+    }
+    return result;
+}
+
 int remote_landscape(const Options& o) {
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
     auto a = r->ask(Map{{"t", Value("landscape")}});
     if (!a) return fail(a.error());
-    if (const Array* hosts = Fields{*a}.array("hosts")) {
-        for (const auto& h : *hosts) {
-            const Bytes* b = h.as_bin();
-            paglets::services::mesh_info::Snapshot s;
-            if (b == nullptr || !paglets::wire::from_msgpack(*b, s)) continue;
-            std::cout << std::format(
-                "{:<12} {:>3} cpus  load {:5.2f}/cpu  mem {:>6} MB free  slots {}/{} free  "
-                "queued {}  paglets {}\n",
-                s.host_name.empty() ? s.host.substr(0, 12) : s.host_name, s.cpus, s.load_per_cpu,
-                s.memory_available / (1024 * 1024), s.slots_free, s.slots, s.queued, s.paglets);
-            for (const auto& offer : s.offers) {
-                std::cout << "  offers " << offer.service;
-                for (std::size_t i = 0; i < offer.ops.size(); ++i) std::cout << (i == 0 ? " " : ",") << offer.ops[i];
-                for (const auto& attr : offer.attributes) {
-                    std::cout << "  " << attr.name << "="
-                              << (attr.numeric ? std::format("{}", attr.number) : attr.text);
-                }
-                std::cout << "\n";
+    auto hosts = decoded_rows<paglets::services::mesh_info::Snapshot>(Fields{*a}, "hosts");
+    if (!hosts) return fail(hosts.error());
+    for (const auto& s : *hosts) {
+        std::cout << std::format(
+            "{:<12} {:>3} cpus  load {:5.2f}/cpu  mem {:>6} MB free  slots {}/{} free  "
+            "queued {}  paglets {}\n",
+            s.host_name.empty() ? s.host.substr(0, 12) : s.host_name, s.cpus, s.load_per_cpu,
+            s.memory_available / (1024 * 1024), s.slots_free, s.slots, s.queued, s.paglets);
+        for (const auto& offer : s.offers) {
+            std::cout << "  offers " << offer.service;
+            for (std::size_t i = 0; i < offer.ops.size(); ++i) std::cout << (i == 0 ? " " : ",") << offer.ops[i];
+            for (const auto& attr : offer.attributes) {
+                std::cout << "  " << attr.name << "="
+                          << (attr.numeric ? std::format("{}", attr.number) : attr.text);
             }
+            std::cout << "\n";
         }
     }
     return 0;
@@ -1346,6 +1408,7 @@ int remote_slots(const Options& o) {
     std::cout << "slots " << s.self.free << "/" << s.self.slots << " free, " << s.self.queued << " waiting\n";
     for (const auto& l : s.leases) {
         std::cout << "  lease " << l.lease << "  paglet " << l.paglet << "  job " << l.job << "  cores " << l.cores
+                  << "  granted_ms " << l.granted_ms << "  expires_ms " << l.expires_ms
                   << "\n";
     }
     for (const auto& w : s.queue) {
@@ -1365,6 +1428,7 @@ std::string_view ending_name(zb::Ending e) {
         case zb::Ending::none: return "running";
         case zb::Ending::delivered: return "delivered";
         case zb::Ending::cancelled: return "cancelled";
+        case zb::Ending::failed: return "failed";
     }
     return "?";
 }
@@ -1387,16 +1451,13 @@ int remote_zombies(const Options& o) {
     if (!a) return fail(a.error());
     const Fields f{*a};
     if (op == "list") {
-        if (const Array* groups = f.array("groups")) {
-            for (const auto& g : *groups) {
-                zb::GroupInfo i;
-                const Bytes* b = g.as_bin();
-                if (b == nullptr || !paglets::wire::from_msgpack(*b, i)) continue;
-                std::cout << i.state.group << "  " << ending_name(i.state.ending) << "  sink " << i.state.sink << " "
-                          << i.state.sink_spec << "  replica " << (i.paglet.empty() ? "-" : i.paglet.substr(0, 12))
-                          << "  traces " << i.traces << (i.state.reason.empty() ? "" : "  (" + i.state.reason + ")")
-                          << "\n";
-            }
+        auto groups = decoded_rows<zb::GroupInfo>(f, "groups");
+        if (!groups) return fail(groups.error());
+        for (const auto& i : *groups) {
+            std::cout << i.state.group << "  " << ending_name(i.state.ending) << "  sink " << i.state.sink << " "
+                      << i.state.sink_spec << "  replica " << (i.paglet.empty() ? "-" : i.paglet.substr(0, 12))
+                      << "  traces " << i.traces << (i.state.reason.empty() ? "" : "  (" + i.state.reason + ")")
+                      << "\n";
         }
         return 0;
     }
@@ -1408,21 +1469,18 @@ int remote_zombies(const Options& o) {
         return 0;
     }
     if (op == "traces") {
-        if (const Array* records = f.array("records")) {
-            for (const auto& v : *records) {
-                zb::TraceRecord t;
-                const Bytes* b = v.as_bin();
-                if (b == nullptr || !paglets::wire::from_msgpack(*b, t)) continue;
-                const auto secs = t.time_ms / 1000;
-                std::cout << std::format("{:%F %T}  host {}  replica {} ({}.{})  ",
-                                         std::chrono::sys_seconds(std::chrono::seconds(secs)), t.host.substr(0, 8),
-                                         t.replica, t.incarnation, t.seq);
-                if (t.event == "transition") {
-                    std::cout << t.from << " -> " << t.to << " (" << t.cause << ")  progress " << t.progress
-                              << (t.done ? " done" : "") << "  reign " << t.term << "\n";
-                } else {
-                    std::cout << "sink " << t.sink << ": " << t.event << "\n";
-                }
+        auto records = decoded_rows<zb::TraceRecord>(f, "records");
+        if (!records) return fail(records.error());
+        for (const auto& t : *records) {
+            const auto secs = t.time_ms / 1000;
+            std::cout << std::format("{:%F %T}  host {}  replica {} ({}.{})  ",
+                                     std::chrono::sys_seconds(std::chrono::seconds(secs)), t.host.substr(0, 8),
+                                     t.replica, t.incarnation, t.seq);
+            if (t.event == "transition") {
+                std::cout << t.from << " -> " << t.to << " (" << t.cause << ")  progress " << t.progress
+                          << (t.done ? " done" : "") << "  reign " << t.term << "\n";
+            } else {
+                std::cout << "sink " << t.sink << ": " << t.event << "\n";
             }
         }
         return 0;
@@ -1468,6 +1526,53 @@ int remote_slots(const Options&) {
 }
 #endif
 
+int remote_jobs(const Options& o) {
+    const bool cancel = !o.positional.empty() && o.positional[0] == "cancel";
+    if ((cancel && o.positional.size() != 2) || (!cancel && !o.positional.empty())) return usage();
+    const auto id = cancel ? decimal_integer<std::int64_t>(o.positional[1]) : std::nullopt;
+    if (cancel && (!id || *id <= 0)) return usage();
+    auto r = Remote::open(o);
+    if (!r) return fail(r.error());
+    Map q{{"t", Value("jobs")}};
+    if (cancel) {
+        q.emplace_back("op", Value("cancel"));
+        q.emplace_back("id", Value(*id));
+    }
+    auto a = r->ask(std::move(q));
+    if (!a) return fail(a.error());
+    const Fields f{*a};
+    auto truth = [](const Fields& m, std::string_view k) {
+        const Value* v = m.get(k);
+        return v != nullptr && v->as_bool() != nullptr && *v->as_bool();
+    };
+    if (cancel) {
+        std::cout << (truth(f, "cancelled") ? "cancelled\n" : "already ended\n");
+        return 0;
+    }
+    std::cout << "job slots " << f.integer("running").value_or(0) << "/" << f.integer("slots").value_or(0)
+              << " in use" << (truth(f, "aot") ? ", ahead-of-time compiled" : ", interpreter")
+              << "\n";
+    if (const Array* jobs = f.array("jobs")) {
+        for (const auto& v : *jobs) {
+            if (v.as_map() == nullptr) continue;
+            const Fields j{*v.as_map()};
+            std::cout << std::format("  {:>5} {:<8} {:<16} paglet {} cores {} ", j.integer("id").value_or(0),
+                                     j.str("state").value_or(""), j.str("function").value_or(""),
+                                     j.str("paglet").value_or("").substr(0, 8), j.integer("cores").value_or(1));
+            if (j.integer("total").value_or(0) > 0) {
+                std::cout << std::format("progress {}/{} ", j.integer("done").value_or(0), j.integer("total").value_or(0));
+            }
+            std::cout << std::format("{:.1f} s", static_cast<double>(j.integer("elapsed_ms").value_or(0)) / 1000);
+            if (truth(j, "aot")) std::cout << " aot";
+            if (!j.str("requester").value_or("").empty()) {
+                std::cout << "  for host " << j.str("requester").value_or("").substr(0, 8);
+            }
+            std::cout << "\n";
+        }
+    }
+    return 0;
+}
+
 int remote_locate(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
@@ -1482,10 +1587,7 @@ int remote_pin(const Options& o) {
     if (o.positional.size() != 1) return usage();
     auto r = Remote::open(o);
     if (!r) return fail(r.error());
-    auto a = r->ask(Map{{"t", Value("pin")},
-                        {"paglet", Value(o.positional[0])},
-                        {"duration_ms", Value(o.minutes.value_or(10) * 60'000)},
-                        {"reason", Value(o.reason.value_or(""))}});
+    auto a = r->session.pin(o.positional[0], o.minutes.value_or(10), o.reason.value_or(""));
     if (!a) return fail(a.error());
     const Fields f{*a};
     print_location(f);
@@ -1563,6 +1665,7 @@ int mesh_command(int argc, char** argv) {
         }
         if (group == "remote") {
             if (action == "status") return remote_status(o);
+            if (action == "moves") return remote_moves(o);
             if (action == "push") return remote_push(o);
             if (action == "launch") return remote_launch(o);
             if (action == "call") return remote_call(o);
@@ -1573,6 +1676,7 @@ int mesh_command(int argc, char** argv) {
             if (action == "hosts") return remote_hosts(o);
             if (action == "landscape") return remote_landscape(o);
             if (action == "slots") return remote_slots(o);
+            if (action == "jobs") return remote_jobs(o);
             if (action == "zombies") return remote_zombies(o);
             if (action == "locate") return remote_locate(o);
             if (action == "pin") return remote_pin(o);

@@ -17,6 +17,7 @@
 #include <expected>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -48,7 +49,7 @@ void fill_random(std::span<std::uint8_t> out);
 
 struct Limits {
     std::uint32_t stack_size = 64 * 1024;  // Wasm operand/call stack of the interpreter
-    std::uint32_t max_memory_pages = 256;  // 16 MB linear memory
+    std::uint32_t max_memory_pages = 4096;  // 256 MB ceiling; initial memory comes from the module
 };
 
 class Module {
@@ -56,6 +57,14 @@ public:
     // Parses, validates imports against the policy, and loads the module.
     static std::expected<std::shared_ptr<Module>, std::string> load(std::vector<std::uint8_t> bytes,
                                                                     const ImportPolicy& policy);
+    // Loads ahead-of-time compiled code (WAMR AOT, made by the host's
+    // compiler from `wasm`, for this CPU). The module's identity, imports and
+    // exports are those of `wasm`; only compute jobs run such modules.
+    static std::expected<std::shared_ptr<Module>, std::string> load_aot(std::vector<std::uint8_t> wasm,
+                                                                        std::vector<std::uint8_t> aot,
+                                                                        const ImportPolicy& policy);
+    // True if WAMR can load AOT code in this build.
+    static bool aot_supported();
     ~Module();
     Module(const Module&) = delete;
     Module& operator=(const Module&) = delete;
@@ -66,6 +75,8 @@ public:
     std::size_t size() const { return bytes_.size(); }
     // The module as loaded (WAMR rewrites its own buffer while loading).
     std::span<const std::uint8_t> bytes() const { return original_; }
+    bool aot() const { return !aot_.empty(); }
+    std::span<const std::uint8_t> aot_bytes() const { return aot_; }
     WASMModuleCommon* handle() const { return module_; }
 
 private:
@@ -73,6 +84,7 @@ private:
 
     std::vector<std::uint8_t> bytes_;     // WAMR keeps pointers into this buffer and modifies it
     std::vector<std::uint8_t> original_;  // unmodified copy, for worker processes and stores
+    std::vector<std::uint8_t> aot_;       // AOT code as compiled (load_aot), for worker processes
     ModuleInfo info_;
     Digest hash_{};
     WASMModuleCommon* module_ = nullptr;
@@ -102,6 +114,16 @@ public:
     virtual std::int32_t create_child(std::span<const std::uint8_t> spec);
     virtual std::int32_t lifecycle(std::int32_t op, std::span<const std::uint8_t> arg);
     virtual std::int32_t timer_set(std::int64_t delay_ms, std::span<const std::uint8_t> msg);
+    // v1.3 compute jobs. A paglet: submit (returns the correlation of the
+    // result), cancel, status. A job instance: its input from `offset` into
+    // `out` (bytes copied), output appended, progress, cancellation.
+    virtual std::int64_t job_submit(std::span<const std::uint8_t> spec);
+    virtual std::int32_t job_cancel(std::int64_t correlation);
+    virtual Document job_status(std::int64_t correlation);
+    virtual std::int32_t job_input(std::int64_t offset, std::span<std::uint8_t> out);
+    virtual std::int32_t job_output(std::span<const std::uint8_t> data);
+    virtual std::int32_t job_progress(std::int64_t done, std::int64_t total);
+    virtual std::int32_t job_cancelled();
 
     // Set by Instance::set_imports; the log default writes to its sink.
     class Instance* instance = nullptr;
@@ -115,8 +137,9 @@ struct StringHash {
 
 class Instance {
 public:
-    // Instantiates the module. With run_initializer, the reactor initializer
-    // (_initialize) runs; memory-image restore skips it.
+    // Instantiates the module. WAMR runs _initialize for WASI reactors even
+    // on restore; the image subsequently overwrites its memory effects.
+    // run_initializer controls our explicit call for non-WASI modules.
     static std::expected<std::unique_ptr<Instance>, std::string> create(std::shared_ptr<Module> module,
                                                                         const Limits& limits = {},
                                                                         bool run_initializer = true);
@@ -141,7 +164,8 @@ public:
                                                             std::span<const std::uint32_t> leading,
                                                             std::span<const std::uint8_t> data);
 
-    // Makes a running call fail with "terminated"; callable from any thread.
+    // Makes running and future calls fail with "terminated"; callable from
+    // any thread. A terminated instance must be discarded or restored.
     void terminate();
 
     // Linear memory.
@@ -149,7 +173,7 @@ public:
     std::span<std::uint8_t> memory();
     bool grow_to(std::uint32_t pages);
 
-    // Exported globals, as raw 64-bit patterns (i32/f32 use the low 32 bits).
+    // Numeric exported globals, as raw 64-bit patterns (i32/f32 use the low 32 bits).
     std::expected<std::uint64_t, std::string> global_bits(std::string_view name) const;
     std::expected<void, std::string> set_global_bits(std::string_view name, std::uint64_t bits);
 
@@ -176,6 +200,8 @@ private:
     WASMModuleInstanceCommon* inst_ = nullptr;
     WASMExecEnv* exec_env_ = nullptr;
     std::thread::id exec_thread_;  // WAMR binds an execution environment to the thread that first uses it
+    std::mutex termination_mu_;  // cancellation cannot race with clearing a previous trap
+    bool terminated_ = false;
     std::unordered_map<std::string, void*, StringHash, std::equal_to<>> functions_;  // export lookup cache
     LogSink log_sink_;
     HostImports* imports_ = nullptr;

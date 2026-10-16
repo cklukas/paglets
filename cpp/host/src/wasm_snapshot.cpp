@@ -72,6 +72,7 @@ std::expected<Snapshot, std::string> capture(Instance& instance) {
         snap.globals.push_back({*g.export_name, static_cast<std::uint8_t>(g.type), *bits});
     }
 
+// --8<-- [start:paper_pages]
     const std::span<std::uint8_t> mem = instance.memory();
     snap.page_count = static_cast<std::uint32_t>(mem.size() / page_size);
     snap.pages.resize(snap.page_count);
@@ -82,6 +83,7 @@ std::expected<Snapshot, std::string> capture(Instance& instance) {
         snap.pages[p].hash = sha256(page);
         snap.data.insert(snap.data.end(), page.begin(), page.end());
     }
+// --8<-- [end:paper_pages]
     return snap;
 }
 // --8<-- [end:capture]

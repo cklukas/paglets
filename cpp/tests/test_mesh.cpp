@@ -690,10 +690,10 @@ PAGLETS_TEST("passports: owner-signed roots and host-signed links") {
         Passport::issue(owner, ledger.mesh(), module, "root-1", Value(Map{{"files", Value("read")}}), 1000, 100000);
     REQUIRE_OK(p);
     const LedgerState& st = ledger.state();
-    REQUIRE_OK(verify_passport(*p, st, "root-1", module, 2000));
+    REQUIRE_OK(verify_passport(*p, st, p->paglet(), module, 2000));
     CHECK(!verify_passport(*p, st, "root-2", module, 2000));
-    CHECK(!verify_passport(*p, st, "root-1", other_module, 2000));
-    CHECK(!verify_passport(*p, st, "root-1", module, 100000));  // expired
+    CHECK(!verify_passport(*p, st, p->paglet(), other_module, 2000));
+    CHECK(!verify_passport(*p, st, p->paglet(), module, 100000));  // expired
 
     auto child = p->extend(host, "child", "child-1", other_module, 3000);
     REQUIRE_OK(child);
@@ -721,10 +721,10 @@ PAGLETS_TEST("passports: owner-signed roots and host-signed links") {
     CHECK(!verify_passport(*foreign_link, st, "c2", module, 5000));
     auto unenrolled = Passport::issue(stranger, ledger.mesh(), module, "r", Value(), 1000, 100000);
     REQUIRE_OK(unenrolled);
-    CHECK(!verify_passport(*unenrolled, st, "r", module, 2000));
+    CHECK(!verify_passport(*unenrolled, st, unenrolled->paglet(), module, 2000));
     issue(ledger, "revoke", data::revoke_key(host.public_key(), "retired"), {&ad.a});
     CHECK(!verify_passport(*decoded, ledger.state(), "clone-1", other_module, 5000));
-    REQUIRE_OK(verify_passport(*p, ledger.state(), "root-1", module, 2000));
+    REQUIRE_OK(verify_passport(*p, ledger.state(), p->paglet(), module, 2000));
 }
 
 // ---------------------------------------------------------------------------
@@ -826,4 +826,24 @@ PAGLETS_TEST("policy: rules match modules by their signers") {
     CHECK(evaluate(ledger.state(), other, host.public_key(), item).decision == Decision::deny);
     issue(ledger, "revoke", data::revoke_key(signer.public_key(), "lost"), {&ad.a});
     CHECK(evaluate(ledger.state(), tool, host.public_key(), item).decision == Decision::deny);
+}
+
+PAGLETS_TEST("gossip: revocation overrides bootstrap seeds and denies later ledger requests") {
+    Admins ad;
+    auto genesis = make_genesis("revocation", {&ad.a}, {}, 1);
+    REQUIRE_OK(genesis);
+    Network net;
+    auto& a = net.add(*genesis);
+    auto& b = net.add(*genesis);
+    REQUIRE_OK(a.replica->submit(signed_draft(*a.ledger, "revoke",
+        data::revoke_key(b.key.public_key(), "retired"), {&ad.a})));
+    auto peers = a.replica->peers();
+    CHECK(std::ranges::find(peers, b.key.public_key()) == peers.end());
+    net.queue.clear();
+    a.replica->tick();
+    CHECK(net.queue.empty());
+    net.queue.clear();
+    a.replica->receive(b.key.public_key(), encode(Value(Map{{"t", Value("digest")},
+        {"d", Value::bin(paglets::Digest{})}, {"n", Value(0)}})));
+    CHECK(net.queue.empty());
 }

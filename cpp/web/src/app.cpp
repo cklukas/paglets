@@ -740,6 +740,20 @@ web::Response App::action(const std::string& name, const Json& body) {
         const Json* payload = body.find("payload");
         std::vector<std::string> args{paglet, message};
         if (payload != nullptr && !payload->is_null()) args.push_back(payload->dump());
+        const auto timeout_ms =
+            std::clamp<std::int64_t>(integer(body, "timeout_ms").value_or(30000), 100, 120000);
+        if (name == "call" && timeout_ms != 30000) {
+            // Keep the effective timeout exactly reproducible in the shell,
+            // including a millisecond fraction when it is not whole seconds.
+            std::string seconds = std::to_string(timeout_ms / 1000);
+            if (timeout_ms % 1000 != 0) {
+                std::string fraction = std::to_string(1000 + timeout_ms % 1000).substr(1);
+                while (fraction.back() == '0') fraction.pop_back();
+                seconds += "." + fraction;
+            }
+            args.push_back("--timeout");
+            args.push_back(std::move(seconds));
+        }
         const auto priority = integer(body, "priority");
         if (name == "send" && priority) {
             if (*priority < 0 || *priority > 7) return failure(400, "the priority is 0 to 7");
@@ -755,8 +769,7 @@ web::Response App::action(const std::string& name, const Json& body) {
             }
             return ok(Obj().add("sent", flag(true)).add("shell", str(command)).done());
         }
-        auto r = session->call(paglet, message, payload_of(payload),
-                               std::clamp<std::int64_t>(integer(body, "timeout_ms").value_or(30000), 100, 120000));
+        auto r = session->call(paglet, message, payload_of(payload), timeout_ms);
         if (!r) return failure(422, r.error(), command);
         return ok(Obj()
                       .add("status", num(r->status))
@@ -772,7 +785,11 @@ web::Response App::action(const std::string& name, const Json& body) {
         const std::string data = member(body, "data");  // an upload: base64, and its file name
         std::string module = member(body, "module");
         const Json* args = body.find("args");
-        const std::string id = member(body, "id");
+        if (body.find("id")) return failure(400, "id is no longer accepted; use an owner-local nonce");
+        const Json* nonce_value = body.find("nonce");
+        if (nonce_value != nullptr && !nonce_value->is_string()) return failure(400, "nonce must be a string");
+        const std::string nonce = member(body, "nonce");
+        if (nonce.size() > 128) return failure(400, "nonce must be at most 128 bytes");
         const std::int64_t hours = std::clamp<std::int64_t>(integer(body, "hours").value_or(24), 1, 24 * 30);
         Bytes bytes;
         std::string shown = module;
@@ -800,9 +817,9 @@ web::Response App::action(const std::string& name, const Json& body) {
             cli_args.push_back("--args");
             cli_args.push_back(args->dump());
         }
-        if (!id.empty()) {
-            cli_args.push_back("--id");
-            cli_args.push_back(id);
+        if (!nonce.empty()) {
+            cli_args.push_back("--nonce");
+            cli_args.push_back(nonce);
         }
         if (hours != 24) {
             cli_args.push_back("--hours");
@@ -814,7 +831,7 @@ web::Response App::action(const std::string& name, const Json& body) {
         }
         auto session = session_for();
         if (!session) return failure(502, session.error(), command);
-        auto launched = session->launch(identity_, *hash, std::move(bytes), payload_of(args), id, hours);
+        auto launched = session->launch(identity_, *hash, std::move(bytes), payload_of(args), nonce, hours);
         if (!launched) return failure(422, launched.error(), command);
         refresh();
         return ok(Obj().add("paglet", str(*launched)).add("host", str(host)).add("shell", str(command)).done());
@@ -919,8 +936,11 @@ web::Response App::action(const std::string& name, const Json& body) {
         if (!r) return failure(422, r.error(), command);
         const mesh::Fields f{*r};
         const mesh::Value* moved = f.get("moved");
+        const auto* pending = f.get("pending");
+        // Older hosts acknowledge that dispatch started without an outcome.
+        const bool waiting = moved == nullptr || (pending != nullptr && *pending->as_bool());
         Obj o;
-        o.add("pending", flag(f.get("pending") != nullptr))
+        o.add("pending", flag(waiting))
             .add("moved", flag(moved != nullptr && moved->as_bool() != nullptr && *moved->as_bool()))
             .add("reason", str(f.str("reason").value_or("")))
             .add("host_name", str(f.str("host_name").value_or("")))

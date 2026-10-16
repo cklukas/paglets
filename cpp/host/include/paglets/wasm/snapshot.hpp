@@ -46,8 +46,10 @@ struct Snapshot {
 
 std::expected<Snapshot, std::string> capture(Instance& instance);
 
-// Instantiates the module without running its initializer and installs the
-// image. The module hash must match the image.
+// Instantiates the module and installs the image over its initial memory.
+// WAMR may run a WASI reactor's initializer first; constructors must avoid
+// host-import side effects. Non-WASI explicit initialization is skipped.
+// The module hash must match the image.
 std::expected<std::unique_ptr<Instance>, std::string> restore(std::shared_ptr<Module> module, const Snapshot& snapshot,
                                                               const Limits& limits = {});
 

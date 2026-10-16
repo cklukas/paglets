@@ -278,7 +278,7 @@ std::expected<void, std::string> RingChannel::read_bytes(std::uint8_t* p, std::s
 
 std::expected<void, std::string> RingChannel::send(std::span<const std::uint8_t> frame) {
     if (!valid()) return std::unexpected(std::string("ipc: channel closed"));
-    if (frame.size() > 0xffffffffu) return std::unexpected(std::string("ipc: frame too large"));
+    if (frame.size() > max_frame) return std::unexpected(std::string("ipc: frame too large"));
     const auto n = static_cast<std::uint32_t>(frame.size());
     const std::array<std::uint8_t, 4> header{static_cast<std::uint8_t>(n), static_cast<std::uint8_t>(n >> 8),
                                              static_cast<std::uint8_t>(n >> 16), static_cast<std::uint8_t>(n >> 24)};

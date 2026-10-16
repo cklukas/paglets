@@ -84,6 +84,20 @@ public:
         });
         router().on("journal", [this](Message& m) { m.reply(journal_); });
         router().on<explorer::Access>("request_access", [](const explorer::Access& q, Message& m) { access(q, m); });
+        router().on<explorer::Text>("grant_status", [](const explorer::Text& q, Message& m) {
+            auto reply = std::make_shared<Capability>(m.defer_reply());
+            auto grants = paglets::service("grants");
+            if (!grants) return (void)paglets::reply_to(*reply, failure("service", grants.error()));
+            svc::grants::Client c{*grants};
+            auto sent = c.status(svc::grants::StatusRequest{q.text},
+                [reply](paglets::Result<svc::grants::Answer> a, Message&) {
+                    const std::string status = !a ? failure("status", a.error()) :
+                        a->status == svc::grants::Status::granted ? "granted" :
+                        a->status == svc::grants::Status::pending ? "pending" : "denied";
+                    (void)paglets::reply_to(*reply, status);
+                });
+            if (!sent) (void)paglets::reply_to(*reply, failure("status", sent.error()));
+        });
         router().on<explorer::Text>("release", [](const explorer::Text& q, Message& m) { release(q, m); });
         // Late answers of the grants service (after an admin decided).
         router().on<svc::grants::Answer>("grants.granted", [this](const svc::grants::Answer& a, Message& m) {

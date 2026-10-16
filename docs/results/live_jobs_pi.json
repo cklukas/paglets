@@ -1,0 +1,51 @@
+{
+  "topic": "live_jobs_pi",
+  "tests": [
+    {
+      "test": "Pi compute jobs, 6000 hex digits",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 3,
+      "platform": "",
+      "build": "Mac RelWithDebInfo; both Pis Release",
+      "date": "2026-10-14",
+      "values": [
+        {
+          "name": "hex digits in the file",
+          "value": "6000",
+          "unit": ""
+        },
+        {
+          "name": "decimal digits in the file",
+          "value": "7222",
+          "unit": ""
+        },
+        {
+          "name": "minimum chunk hold",
+          "value": "200",
+          "unit": "ms"
+        },
+        {
+          "name": "chunks of 500 digits",
+          "value": "12",
+          "unit": ""
+        },
+        {
+          "name": "hosts that computed chunks",
+          "value": "mac, pi, uconsole",
+          "unit": ""
+        },
+        {
+          "name": "computing the hex digits",
+          "value": "3",
+          "unit": "s"
+        },
+        {
+          "name": "converting into decimal digits",
+          "value": "< 1",
+          "unit": "s"
+        }
+      ]
+    }
+  ]
+}

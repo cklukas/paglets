@@ -77,7 +77,7 @@ void allow_files(Mesh& net, const std::string& name, std::vector<std::string> op
 
 }  // namespace
 
-PAGLETS_TEST("exchange: a shared file larger than a paglet's memory travels as a capability") {
+PAGLETS_TEST("exchange: a large shared file travels as a capability") {
     const fs::path data = temp_root("data"), inbox = temp_root("inbox");
     std::string big(20u * 1024 * 1024 + 4321, '\0');
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>((i * 40503u) >> 7);

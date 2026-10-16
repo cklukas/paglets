@@ -1,0 +1,280 @@
+{
+  "run": {
+    "start": "2026-10-15T04:33:52.585845+00:00",
+    "end": "2026-10-15T04:36:16.675558+00:00",
+    "seconds": 144.08960516698426,
+    "exit": 0,
+    "inputs": {
+      "cpp/tools/mesh_bench.sh": "7ab6af07afde2fcdbda28dbd0056da26010a470f9195ccaa3f87aefa6595b301",
+      "cpp/tools/mesh_move_bench.py": "db6b0899eef00e32ee49e2f07443866e4e465f17634b507e8491d44f30d8ee9f",
+      "cpp/build/macos-arm64/host/paglets-host": "922ffcb69fea0b7655a9c284091d3676595937ab1e00ab39fb23e95488c8716c",
+      "cpp/build/macos-arm64/host/paglets-worker": "0b4948333ca5f65d1b1fa542ed21fe039cd57971f033acead02844a150aaf820",
+      "cpp/build/macos-arm64/guests/counter.wasm": "be199a2be732ef0578ddc306c676250d0cfea3361a8ede5537931ba223c782d4",
+      "cpp/build/macos-arm64/guests/benchmark.wasm": "b7d94dbef9e583a090602d335ec67008805666de66df650fa9d60263596fee6b",
+      "cpp/build/macos-arm64/guests/pi.wasm": "b4d9cffdae59b8d82bab4054d18b4c5b0f9571271cd880a795b97ef59e09ffbe"
+    },
+    "command": [
+      "/opt/homebrew/bin/bash",
+      "/Volumes/S8T/tmp/paglets/priority-fixes-20261015-01/frozen-driver/cpp/tools/mesh_bench.sh",
+      "--remote",
+      "pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host",
+      "--remote",
+      "uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host",
+      "--build",
+      "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64",
+      "--steps",
+      "move latency benchmark jobs pi",
+      "--move-sizes",
+      "0",
+      "--move-samples",
+      "1",
+      "--jobs-samples",
+      "5",
+      "--jobs-iterations",
+      "3000000",
+      "--pi-digits",
+      "100000",
+      "--results-dir",
+      "/Volumes/S8T/tmp/paglets/priority-fixes-20261015-01/live-three-host-02",
+      "--port",
+      "7464"
+    ],
+    "source_commit": "a4b9b91f96782bb574d310ae841ed98872194807",
+    "driver_sha256": "7ab6af07afde2fcdbda28dbd0056da26010a470f9195ccaa3f87aefa6595b301",
+    "thermal_before": {
+      "klukas@rpi4": {
+        "unix_time": 1792038832.327976,
+        "temperature_C": 73.0,
+        "throttled": "0xf0000",
+        "live_flags": 0,
+        "load": [
+          0.99853515625,
+          0.80615234375,
+          0.79345703125
+        ],
+        "cpu_kHz": {
+          "cpu3": 1800000,
+          "cpu1": 1800000,
+          "cpu2": 1800000,
+          "cpu0": 1800000
+        }
+      },
+      "uconsole": {
+        "unix_time": 1792038832.5622942,
+        "temperature_C": 37.8,
+        "throttled": "0x0",
+        "live_flags": 0,
+        "load": [
+          0.03173828125,
+          0.26611328125,
+          0.2578125
+        ],
+        "cpu_kHz": {
+          "cpu3": 1600000,
+          "cpu1": 1600000,
+          "cpu2": 1600000,
+          "cpu0": 1600000
+        }
+      }
+    },
+    "thermal_after": {
+      "klukas@rpi4": {
+        "unix_time": 1792038976.9823618,
+        "temperature_C": 76.9,
+        "throttled": "0xf0000",
+        "live_flags": 0,
+        "load": [
+          2.60302734375,
+          1.4482421875,
+          1.0283203125
+        ],
+        "cpu_kHz": {
+          "cpu3": 1800000,
+          "cpu1": 1800000,
+          "cpu2": 1800000,
+          "cpu0": 1800000
+        }
+      },
+      "uconsole": {
+        "unix_time": 1792038977.2411785,
+        "temperature_C": 39.5,
+        "throttled": "0x0",
+        "live_flags": 0,
+        "load": [
+          0.89697265625,
+          0.55810546875,
+          0.36474609375
+        ],
+        "cpu_kHz": {
+          "cpu3": 1700000,
+          "cpu1": 1700000,
+          "cpu2": 1700000,
+          "cpu0": 1700000
+        }
+      }
+    }
+  },
+  "move_run": {
+    "start": "2026-10-15T04:08:45.393841+00:00",
+    "end": "2026-10-15T04:19:58.418162+00:00",
+    "seconds": 673.0243704159802,
+    "exit": 2,
+    "inputs": {
+      "cpp/tools/mesh_bench.sh": "99b031b3e4531bc35134a047d3986a00c0534b13f30063d16c15c3b725887279",
+      "cpp/tools/mesh_move_bench.py": "db6b0899eef00e32ee49e2f07443866e4e465f17634b507e8491d44f30d8ee9f",
+      "cpp/build/macos-arm64/host/paglets-host": "e32e16ea285eb12184b736cfb17eb832a09122c4fe78854b5ff6cf972c269c67",
+      "cpp/build/macos-arm64/host/paglets-worker": "0b4948333ca5f65d1b1fa542ed21fe039cd57971f033acead02844a150aaf820",
+      "cpp/build/macos-arm64/guests/counter.wasm": "be199a2be732ef0578ddc306c676250d0cfea3361a8ede5537931ba223c782d4",
+      "cpp/build/macos-arm64/guests/benchmark.wasm": "b7d94dbef9e583a090602d335ec67008805666de66df650fa9d60263596fee6b",
+      "cpp/build/macos-arm64/guests/pi.wasm": "b4d9cffdae59b8d82bab4054d18b4c5b0f9571271cd880a795b97ef59e09ffbe"
+    },
+    "command": [
+      "/opt/homebrew/bin/bash",
+      "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/tools/mesh_bench.sh",
+      "--remote",
+      "pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host",
+      "--remote",
+      "uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host",
+      "--build",
+      "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64",
+      "--steps",
+      "move latency benchmark jobs pi",
+      "--move-sizes",
+      "0 1 4 16",
+      "--move-samples",
+      "10",
+      "--jobs-samples",
+      "5",
+      "--jobs-iterations",
+      "3000000",
+      "--pi-digits",
+      "100000",
+      "--results-dir",
+      "/Volumes/S8T/tmp/paglets/priority-fixes-20261015-01/live-three-host-01",
+      "--port",
+      "7464"
+    ],
+    "source_commit": "2b19ecc85a30d8f7399d6cc75d59ba2cd6fab9d2",
+    "thermal_before": {
+      "klukas@rpi4": {
+        "unix_time": 1792037324.999652,
+        "temperature_C": 75.9,
+        "throttled": "0xf0000",
+        "live_flags": 0,
+        "load": [
+          0.81103515625,
+          0.80078125,
+          1.25927734375
+        ],
+        "cpu_kHz": {
+          "cpu3": 1800000,
+          "cpu1": 1800000,
+          "cpu2": 1800000,
+          "cpu0": 1800000
+        }
+      },
+      "uconsole": {
+        "unix_time": 1792037325.3514054,
+        "temperature_C": 36.7,
+        "throttled": "0x0",
+        "live_flags": 0,
+        "load": [
+          0.025390625,
+          0.103515625,
+          0.0986328125
+        ],
+        "cpu_kHz": {
+          "cpu3": 1600000,
+          "cpu1": 1600000,
+          "cpu2": 1600000,
+          "cpu0": 1600000
+        }
+      }
+    },
+    "thermal_after": {
+      "klukas@rpi4": {
+        "unix_time": 1792037998.7150667,
+        "temperature_C": 77.9,
+        "throttled": "0xf0000",
+        "live_flags": 0,
+        "load": [
+          2.9091796875,
+          1.19921875,
+          1.03271484375
+        ],
+        "cpu_kHz": {
+          "cpu3": 1800000,
+          "cpu1": 1800000,
+          "cpu2": 1800000,
+          "cpu0": 1800000
+        }
+      },
+      "uconsole": {
+        "unix_time": 1792037998.931606,
+        "temperature_C": 41.7,
+        "throttled": "0x0",
+        "live_flags": 0,
+        "load": [
+          1.07080078125,
+          0.5771484375,
+          0.267578125
+        ],
+        "cpu_kHz": {
+          "cpu3": 2400000,
+          "cpu1": 2400000,
+          "cpu2": 2400000,
+          "cpu0": 2400000
+        }
+      }
+    }
+  },
+  "initial_campaign_outcome": "All 480 move trials completed and were independently verified. Later Pi conversion failed and an in-flight driver edit caused a separate reporting syntax error. Only completed move samples are used from that campaign; its non-move results are superseded.",
+  "topics": {
+    "live_move": {
+      "rows": 48,
+      "sha256": "e8dd794d01e295e5e4c8857537a2f1a4c68bc2358729da7d24f8956604b0e437"
+    },
+    "live_three_host_latency": {
+      "rows": 6,
+      "sha256": "5295f056b2954b41d000c43f36adfb1812641910f2759e1c8e5aaf34c9d8f1d8"
+    },
+    "live_three_host_benchmark": {
+      "rows": 3,
+      "sha256": "2165696eb6437919dafe903f95e3b4c02b1ae6b18d313b23ba6723ec241b452d"
+    },
+    "live_three_host_jobs": {
+      "rows": 6,
+      "sha256": "c21e712fc20647d705fb444bf238520ea000f857bf604f610cfe0714f8f3d648"
+    },
+    "live_three_host_pi": {
+      "rows": 1,
+      "sha256": "f24fdb9a15a3699a71f0c470b7e437109d02344a6267c38de96436a4d57e851d"
+    },
+    "live_three_host_hosts": {
+      "rows": 3,
+      "sha256": "c478b91b4d0d16b24f03ef03097f896297c57448415b28b104e21a87f21fa366"
+    }
+  },
+  "moves": 480,
+  "groups": 48,
+  "samples_per_group": 10,
+  "raw_evidence": "cpp-three-host-20261015-evidence.json.gz",
+  "raw_sha256": "937a6d6464aab7e5b9df18b71a202b3c2492bda8eaade349ba19d8212f1e7843",
+  "checks": [
+    "all six ordered host pairs, four sizes, cold/return, ten samples",
+    "exact move/arrival counters, guest counter and memory preserved",
+    "positive activation duration in every authenticated receipt",
+    "cold cache reuse zero; 16 MB return sends two pages and reuses 256",
+    "refreshed non-move selected outcomes passed; Pi completed with driver-checked first 100 decimal digits"
+  ],
+  "limitations": [
+    "move campaign predates the AOT-job bounds correction; recorded native fingerprints are retained, movement implementation unchanged",
+    "uniform nonzero ballast compresses strongly; not a bandwidth estimate",
+    "module caches remain after first use",
+    "ACK includes return network trip; CLI confirmation separate",
+    "Pi prefix only checked, not all generated digits",
+    "job kernel timing is workload-specific; AOT compilation excluded from warm times"
+  ],
+  "final_control_moves": 12,
+  "job_modes": "Interpreter and AOT observed on every host; explicit software bounds checks for all AOT jobs."
+}

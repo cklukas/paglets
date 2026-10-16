@@ -84,7 +84,7 @@ Non-goals (for the first release):
 | Access to files and OS | Anything Python can do | Only via portable system paglets and mesh grants |
 | Paglet-to-paglet messages | Any paglet with a proxy ref can message any other | Only through endpoint capabilities; one-shot reply capabilities |
 | Finding a paglet | Proxy ref with a fixed host URL | Mesh-wide location (distributed location records, tombstones, mesh query), locate-and-pin |
-| Security administration | Shared API key per mesh, per-host configuration | Public-key cryptography only; signed, replicated mesh ledger; admins act from any host |
+| Security administration | An optional shared API key, configured per host | Public-key cryptography only; signed, replicated mesh ledger; admins act from any host |
 | Host roles | Relay hub and seed hosts are configured specially | All hosts equal; no central, hub or home host |
 | Activation cost | Process spawn + imports | Instantiate module in a running worker (cached, AOT where available) + copy image |
 | Clone | Serialize state, new ID | Copy image (page dedupe on the wire) |
@@ -150,7 +150,7 @@ empty. At that point the complete paglet state is:
 
 - the linear memory (including the C/C++ shadow stack and heap),
 - the mutable globals (including `__stack_pointer`),
-- the table contents, if the module mutates tables at runtime,
+- no table contents: the ABI forbids table mutation after initialization,
 - the module hash,
 - the host-side capability table (mobility rules in the security design, 4.6).
 
@@ -230,26 +230,29 @@ Designed in detail in
 
 ### 3.4 Execution model: worker processes
 
-- The host control process starts a pool of **worker processes**, by default
-  one per CPU core. Each worker runs WAMR and many paglet instances on its own
-  threads, so the host uses all cores and a failure in a worker cannot take
-  down the control process.
-- A paglet is placed in a worker when it is activated. Compute-heavy paglets
-  can request a dedicated worker (subject to compute-slots and quotas).
+- The host control process uses scheduler lanes, default **two**
+  (`runtime::Config::threads`, CLI `--threads`). With worker isolation each
+  lane hosts its Wasm instances in a worker process. Handlers of a paglet
+  are serialized; a worker failure cannot take down the control process.
+- Compute jobs use a separate pool and the mesh's compute-slot admission,
+  rather than a dedicated-worker request on a paglet. See
+  [the compute-job design](cpp-compute-jobs.md).
 - Workers talk to the control process over IPC: a control channel (pipe or
   Unix domain socket / named pipe on Windows) plus shared-memory rings for
   message payloads and memory images, so large images are not copied through
   sockets.
-- Host calls from a paglet (send, request, capability operations) go to the
-  control process asynchronously; the handler does not wait for them.
+- Host imports (send, request, capability operations) synchronously obtain
+  their checked result from the control process over IPC. The work a
+  message requests, and its eventual reply, are delivered asynchronously.
 - Message handling is **serial per paglet** and priority-ordered.
 - Handlers must not block. Anything that waits (service calls, remote replies,
   timers) is asynchronous: the result arrives as a later message. This matches
   the direction the Python edition already took (no polling, results via
   messages and the user-info service).
 - A trap in a paglet (out of bounds, unreachable, stack overflow) terminates
-  only that paglet. A crashing worker is restarted; its paglets resume from
-  their last checkpoint and their owners are notified.
+  only that paglet. If a worker crashes, the paglet in its failed call ends
+  as failed. Its other instances can reactivate from their last images;
+  an instance without an image fails as well.
 - CPU limits: handlers get a time budget; the worker terminates a running
   instance from another thread. Memory limits: maximum linear memory per
   paglet, plus OS limits per worker process.

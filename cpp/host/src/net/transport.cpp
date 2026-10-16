@@ -382,7 +382,8 @@ struct Transport::Impl {
             inbox.pop_front();
             const std::size_t size = in.frame.size();
             lock.unlock();
-            (void)handler(in.from, std::move(in.frame));
+            if (permitted(in.from)) (void)handler(in.from, std::move(in.frame));
+            else ++dropped;  // membership may have changed while this frame queued
             lock.lock();
             inbox_bytes -= size;
             inbox_room_cv.notify_all();
@@ -529,7 +530,15 @@ struct Transport::Impl {
 
     // A frame that arrived from `from`: transport control frames are handled
     // here, the others go to the handler.
-    std::vector<Bytes> ingest(const Identity& from, Bytes frame) {
+    std::expected<void, std::string> permitted(const Identity& peer) const {
+        return accept ? accept(peer) : std::expected<void, std::string>();
+    }
+
+    std::expected<std::vector<Bytes>, std::string> ingest(const Identity& from, Bytes frame) {
+        if (auto ok = permitted(from); !ok) {
+            ++dropped;
+            return std::unexpected(ok.error());
+        }
         if (is_control(frame)) {
             control(from, frame);
             return {};
@@ -673,7 +682,16 @@ struct Transport::Impl {
                     if (*frame) frames.push_back(std::move(**frame));
                 }
             }
-            for (auto& frame : frames) (void)ingest(peer, std::move(frame));
+            for (auto& frame : frames) {
+                if (auto ok = ingest(peer, std::move(frame)); !ok) {
+                    {
+                        std::lock_guard lock(tunnels_in_mu);
+                        tunnels_in.erase({origin, sid});
+                    }
+                    reset();
+                    return;
+                }
+            }
         }
     }
 
@@ -735,11 +753,11 @@ struct Transport::Impl {
             t->sid = random_session_id();
             tunnels_out[key] = t;
         }
-        AcceptPeer expected = [&key](const Identity& other) -> std::expected<void, std::string> {
+        AcceptPeer expected = [this, &key](const Identity& other) -> std::expected<void, std::string> {
             if (other.key != key || other.role != PeerRole::host) {
                 return std::unexpected(std::string("the tunnel's peer is not the expected host"));
             }
-            return {};
+            return permitted(other);
         };
         ChannelHandshake hs(Handshake::Role::initiator, identity, PeerRole::host, mesh_id, expected, config.max_frame,
                             own_url(), config.protocol);
@@ -787,6 +805,19 @@ struct Transport::Impl {
             delivery_failed(key, t.error());
             return true;
         }
+        // The immutable peer identity is safe to inspect outside mu. Never
+        // call the authorizer while holding a transport routing lock: node
+        // authorizers acquire their ledger lock, which also sends frames.
+        if (auto ok = permitted((*t)->channel->peer()); !ok) {
+            {
+                std::lock_guard lock(mu);
+                if (auto it = tunnels_out.find(key); it != tunnels_out.end() && it->second == *t)
+                    tunnels_out.erase(it);
+            }
+            dropped += batch.size();
+            delivery_failed(key, ok.error());
+            return true;
+        }
         std::vector<Bytes> messages;
         mesh::PublicKey relay{};
         std::string sid;
@@ -824,11 +855,11 @@ struct Transport::Impl {
         };
         while (!u.stop) {
             if (!c) {
-                AcceptPeer expected = [&u](const Identity& other) -> std::expected<void, std::string> {
+                AcceptPeer expected = [this, &u](const Identity& other) -> std::expected<void, std::string> {
                     if (other.key != u.key || other.role != PeerRole::host) {
                         return std::unexpected(std::string("the relay is not the expected host"));
                     }
-                    return {};
+                    return permitted(other);
                 };
                 auto x = connect(u.url, identity, PeerRole::host, mesh_id, expected, config, own_url());
                 if (!x) {
@@ -849,6 +880,11 @@ struct Transport::Impl {
                 u.live = true;
             }
             if (u.stop) break;
+            if (auto ok = permitted(c->server); !ok) {
+                drop();
+                pause(std::chrono::milliseconds(500));
+                continue;
+            }
             auto r = c->http->Post(std::string(path_poll) + c->session, std::string(), content_type);
             if (!r || r->status != 200) {
                 if (!u.stop) log("relay " + mesh::key_id(u.key).substr(0, 16) + ": poll failed: " + describe(r));
@@ -1015,6 +1051,12 @@ struct Transport::Impl {
             res.status = 409;
             return;
         }
+        auto refuse = [&](const std::string& why) {
+            drop(id);
+            res.status = 403;
+            res.set_content(why, "text/plain");
+        };
+        if (auto ok = permitted(session->channel->peer()); !ok) return refuse(ok.error());
         session->used = Clock::now();
         auto messages = unpack(req.body);
         if (!messages) {
@@ -1033,8 +1075,13 @@ struct Transport::Impl {
                 return;
             }
             if (!*frame) continue;
-            for (auto& a : ingest(channel.peer(), std::move(**frame))) answers.push_back(std::move(a));
+            auto reply = ingest(channel.peer(), std::move(**frame));
+            if (!reply) return refuse(reply.error());
+            for (auto& a : *reply) answers.push_back(std::move(a));
         }
+        // A long-running request, or an earlier frame in the batch, may
+        // have revoked this identity. Do not release its answers afterward.
+        if (auto ok = permitted(channel.peer()); !ok) return refuse(ok.error());
         std::vector<Bytes> sealed;
         for (const auto& a : answers) {
             for (auto& m : channel.seal(a)) sealed.push_back(std::move(m));
@@ -1057,14 +1104,34 @@ struct Transport::Impl {
             return;
         }
         const mesh::PublicKey peer = session->channel->peer().key;
+        auto refuse = [&](const std::string& why) {
+            drop(id);
+            {
+                std::lock_guard lock(mu);
+                if (auto d = downlinks.find(peer); d != downlinks.end()) {
+                    dropped += d->second->frames.size();
+                    downlinks.erase(d);
+                }
+            }
+            res.status = 403;
+            res.set_content(why, "text/plain");
+        };
+        if (auto ok = permitted(session->channel->peer()); !ok) return refuse(ok.error());
         std::vector<Bytes> frames;
+        std::shared_ptr<Downlink> d;
         {
             std::unique_lock lock(mu);
             auto& slot = downlinks[peer];
             if (!slot) slot = std::make_shared<Downlink>();
-            auto d = slot;
+            d = slot;
             d->polled = Clock::now();
             d->cv.wait_for(lock, config.poll_wait, [&] { return stopping || !d->frames.empty(); });
+        }
+        // The ledger can change during a long poll. Authorize again before
+        // draining its queue, outside mu to preserve the node/transport lock order.
+        if (auto ok = permitted(session->channel->peer()); !ok) return refuse(ok.error());
+        {
+            std::lock_guard lock(mu);
             std::size_t bytes = 0;
             while (!d->frames.empty() &&
                    (frames.empty() || bytes + d->frames.front().size() <= config.max_batch_bytes)) {
@@ -1133,17 +1200,18 @@ struct Transport::Impl {
         for (int attempt = 0; attempt < 2; ++attempt) {
             if (peer.connection && peer.connection->url != *url) peer.connection.reset();  // the peer moved
             if (!peer.connection) {
-                AcceptPeer expected = [&key](const Identity& other) -> std::expected<void, std::string> {
+                AcceptPeer expected = [this, &key](const Identity& other) -> std::expected<void, std::string> {
                     if (other.key != key || other.role != PeerRole::host) {
                         return std::unexpected(std::string("the server is not the expected host"));
                     }
-                    return {};
+                    return permitted(other);
                 };
                 auto c = connect(*url, identity, PeerRole::host, mesh_id, expected, config, own_url());
                 if (!c) return give_up(c.error());
                 ++opened;
                 peer.connection.emplace(std::move(*c));
             }
+            if (auto ok = permitted(peer.connection->server); !ok) return give_up(ok.error());
             auto answers = exchange(*peer.connection, batch);
             if (answers) {
                 sent += batch.size();
@@ -1407,6 +1475,8 @@ bool Transport::flush(std::chrono::milliseconds timeout) {
     });
 }
 
+std::size_t Transport::frame_limit() const { return impl_->config.max_frame; }
+
 std::optional<std::string> Transport::send_failure(const mesh::PublicKey& peer) const {
     std::lock_guard lock(impl_->mu);
     auto it = impl_->send_failures.find(peer);
@@ -1423,6 +1493,8 @@ TransportStats Transport::stats() const {
 
 struct ClientSession::Impl {
     Connection connection;
+    AcceptPeer accept;
+    std::string refusal;
 };
 
 ClientSession::ClientSession(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -1437,12 +1509,26 @@ std::expected<ClientSession, std::string> ClientSession::open(const std::string&
     if (!c) return std::unexpected(c.error());
     auto impl = std::make_unique<Impl>();
     impl->connection = std::move(*c);
+    impl->accept = std::move(accept);
     return ClientSession(std::move(impl));
 }
 
 std::expected<std::vector<Bytes>, std::string> ClientSession::exchange(const std::vector<Bytes>& frames) {
+    auto permitted = [&] {
+        if (!impl_->refusal.empty()) return false;
+        if (impl_->accept) {
+            if (auto ok = impl_->accept(impl_->connection.server); !ok) {
+                impl_->refusal = "server authorization refused: " + ok.error();
+                impl_->connection.channel.reset();
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!permitted()) return std::unexpected(impl_->refusal);
     auto r = net::exchange(impl_->connection, frames);
     if (!r) return std::unexpected(r.error().text);
+    if (!permitted()) return std::unexpected(impl_->refusal);
     return std::move(*r);
 }
 

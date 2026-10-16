@@ -8,9 +8,9 @@
 \input{preamble}
 
 \title{\color{pagletsBlue}\Large\bfseries Paglets: Mobile Agents as Migrating WebAssembly Instances\\[0.35em]
-  \normalsize\normalfont\color{pagletsMuted}The C++ edition: a programming model, runtime and mesh for stateful agents that move between hosts}
+  \normalsize\normalfont\color{pagletsMuted}State capture between handler calls, migration and replicated execution}
 \author{\normalsize Christian Klukas}
-\date{\normalsize October 2026 \quad\textcolor{pagletsMuted}{(draft, paglets/cpp 0.2.0)}}
+\date{\normalsize October 2026 \quad\textcolor{pagletsMuted}{(paglets/cpp 0.2.0)}}
 
 \begin{document}
 
@@ -21,68 +21,44 @@
 
 \section{Introduction}\label{sec:introduction}
 \input{chapters/01-introduction}
-
 \section{Background and Related Work}\label{sec:background}
 \input{chapters/02-background}
-
-\section{The Paglet Model}\label{sec:model}
+\section{Execution Model}\label{sec:model}
 \input{chapters/03-model}
-
-\section{Lifecycle and Events}\label{sec:lifecycle}
 \input{chapters/04-lifecycle}
-
-\section{Movement}\label{sec:movement}
+\Needspace{10\baselineskip}
+\section{Migration}\label{sec:movement}
 \input{chapters/05-movement}
-
-\section{Communication Across Moves}\label{sec:communication}
 \input{chapters/06-communication}
-
-\section{The Mesh}\label{sec:mesh}
+\section{Mesh Policies and Compute Jobs}\label{sec:mesh}
 \input{chapters/07-mesh}
-
-\section{Fault Tolerance: Zombie Paglets}\label{sec:zombies}
-\input{chapters/08-zombies}
-
-\section{Interfaces and Tools}\label{sec:tools}
 \input{chapters/09-tools}
-
+\Needspace{7\baselineskip}
+\section{Replicated Agents}\label{sec:zombies}
+\input{chapters/08-zombies}
 \section{Evaluation}\label{sec:evaluation}
 \input{chapters/10-evaluation}
-
 \section{Discussion and Limitations}\label{sec:discussion}
 \input{chapters/11-discussion}
-
 \section{Conclusion}\label{sec:conclusion}
 \input{chapters/12-conclusion}
 
 \section*{Use of generative AI}\label{sec:ai}
 \addcontentsline{toc}{section}{Use of generative AI}
-The C++ edition of \paglets{} (the runtime, the mesh, the tools, the examples,
-the tests and the documentation) and this paper were developed with
-substantial support from a generative AI assistant (Claude, Anthropic),
-used as a coding and writing agent under the direction and review of the
-author. The author set the goals, the design and the acceptance criteria,
-reviewed the results, and is responsible for the content. Code written this
-way is covered by the test suite described in Section~\ref{sec:evaluation}
-and Appendix~\ref{app:reproduce}; the excerpts and result tables in this
-paper are generated from the sources and the recorded results, and every
-technical statement was checked against the code before publication.
+The implementation and this paper were developed with support from
+Claude (Anthropic) and Codex (OpenAI) under the author's direction.
+The author is responsible for the design, technical claims and review.
+Generated excerpts and tables are checked against source files and
+recorded results. These checks detect text that no longer matches its
+source. They do not establish that models, measurements or interpretations
+are correct.
 
 \bibliographystyle{plain}
 \bibliography{references}
 
 \clearpage
 \begin{appendices}
-\section{The Paglet ABI}\label{app:abi}
-\input{chapters/appendix-a-abi}
-
-\section{Complete Example Paglets}\label{app:examples}
-\input{chapters/appendix-b-examples}
-
-\section{Lifecycle and Event Reference}\label{app:events}
-\input{chapters/appendix-c-events}
-
-\section{Reproducing the Evaluation}\label{app:reproduce}
+\section{Source Files and Reproducibility}\label{app:reproduce}
 \input{chapters/appendix-d-reproduce}
 \end{appendices}
 

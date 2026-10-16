@@ -340,6 +340,6 @@ The test checks that:
 <!-- results: explainer -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | log lines found by the Log Scout | distinct problems after grouping | lines in the largest group |
 |---|---|---|---|---|---|---|---|---|
-| gateway: Log Explainer groups what a Log Scout found and explains it on the AI host | in-process | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 7 | 3 | 4 |
-| gateway: Log Explainer groups what a Log Scout found and explains it on the AI host | worker processes | passed | 0.5 s | Darwin arm64, Release build | 2026-10-12 | 7 | 3 | 4 |
+| gateway: Log Explainer groups what a Log Scout found and explains it on the AI host | in-process | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 7 | 3 | 4 |
+| gateway: Log Explainer groups what a Log Scout found and explains it on the AI host | worker processes | passed | 0.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 7 | 3 | 4 |
 <!-- /results -->

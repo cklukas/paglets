@@ -38,6 +38,9 @@ std::vector<PublicKey> Replica::peers() const {
     for (const auto& [key, host] : ledger_.state().hosts) {
         if (key != self_) all.insert(key);
     }
+    // A bootstrap seed is trusted before enrollment, but never after its
+    // key is explicitly revoked. Revocation overrides persistent seeds.
+    for (const auto& key : ledger_.state().revoked_keys) all.erase(key);
     return {all.begin(), all.end()};
 }
 
@@ -86,7 +89,7 @@ void Replica::tick() {
 
 void Replica::receive(const PublicKey& from, std::span<const std::uint8_t> frame) {
     ++stats_.frames_received;
-    if (frame.size() > max_frame) return;
+    if (ledger_.state().revoked_keys.contains(from) || frame.size() > max_frame) return;
     auto v = decode(frame);
     if (!v || v->as_map() == nullptr) return;
     const Fields f{*v->as_map()};

@@ -8,15 +8,17 @@
 // the messages, and step(), the transition function of one replica. It is
 // pure: no ABI calls, no clock, no network. The guest SDK runs it, the
 // model checker and the simulator (paglets/verify) explore it, and the
-// `zombies` system paglet replays recorded traces through it.
+// `zombies` system paglet checks recorded role/rank/sink traces against
+// trace invariants; it does not replay complete inputs through step().
 //
 // A replica is driven by inputs (a timer fired, a message arrived, the
 // paglet worked or observed something, the sink answered, the host's
 // registry changed) and answers with outputs, which the environment carries
 // out in order. One rule binds the environment: a Persist output completes
 // (the replica's state is durable) before any later output of the same step
-// takes effect. Everything a replica sends is therefore covered by its
-// durable state.
+// takes effect. A checkpoint is stored before being advertised or adopted;
+// merged entries are stored before the reply. Beats may advertise live
+// journal vectors and membership ahead of the last durable checkpoint.
 
 #pragma once
 
@@ -156,7 +158,8 @@ struct Journal {
 // -- messages -----------------------------------------------------------------
 
 // Every message carries a term: StatusReq, Status and Takeover the sender's
-// highest known term, the others the reign of the checkpoint they describe.
+// highest known term; Beat, Ack and CheckpointMsg the checkpoint reign.
+// Entries carries term 0: journal entries merge independently of reign.
 struct Beat {  // main and delivering -> everybody
     std::uint64_t term = 0;
     Rank rank;  // of the main's latest checkpoint
@@ -253,6 +256,8 @@ struct StartWork {  // the paglet works from this state (main, not frozen)
 };
 struct StopWork {};
 struct Deliver {  // deliver the result (from the latest work and journal) to the sink
+    // The registry chooses the authoritative sink for live delivery; this
+    // replica's known number is a lower bound, not a command to use an old sink.
     std::uint64_t sink = 1;
 };
 struct Tombstone {};  // record in the host's registry that the group ended (delivered)

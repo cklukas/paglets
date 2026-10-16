@@ -66,8 +66,9 @@ reach each other the same way (each through the other's relays).
   relays (`relays`: their keys, at most 8); a new announcement goes out
   when they change. Hosts that learn it tell their transport
   (`set_relays`). The registry and `paglets-host remote hosts` show them.
-- The bootstrap contact (`--join`) is the first relay, so a newcomer
-  receives the registry through it.
+- The bootstrap contact (`--join`) supplies the initial registry and is
+  usually the first reachable relay candidate. Relay selection favours
+  recent contacts; it does not guarantee that the bootstrap contact is first.
 
 ## 5. Exit
 

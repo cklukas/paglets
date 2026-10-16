@@ -80,6 +80,7 @@ void Node::Impl::zombie_notify(const std::string& group) {
 bool Node::Impl::zombie_merge(const zb::GroupState& s) {
     if (!valid_group(s.group)) return false;
     auto& g = zombies.groups[s.group];
+    const auto previous = g.state;
     if (g.state.group.empty()) {
         g.state.group = s.group;
         g.state.sink_spec = s.sink_spec;
@@ -98,21 +99,31 @@ bool Node::Impl::zombie_merge(const zb::GroupState& s) {
     }
     if (changed) {
         zombies.dirty = true;
+        if (!save_zombies()) {
+            g.state = previous;
+            return false;  // the sender's periodic gossip will retry
+        }
         zombie_notify(s.group);
     }
     return changed;
 }
 
-void Node::Impl::zombie_end(const std::string& group, zb::Ending ending, std::string reason) {
+bool Node::Impl::zombie_end(const std::string& group, zb::Ending ending, std::string reason) {
     auto& g = zombies.groups[group];
+    const auto previous = g.state;
     if (g.state.group.empty()) g.state.group = group;
-    if (g.state.ending != zb::Ending::none) return;
+    if (g.state.ending != zb::Ending::none) return save_zombies();
     g.state.ending = ending;
     g.state.reason = std::move(reason);
     g.state.ended_ms = now_ms();
     zombies.dirty = true;
+    if (!save_zombies()) {
+        g.state = previous;
+        return false;
+    }
     zombies.next_gossip = {};  // spread at once
     zombie_notify(group);
+    return true;
 }
 
 void Node::Impl::zombies_tick() {
@@ -204,9 +215,10 @@ bool Node::Impl::on_zombies_frame(std::string_view type, const mesh::PublicKey& 
         auto name = f.str("n");
         auto data = f.bin("d");
         if (!request || !group || !sink || !name || !data || !ledger.state().is_host(from)) return true;
-        const bool accepted = zombie_accept(*group, *sink, mesh::key_id(from), *name, *data);
+        const auto accepted = zombie_accept(*group, *sink, mesh::key_id(from), *name, *data);
         send_frame(from, mesh::Map{{"t", mesh::Value("zb-accepted")}, {"r", mesh::Value(*request)},
-                                   {"a", mesh::Value(accepted)}});
+                                   {"a", mesh::Value(accepted.value_or(false))},
+                                   {"e", mesh::Value(static_cast<std::int64_t>(accepted ? abi::ok : accepted.error()))}});
         return true;
     }
     if (type == "zb-accepted") {
@@ -216,8 +228,9 @@ bool Node::Impl::on_zombies_frame(std::string_view type, const mesh::PublicKey& 
         auto it = zombies.deliveries.find(static_cast<std::uint64_t>(*request));
         if (it == zombies.deliveries.end() || mesh::key_id(from) != it->second.host) return true;
         if (zombies.ctx != nullptr) {
-            (void)zombies.ctx->reply(std::move(it->second.reply), abi::ok,
-                                     wire::to_msgpack(zb::DeliverReply{*a->as_bool(), it->second.sink, it->second.host}));
+            const auto error = static_cast<std::int32_t>(f.integer("e").value_or(abi::ok));
+            (void)zombies.ctx->reply(std::move(it->second.reply), error,
+                                     error == abi::ok ? wire::to_msgpack(zb::DeliverReply{*a->as_bool(), it->second.sink, it->second.host}) : mesh::Bytes{});
         }
         zombies.deliveries.erase(it);
         return true;
@@ -281,26 +294,28 @@ void Node::Impl::collect_zombie_traces(const std::string& group,
     }
 }
 
-bool Node::Impl::zombie_accept(const std::string& group, std::int64_t sink, const std::string& from, std::string name,
+std::expected<bool, std::int32_t> Node::Impl::zombie_accept(const std::string& group, std::int64_t sink, const std::string& from, std::string name,
                                std::vector<std::uint8_t> data) {
-    if (!valid_group(group) || data.size() > max_result_bytes) return false;
+    if (!valid_group(group) || sink < 1) return std::unexpected(abi::invalid_argument);
+    if (data.size() > max_result_bytes) return std::unexpected(abi::quota);
     auto [it, fresh] = zombies.results.try_emplace({group, sink});
     if (!fresh) return false;  // the first result counts
     it->second = zb::StoredResult{true, sink, now_ms(), from, std::move(name), std::move(data)};
-    save_zombies();  // durable before the answer
+    zombies.dirty = true;
+    if (!save_zombies()) {
+        zombies.results.erase(it);
+        return std::unexpected(abi::internal);
+    }
     return true;
 }
 
 // `host:NAME`: a host name in the ledger, or (the start of) a key ID.
-std::optional<mesh::PublicKey> Node::Impl::zombie_sink_host(const std::string& spec) const {
-    if (!spec.starts_with("host:")) return std::nullopt;
-    const std::string want = spec.substr(5);
-    if (want.empty()) return std::nullopt;
-    for (const auto& [k, h] : ledger.state().hosts) {
-        const std::string id = mesh::key_id(k);
-        if (h.name == want || id == want || (want.size() >= 8 && id.starts_with(want))) return k;
-    }
-    return std::nullopt;
+std::expected<mesh::PublicKey, std::int32_t> Node::Impl::zombie_sink_host(const std::string& spec) const {
+    if (!spec.starts_with("host:")) return std::unexpected(abi::invalid_argument);
+    const auto host = host_detail::resolve_host_address(ledger.state(), std::string_view(spec).substr(5), true);
+    if (!host) return std::unexpected(host.error() == host_detail::HostAddressError::missing
+                                        ? abi::not_found : abi::invalid_argument);
+    return *host;
 }
 
 void Node::Impl::load_zombies() {
@@ -315,6 +330,10 @@ void Node::Impl::load_zombies() {
         g.owner = std::move(s.owner);
         g.module = std::move(s.module);
         g.paglet = std::move(s.paglet);
+        if (!g.paglet.empty() && !runtime.info(g.paglet)) {
+            g.paglet.clear();
+            zombies.dirty = true;
+        }
         g.joined_ms = s.joined_ms;
         g.traces.assign(s.traces.begin(), s.traces.end());
         for (const auto& m : s.members) g.members[m.replica] = {m.paglet, m.host};
@@ -324,9 +343,11 @@ void Node::Impl::load_zombies() {
     }
 }
 
-void Node::Impl::save_zombies() {
-    zombies.dirty = false;
-    if (state_dir.empty()) return;
+bool Node::Impl::save_zombies() {
+    if (state_dir.empty()) {
+        zombies.dirty = false;
+        return true;  // explicitly in-memory embedded nodes
+    }
     StoredAll all;
     for (const auto& [id, g] : zombies.groups) {
         Stored st{g.state, g.owner, g.module, g.paglet, g.joined_ms, {g.traces.begin(), g.traces.end()}, {}};
@@ -341,10 +362,18 @@ void Node::Impl::save_zombies() {
     const auto bytes = wire::to_msgpack(all);
     const auto file = state_dir / "zombies.state";
     const auto tmp = state_dir / "zombies.state.tmp";
-    if (wasm::write_file(tmp.string(), bytes)) {
-        std::error_code ec;
-        fs::rename(tmp, file, ec);
+    if (auto written = wasm::write_file(tmp.string(), bytes); !written) {
+        warn("saving zombie registry failed: " + written.error());
+        return false;
     }
+    std::error_code ec;
+    fs::rename(tmp, file, ec);
+    if (ec) {
+        warn("saving zombie registry failed: " + ec.message());
+        return false;
+    }
+    zombies.dirty = false;
+    return true;
 }
 
 // -- the system paglet ------------------------------------------------------------------------
@@ -367,6 +396,7 @@ public:
                 node_.zombies.dirty = true;
             }
         }
+        if (node_.zombies.dirty) (void)node_.save_zombies();
     }
 
     services::Result<zb::JoinReply> join(const zb::JoinRequest& q, services::Operation& op) {
@@ -428,8 +458,19 @@ public:
         std::lock_guard lock(node_.mu);
         auto it = node_.zombies.groups.find(q.group);
         if (it == node_.zombies.groups.end() || it->second.paglet != caller->id) return std::unexpected(abi::denied);
-        node_.zombie_end(q.group, zb::Ending::delivered, "the result was delivered");
-        node_.save_zombies();  // durable before the replica ends
+        if (!node_.zombie_end(q.group, zb::Ending::delivered, "the result was delivered"))
+            return std::unexpected(abi::internal);
+        return it->second.state;
+    }
+
+    services::Result<zb::GroupState> failed(const zb::FailedRequest& q, services::Operation& op) {
+        const auto* caller = replica(op);
+        if (caller == nullptr) return std::unexpected(abi::denied);
+        std::lock_guard lock(node_.mu);
+        auto it = node_.zombies.groups.find(q.group);
+        if (it == node_.zombies.groups.end() || it->second.paglet != caller->id) return std::unexpected(abi::denied);
+        if (!node_.zombie_end(q.group, zb::Ending::failed, q.reason.empty() ? "result permanently refused" : q.reason))
+            return std::unexpected(abi::internal);
         return it->second.state;
     }
 
@@ -445,8 +486,8 @@ public:
         auto it = node_.zombies.groups.find(q.group);
         if (it == node_.zombies.groups.end()) return std::unexpected(abi::not_found);
         if (!owns(op, it->second)) return std::unexpected(abi::denied);
-        node_.zombie_end(q.group, zb::Ending::cancelled, q.reason.empty() ? "cancelled by its owner" : q.reason);
-        node_.save_zombies();
+        if (!node_.zombie_end(q.group, zb::Ending::cancelled, q.reason.empty() ? "cancelled by its owner" : q.reason))
+            return std::unexpected(abi::internal);
         return it->second.state;
     }
 
@@ -458,7 +499,7 @@ public:
         zb::GroupState s = it->second.state;
         s.sink += 1;
         s.sink_spec = q.sink_spec;
-        node_.zombie_merge(s);
+        if (!node_.zombie_merge(s)) return std::unexpected(abi::internal);
         node_.zombies.next_gossip = {};
         node_.save_zombies();
         return it->second.state;
@@ -484,17 +525,22 @@ public:
     services::Result<zb::DeliverReply> deliver(const zb::DeliverRequest& q, services::Operation& op) {
         const auto* caller = replica(op);
         if (caller == nullptr) return std::unexpected(abi::denied);
-        if (q.result.size() > max_result_bytes) return std::unexpected(abi::quota);
         std::lock_guard lock(node_.mu);
         auto it = node_.zombies.groups.find(q.group);
         if (it == node_.zombies.groups.end() || it->second.paglet != caller->id) return std::unexpected(abi::denied);
+        if (q.result.size() > max_result_bytes) {
+            if (!node_.zombie_end(q.group, zb::Ending::failed, "result permanently refused: quota"))
+                return std::unexpected(abi::internal);
+            return std::unexpected(abi::quota);
+        }
         const zb::GroupState& s = it->second.state;
         auto host = node_.zombie_sink_host(s.sink_spec);
-        if (!host) return std::unexpected(abi::not_found);
+        if (!host) return std::unexpected(host.error());
         const std::string here = mesh::key_id(node_.key.public_key());
         if (*host == node_.key.public_key()) {
-            const bool accepted = node_.zombie_accept(q.group, s.sink, here, q.name, q.result);
-            return zb::DeliverReply{accepted, s.sink, here};
+            const auto accepted = node_.zombie_accept(q.group, s.sink, here, q.name, q.result);
+            if (!accepted) return std::unexpected(accepted.error());
+            return zb::DeliverReply{*accepted, s.sink, here};
         }
         auto reply = op.call.defer();
         if (!reply) return std::unexpected(abi::internal);
@@ -583,8 +629,8 @@ std::expected<zb::GroupState, std::string> Node::zombie_cancel(const std::string
     auto it = impl_->zombies.groups.find(group);
     if (it == impl_->zombies.groups.end()) return std::unexpected("no group " + group + " on this host");
     if (!owner.empty() && it->second.owner != owner) return std::unexpected(std::string("not the group's owner"));
-    impl_->zombie_end(group, zb::Ending::cancelled, reason.empty() ? "cancelled by its owner" : reason);
-    impl_->save_zombies();
+    if (!impl_->zombie_end(group, zb::Ending::cancelled, reason.empty() ? "cancelled by its owner" : reason))
+        return std::unexpected(std::string("could not persist the zombie ending"));
     return it->second.state;
 }
 
@@ -597,7 +643,7 @@ std::expected<zb::GroupState, std::string> Node::zombie_redirect(const std::stri
     zb::GroupState s = it->second.state;
     s.sink += 1;
     s.sink_spec = sink_spec;
-    impl_->zombie_merge(s);
+    if (!impl_->zombie_merge(s)) return std::unexpected(std::string("could not persist the zombie redirect"));
     impl_->zombies.next_gossip = {};
     impl_->save_zombies();
     return it->second.state;

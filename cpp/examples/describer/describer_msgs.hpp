@@ -33,7 +33,7 @@ struct Start {
     Output output;
     std::string model;  // empty: the AI host's default
     std::int64_t max_images = 50;
-    // The images travel in the paglet's memory (at most 16 MB), and each
+    // The images travel in the paglet's memory (default ceiling 256 MB), and each
     // goes to the `ai` system paglet in one request (by default at most
     // 256 KB of input).
     std::int64_t max_image_bytes = 256 * 1024;

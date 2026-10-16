@@ -4,6 +4,7 @@
 #include "sandbox.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
@@ -24,6 +25,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+#include <thread>
 
 namespace paglets::runtime {
 
@@ -35,97 +37,36 @@ constexpr std::uint32_t audit_arch = AUDIT_ARCH_X86_64;
 constexpr std::uint32_t audit_arch = AUDIT_ARCH_AARCH64;
 #endif
 
-// System calls a worker never needs once it runs.
-constexpr long denied[] = {
-    SYS_execve,
-    SYS_execveat,
-#ifdef SYS_fork
-    SYS_fork,
+// After startup a worker only needs memory, threads, clocks and IPC over
+// inherited descriptors. New kernel interfaces are denied automatically.
+constexpr long allowed[] = {
+    SYS_read, SYS_write, SYS_readv, SYS_writev, SYS_close,
+    SYS_recvfrom, SYS_sendto, SYS_recvmsg, SYS_sendmsg, SYS_shutdown,
+    SYS_fstat, SYS_lseek,
+    SYS_mmap, SYS_munmap, SYS_mprotect, SYS_mremap, SYS_madvise, SYS_brk,
+    SYS_rt_sigaction, SYS_rt_sigprocmask, SYS_rt_sigreturn, SYS_sigaltstack,
+    SYS_futex, SYS_set_robust_list, SYS_set_tid_address,
+    SYS_clock_gettime, SYS_clock_getres, SYS_clock_nanosleep, SYS_nanosleep,
+    SYS_gettimeofday, SYS_getrandom, SYS_getpid, SYS_gettid,
+    SYS_sched_yield, SYS_sched_getaffinity, SYS_getrusage,
+    SYS_ppoll, SYS_pselect6, SYS_restart_syscall, SYS_exit, SYS_exit_group,
+#ifdef SYS_poll
+    SYS_poll,
 #endif
-#ifdef SYS_vfork
-    SYS_vfork,
+#ifdef SYS_select
+    SYS_select,
 #endif
-#ifdef SYS_open
-    SYS_open,
+#ifdef SYS_getrlimit
+    SYS_getrlimit,
 #endif
-#ifdef SYS_creat
-    SYS_creat,
+#ifdef SYS_rseq
+    SYS_rseq,
 #endif
-    SYS_openat,
-#ifdef SYS_openat2
-    SYS_openat2,
+#ifdef SYS_futex_waitv
+    SYS_futex_waitv,
 #endif
-#ifdef SYS_open_by_handle_at
-    SYS_open_by_handle_at,
-#endif
-#ifdef SYS_unlink
-    SYS_unlink,
-#endif
-    SYS_unlinkat,
-#ifdef SYS_rename
-    SYS_rename,
-#endif
-    SYS_renameat,
-#ifdef SYS_renameat2
-    SYS_renameat2,
-#endif
-#ifdef SYS_mkdir
-    SYS_mkdir,
-#endif
-    SYS_mkdirat,
-#ifdef SYS_rmdir
-    SYS_rmdir,
-#endif
-#ifdef SYS_link
-    SYS_link,
-#endif
-    SYS_linkat,
-#ifdef SYS_symlink
-    SYS_symlink,
-#endif
-    SYS_symlinkat,
-#ifdef SYS_chmod
-    SYS_chmod,
-#endif
-    SYS_fchmodat,
-#ifdef SYS_chown
-    SYS_chown,
-#endif
-    SYS_fchownat,
-    SYS_truncate,
-    SYS_socket,
-    SYS_connect,
-    SYS_bind,
-    SYS_listen,
-    SYS_accept,
-    SYS_accept4,
-    SYS_ptrace,
-    SYS_process_vm_readv,
-    SYS_process_vm_writev,
-    SYS_mount,
-    SYS_umount2,
-    SYS_pivot_root,
-    SYS_chroot,
-    SYS_setuid,
-    SYS_setgid,
-    SYS_setreuid,
-    SYS_setregid,
-    SYS_setresuid,
-    SYS_setresgid,
-    SYS_keyctl,
-    SYS_add_key,
-    SYS_request_key,
-    SYS_bpf,
-    SYS_perf_event_open,
-    SYS_init_module,
-    SYS_finit_module,
-    SYS_delete_module,
-    SYS_reboot,
-    SYS_kexec_load,
-    SYS_unshare,
-    SYS_setns,
-#ifdef SYS_userfaultfd
-    SYS_userfaultfd,
+#ifdef SYS_arch_prctl
+    SYS_arch_prctl,
 #endif
 };
 
@@ -149,24 +90,61 @@ std::vector<sock_filter> build_filter() {
     jump(BPF_JMP | BPF_JGE | BPF_K, 0x40000000u, 0, 1);
     stmt(BPF_RET | BPF_K, errno_result(EPERM));
 #endif
-    for (long nr : denied) {
+    for (long nr : allowed) {
         jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<std::uint32_t>(nr), 0, 1);
-        stmt(BPF_RET | BPF_K, errno_result(EPERM));
+        stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     }
+    // Descriptor flags/duplication are local; ownership and asynchronous
+    // signal commands (F_SETOWN/F_SETSIG) are unnecessary authority.
+    jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_fcntl, 0, 14);
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[1]));
+    for (int command : {F_GETFD, F_SETFD, F_GETFL, F_SETFL, F_DUPFD, F_DUPFD_CLOEXEC}) {
+        jump(BPF_JMP | BPF_JEQ | BPF_K, command, 0, 1);
+        stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    }
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    // Signals are needed to stop WAMR threads, but only within this worker.
+    jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_tgkill, 0, 4);
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[0]));
+    jump(BPF_JMP | BPF_JEQ | BPF_K, static_cast<std::uint32_t>(::getpid()), 1, 0);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+#ifdef SYS_prlimit64
+    // C library stack discovery may query this process's limits. It cannot
+    // change limits or inspect another process through this exception.
+    jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_prlimit64, 0, 10);
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[0]));
+    jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[2]));
+    jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[2]) + 4);
+    jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+#endif
     // clone3 passes its flags in memory, which a filter cannot read: ENOSYS
     // makes the C library fall back to clone.
 #ifdef SYS_clone3
     jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone3, 0, 1);
     stmt(BPF_RET | BPF_K, errno_result(ENOSYS));
 #endif
-    // clone is allowed for threads only (CLONE_THREAD in the flags, the
-    // first argument on both architectures).
-    jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 4);
+    // Accept only the flags used for pthreads, with CLONE_THREAD mandatory.
+    // Both supported architectures pass flags as the first argument.
+    constexpr std::uint32_t thread_flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+        CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID;
+    jump(BPF_JMP | BPF_JEQ | BPF_K, SYS_clone, 0, 9);
+    stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[0]) + 4);
+    jump(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 0);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
     stmt(BPF_LD | BPF_W | BPF_ABS, offsetof(seccomp_data, args[0]));
     jump(BPF_JMP | BPF_JSET | BPF_K, CLONE_THREAD, 1, 0);
     stmt(BPF_RET | BPF_K, errno_result(EPERM));
+    jump(BPF_JMP | BPF_JSET | BPF_K, ~thread_flags, 0, 1);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
     stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
-    stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    stmt(BPF_RET | BPF_K, errno_result(EPERM));
     return f;
 }
 
@@ -203,6 +181,19 @@ std::expected<void, std::string> check_sandbox() {
     if (::execve("/bin/true", argv, nullptr) == 0 || errno != EPERM) {
         return std::unexpected(std::string("execve is allowed"));
     }
+    // These were outside the old deny list. Neither a harmless unlisted
+    // syscall nor a new asynchronous I/O interface bypasses the allow list.
+    if (::syscall(SYS_getsid, 0) != -1 || errno != EPERM)
+        return std::unexpected(std::string("an unlisted system call is allowed"));
+#ifdef SYS_io_uring_setup
+    if (::syscall(SYS_io_uring_setup, 1, nullptr) != -1 || errno != EPERM)
+        return std::unexpected(std::string("io_uring_setup is allowed"));
+#endif
+    bool thread_ran = false;
+    std::thread thread([&] { thread_ran = true; });
+    thread.join();
+    if (!thread_ran) return std::unexpected(std::string("worker threads are not allowed"));
+
     return {};
 }
 
@@ -257,7 +248,12 @@ std::expected<void, std::string> check_sandbox() {
         ::close(fd);
         return std::unexpected(std::string("reading files is allowed"));
     }
-    const std::string path = "/tmp/paglets-sandbox-check-" + std::to_string(::getpid());
+    const char* temporary = std::getenv("TMPDIR");
+    if (temporary == nullptr || *temporary == '\0')
+        return std::unexpected(std::string("TMPDIR is required for the sandbox file-creation probe"));
+    std::string path(temporary);
+    if (path.back() != '/') path += '/';
+    path += "paglets-sandbox-check-" + std::to_string(::getpid());
     if (int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600); fd >= 0) {
         ::close(fd);
         ::unlink(path.c_str());
@@ -293,7 +289,10 @@ std::expected<void, std::string> check_sandbox() {
 
 #elif defined(_WIN32)
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include "windows_sandbox.hpp"
 
 #include <vector>
 
@@ -315,31 +314,42 @@ std::vector<std::uint8_t> token_information(HANDLE token, TOKEN_INFORMATION_CLAS
 
 }  // namespace
 
-// The host starts workers in a job object that ends them with the host;
-// here the worker adds its own job (no processes, no UI) and restricts its
-// token: every privilege removed, integrity level Low (no writes to
-// ordinary files, registry keys or processes of the user). Network access
-// is not restricted on Windows yet (that needs an AppContainer).
+// The host assigns the job before resuming the worker. Windows forbids
+// nesting another job with UI restrictions, so verify and reuse those limits.
+// The host also supplies a distinct LPAC identity without network capabilities.
 std::expected<void, std::string> sandbox_worker() {
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job == nullptr) return std::unexpected(last_error("CreateJobObject"));
+    HANDLE identity = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &identity)) return std::unexpected(last_error("OpenProcessToken"));
+    auto verified = ipc::verify_windows_identity(identity);
+    CloseHandle(identity);
+    if (!verified) return verified;
+    constexpr DWORD required_limits = JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    constexpr DWORD required_ui = JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+        JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_GLOBALATOMS | JOB_OBJECT_UILIMIT_HANDLES |
+        JOB_OBJECT_UILIMIT_READCLIPBOARD | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
     JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
-    ui.UIRestrictionsClass = JOB_OBJECT_UILIMIT_DESKTOP | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-                             JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_GLOBALATOMS |
-                             JOB_OBJECT_UILIMIT_HANDLES | JOB_OBJECT_UILIMIT_READCLIPBOARD |
-                             JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) ||
-        !SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof ui) ||
-        !AssignProcessToJobObject(job, GetCurrentProcess())) {
-        const std::string error = last_error("job object");
-        CloseHandle(job);
-        return std::unexpected(error);
+    const bool restricted =
+        QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation, &limits, sizeof limits, nullptr) &&
+        QueryInformationJobObject(nullptr, JobObjectBasicUIRestrictions, &ui, sizeof ui, nullptr) &&
+        (limits.BasicLimitInformation.LimitFlags & required_limits) == required_limits &&
+        limits.BasicLimitInformation.ActiveProcessLimit == 1 && (ui.UIRestrictionsClass & required_ui) == required_ui;
+    if (!restricted) {
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (job == nullptr) return std::unexpected(last_error("CreateJobObject"));
+        limits = {};
+        limits.BasicLimitInformation.LimitFlags = required_limits;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        ui.UIRestrictionsClass = required_ui;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof limits) ||
+            !SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof ui) ||
+            !AssignProcessToJobObject(job, GetCurrentProcess())) {
+            const std::string error = last_error("job object");
+            CloseHandle(job);
+            return std::unexpected(error);
+        }
+        // The job stays with the process; its handle is intentionally kept open.
     }
-    // The job stays with the process; its handle is intentionally kept open.
 
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &token)) {
@@ -374,14 +384,52 @@ std::expected<void, std::string> sandbox_worker() {
     return {};
 }
 
+std::expected<void, std::string> check_windows_network() {
+    WSADATA winsock{};
+    if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0)
+        return std::unexpected(std::string("Winsock could not initialize for its denial probe"));
+    struct CleanupWinsock { ~CleanupWinsock() { WSACleanup(); } } cleanup_winsock;
+    for (int family : {AF_INET, AF_INET6}) for (bool loopback : {true, false}) {
+        SOCKET socket = ::socket(family, SOCK_STREAM, IPPROTO_TCP);
+        if (socket == INVALID_SOCKET) {
+            const int e = WSAGetLastError();
+            if (e == WSAEACCES) continue;
+            return std::unexpected(std::string("socket failed for a reason other than access denial: ") + std::to_string(e));
+        }
+        u_long nonblocking = 1;
+        if (ioctlsocket(socket, FIONBIO, &nonblocking) != 0) { closesocket(socket); return std::unexpected(std::string("nonblocking socket probe failed")); }
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(9);
+        address.sin_addr.s_addr = htonl(loopback ? INADDR_LOOPBACK : 0xc0000201);  // 192.0.2.1 (TEST-NET)
+        sockaddr_in6 address6{};
+        address6.sin6_family = AF_INET6;
+        address6.sin6_port = htons(9);
+        if (loopback) address6.sin6_addr.s6_addr[15] = 1;
+        else { address6.sin6_addr.s6_addr[0] = 0x20; address6.sin6_addr.s6_addr[1] = 1;
+               address6.sin6_addr.s6_addr[2] = 0x0d; address6.sin6_addr.s6_addr[3] = 0xb8;
+               address6.sin6_addr.s6_addr[15] = 1; }  // 2001:db8::1 (documentation)
+        const auto rc = family == AF_INET
+            ? connect(socket, reinterpret_cast<sockaddr*>(&address), sizeof address)
+            : connect(socket, reinterpret_cast<sockaddr*>(&address6), sizeof address6);
+        const auto e = WSAGetLastError();
+        closesocket(socket);
+        if (rc == 0 || e != WSAEACCES) return std::unexpected(std::string("network connections are not denied"));
+    }
+
+    return {};
+}
+
 std::expected<void, std::string> check_sandbox() {
     HANDLE token = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
         return std::unexpected(last_error("OpenProcessToken"));
     }
+    auto identity = ipc::verify_windows_identity(token);
     const auto privileges = token_information(token, TokenPrivileges);
     const auto label = token_information(token, TokenIntegrityLevel);
     CloseHandle(token);
+    if (!identity) return identity;
     if (!privileges.empty() && reinterpret_cast<const TOKEN_PRIVILEGES*>(privileges.data())->PrivilegeCount > 0) {
         return std::unexpected(std::string("the token still has privileges"));
     }
@@ -390,17 +438,10 @@ std::expected<void, std::string> check_sandbox() {
     const DWORD rid = *GetSidSubAuthority(l->Label.Sid, *GetSidSubAuthorityCount(l->Label.Sid) - 1);
     if (rid > SECURITY_MANDATORY_LOW_RID) return std::unexpected(std::string("integrity level is above Low"));
 
-    wchar_t temp[MAX_PATH + 1];
-    const DWORD n = GetTempPathW(MAX_PATH, temp);
-    if (n > 0) {
-        const std::wstring path =
-            std::wstring(temp, n) + L"paglets-sandbox-check-" + std::to_wstring(GetCurrentProcessId());
-        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-        if (f != INVALID_HANDLE_VALUE) {
-            CloseHandle(f);
-            return std::unexpected(std::string("creating files in the user's temporary directory is allowed"));
-        }
-    }
+    // Network denial was checked with the stronger launch token. Removing
+    // SeChangeNotifyPrivilege can prevent Winsock from reopening its provider,
+    // which is not a useful test of network capability enforcement.
+
     STARTUPINFOW si{};
     si.cb = sizeof si;
     PROCESS_INFORMATION pi{};

@@ -3,8 +3,8 @@
 
 # The paper on the C++ edition. Code excerpts and result tables in the .tex
 # files are kept current by paglets-docs-sync (see ../../AGENTS.md); the
-# figures are drawn by gnuplot from data that figures/data.sh extracts from
-# ../../docs/results/*.json.
+# current diagrams are drawn by TikZ. Historical gnuplot recipes and their
+# data extractor remain available, but are not inputs of this paper.
 
 TEX = paglets-cpp.tex
 PDF = build/paglets-cpp.pdf
@@ -13,11 +13,11 @@ GNUPLOTS = $(wildcard figures/*.gnuplot)
 FIGURES = $(patsubst figures/%.gnuplot,build/figures/%.pdf,$(GNUPLOTS))
 RESULTS = $(wildcard ../../docs/results/*.json)
 
-.PHONY: all clean distclean open sync check
+.PHONY: all clean distclean open sync check check-data site
 
 all: $(PDF)
 
-$(PDF): $(TEX) $(CHAPTERS) references.bib $(FIGURES)
+$(PDF): $(TEX) preamble.tex $(CHAPTERS) references.bib
 	latexmk -pdf -interaction=nonstopmode -halt-on-error -outdir=build $(TEX)
 
 build/data.stamp: figures/data.sh $(RESULTS)
@@ -36,6 +36,18 @@ sync:
 	$(PAGLETS_BUILD)/tools/docs_sync/paglets-docs-sync --root ../..
 check:
 	$(PAGLETS_BUILD)/tools/docs_sync/paglets-docs-sync --root ../.. --check
+
+# Supply an explicit disposable workspace (on Mac, below the mounted temp volume).
+check-data:
+	@test -n "$(TEST_WORK)" || { echo "set TEST_WORK to a disposable directory" >&2; exit 2; }
+	sh tools/test-figure-data.sh figures/data.sh "$(TEST_WORK)"
+
+# A small site with the PDF, for the review copy on the ck-git Pages
+# server (rpi4): build/site/index.html and the PDF.
+site: $(PDF)
+	mkdir -p build/site
+	cp $(PDF) build/site/paglets-cpp.pdf
+	sh tools/site-index.sh $(PDF) > build/site/index.html
 
 open: $(PDF)
 	open $(PDF)

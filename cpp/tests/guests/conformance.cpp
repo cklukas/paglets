@@ -9,6 +9,7 @@
 #include "conformance_cmd.hpp"
 
 #include <paglets/paglet.hpp>
+#include <paglets/async.hpp>
 
 #include <cstdio>
 
@@ -21,6 +22,8 @@ __attribute__((import_module("paglets"), import_name("send"))) std::int32_t raw_
 __attribute__((import_module("paglets"), import_name("request"))) std::int64_t raw_request(std::int32_t, const void*,
                                                                                            std::uint32_t);
 __attribute__((import_module("paglets"), import_name("self_info"))) std::int32_t raw_self_info(void*, std::uint32_t);
+__attribute__((import_module("paglets"), import_name("job_submit"))) std::int64_t raw_job_submit(const void*, std::uint32_t);
+__attribute__((import_module("paglets"), import_name("reply"))) std::int32_t raw_reply(std::int32_t, const void*, std::uint32_t);
 }
 
 namespace {
@@ -47,25 +50,84 @@ std::int32_t code_of(const paglets::Result<void>& r) {
     return r ? 0 : r.error();
 }
 
+void clone_wait(paglets::compute::JobContext& job) {
+    while (!job.cancelled()) {}
+}
+PAGLETS_JOB(clone_wait)
+
+void move_echo(paglets::compute::JobContext& job) {
+    if (auto input = job.input()) (void)job.write(*input);
+}
+PAGLETS_JOB(move_echo)
+
 class Conformance : public paglets::Paglet {
 public:
     Conformance() {
         auto& r = router();
+        r.on("invalid_reply", [](Message& m) {
+            std::vector<std::int32_t> results;
+            for (const auto name : {"paglets.spoof", ""}) {
+                abi::OutMessage out;
+                out.name = name;
+                auto doc = abi::encode(out);
+                results.push_back(raw_reply(m.reply_handle(), doc.data(), doc.size()));
+            }
+            abi::OutMessage out;
+            out.name = "answer";
+            out.priority = abi::max_priority + 1;
+            auto doc = abi::encode(out);
+            results.push_back(raw_reply(m.reply_handle(), doc.data(), doc.size()));
+            m.reply(results);  // the rejected replies did not consume this handle
+        });
         r.otherwise([this](Message& m) -> std::int32_t {
             note("msg:" + m.name());
             return abi::not_handled;
         });
+        r.on<Cmd>("watch_cleanup", [this](const Cmd& c, Message& m) {
+            if (c.code == 0) {
+                auto guard = std::make_shared<Cleanup>(&released_[0]);
+                auto q = paglets::self().request_raw("defer", {}, [this, guard](Message&) { ++resumed_[0]; });
+                (void)m.reply(q ? 0 : q.error());
+            } else {
+                wait_cleanup(c.code);
+                (void)m.reply();
+            }
+        });
+        r.on("cleanup_counts", [this](Message& m) {
+            (void)m.reply(std::vector<std::int64_t>{released_[0], released_[1], released_[2],
+                                                  resumed_[0], resumed_[1], resumed_[2]});
+        });
+        r.on("sender_now", [](Message& m) { m.reply(m.sender().value_or(abi::SenderRecord{})); });
+        r.on("remember_sender", [this](Message& m) { remembered_sender_ = m.sender().value_or(abi::SenderRecord{}); });
+        r.on("stored_sender", [this](Message& m) { m.reply(remembered_sender_); });
         r.on("echo", [this](Message& m) {
             note("msg:echo");
             m.reply_raw(paglets::Bytes(m.payload().begin(), m.payload().end()));
         });
         r.on("journal", [this](Message& m) { m.reply(journal_); });
-        // Memory that stays the same (Cmd.ms bytes of a fixed pattern): moves
-        // then have pages to reuse.
+        r.on<Cmd>("end_hook", [this](const Cmd& c, Message& m) {
+            hook_ = c;
+            m.reply();
+        });
+        // Stable memory: the default repeating pattern exercises page reuse;
+        // code=1 uses deterministic noise to exercise multi-frame transfers.
         r.on<Cmd>("ballast", [this](const Cmd& c, Message& m) {
             ballast_.assign(static_cast<std::size_t>(c.ms), 0);
-            for (std::size_t i = 0; i < ballast_.size(); ++i) ballast_[i] = static_cast<std::uint8_t>(i * 131 + 7);
+            std::uint32_t random = 0x9e3779b9;
+            for (std::size_t i = 0; i < ballast_.size(); ++i) {
+                if (c.code == 1) {
+                    random ^= random << 13;
+                    random ^= random >> 17;
+                    random ^= random << 5;
+                    ballast_[i] = static_cast<std::uint8_t>(random >> 24);
+                } else ballast_[i] = static_cast<std::uint8_t>(i * 131 + 7);
+            }
             m.reply(static_cast<std::int64_t>(ballast_.size()));
+        });
+        r.on("ballast_digest", [this](Message& m) {
+            std::uint32_t hash = 2166136261u;
+            for (auto byte : ballast_) hash = (hash ^ byte) * 16777619u;
+            m.reply(static_cast<std::int64_t>(hash));
         });
         r.on("hops", [this](Message& m) { m.reply(hops_); });
         r.on("count", [this](Message& m) {
@@ -93,6 +155,59 @@ public:
             note("caps:" + std::to_string(handles.size()));
             m.reply(handles);
         });
+        r.on("take_badged", [this](Message& m) {
+            for (std::size_t i = 0; i < m.cap_count(); ++i) (void)m.take_cap(i);
+            const auto badge = m.badge().value_or("");
+            note("badged:" + badge);
+            if (m.reply_handle() > 0) m.reply_raw(paglets::Bytes(badge.begin(), badge.end()));
+        });
+        r.on<Cmd>("reply_self_transfer", [this](const Cmd& c, Message& m) {
+            abi::OutMessage out;
+            out.name = "reply";
+            out.caps = {m.reply_handle()};
+            out.async = c.async;
+            const auto doc = abi::encode(out);
+            const auto result = raw_reply(m.reply_handle(), doc.data(), doc.size());
+            note("reply-self-transfer:" + std::to_string(result));
+            if (!c.async) m.reply(result);
+        });
+        r.on("echo_with_self", [](Message& m) {
+            m.reply_raw(paglets::Bytes(m.payload().begin(), m.payload().end()), {paglets::self()});
+        });
+        r.on<Cmd>("pause_request_then_move", [this](const Cmd& c, Message& m) {
+            const auto request = Endpoint(c.handle).request_raw(c.code ? "defer" : "echo_with_self", c.payload, [this](Message& reply) {
+                const auto count = reply.cap_count();
+                note("moved-reply:" + std::string(abi::error_name(reply.status())) + ":" +
+                     std::string(reply.payload().begin(), reply.payload().end()) + ":" + std::to_string(count));
+                for (std::size_t i = 0; i < count; ++i) {
+                    auto cap = reply.take_cap(i);
+                    auto info = cap.inspect();
+                    if (info) note("moved-cap:" + info->target);
+                }
+            }, {.timeout_ms = c.code ? 20 : abi::default_timeout_ms});
+            if (!request) { m.reply(request.error()); return; }
+            const auto until = paglets::now_ns(abi::Clock::monotonic) + c.ms * 1'000'000;
+            while (paglets::now_ns(abi::Clock::monotonic) < until) {}
+            m.reply(code_of(paglets::dispatch(c.name)));
+        });
+        r.on<Cmd>("pause_job_then_move", [this](const Cmd& c, Message& m) {
+            auto job = paglets::compute::submit_raw("move_echo", c.payload,
+                [this](paglets::Result<paglets::compute::Output> output, Message&) {
+                    note(output ? "moved-job:" + std::string(output->data.begin(), output->data.end())
+                                : "moved-job-error:" + std::string(abi::error_name(output.error())));
+                });
+            if (!job) { m.reply(job.error()); return; }
+            const auto until = paglets::now_ns(abi::Clock::monotonic) + c.ms * 1'000'000;
+            while (paglets::now_ns(abi::Clock::monotonic) < until) {}
+            m.reply(code_of(paglets::dispatch(c.name)));
+        });
+        r.on<Cmd>("pause_timer_then_move", [](const Cmd& c, Message& m) {
+            const auto timer = paglets::after_raw(0, "timer-case-queued", {});
+            if (!timer) { m.reply(timer.error()); return; }
+            const auto until = paglets::now_ns(abi::Clock::monotonic) + c.ms * 1'000'000;
+            while (paglets::now_ns(abi::Clock::monotonic) < until) {}
+            m.reply(code_of(paglets::dispatch(c.name)));
+        });
         r.on<Cmd>("inspect", [](const Cmd& c, Message& m) -> std::int32_t {
             auto info = Capability(c.handle).inspect();
             if (!info) return info.error();
@@ -117,6 +232,25 @@ public:
             options.lend = lent_of(c);
             options.async = c.async;
             m.reply(code_of(Endpoint(c.handle).send_raw(c.name, c.payload, std::move(options))));
+        });
+        // Queue a self-directed operation before dispatch in the same handler.
+        r.on<Cmd>("self_queue_then_move", [this](const Cmd& c, Message& m) {
+            if (c.code == 1) {
+                paglets::RequestOptions options;
+                options.caps = caps_of(c);
+                if (c.ms > 0) options.timeout_ms = c.ms;
+                const auto request = paglets::self().request_raw("held-self", {}, [this](Message& reply) {
+                    note("self-failure:" + std::string(abi::error_name(reply.status())));
+                }, std::move(options));
+                if (!request) { m.reply(request.error()); return; }
+            } else {
+                paglets::SendOptions options;
+                options.async = true;
+                options.caps = caps_of(c);
+                const auto sent = paglets::self().send_raw("held-self", {}, std::move(options));
+                if (!sent) { m.reply(code_of(sent)); return; }
+            }
+            m.reply(code_of(paglets::dispatch(c.name)));
         });
         // Requests cannot be asynchronous; the SDK has no option for it.
         r.on<Cmd>("async_request", [](const Cmd& c, Message& m) {
@@ -258,9 +392,12 @@ public:
     }
     void on_cloned(paglets::Started& s) override { note("event:cloned:" + std::string(s.args.begin(), s.args.end())); }
     void on_activated() override { note("event:activated"); }
-    void on_deactivating() override { note("event:deactivating"); }
-    void on_disposing() override { paglets::log("conformance paglet disposing"); }
-    void on_dispatching(const abi::DispatchingEvent& e) override { note("event:dispatching:" + e.destination); }
+    void on_deactivating() override { note("event:deactivating"); end_hook("deactivate"); }
+    void on_disposing() override { paglets::log("conformance paglet disposing"); end_hook("dispose"); }
+    void on_dispatching(const abi::DispatchingEvent& e) override {
+        note("event:dispatching:" + e.destination);
+        end_hook("dispatch");
+    }
     void on_arrived(const abi::ArrivedEvent& e) override {
         if (roam_ms_ > 0) {
             ++hops_;
@@ -285,6 +422,10 @@ public:
     }
 
     std::int32_t on_message(Message& m) override {
+        if (m.name().starts_with("timer-case-") && m.kind() != abi::MessageKind::timer) {
+            note("wrong-timer-kind:" + m.name());
+            return abi::handled;
+        }
         if (m.kind() == abi::MessageKind::timer) {
             if (m.name() == "roam-tick") {
                 if (roam_ms_ <= 0) return abi::handled;
@@ -296,6 +437,7 @@ public:
                 }
                 return abi::handled;
             }
+            if (m.name() == "unhandled_timer") return abi::not_handled;
             note("timer:" + m.name());
             return abi::handled;
         }
@@ -303,15 +445,62 @@ public:
     }
 
 private:
+    abi::SenderRecord remembered_sender_;
+    void end_hook(std::string_view name) {
+        if (hook_.name != name) return;
+        const std::string prefix = "end-hook:" + std::string(name) + ":";
+        paglets::log(prefix + "entered");
+        if (hook_.code == 1) __builtin_trap();
+        if (hook_.code == 2) {
+            volatile std::uint64_t n = 0;
+            for (;;) n = n + 1;
+        }
+        if (hook_.code == 3) {
+            auto report = [&](std::string_view operation, std::int32_t result) {
+                paglets::log(prefix + std::string(operation) + ":" + std::to_string(result));
+            };
+            report("dispose", code_of(paglets::dispose()));
+            report("deactivate", code_of(paglets::deactivate()));
+            report("dispatch", code_of(paglets::dispatch("b")));
+            report("checkpoint", code_of(paglets::checkpoint()));
+            auto clone = paglets::clone_raw({}, {});
+            report("clone", clone ? clone->handle() : clone.error());
+            auto child = paglets::create_child_raw({}, {});
+            report("child", child ? child->handle() : child.error());
+            abi::JobSpec job;
+            job.function = "unused";
+            const auto doc = abi::encode(job);
+            report("job", static_cast<std::int32_t>(raw_job_submit(doc.data(), doc.size())));
+        }
+    }
+
     static std::int32_t recurse(std::int32_t depth) {
         volatile char pad[256];
         pad[0] = static_cast<char>(depth);
         return depth > 1'000'000 ? depth : recurse(depth + 1) + pad[0];
     }
 
+    struct Cleanup {
+        explicit Cleanup(std::int64_t* n) : count(n) {}
+        ~Cleanup() { ++*count; }
+        std::int64_t* count;
+    };
+    paglets::Async wait_cleanup(int kind) {
+        Cleanup guard(&released_[kind]);
+        if (kind == 1) {
+            (void)co_await paglets::ask_raw(paglets::self(), "defer");
+        } else {
+            (void)co_await paglets::compute::run_raw("clone_wait", {}, {.max_ms = 5000});
+        }
+        ++resumed_[kind];
+    }
+    std::int64_t released_[3]{};
+    std::int64_t resumed_[3]{};
+
     void note(std::string entry) { journal_.push_back(std::move(entry)); }
 
     std::vector<std::string> journal_;
+    Cmd hook_;
     std::vector<std::uint8_t> ballast_;
     std::vector<Capability> deferred_;
     std::int64_t count_ = 0;

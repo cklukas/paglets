@@ -6,7 +6,7 @@
 //
 // A Ledger is one host's copy: a grow-only set of signed records (record.hpp)
 // anchored at the genesis record, whose ID is the mesh ID. Adding a record
-// only checks its form and signatures; what a record means is decided when
+// only checks its form, signatures and mesh; what a record means is decided when
 // the state is derived, from the whole set, deterministically. Hosts holding
 // the same records therefore derive the same state, whatever order the
 // records arrived in.
@@ -17,7 +17,7 @@
 // - genesis: every initial admin;
 // - admin-set: the admin-set quorum of its epoch;
 // - host-enroll, host-remove, owner-enroll, owner-remove, request-deny,
-//   revoke, policy-rule, module-trust, module-policy: the normal admin
+//   revoke, policy-rule, module-trust, module-policy, root-residency: the normal admin
 //   quorum;
 // - module-sign: the signer key it names;
 // - host-enroll-request, owner-enroll-request: the key they name;

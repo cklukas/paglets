@@ -179,6 +179,86 @@ private:
     std::size_t pos_ = 0;
 };
 
+// Decode instruction boundaries, rather than searching raw bytes: constants,
+// offsets and data can contain the same bytes as table mutation opcodes.
+// Unknown extensions fail the snapshot check until their immediates are known.
+bool scan_instructions(Cursor& c, ModuleInfo& info) {
+    auto index = [&] { std::uint32_t n = 0; return c.u32(n); };
+    auto memarg = [&] {
+        std::uint64_t alignment = 0, offset = 0;
+        // The multi-memory extension adds another immediate; do not guess
+        // boundaries for an extension this host does not enable.
+        return c.uleb(alignment) && !(alignment & 0x40) && c.uleb(offset);
+    };
+    while (!c.at_end()) {
+        std::uint8_t op = 0;
+        if (!c.byte(op)) return false;
+        if (op == 0x26) {  // table.set
+            info.mutable_tables = true;
+            if (!index()) return false;
+        } else if (op == 0x02 || op == 0x03 || op == 0x04 || op == 0x06 || op == 0x41 || op == 0x42 || op == 0xd0) {
+            if (!c.sleb_skip()) return false;  // block type, integer constant or heap type
+        } else if (op == 0x07 || op == 0x08 || op == 0x09 || op == 0x0c || op == 0x0d || op == 0x10 ||
+                   op == 0x12 || op == 0x14 || op == 0x15 || op == 0x18 ||
+                   (op >= 0x20 && op <= 0x25) || op == 0x3f || op == 0x40 || op == 0xd2 || op == 0xd5 || op == 0xd6) {
+            if (!index()) return false;
+        } else if (op == 0x11 || op == 0x13) {
+            if (!index() || !index()) return false;
+        } else if (op == 0x0e) {
+            std::uint32_t n = 0;
+            if (!c.u32(n)) return false;
+            for (std::uint64_t i = 0; i <= n; ++i) if (!index()) return false;
+        } else if (op == 0x1c) {
+            std::uint32_t n = 0;
+            if (!c.u32(n)) return false;
+            for (std::uint32_t i = 0; i < n; ++i) {
+                ValType type;
+                if (!c.valtype(type)) return false;
+            }
+        } else if (op >= 0x28 && op <= 0x3e) {
+            if (!memarg()) return false;
+        } else if (op == 0x43 || op == 0x44) {
+            if (!c.skip(op == 0x43 ? 4 : 8)) return false;
+        } else if (op == 0xfc) {
+            std::uint32_t sub = 0;
+            if (!c.u32(sub)) return false;
+            if (sub <= 7) continue;  // saturating conversions
+            if (sub == 12 || sub == 13 || sub == 14 || sub == 15 || sub == 17) {
+                info.mutable_tables = true;  // includes passive element-segment state
+            }
+            if (sub == 9) info.mutable_segments = true;  // data.drop is not part of the image
+            if (sub == 8 || sub == 10 || sub == 12 || sub == 14) {
+                if (!index() || !index()) return false;
+            } else if (sub == 9 || sub == 11 || (sub >= 13 && sub <= 17)) {
+                if (!index()) return false;
+            } else return false;
+        } else if (op == 0xfd) {
+            std::uint32_t sub = 0;
+            if (!c.u32(sub)) return false;
+            if (sub <= 11 || sub == 92 || sub == 93) {
+                if (!memarg()) return false;
+            } else if (sub == 12 || sub == 13) {
+                if (!c.skip(16)) return false;
+            } else if (sub >= 21 && sub <= 34) {
+                if (!c.skip(1)) return false;
+            } else if (sub >= 84 && sub <= 91) {
+                if (!memarg() || !c.skip(1)) return false;
+            } else if (sub > 0x113) return false;
+        } else if (op == 0xfe) {
+            std::uint32_t sub = 0;
+            if (!c.u32(sub)) return false;
+            if (sub == 3) { if (!c.skip(1)) return false; }
+            else if (sub <= 2 || (sub >= 0x10 && sub <= 0x4e)) { if (!memarg()) return false; }
+            else return false;
+        } else if (!(op == 0x00 || op == 0x01 || op == 0x05 || op == 0x0b || op == 0x0f ||
+                     op == 0x19 || op == 0x1a || op == 0x1b || (op >= 0x45 && op <= 0xc4) ||
+                     op == 0xd1 || op == 0xd3 || op == 0xd4)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::expected<ModuleInfo, std::string> parse_module(std::span<const std::uint8_t> bytes) {
@@ -278,6 +358,26 @@ std::expected<ModuleInfo, std::string> parse_module(std::span<const std::uint8_t
             }
         } else if (id == 8) {  // start
             info.has_start_function = true;
+        } else if (id == 10) {  // code, each function has its own bounded cursor
+            std::uint32_t count = 0;
+            if (!c.u32(count)) break;
+            for (std::uint32_t i = 0; i < count && error.empty(); ++i) {
+                std::uint32_t length = 0;
+                if (!c.u32(length)) break;
+                const auto start = c.pos();
+                if (start > section_end || length > section_end - start) { c.fail("function exceeds code section"); break; }
+                std::string scan_error;
+                Cursor body(bytes.subspan(start, length), scan_error);
+                std::uint32_t locals = 0;
+                bool known = body.u32(locals);
+                for (std::uint32_t j = 0; j < locals && known; ++j) {
+                    std::uint32_t n = 0;
+                    ValType type;
+                    known = body.u32(n) && body.valtype(type);
+                }
+                if (!known || !scan_instructions(body, info)) info.snapshot_instructions_checked = false;
+                c.seek(start + length);
+            }
         }
 
         if (!error.empty()) break;
@@ -296,6 +396,7 @@ std::expected<ModuleInfo, std::string> parse_module(std::span<const std::uint8_t
 }
 
 ImportPolicy ImportPolicy::standard() {
+    // --8<-- [start:wasi_allowlist]
     std::vector<std::string> allowed = {
         "wasi_snapshot_preview1.args_get",
         "wasi_snapshot_preview1.args_sizes_get",
@@ -313,6 +414,7 @@ ImportPolicy ImportPolicy::standard() {
         "wasi_snapshot_preview1.fd_prestat_get",
         "wasi_snapshot_preview1.fd_prestat_dir_name",
     };
+    // --8<-- [end:wasi_allowlist]
     for (const auto name : abi::import_names) {
         allowed.push_back(std::string(abi::import_module) + "." + std::string(name));
     }
@@ -326,6 +428,9 @@ ImportPolicy ImportPolicy::system() {
 }
 
 bool ImportPolicy::allows(const Import& import) const {
+    // Native imports supplied by this host are functions. A matching name
+    // cannot authorize a table, memory, global or exception tag instead.
+    if (import.kind != ExternKind::function) return false;
     return std::ranges::any_of(allowed_, [&](const std::string& rule) {
         const auto dot = rule.find('.');
         if (dot == std::string::npos) return false;
@@ -351,8 +456,15 @@ std::expected<void, std::string> ImportPolicy::check(const ModuleInfo& info) con
 
 // --8<-- [start:snapshot_ready]
 std::expected<void, std::string> check_snapshot_ready(const ModuleInfo& info) {
+    if (info.mutable_tables) return std::unexpected("table mutation is not supported by memory images");
+    if (info.mutable_segments) return std::unexpected("passive segment mutation is not supported by memory images");
+    if (!info.snapshot_instructions_checked)
+        return std::unexpected("module uses instructions whose memory-image safety cannot be checked");
     std::string missing;
     for (const auto& g : info.globals) {
+        if (g.is_mutable && g.type != ValType::i32 && g.type != ValType::i64 &&
+            g.type != ValType::f32 && g.type != ValType::f64)
+            return std::unexpected("memory images support only numeric mutable globals");
         if (g.is_mutable && !g.imported && !g.export_name) {
             if (!missing.empty()) missing += ", ";
             missing += "#" + std::to_string(g.index);

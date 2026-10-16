@@ -1,0 +1,191 @@
+{
+  "topic": "live_three_host_jobs",
+  "tests": [
+    {
+      "test": "mac",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.031,
+      "platform": "Darwin arm64, Mac13,1, 10 CPUs",
+      "build": "RelWithDebInfo",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "5",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "31.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "30.0 to 32.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "test": "mac",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 0.072,
+      "platform": "Darwin arm64, Mac13,1, 10 CPUs",
+      "build": "RelWithDebInfo",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "10",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "72.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "68.0 to 82.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "test": "pi",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.027,
+      "platform": "Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "5",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "27.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "27.0 to 29.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "test": "pi",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 0.184,
+      "platform": "Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "75",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "184.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "174.0 to 239.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "test": "uconsole",
+      "mode": "AOT job",
+      "outcome": "passed",
+      "seconds": 0.011,
+      "platform": "Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "5",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "11.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "11.0 to 11.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "test": "uconsole",
+      "mode": "interpreter job",
+      "outcome": "passed",
+      "seconds": 0.074,
+      "platform": "Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs",
+      "build": "Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "samples",
+          "value": "40",
+          "unit": ""
+        },
+        {
+          "name": "median elapsed",
+          "value": "74.0",
+          "unit": "ms"
+        },
+        {
+          "name": "elapsed range",
+          "value": "68.0 to 97.0",
+          "unit": "ms"
+        },
+        {
+          "name": "iterations",
+          "value": "3000000",
+          "unit": ""
+        }
+      ]
+    }
+  ]
+}

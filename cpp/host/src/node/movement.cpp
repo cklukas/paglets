@@ -24,39 +24,28 @@ constexpr std::string_view offer_domain = "paglets move offer v1";
 constexpr std::size_t pages_per_frame_bytes = 1024 * 1024;  // compressed bytes per move-pages frame
 constexpr int zstd_level = 3;
 constexpr auto decision_ttl = std::chrono::hours(1);
+constexpr std::size_t max_move_diagnostic_bytes = 8 * 1024;
 
-std::expected<Node::Impl::Ticket, std::string> parse_ticket(std::string_view text) {
-    Node::Impl::Ticket t;
-    const auto q = text.find('?');
-    t.target = std::string(text.substr(0, q));
-    if (t.target.empty()) return std::unexpected(std::string("empty destination"));
-    if (q == std::string_view::npos) return t;
-    std::string_view rest = text.substr(q + 1);
-    while (!rest.empty()) {
-        const auto amp = rest.find('&');
-        const std::string_view param = rest.substr(0, amp);
-        rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
-        const auto eq = param.find('=');
-        if (eq == std::string_view::npos) return std::unexpected("malformed ticket parameter " + std::string(param));
-        const std::string_view key = param.substr(0, eq);
-        const std::string_view value = param.substr(eq + 1);
-        if (key == "retries") {
-            int n = 0;
-            auto [p, ec] = std::from_chars(value.data(), value.data() + value.size(), n);
-            if (ec != std::errc() || p != value.data() + value.size() || n < 1 || n > 16) {
-                return std::unexpected(std::string("retries is 1 to 16"));
-            }
-            t.retries = n;
-        } else if (key == "arrival") {
-            if (value != "active" && value != "inactive")
-                return std::unexpected(std::string("arrival is active or inactive"));
-            t.activate = value == "active";
-        } else {
-            return std::unexpected("unknown ticket parameter " + std::string(key));
-        }
+std::string move_diagnostic(std::string_view summary, const std::vector<std::string>& reasons) {
+    // Keep complete fragments rather than cutting a UTF-8 host name or
+    // reason in the middle; reserve space for the omitted-reason count.
+    constexpr std::size_t budget = max_move_diagnostic_bytes - 64;
+    std::string out = summary.size() <= budget ? std::string(summary)
+                                              : "the transfer failed (oversized summary omitted)";
+    std::size_t omitted = 0;
+    for (const auto& reason : reasons) {
+        if (out.size() + 2 <= budget && reason.size() <= budget - out.size() - 2) out += "; " + reason;
+        else ++omitted;
     }
-    return t;
+    if (omitted != 0) out += "; " + std::to_string(omitted) + " more host reason(s) omitted";
+    return out;
 }
+
+std::uint64_t elapsed_ns(std::chrono::steady_clock::time_point start) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - start).count());
+}
+
 
 mesh::Value image_manifest(const wasm::Snapshot& image) {
     mesh::Array globals;
@@ -125,13 +114,12 @@ mesh::Bytes offer_message(std::span<const std::uint8_t> body) {
     return m;
 }
 
-// Does the path `inner` lie within `outer` (resources of dir capabilities,
-// `root:path`)?
+// Does `inner` equal `outer` or name a subdirectory (dir resources use root/path)?
 bool within(std::string_view outer, std::string_view inner) {
+    if (outer.empty()) return false;
     if (inner == outer) return true;
     if (!inner.starts_with(outer)) return false;
-    const char next = inner[outer.size()];
-    return outer.back() == ':' || next == '/';
+    return inner[outer.size()] == '/';
 }
 
 }  // namespace
@@ -149,6 +137,13 @@ void Node::Impl::install_mobility() {
                                                                {"m", mesh::Value(runtime::encode_remote(m))}})));
     };
     hooks.depart = [this](runtime::Departure d) { on_depart(std::move(d)); };
+    hooks.arrived = [this](const std::string& from, std::uint64_t request, bool succeeded, std::uint64_t activation_ns) {
+        if (auto source = mesh::parse_key_id(from)) {
+            transport.send(*source, mesh::encode(mesh::Value(mesh::Map{
+                {"t", mesh::Value("move-arrived")}, {"r", mesh::Value(static_cast<std::int64_t>(request))},
+                {"a", mesh::Value(succeeded)}, {"activation_ns", mesh::Value(static_cast<std::int64_t>(activation_ns))}})));
+        }
+    };
     // Called with the runtime's lock held: queued for location.cpp.
     hooks.unresolved = [this](runtime::RemoteMessage m) {
         std::lock_guard lock(unresolved_mu);
@@ -209,6 +204,16 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
     const mesh::LedgerState& st = ledger.state();
     std::vector<mesh::PublicKey> matches;
     const std::string& t = ticket.target;
+    std::optional<mesh::PublicKey> addressed;
+    if (t != "any" && !t.starts_with("offer:") && !t.starts_with("label:")) {
+        const auto host = host_detail::resolve_host_address(st, t, true);
+        if (!host) {
+            if (host.error() == host_detail::HostAddressError::ambiguous)
+                why_not.push_back("ambiguous host address " + t + "; use a full key ID");
+            return {};
+        }
+        addressed = *host;
+    }
     // `offer:<service>[.<op>]`: hosts offering it (planning/cpp-offers.md),
     // the least loaded first.
     std::vector<std::string> offering;
@@ -234,8 +239,7 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
         } else if (t.starts_with("label:")) {
             match = std::ranges::find(h.labels, t.substr(6)) != h.labels.end();
         } else {
-            const std::string id = mesh::key_id(k);
-            match = h.name == t || id == t || (t.size() >= 8 && id.starts_with(t));
+            match = addressed == k;
         }
         if (!match) continue;
         // Hosts that could not run the paglet: another protocol or ABI, or
@@ -258,7 +262,7 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
                 // A grant the admins gave for that host satisfies the item too.
                 const bool granted = std::ranges::any_of(st.grants, [&](const auto& e) {
                     const mesh::Grant& g = e.second;
-                    return g.principal.paglet == principal.paglet && g.item == (*manifest)[i] && g.expires > now &&
+                    return g.principal == principal && g.item == (*manifest)[i] && g.expires > now &&
                            mesh::selects(st, g.hosts, k);
                 });
                 if (!granted) {
@@ -292,7 +296,14 @@ std::vector<mesh::PublicKey> Node::Impl::candidates(const Ticket& ticket, const 
     // Hosts that are up first (location.cpp keeps the view).
     update_view();
     std::ranges::stable_partition(out, [&](const mesh::PublicKey& k) { return std::ranges::binary_search(view, k); });
-    if (out.size() > static_cast<std::size_t>(ticket.retries)) out.resize(static_cast<std::size_t>(ticket.retries));
+    const auto limit = static_cast<std::size_t>(ticket.retries);
+    if (out.size() > limit) {
+        for (std::size_t i = limit; i < out.size(); ++i) {
+            why_not.push_back("host " + st.hosts.at(out[i]).name + ": not tried (retry limit " +
+                              std::to_string(ticket.retries) + ")");
+        }
+        out.resize(limit);
+    }
     return out;
 }
 
@@ -304,11 +315,14 @@ void Node::Impl::fail_move(Outgoing& o, const std::string& why) {
 void Node::Impl::start_move(runtime::Departure d) {
     take_spawns();
     Outgoing o;
+    o.started = Clock::now();
+    move_stats.capture_ns += d.capture_ns;
+    move_stats.image_pages += d.image.page_count;
     auto fail = [&](const std::string& why) {
         o.departure = std::move(d);
         fail_move(o, why);
     };
-    auto ticket = parse_ticket(d.destination);
+    auto ticket = runtime::parse_transfer_ticket(d.destination);
     if (!ticket) return fail(ticket.error());
     // The passport travels: the paglet's own, or for a clone a link signed
     // by this host.
@@ -341,10 +355,11 @@ void Node::Impl::start_move(runtime::Departure d) {
     // --8<-- [end:residency]
     auto hosts = candidates(*ticket, principal, manifest, d.state.marks, why_not);
     if (hosts.empty()) {
-        std::string why = "no host matches " + ticket->target;
-        for (const auto& w : why_not) why += "; " + w;
-        return fail(why);
+        const std::string why = why_not.empty() ? "no enrolled host matches " + ticket->target
+                                              : "every host matching " + ticket->target + " was excluded";
+        return fail(move_diagnostic(why, why_not));
     }
+    o.failures = std::move(why_not);
     o.candidates.assign(hosts.begin(), hosts.end());
     o.ticket = *ticket;
     pages.add_image(d.image);  // for the way back
@@ -359,9 +374,7 @@ void Node::Impl::offer_next(std::uint64_t request) {
     if (it == outgoing.end()) return;
     Outgoing& o = it->second;
     if (o.candidates.empty()) {
-        std::string why = "no host took the paglet";
-        for (const auto& f : o.failures) why += "; " + f;
-        fail_move(o, why);
+        fail_move(o, move_diagnostic("no host took the paglet", o.failures));
         outgoing.erase(it);
         return;
     }
@@ -395,11 +408,17 @@ void Node::Impl::offer_next(std::uint64_t request) {
     }
     const mesh::Bytes bytes = mesh::encode(mesh::Value(std::move(body)));
     const mesh::Signature sig = key.sign(offer_message(bytes));
-    out.deadline = Clock::now() + move_timeout;
-    send_frame(out.target, mesh::Map{{"t", mesh::Value("move-offer")},
+    auto frame = mesh::encode(mesh::Value(mesh::Map{{"t", mesh::Value("move-offer")},
                                      {"r", mesh::Value(static_cast<std::int64_t>(r))},
                                      {"b", mesh::Value(bytes)},
-                                     {"s", mesh::Value::bin(sig)}});
+                                     {"s", mesh::Value::bin(sig)}}));
+    if (frame.size() > transport.frame_limit()) {
+        fail_move(out, "move offer exceeds the transport frame limit");
+        outgoing.erase(r);
+        return;
+    }
+    out.deadline = Clock::now() + move_timeout;
+    transport.send(out.target, std::move(frame));
 }
 
 void Node::Impl::on_move_want(const mesh::PublicKey& from, const mesh::Fields& f) {
@@ -428,13 +447,15 @@ void Node::Impl::on_move_want(const mesh::PublicKey& from, const mesh::Fields& f
         const std::uint8_t* page = image.data.data() + static_cast<std::size_t>(*index) * wasm::page_size;
         const std::size_t n = ZSTD_compress(buffer.data(), buffer.size(), page, wasm::page_size, zstd_level);
         if (ZSTD_isError(n)) continue;
+        // A single compressed 64 KB page is below the frame budget. Flush
+        // before adding the next page, rather than exceeding it by one page.
+        if (!parts.empty() && part_bytes + n > pages_per_frame_bytes) flush();
         parts.emplace_back(
             mesh::Array{mesh::Value(*index),
                         mesh::Value(mesh::Bytes(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(n)))});
         part_bytes += n;
         ++move_stats.pages_sent;
         move_stats.bytes_sent += n;
-        if (part_bytes >= pages_per_frame_bytes) flush();
     }
     flush();
     o.deadline = Clock::now() + move_timeout;
@@ -445,9 +466,25 @@ void Node::Impl::on_move_ready(const mesh::PublicKey& from, const mesh::Fields& 
     if (!r) return;
     auto it = outgoing.find(static_cast<std::uint64_t>(*r));
     if (it == outgoing.end() || it->second.target != from || it->second.recording) return;
+    move_stats.ready_ns += elapsed_ns(it->second.started);
     // The move commits once a majority of the responsible hosts recorded
     // where the paglet goes (location.cpp).
     record_move(it->first);
+}
+
+void Node::Impl::on_move_arrived(const mesh::PublicKey& from, const mesh::Fields& f) {
+    const auto request = f.integer("r");
+    const auto* succeeded = f.get("a");
+    if (!request || !succeeded || !succeeded->as_bool()) return;
+    auto it = decisions.find(static_cast<std::uint64_t>(*request));
+    if (it == decisions.end() || !it->second.committed || it->second.to != from ||
+        it->second.arrival_reported || it->second.capture_started == Clock::time_point{}) return;
+    it->second.arrival_reported = true;
+    ++move_stats.arrival_acks;
+    if (const auto ns = f.integer("activation_ns"); ns && *ns >= 0)
+        move_stats.destination_activation_ns += static_cast<std::uint64_t>(*ns);
+    if (!*succeeded->as_bool()) ++move_stats.arrival_failures;
+    move_stats.arrival_ack_ns += elapsed_ns(it->second.capture_started);
 }
 
 void Node::Impl::commit_move(std::uint64_t request) {
@@ -459,6 +496,8 @@ void Node::Impl::commit_move(std::uint64_t request) {
     const auto r = static_cast<std::int64_t>(request);
     // The decision is recorded (durably) before the destination hears it.
     decisions[request] = Decision{true, from, Clock::now() + decision_ttl, o.moves};
+    decisions[request].capture_started = o.departure.capture_started == Clock::time_point{}
+        ? o.started : o.departure.capture_started;
     save();
     runtime.finish_departure(o.departure.move, mesh::key_id(from));
     loc_cache[o.departure.state.id] = {LocRecord{from, o.moves, mesh::unix_ms(), o.departure.state.owner, 0},
@@ -661,8 +700,11 @@ void Node::Impl::arrival_pages_complete(const mesh::PublicKey& from, std::uint64
     a.clone_args = std::move(in.clone_args);
     a.clone_caps = std::move(in.clone_caps);
     a.original = in.original;
-    const runtime::PagletId id = in.state.id;
-    auto lost = runtime.prepare_arrival(std::move(a), [this, id](const runtime::Cap& c) { return recreate(id, c); });
+    a.request = request;
+    const mesh::Principal principal{in.state.id, in.state.owner, in.state.module, in.state.trust};
+    const auto preparing = Clock::now();
+    auto lost = runtime.prepare_arrival(std::move(a), [this, principal](const runtime::Cap& c) { return recreate(principal, c); });
+    move_stats.prepare_ns += elapsed_ns(preparing);
     if (!lost) return refuse_arrival(from, request, lost.error());
     in.phase = Incoming::Phase::prepared;
     in.deadline = Clock::now() + move_timeout;
@@ -677,14 +719,18 @@ void Node::Impl::on_move_commit(const mesh::PublicKey& from, const mesh::Fields&
     if (it == incoming.end() || it->second.phase != Incoming::Phase::prepared) return;
     Incoming in = std::move(it->second);
     incoming.erase(it);
-    if (auto ok = runtime.commit_arrival(in.state.id, in.activate); !ok) {
-        warn("committing the arrival of " + in.state.id.substr(0, 8) + ": " + ok.error());
+    const auto committing = Clock::now();
+    auto committed = runtime.commit_arrival(in.state.id, in.activate);
+    move_stats.commit_ns += elapsed_ns(committing);
+    if (!committed) {
+        warn("committing the arrival of " + in.state.id.substr(0, 8) + ": " + committed.error());
         return;
     }
     save_passport(*in.passport);
     passports.insert_or_assign(in.state.id, std::move(*in.passport));
     held[in.state.id] =
         Held{static_cast<std::uint64_t>(f.integer("c").value_or(static_cast<std::int64_t>(in.moves))), mesh::unix_ms()};
+    save();
     ++move_stats.moves_in;
     sync_locked();  // grants approved for it meanwhile
 }
@@ -701,7 +747,7 @@ void Node::Impl::on_move_abort(const mesh::PublicKey& from, const mesh::Fields& 
 // A capability the runtime cannot re-create: from the grant it came from,
 // if the grant is the paglet's own, valid and covers this host. Narrowings
 // the paglet made (fewer rights, a subdirectory, an earlier expiry) stay.
-std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet, const runtime::Cap& kept) {
+std::optional<runtime::Cap> Node::Impl::recreate(const mesh::Principal& principal, const runtime::Cap& kept) {
     // Pins refer to the pinned paglet, not to their holder's host: they stay
     // valid (every host has a locator).
     if (kept.kind == runtime::Cap::Kind::resource && kept.resource_type == "pin" &&
@@ -718,7 +764,7 @@ std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet
     if (!id) return std::nullopt;
     const mesh::LedgerState& st = ledger.state();
     auto g = st.grants.find(*id);
-    if (g == st.grants.end() || g->second.principal.paglet != paglet || g->second.expires <= mesh::unix_ms() ||
+    if (g == st.grants.end() || g->second.principal != principal || g->second.expires <= mesh::unix_ms() ||
         !mesh::selects(st, g->second.hosts, key.public_key())) {
         return std::nullopt;
     }
@@ -732,11 +778,17 @@ std::optional<runtime::Cap> Node::Impl::recreate(const runtime::PagletId& paglet
         }
     }
     c.ops = std::move(ops);
-    if (c.kind == runtime::Cap::Kind::resource && within(c.resource, kept.resource)) c.resource = kept.resource;
+    if (c.kind == runtime::Cap::Kind::resource) {
+        if (c.resource_type != kept.resource_type || !within(c.resource, kept.resource)) return std::nullopt;
+        c.resource = kept.resource;
+    }
     if (kept.expires && (!c.expires || *kept.expires < *c.expires)) c.expires = kept.expires;
     c.uses_left = kept.uses_left;
     c.transferable = c.transferable && kept.transferable;
     c.badge = kept.badge;
+    // Rebinding the local provider must not create a new revocation root.
+    c.id = kept.id;
+    c.lineage = kept.lineage;
     materialized.insert(hex(*id));  // delivered: sync does not send it again
     return c;
 }
@@ -782,7 +834,7 @@ void Node::Impl::check_move_deadlines() {
 // -- Node API -----------------------------------------------------------------------
 
 std::expected<void, std::string> Node::dispatch(const runtime::PagletId& paglet, std::string destination) {
-    if (auto t = parse_ticket(destination); !t) return std::unexpected(t.error());
+    if (auto t = runtime::parse_transfer_ticket(destination); !t) return std::unexpected(t.error());
     auto r = impl_->runtime.dispatch(paglet, std::move(destination));
     if (!r) return std::unexpected(std::string(abi::error_name(r.error())));
     return {};

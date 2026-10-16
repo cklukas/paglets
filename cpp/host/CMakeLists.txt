@@ -21,6 +21,7 @@ add_library(paglets_host STATIC
     src/ipc.cpp
     src/runtime.cpp
     src/runtime_exec.cpp
+    src/runtime_jobs.cpp
     src/runtime_modules.cpp
     src/runtime_store.cpp
     src/sandbox.cpp
@@ -28,12 +29,19 @@ add_library(paglets_host STATIC
     src/sha256.cpp
     src/wasm_binary.cpp
     src/wasm_direct.cpp
+    src/wasm_address_space.cpp
     src/wasm_engine.cpp
     src/wasm_snapshot.cpp)
 target_include_directories(paglets_host PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/common/include)
 target_link_libraries(paglets_host PUBLIC paglets_wire paglets_vmlib)
+target_link_libraries(paglets_host PRIVATE Sodium::Sodium)
+if(WIN32)
+    target_sources(paglets_host PRIVATE src/windows_sandbox.cpp)
+    target_compile_definitions(paglets_host PRIVATE _WIN32_WINNT=0x0A00)
+    target_link_libraries(paglets_host PRIVATE userenv advapi32 bcrypt)
+endif()
 target_compile_options(paglets_host PRIVATE ${PAGLETS_WARNINGS})
 target_compile_definitions(paglets_host PUBLIC
     PAGLETS_VERSION="${PROJECT_VERSION}"
@@ -123,7 +131,7 @@ if(PAGLETS_ENABLE_REFLECTION)
 
     # A host in a mesh: ledger and gossip tied to the runtime, the grants
     # system paglet (WP9).
-    add_library(paglets_node STATIC src/node/compute.cpp src/node/exchange.cpp src/node/location.cpp src/node/movement.cpp src/node/node.cpp src/node/registry.cpp src/node/zombies.cpp
+    add_library(paglets_node STATIC src/node/compute.cpp src/node/exchange.cpp src/node/jobs.cpp src/node/location.cpp src/node/movement.cpp src/node/node.cpp src/node/registry.cpp src/node/zombies.cpp
                                     src/node/session.cpp)
     target_link_libraries(paglets_node PUBLIC paglets_services paglets_mesh PRIVATE Zstd::Zstd)
     target_compile_options(paglets_node PRIVATE ${PAGLETS_WARNINGS})
@@ -131,6 +139,7 @@ endif()
 
 # The host binary and its worker processes.
 add_executable(paglets-host src/host_main.cpp src/mesh_cli.cpp src/serve_cli.cpp)
+target_compile_definitions(paglets-host PRIVATE PAGLETS_HOST_BUILD="$<CONFIG>")
 target_link_libraries(paglets-host PRIVATE paglets_host paglets_mesh paglets_net paglets_client)
 if(TARGET paglets_node)
     target_link_libraries(paglets-host PRIVATE paglets_node paglets_gateway)

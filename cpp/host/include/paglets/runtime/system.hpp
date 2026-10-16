@@ -10,7 +10,8 @@
 // A system paglet sees the capabilities a caller lends it for one message
 // (`lend` in the outgoing message) and those transferred to it, replies
 // with data and capabilities, mints resource capabilities it provides
-// (`dir`, `file`, `artifact`, `topic`), and sends messages to paglets.
+// (`dir`, `artifact`, `topic`, `pin`), and sends messages to paglets.
+// `file` is reserved; no built-in service currently issues it.
 
 #pragma once
 

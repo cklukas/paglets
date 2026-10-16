@@ -40,7 +40,7 @@ private:
     void bounce(std::uint32_t n) {
         if (n >= target_) {
             (void)paglets::reply_to(pending_run_, n);
-            (void)pong_.send("stop");
+            stop_child();
             return;
         }
         auto sent = pong_.request("ping", n, [this](paglets::Message& reply) {
@@ -48,12 +48,23 @@ private:
             if (!reply.ok() || !reply.decode(value)) {
                 paglets::log(paglets::abi::LogLevel::error,
                              "ping failed: " + std::string(paglets::abi::error_name(reply.status())));
+                stop_child();
                 (void)pending_run_.drop();
                 return;
             }
             bounce(value);
         });
-        if (!sent) (void)pending_run_.drop();
+        if (!sent) {
+            stop_child();
+            (void)pending_run_.drop();
+        }
+    }
+
+    void stop_child() {
+        (void)pong_.send("stop");
+        (void)pong_.drop();
+        pong_ = {};
+        target_ = 0;
     }
     // --8<-- [end:bounce]
 

@@ -1,33 +1,37 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 #
-# Self-hosted CI on the ck-git server (rpi4). Publish this repository there
-# with `ckgit publish`; afterwards `git push ckgit <branch>` triggers a run.
+# The paper on the C++ edition (papers/paglets-cpp) on the ck-git server
+# (rpi4), as the hosted project `paglets-paper` whose default branch is
+# cpp-paper: every push to `git push ckgit-paper cpp-paper` checks that the
+# paper's generated excerpts and tables are current, builds the PDF, keeps
+# it as the run's artifact, and publishes the review site (the PDF and an
+# index page) on ck-git Pages: http://rpi4:8421/paglets-paper/. This is the
+# review copy; publication on GitHub is a separate, explicit step
+# (.github/workflows/cpp-paper.yml: a cpp-paper-v* tag).
 #
-# The runner has no network by default, so this workflow only builds the
-# documentation site with the server's own `ckdocs` (strict: a broken link
-# or heading fragment fails the run). The site is a portal over two sites
-# (ckdocs.yml): the C++ edition from this branch and the Python edition from
-# `main`. The CI checkout has no Git history, so `main` comes in as a sister
-# checkout of this same project and is passed to ckdocs with --ref-tree. A
-# push to the hosted project's default branch (cpp) publishes the site on
-# ck-git Pages. The C++ build and tests run in GitHub Actions
-# (.github/workflows/cpp.yml).
+# The runner has no network: TeX Live, gnuplot, jq and g++ come from the
+# server itself. The `cpp` branch has its own ci.yml (the documentation
+# site); this file replaces it on this branch.
 version: 1
 on:
-  branches: [cpp]
-sisters:
-  - name: paglets
-    ref: main
+  branches: [cpp-paper]
 jobs:
-  - name: docs
+  - name: paper
     steps:
-      - name: site
+      - name: current
         script: |
-          if ! command -v ckdocs >/dev/null 2>&1; then
-            echo "ckdocs is not installed on the CI server (it comes with ck-git-hosting)" >&2
-            exit 1
-          fi
-          ckdocs build --root "$PWD" --ref-tree main="$CKGIT_SISTER_PAGLETS" --out "$PWD/public" --strict
+          mkdir -p "$HOME/sync"
+          g++ -std=c++23 -O1 -I cpp/host/include -I cpp/common/include \
+            cpp/tools/docs_sync/docs_sync.cpp cpp/host/src/json.cpp -o "$HOME/sync/paglets-docs-sync"
+          "$HOME/sync/paglets-docs-sync" --root "$PWD" --check
+      - name: pdf
+        script: |
+          make -C papers/paglets-cpp site
+          pdfinfo papers/paglets-cpp/build/paglets-cpp.pdf | grep -E "Pages|Title"
+    artifacts:
+      name: paper
+      paths:
+        - papers/paglets-cpp/build/paglets-cpp.pdf
 pages:
-  path: public
+  path: papers/paglets-cpp/build/site

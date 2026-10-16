@@ -348,7 +348,7 @@ PAGLETS_TEST("mesh: the registry keeps hosts of another ABI out of moves and res
     REQUIRE_OK(id);
     REQUIRE_OK(a.node->dispatch(*id, "b"));
     REQUIRE(net.settle([&] { return a.node->move_stats().moves_failed == 1u; }));
-    CHECK(journal_eventually(*a.f, *id, "move_failed:b:no host matches b; host b: runs an incompatible paglet ABI:"));
+    CHECK(journal_eventually(*a.f, *id, "move_failed:b:every host matching b was excluded: host b: runs an incompatible paglet ABI:"));
     REQUIRE_OK(a.node->dispatch(*id, "any"));
     REQUIRE(net.settle([&] { return c.f->runtime->info(*id).has_value(); }, 400));
 }

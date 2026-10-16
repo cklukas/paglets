@@ -13,21 +13,33 @@ provides, a few imports the host provides, and MessagePack documents passed
 through linear memory. The ABI v0 of the M0 spike (`paglets_handle` returning
 a reply) is replaced entirely.
 
+`cpp/tests/guests/plain_counter.c` implements this contract in C without the
+C++ guest SDK. Its runtime test checks creation, delivery, unhandled-request
+rejection and state preservation across deactivation/reactivation in both
+execution modes.
+
 ## 1. Module requirements
 
 A paglet module for ABI v1:
 
 - is a core Wasm module for `wasm32` with exactly one linear memory, exported
   as `memory`;
-- is a reactor: it may export `_initialize`, which the host runs once when the
-  paglet is created (never again after a memory-image restore);
-- exports every mutable global it defines, so memory images can capture them
+- is a reactor: it may export `_initialize`. WAMR initializes WASI reactors
+  on each fresh instantiation, including restore; the image then overwrites
+  those memory effects. Static constructors must avoid host-import side
+  effects. Use lifecycle hooks for interactions with the host;
+- uses only numeric scalar mutable globals and exports each one, so memory images can capture them
   (C/C++ guests: `-Wl,--export=__stack_pointer`);
 - does not mutate its tables at runtime (function pointers stay valid across
-  memory images; C and C++ guests satisfy this; the host cannot verify it);
+  memory images). Admission decodes instructions and rejects table mutation,
+  passive-segment drops and extensions whose snapshot safety is unknown;
 - exports the version marker `paglets_abi_v1` (section 2);
-- imports only functions from the import set of its trust class (section 5):
-  the host rejects the module at load time otherwise.
+- imports only functions from the supported import set (section 5). The
+  module store checks the standard set for stored Wasm modules; creation
+  and arrival check the actual trust class. System paglets are native host
+  objects, not stored Wasm modules. `paglets-host module inspect` reports
+  the per-class checks. Name matching, including a wildcard policy, never
+  authorizes a non-function kind.
 
 The host checks all of this statically before instantiating the module.
 
@@ -90,6 +102,11 @@ fail as well.
 
 ## 4. Memory ownership
 
+When the host needs a nonempty input buffer, `paglets_alloc` returning 0
+or an out-of-bounds buffer fails the paglet as for a trap. The host does
+not deliver the handler with that invalid buffer. Zero-length inputs do
+not require an allocation.
+
 - **Host to guest**: to pass a document of `len` bytes, the host calls
   `paglets_alloc(len)`, copies the document, calls the handler with
   `(ptr, len)` and calls `paglets_free(ptr)` after the handler returns. The
@@ -116,7 +133,7 @@ an import is running.
 | Trust class | Import modules |
 |---|---|
 | roaming, resident | `paglets` (section 5.2), WASI subset (section 5.4) |
-| system (Wasm) | the above plus `paglets_sys` (section 5.5) |
+| system (Wasm) | the above; `paglets_sys` is reserved and currently rejected (section 5.5) |
 
 ### 5.2 Module `paglets`
 
@@ -138,22 +155,39 @@ All pointers are `i32` offsets into linear memory; `endpoint`, `handle` and
 | `lifecycle` | `(op: i32, arg: i32, len: i32) -> i32` | 0 (or an endpoint handle for `clone`), or error |
 | `timer_set` | `(delay_ms: i64, msg: i32, len: i32) -> i32` | Timer handle or error |
 | `now` | `(clock: i32) -> i64` | Nanoseconds; clock 0 wall time since the Unix epoch, 1 monotonic |
-| `random` | `(out: i32, len: i32) -> i32` | 0; fills the buffer with secure random bytes |
+| `random` | `(out: i32, len: i32) -> i32` | 0; fills the buffer from libsodium's OS-backed secure entropy source |
+| `job_submit` | `(spec: i32, len: i32) -> i64` | v1.3: job correlation ID or error (section 15) |
+| `job_cancel` | `(job: i64) -> i32` | v1.3: cancel a job; 0 or error |
+| `job_status` | `(job: i64, out: i32, cap: i32) -> i32` | v1.3: status document length or error |
+| `job_input` | `(offset: i64, out: i32, cap: i32) -> i32` | v1.3, job context: bytes read or error |
+| `job_output` | `(data: i32, len: i32) -> i32` | v1.3, job context: append output; 0 or error |
+| `job_progress` | `(done: i64, total: i64) -> i32` | v1.3, job context: publish progress; 0 or error |
+| `job_cancelled` | `() -> i32` | v1.3, job context: zero, or one when stopped |
 
 Lifecycle operations (`op`):
 
 | Op | Name | Argument document | Effect |
 |---|---|---|---|
 | 1 | `dispose` | none | The paglet is disposed after the handler returns |
-| 2 | `deactivate` | `{wake_after_ms?: int}` | Snapshot to the image store after the handler returns; activated again by the next message or after `wake_after_ms` |
-| 3 | `clone` | `{args?: bin, caps?: [handle]}` | A clone is made from the image taken after the handler returns; returns an endpoint to the clone at once |
-| 4 | `dispatch` | `{destination: str}` | Move to another host (milestone M3; `unsupported` before) |
+| 2 | `deactivate` | `{wake_after_ms?: int}` | Take a memory image after the handler returns; activate again on the next message or automatic wake |
+| 3 | `clone` | `{args?: bin, caps?: [handle], destination?: str}` | A clone is made from the image taken after the handler returns; returns an endpoint at once; `destination` is a v1.1 transfer ticket and requires roaming trust (`denied` otherwise) |
+| 4 | `dispatch` | `{destination: str}` | v1.1: move to another host; roaming trust required (`denied` otherwise); `unsupported` without mobility hooks |
+| 5 | `checkpoint` | none | v1.2: schedule a stored image after this handler; requires storage and restart enabled (section 14) |
+| 6 | `restart` | `{restart: bool, notify_recovered: bool}` | v1.2: set the restart policy, not an immediate restart (section 14); system paglets receive `denied` |
 
 At most one of `dispose`, `deactivate` and `dispatch` can be pending per
 handler call (`bad_state` otherwise). They take effect at the next quiescent
-point, after any clones of the same call. Children and clones are roaming
-paglets of the creator's owner (clones of a system paglet as well) and count
-against the per-call limit of section 10 (`quota` beyond it).
+point, after any clones of the same call. Children are roaming paglets of
+the creator's owner. Local clones keep the creator's class, except that a
+system paglet's clone is roaming; a clone with a destination requires a
+roaming creator (`denied` otherwise). Children and clones count against the
+per-call limit of section 10 (`quota` beyond it). End-of-call hooks refuse
+nested lifecycle transitions and spawns with `bad_state`.
+
+The automatic wake is part of the paglet's host-side state: it travels with
+a move and survives restart when its image is stored and restart is enabled.
+An earlier delivery that activates the paglet consumes the wake. Use a named
+timer when application code must distinguish its wake-up message.
 
 A clone starts with a copy of the original's memory image. Its capability
 table holds its own endpoint (handle 1), copies of the original's
@@ -175,6 +209,8 @@ absent optional keys take the stated defaults.
 | `caps` | [int] | none | Handles to transfer; each must be transferable and is moved to the receiver on success |
 | `priority` | int | 3 | 0 (lowest) to 7 (highest) |
 | `timeout_ms` | int | 30000 | `request` only, positive: after this time the requester gets a reply with status `timeout` |
+| `lend` | [int] | none | v1.1, send/request to a system paglet: show capabilities for this message without transferring them; refused in replies |
+| `async` | bool | false | v1.1, send/reply only: return after admission without waiting for delivery; failures produce a host report (7.4) |
 
 **Delivered message** (argument of `paglets_on_message`):
 
@@ -193,16 +229,31 @@ absent optional keys take the stated defaults.
 
 **Self document** (`self_info`): `id` (str), `module` (hex SHA-256), `owner`
 (str), `trust` (`roaming`, `resident` or `system`), `host` (str), `abi` (int).
+Since v1.1 it also has `minor` (the host's highest implemented minor;
+currently 3), `services` (map of service names to endpoint handles) and
+`pinned_until` (Unix milliseconds; zero when not pinned). Since v1.2,
+`restart` and `notify_recovered` report the restart policy.
+
+The sender record for embedder/host-tool messages is synthetic: `id` and
+`trust` are `host`, `module` is empty, and `host` is the executing host's
+identity. `owner` defaults to `local` for the embedder's API (whose trusted
+caller may supply `sender_owner`). Authenticated remote calls and sends
+use the acting owner's or admin's key ID as `owner`, after authorization;
+the request body cannot override this channel identity. Native services
+retain IDs `system.NAME` and `trust: system`.
 
 **Derive specification** (`cap_derive`): `ops` ([str], subset of the
 source's operations), `expires_ms` (int, relative, cannot extend the source's
 expiry), `uses` (int, cannot exceed the source's remaining uses),
 `transferable` (bool, can only be cleared), `badge` (str, only if the source
-has none).
+has none). Since v1.1, `path` narrows a `dir` capability to a relative path
+below it; other kinds refuse a path specification.
 
-**Capability document** (`cap_inspect`): `kind` (`endpoint`, `reply` or
-`timer`), `target` (str), `ops` ([str]), `transferable` (bool), and when set
-`badge` (str), `expires` (int, Unix milliseconds), `uses_left` (int).
+**Capability document** (`cap_inspect`): `kind` (`endpoint`, `reply`,
+`timer`, or a resource kind), `target` (str), `ops` ([str]), `transferable`
+(bool), and when set `badge` (str), `expires` (int, Unix milliseconds),
+`uses_left` (int). Since v1.1, `revoked` reports revocation; the built-in
+resource kinds are `dir`, `artifact`, `topic` and `pin` (section 8).
 
 **Child specification** (`create_child`): `module` (hex hash, default: the
 creator's own module), `args` (bin), `caps` ([int], transferred). The child
@@ -211,23 +262,22 @@ one is passed in `caps`.
 
 ### 5.4 WASI subset
 
-`wasi_snapshot_preview1` functions available to every paglet: `args_get`,
-`args_sizes_get`, `environ_get`, `environ_sizes_get` (always empty),
-`clock_res_get`, `clock_time_get`, `random_get`, `sched_yield`, `proc_exit`
-(fails the paglet), `fd_write` (stdout and stderr go to the host log line by
-line, stdout at level info and stderr at level warning; a partial line is
-logged when the call that wrote it returns; other descriptors are `EBADF`),
-`fd_close`,
-`fd_seek`, `fd_fdstat_get`, `fd_prestat_get`, `fd_prestat_dir_name` (no
-directories are preopened). File access inside mounted `dir` capabilities is
-added with the files system paglet (WP10).
+The exact function list is generated from `ImportPolicy::standard()` in
+[the SDK reference](../docs/sdk-reference.md#wasi-subset). Arguments and
+environment are empty; clocks, entropy and scheduling use the WASI subset.
+`proc_exit` fails the paglet. `fd_write` sends stdout and stderr to the host
+log line by line (info and warning respectively); a partial line is logged
+when the handler returns, and other descriptors are `EBADF`. No directories
+are preopened. File access through granted `dir` capabilities uses the
+`files` system paglet rather than WASI descriptors.
 
 ### 5.5 Module `paglets_sys`
 
 Reserved for trusted Wasm system paglets (WP10). It will hold the privileged
 host platform calls (files, volumes, system information) and minting of
-service capabilities. A roaming or resident module that imports anything from
-`paglets_sys` is rejected.
+service capabilities. Every module that imports from `paglets_sys` is
+currently rejected, even with system trust. Implemented system services are
+native host objects; the reserved Wasm imports are not a way to call them.
 
 ## 6. Lifecycle events
 
@@ -236,11 +286,11 @@ service capabilities. A roaming or resident module that imports anything from
 | Kind | Event | Document | Delivered |
 |---|---|---|---|
 | 1 | `created` | `args` (bin), `caps` ([int]) | Once, before any message |
-| 2 | `activated` | none | After a restore from the image store |
-| 3 | `deactivating` | none | Before a snapshot to the image store |
-| 4 | `arrived` | `from` (str), `lost` ([str]) | On the new host after a move (M3) |
+| 2 | `activated` | none | After a restore from its memory image, held in memory or in the state directory |
+| 3 | `deactivating` | none | Before its memory image is taken |
+| 4 | `arrived` | `from` (str), `lost` ([str]) | On the new host after a move (v1.1) |
 | 5 | `cloned` | `original` (str), `args` (bin), `caps` ([int]) | In the clone, instead of `created` |
-| 6 | `dispatching` | `destination` (str) | Before a move (M3) |
+| 6 | `dispatching` | `destination` (str) | Before a move (v1.1) |
 | 7 | `disposing` | none | Before disposal |
 
 `created` and `cloned` are the paglet's first delivery, ahead of any message
@@ -270,7 +320,10 @@ they do not stop the transition.
 - The receiver answers with `reply(reply, msg)`, at once or from a later
   handler (the reply capability survives deactivation and memory images).
   A reply capability can be transferred like any other capability, so a
-  paglet can delegate the answer.
+  paglet can delegate the answer. It cannot be consumed and transferred in
+  the same `reply` call (`invalid_argument`, before transfer). An endpoint
+  may be used and transferred by one send/request; its remaining uses
+  reflect that call.
 - The requester gets exactly one reply message (`kind` 2, priority 7) with
   the correlation ID and a status: 0 for a real reply, or `timeout`,
   `unknown_message`, `failed` (the receiver trapped), `gone` (the receiver was
@@ -285,6 +338,15 @@ after the delay (not negative; `invalid_argument` otherwise). The result is a ti
 Timers survive deactivation: a deactivated paglet is activated when its timer
 fires.
 
+### 7.4 Host reports
+
+The reserved reports `paglets.undelivered`, `paglets.move_failed` and
+`paglets.recovered` use message kind 0, priority 7 and no sender record.
+Their payloads are described in sections 13 and 14. The SDK handles them
+before an application's `on_message` override. Application senders cannot
+forge the reserved names. A recovered report precedes timeout and lost-job
+replies after a restart.
+
 ## 8. Capability handles
 
 - Handles are positive `i32` values indexing the paglet's host-side
@@ -294,8 +356,9 @@ fires.
   transferable). It cannot be dropped (`denied`); transferring it passes a
   copy.
 - Kinds in ABI v1: `endpoint`, `reply`, `timer`; v1.1 adds resource
-  capabilities provided by system paglets (`dir`, `file`, `artifact`,
-  `topic`; section 13). `pin` arrives with M3.
+  capabilities provided by built-in system paglets (`dir`, `artifact`,
+  `topic`, `pin`; section 13). `file` is reserved; no built-in service
+  currently issues it.
 - Transferring a capability moves it: the sender's handle becomes invalid and
   the receiver gets a new handle number.
 - The capability table is host state and travels with the paglet as part of
@@ -303,25 +366,29 @@ fires.
 
 ## 9. Error codes
 
+The maintained user-facing table is in
+[Configuration and troubleshooting](../docs/configuration.md#error-codes).
+
 | Code | Name | Meaning |
 |---|---|---|
-| -1 | `invalid_argument` | A parameter is out of range or a document is incomplete |
-| -2 | `bad_handle` | The handle does not exist or has the wrong kind |
-| -3 | `denied` | The capability does not allow the operation |
-| -4 | `expired` | The capability has expired |
-| -5 | `quota` | A quota or use limit is exhausted |
-| -6 | `too_large` | A document exceeds the size limit |
-| -7 | `malformed` | A document is not valid MessagePack or has wrong types |
-| -8 | `not_found` | The target paglet or module does not exist |
-| -9 | `bad_state` | Not possible in the current lifecycle state |
-| -10 | `unsupported` | Not supported by this host or in this milestone |
-| -11 | `internal` | Host error |
-| -12 | `timeout` | Reply status: no reply within the timeout |
-| -13 | `unknown_message` | Reply status: the receiver did not handle the message |
-| -14 | `failed` | Reply status: the receiver trapped |
-| -15 | `gone` | Reply status: the receiver was disposed or dropped the reply capability |
-| -16 | `revoked` | v1.1: the capability, one it was derived from, or its grant was revoked |
-| -17 | `pinned` | v1.1: `dispatch` while the paglet is pinned to its host |
+| -1 | `invalid_argument` | a parameter is out of range, or a document is incomplete |
+| -2 | `bad_handle` | the capability handle does not exist, or has the wrong kind |
+| -3 | `denied` | the capability, the mesh policy or the paglet's trust class does not allow the operation |
+| -4 | `expired` | the capability has expired |
+| -5 | `quota` | a quota or limit is exhausted: a full mailbox, too many paglets of an owner, too many pins, the storage quota, the uses of a capability |
+| -6 | `too_large` | a document or message exceeds its size limit |
+| -7 | `malformed` | a body is not valid MessagePack, or does not decode into the expected type |
+| -8 | `not_found` | the target paglet, module or service does not exist |
+| -9 | `bad_state` | not possible in the current lifecycle state, for example disposing while a dispatch is pending |
+| -10 | `unsupported` | not supported by this host |
+| -11 | `internal` | an error of the host |
+| -12 | `timeout` | reply status: no reply within the request's timeout |
+| -13 | `unknown_message` | reply status: the receiver has no handler for the message |
+| -14 | `failed` | reply status: the receiver trapped or its handler exceeded its elapsed time budget (5 s by default); the receiver has ended, and the other requests waiting for its replies fail too |
+| -15 | `gone` | reply status: the receiver was disposed of, or did not answer the request |
+| -16 | `revoked` | the capability, one it was derived from, or its grant was revoked |
+| -17 | `pinned` | `dispatch` while the paglet is pinned to its host |
+| -18 | `cancelled` | a compute job was cancelled |
 
 ## 10. Limits
 
@@ -334,8 +401,14 @@ Defaults of the host, configurable per host and later per mesh policy:
 | Capabilities per paglet | 1024 |
 | Pending timers per paglet | 64 |
 | Children and clones per handler call | 16 |
-| CPU time per handler call | 5 s (the call is terminated and the paglet fails) |
-| Linear memory per paglet | 16 MB |
+| Elapsed time per handler call | 5 s (the call is terminated and the paglet fails) |
+| Linear memory per paglet | 256 MB (growth ceiling, not initial allocation) |
+
+The handler limit measures elapsed time on the host's steady clock,
+including host-import work and worker IPC. A slow or loaded host can
+therefore exhaust the budget even when the guest itself uses little CPU.
+Long computations belong in compute jobs (section 15), or in separately
+scheduled short handlers.
 
 ## 11. Conformance tests
 
@@ -358,7 +431,7 @@ Each test is run against the host runtime with the conformance guest
 | C12 | A request without a reply within `timeout_ms` produces status `timeout`; a later reply is discarded |
 | C13 | A dropped reply capability produces status `gone` |
 | C14 | A trap fails the paglet; its pending requests get status `failed`; other paglets continue |
-| C15 | A handler exceeding the CPU time budget is terminated and the paglet fails |
+| C15 | A handler exceeding the elapsed-time budget is terminated and the paglet fails |
 | C16 | `send` to an endpoint without the operation returns `denied` |
 | C17 | `send` through an expired endpoint returns `expired`; a use-limited endpoint returns `quota` after its last use |
 | C18 | `cap_derive` can only shrink rights; attempts to widen them return `denied` |
@@ -383,7 +456,7 @@ Each test is run against the host runtime with the conformance guest
 | C37 | v1.1: `dispatch` delivers `dispatching`, then the paglet continues on the destination with its memory and receives `arrived` (`from`, `lost`); messages sent meanwhile follow it |
 | C38 | v1.1: a dispatch that fails leaves the paglet where it was with its state; it receives `paglets.move_failed` |
 | C39 | v1.1: `clone` with a destination makes the clone on another host (`cloned` there); the original's endpoint reaches it; failures arrive as `paglets.move_failed` with the clone's ID |
-| C40 | v1.1: endpoints to paglets on other hosts carry messages, requests and replies; only endpoints travel with them (`unsupported` otherwise) |
+| C40 | Endpoints to paglets on other hosts carry messages, requests and replies; only paglet endpoints and host-addressed artifacts travel with them (`unsupported` otherwise) |
 | C41 | v1.1: a pinned paglet's `dispatch` returns `pinned` and `self_info.pinned_until` names the pin's end; after the release it moves (`test_location.cpp`) |
 
 ## 12. Review
@@ -400,21 +473,29 @@ processes and conformance tests were complete. Changes from the review:
 - Rules the implementation had without the text saying so: handle 1 cannot
   be dropped and is copied on transfer; replies carry no sender record and
   arrive at priority 7; request timeouts must be positive and timer delays
-  not negative; children and clones are roaming; the send errors for ended
+  not negative; children are roaming and local clones retain their class
+  (system clones become roaming); the send errors for ended
   targets and full mailboxes.
 - The state migration exports are reserved until code upgrades exist.
 
-Open for later ABI versions (compatible additions): capability kinds for
-files, artifacts, topics and pins (WP9, WP10, M3), `dispatch` (M3), and the
-privileged `paglets_sys` module (WP10).
+Open compatible additions include structured move-failure codes and lost
+capability descriptions, an activation-cause document, a dispatch initiator
+and a distinct host-report kind. None is part of the current contract.
+`MoveFailed.reason` and `ArrivedEvent.lost` remain diagnostic text;
+`activated` has no document and `dispatching` names only the destination.
+The privileged `paglets_sys` module and code-upgrade state migration also
+remain reserved. Movement, resource capabilities and jobs are implemented
+as described above and in the version history below.
 
 ## 13. Additions in v1.1
 
 Compatible additions for system paglets (WP10) and grants (WP9); a v1.0
-guest keeps working, and `self_info.minor` is 1 on hosts that have them.
+guest keeps working. These features were introduced at minor 1; later hosts
+advertise their highest implemented minor version.
 
 - **Resource capabilities.** System paglets hand out capabilities of kinds
-  `dir`, `file`, `artifact` and `topic` (planning/cpp-system-paglets.md).
+  `dir`, `artifact`, `topic` and `pin` (planning/cpp-system-paglets.md).
+  `file` is reserved, rather than issued by a built-in service.
   Their `ops` are rights (`read`, `write`, `create`, `delete`, `list`,
   ...). `cap_inspect` reports the kind and the target `<service>:<resource>`,
   for example `files:shared-data/projects`.
@@ -435,7 +516,8 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
 - **Revocation.** Every endpoint and resource capability has an ID in the
   host; derived capabilities descend from theirs. Revoking a capability or
   the grant it came from makes it and every descendant fail with `revoked`
-  wherever they are; `cap_inspect` reports `revoked: true`.
+  after the relevant host learns the revocation; `cap_inspect` reports
+  `revoked: true`.
 - **Endpoint targets.** `cap_inspect` reports endpoints to system paglets as
   `service:<name>`.
 - **Asynchronous send and reply.** The outgoing message document takes
@@ -451,6 +533,12 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   gave up is released as after a successful call: transferred capabilities
   are dropped, and a failed reply consumes the reply capability, so the
   requester is answered `gone`.
+  For remote asynchronous sends, receiving-host refusals (including failed
+  location lookup and forwarding limits) return the same notification with
+  the original endpoint handle. It follows the sender across moves. This
+  adds host transport metadata and a host-only report kind; the guest ABI
+  is unchanged. Transport loss, mixed-version peers and an ended sender
+  still make delivery and reporting best effort.
 - **Movement between hosts** (M3, planning/cpp-networking.md). `dispatch`
   (lifecycle op 4, `{destination}`) is supported on hosts in a mesh and
   answers `unsupported` elsewhere; system and resident paglets get
@@ -460,15 +548,26 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
   that could not be re-created there). Messages sent to it meanwhile are
   held and then follow it. If the move fails the paglet stays, with its
   state, and receives `paglets.move_failed` (kind 0, priority 7, no sender)
-  with `{destination, reason, clone}`.
+  with `{destination, reason, clone}`. Already queued replies (including
+  job results and timeouts), timer deliveries and host reports travel with
+  the image and run after `arrived`. Replies keep their correlation,
+  payload, portable capabilities and residency metadata. A queued reply
+  with nonportable capabilities becomes `unsupported`, without payload or
+  capabilities, after a successful move. The runtime bounds serialized
+  notifications and the node checks its encoded offer against the transport
+  frame limit. Refusal retains source deliveries. Notification-bearing
+  travel state uses version 2. Unresolved requests require version 3,
+  which carries their capture time so transit and the commit wait consume
+  their remaining timeout. Older peers refuse unsupported state versions
+  safely. These are host movement formats; the guest ABI is unchanged.
 - **Clones for another host**: the clone argument takes `destination`; the
   clone starts there with `cloned` and the original's memory; the returned
-  endpoint reaches it. Only endpoint capabilities can be passed. Failures
+  endpoint reaches it. Paglet endpoints and host-addressed artifacts can be passed. Failures
   arrive as `paglets.move_failed` with the clone's ID.
 - **Capabilities across hosts**: endpoints to paglets name the host of
   their target and work from any host (messages, requests, replies); only
-  endpoints can travel with messages to other hosts (`unsupported`
-  otherwise). A moving paglet keeps its handle numbers: endpoints, reply
+  paglet endpoints and host-addressed artifacts can travel with messages
+  to other hosts (`unsupported` otherwise). A moving paglet keeps its handle numbers: endpoints, reply
   capabilities and timers go along; default service endpoints are the
   destination's; resource capabilities are re-created from their grants
   where the grant covers the destination, or listed in `lost`.
@@ -482,11 +581,18 @@ guest keeps working, and `self_info.minor` is 1 on hosts that have them.
 ## 14. Additions in v1.2
 
 Compatible additions for restarts and zombie paglets
-(planning/cpp-zombie.md); `self_info.minor` is 2 on hosts that have them.
+(planning/cpp-zombie.md), introduced at minor 2. Later hosts advertise
+their highest implemented minor version.
 
 - **`checkpoint`** (lifecycle operation 5, no argument): the host stores the
   paglet's memory image right after the current handler, before its next
-  message (with a state directory; otherwise nothing happens).
+  delivery. Acceptance schedules the write; it is not a durability barrier
+  for an effect earlier in the handler. It returns `unsupported` without a
+  state directory and `bad_state` with restart disabled or a lifecycle
+  transition already pending/running. A later lifecycle request can supersede
+  it. Capture/write failure of an explicit checkpoint ends the paglet as
+  failed before its next delivery; automatic checkpoints retain their due
+  state after failure and retry on later handlers.
 - **`restart`** (lifecycle operation 6, `RestartArg {restart, notify_recovered}`):
   the restart policy. Without `restart`, the paglet is never stored (an
   image stored earlier is removed) and ends with its host process. With
@@ -495,3 +601,46 @@ Compatible additions for restarts and zombie paglets
   its first message. Clones inherit the policy; it travels with the paglet.
   System paglets: `denied`.
 - **`self_info`** reports `restart` and `notify_recovered`.
+
+## 15. Additions in v1.3: compute jobs
+
+The major ABI remains v1; `SelfInfo.minor` is 3. New imports in module
+`paglets` are optional for earlier modules. Jobs use a fresh instance with
+restricted host imports and the optional `paglets_on_job(ptr, len) -> i32`
+export. Its `JobCall` document contains `function` and `input_size`; zero
+means success, a negative ABI error means failure. `cancelled` is -18.
+
+| Import | Signature | Result |
+|---|---|---|
+| `job_submit` | `(ptr: i32, len: i32) -> i64` | positive reply correlation, or negative error |
+| `job_cancel` | `(correlation: i64) -> i32` | cancellation result |
+| `job_status` | `(correlation: i64, ptr: i32, len: i32) -> i32` | required document size, or error |
+| `job_input` | `(offset: i64, ptr: i32, len: i32) -> i32` | bytes read, or error |
+| `job_output` | `(ptr: i32, len: i32) -> i32` | append result |
+| `job_progress` | `(done: i64, total: i64) -> i32` | progress result |
+| `job_cancelled` | `() -> i32` | zero, or one when stopped |
+
+`job_submit` decodes `JobSpec`: `function`, `input`, `input_artifact`,
+`module`, `cores`, `max_ms`, `memory_mb`, `hosts`, `on_departure`. Optional
+module defaults to the paglet's module; an empty host list is local, `any`
+selects a compatible host. Departure is `cancel` by default or `finish`.
+The artifact handle is lent; the host retains the input before submission
+returns. Runtime memory, time and per-owner caps and mesh policy apply.
+
+Results use ordinary reply correlations: success carries `JobResult` with
+`output`, `artifact`, `host`, `elapsed_ms`, `queued_ms`, `aot`, residency
+`marks`. Host-controlled provenance metadata also accompanies the reply,
+independently of its opaque payload. The receiving paglet inherits those
+marks before its reply handler, including after a move. A large output
+is the first reply capability and `artifact` is true. Errors include
+`cancelled`, `timeout`, `quota`, `denied`, `failed` and `gone`.
+`JobStatus` carries `state`, `host`, `done`, `total`, `elapsed_ms`, `aot`.
+Input/output chunks are at most 256 KB; inline messages at most 1 MB.
+
+Deactivation/checkpoint retain pending jobs. Clones do not inherit host job
+ownership. Successful departure cancels jobs unless configured to finish
+and forward results. Restart loses pending jobs and replies `gone`. The
+SDK's job handle is a correlation token and has no automatic drop action.
+The `jobs:` tests cover these imports and execution outcomes; engine tests
+cover cancellation both during execution and before the next guest call.
+See [Compute jobs](../docs/compute-jobs.md) for the SDK contract.

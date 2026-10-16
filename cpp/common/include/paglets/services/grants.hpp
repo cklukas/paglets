@@ -31,7 +31,7 @@ struct Item {
 
 struct Request {
     Item item;
-    std::int64_t duration_ms = 3'600'000;
+    std::int64_t duration_ms = 3'600'000;  // clamped to 1 s..30 days, then to the policy rule's cap
     std::string reason;
 };
 

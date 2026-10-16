@@ -32,11 +32,13 @@ struct DivReply {
     std::string served_by;
 };
 
+// --8<-- [start:contract]
 struct Contract {
     static constexpr std::string_view service = "calc";
     AddReply add(const AddRequest&);
     // invalid_argument for b == 0.
     DivReply divide(const DivRequest&);
 };
+// --8<-- [end:contract]
 
 }  // namespace calc

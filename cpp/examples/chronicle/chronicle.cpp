@@ -67,6 +67,7 @@ std::string span(std::int64_t ms) {
 
 }  // namespace
 
+// --8<-- [start:paglet]
 class Chronicle final : public patterns::Zombie<Work> {
 public:
     Chronicle() {
@@ -88,8 +89,8 @@ public:
             if (s.round_ms > 0) t.round_ms = s.round_ms;
             if (s.expand_ms > 0) t.expand_ms = s.expand_ms;
             t.checkpoint_ms = std::max<std::int64_t>(s.sample_ms, t.beat_ms);
+            startup_reply_ = m.defer_reply();
             start_group(s.sink, std::move(w), t);
-            (void)m.reply(chronicle_msgs::Started{group(), {}});
             return abi::handled;
         });
         router().on("status", [this](Message& m) {
@@ -116,6 +117,18 @@ public:
         });
     }
 
+    void on_zombie_started() override { startup_result(true, {}); }
+
+    void on_zombie_failed(const std::string& why) override {
+        startup_result(false, why);
+        patterns::Zombie<Work>::on_zombie_failed(why);
+    }
+
+    void on_cloned(paglets::Started& s) override {
+        startup_reply_ = {};  // a copied creator reply never belongs to a clone
+        patterns::Zombie<Work>::on_cloned(s);
+    }
+
 // --8<-- [start:step]
     void step(Work& w, std::function<void(bool done)> finished) override {
         auto mi = service("mesh-info");
@@ -134,6 +147,9 @@ public:
     }
 // --8<-- [end:step]
 
+    // Samples measure replaceable work and increase within a lineage.
+    // Events merge independently in the journal; their count must not rank
+    // competing work images after a partition.
     std::int64_t progress(const Work& w) const override { return w.samples; }
 
     std::string result_name() const override { return "chronicle-" + group() + ".md"; }
@@ -153,9 +169,10 @@ public:
         const std::string text = life_log(w, journal);
         return Bytes(text.begin(), text.end());
     }
+// --8<-- [end:paglet]
 
 private:
-    void note(Event e) { (void)observe_value(e); }
+    bool note(Event e) { return observe_value(e); }
 
     std::vector<Event> journal_events() const {
         std::vector<Event> out;
@@ -175,6 +192,7 @@ private:
         return key.substr(0, 8);
     }
 
+    // --8<-- [start:sample]
     // Compares the mesh now with the latest sample and records the changes.
     void sample(Work& w, const std::vector<services::mesh_info::Snapshot>& hosts) {
         const std::int64_t now = now_ms();
@@ -199,9 +217,11 @@ private:
             note(Event{now, "begin", here_, {}, list});
         }
         if (takeover_) {
-            takeover_ = false;
-            if (w.samples > 0) {
-                note(Event{now, "takeover", here_, {}, takeover_cause_, now - w.last_sample_ms, replica().reign});
+            // A reply may arrive while an election freezes this main.
+            // Retain the note until the journal actually accepts it.
+            if (w.samples == 0 ||
+                note(Event{now, "takeover", here_, {}, takeover_cause_, now - w.last_sample_ms, replica().reign})) {
+                takeover_ = false;
             }
         }
 // --8<-- [start:view]
@@ -235,6 +255,7 @@ private:
         w.last_sample_ms = now;
         ++w.samples;
     }
+    // --8<-- [end:sample]
 
     // -- the life log --------------------------------------------------------------------------
 
@@ -262,12 +283,12 @@ private:
             return key.substr(0, 8);
         };
         const std::int64_t end = w.last_sample_ms;
-        std::int64_t takeovers = 0, longest_gap = 0, dead = 0;
+        std::int64_t takeovers = 0, longest_gap = 0, summed_gap_excess = 0;
         for (const auto& e : merged) {
             if (e.kind != "takeover") continue;
             ++takeovers;
             longest_gap = std::max(longest_gap, e.gap_ms);
-            dead += std::max<std::int64_t>(0, e.gap_ms - w.sample_ms);
+            summed_gap_excess += std::max<std::int64_t>(0, e.gap_ms - w.sample_ms);
         }
         std::string md;
         md += "# Mesh life log\n\n";
@@ -281,7 +302,11 @@ private:
         md += "| Replicas | " + std::to_string(w.members.size()) + ": " + hosts + " |\n";
         md += "| Samples of the mesh | " + std::to_string(w.samples) + ", every " + span(w.sample_ms) + " |\n";
         md += "| Takeovers | " + std::to_string(takeovers) + " |\n";
-        md += "| Time without a working main | " + span(dead) + " (longest gap " + span(longest_gap) + ") |\n\n";
+        md += "| Sum of takeover gaps beyond the sample interval | " + span(summed_gap_excess) + " |\n";
+        md += "| Longest gap between samples at a takeover | " + span(longest_gap) + " |\n\n";
+        md += "Each gap runs from the preceding sample in a lineage to the sample that records its takeover note. "
+              "The sum counts only the part beyond one nominal sampling interval for each takeover. "
+              "Gaps from different lineages may overlap. These values do not measure exact main downtime.\n\n";
 
         md += "## Timeline\n\n| Time (UTC) | What happened |\n|---|---|\n";
         for (const auto& e : merged) {
@@ -442,6 +467,14 @@ private:
         return md;
     }
 
+    void startup_result(bool accepted, const std::string& reason) {
+        if (!startup_reply_) return;
+        auto reply = std::exchange(startup_reply_, Capability{});
+        (void)reply_to(reply, chronicle_msgs::Started{group(), accepted, reason});
+        if (reply) (void)reply.drop();  // timed-out requester or another refusal
+    }
+
+    Capability startup_reply_;
     std::string here_;
     bool takeover_ = false;
     std::string takeover_cause_;

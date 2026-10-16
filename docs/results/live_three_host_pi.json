@@ -1,0 +1,51 @@
+{
+  "topic": "live_three_host_pi",
+  "tests": [
+    {
+      "test": "pi, 100000 hex digits",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 69,
+      "platform": "",
+      "build": "mixed; see live_hosts",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "hex digits in the file",
+          "value": "100000",
+          "unit": ""
+        },
+        {
+          "name": "decimal digits in the file",
+          "value": "120409",
+          "unit": ""
+        },
+        {
+          "name": "minimum chunk hold",
+          "value": "0",
+          "unit": "ms"
+        },
+        {
+          "name": "chunks of 500 digits",
+          "value": "200",
+          "unit": ""
+        },
+        {
+          "name": "hosts that computed chunks",
+          "value": "mac, pi, uconsole",
+          "unit": ""
+        },
+        {
+          "name": "computing the hex digits",
+          "value": "69",
+          "unit": "s"
+        },
+        {
+          "name": "converting into decimal digits",
+          "value": "< 1",
+          "unit": "s"
+        }
+      ]
+    }
+  ]
+}

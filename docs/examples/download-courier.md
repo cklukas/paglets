@@ -26,7 +26,7 @@ Directory: [`cpp/examples/courier/`](https://github.com/cklukas/paglets/tree/cpp
   host fetches the content from the web host when the courier asks its
   `artifacts` service about the artifact, and checks its SHA-256 (see
   [Moving content between hosts](../system-paglets.md#moving-content-between-hosts)).
-  A paglet moves as a memory image of at most 16 MB, but the size of the
+  A paglet moves as a memory image with a default ceiling of 256 MB, but the size of the
   file is limited only by the web host's download limit (64 MB by
   default).
 - **Notifications.** The courier tells its owner through `user-info`
@@ -261,6 +261,6 @@ on `127.0.0.1` and without internet access, and a policy rule allows
 <!-- results: courier -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts on the way | bytes delivered, verified by SHA-256 | intranet address through web: refused |
 |---|---|---|---|---|---|---|---|---|
-| gateway: Download Courier fetches through the only web host and brings the file home (WP17 exit) | in-process | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 3 | 22 | yes |
-| gateway: Download Courier fetches through the only web host and brings the file home (WP17 exit) | worker processes | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 3 | 22 | yes |
+| gateway: Download Courier fetches through the only web host and brings the file home (WP17 exit) | in-process | passed | 0.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 22 | yes |
+| gateway: Download Courier fetches through the only web host and brings the file home (WP17 exit) | worker processes | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 22 | yes |
 <!-- /results -->

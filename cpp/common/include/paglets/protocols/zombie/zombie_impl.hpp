@@ -216,10 +216,12 @@ private:
         s_.replies.clear();
         stop(Timer::suspect);
         stop(Timer::round);
+// --8<-- [start:paper_persist_order]
         become(s_.done ? Role::delivering : Role::main, cause);
         persist();
         broadcast(beat());
         set(Timer::beat);
+// --8<-- [end:paper_persist_order]
         if (s_.done) {
             out_.push_back(Deliver{s_.sink});
         } else {
@@ -230,13 +232,6 @@ private:
     // --8<-- [end:become_main]
 
     void become_candidate(Cause cause) {
-        if (s_.role == Role::main) {
-            checkpoint();
-            out_.push_back(StopWork{});
-            stop(Timer::beat);
-            stop(Timer::checkpoint);
-            s_.frozen = false;
-        }
         stop(Timer::suspect);
         s_.replies.clear();
         become(Role::candidate, cause);

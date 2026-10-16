@@ -364,6 +364,6 @@ the very end. The test checks that:
 <!-- results: log_scout -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts searched | bytes read of 2.2 MB of logs | live checks while following | new lines found live |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Log Scout searches logs in a time window and follows them live | in-process | passed | 0.9 s | Darwin arm64, Release build | 2026-10-12 | 2 | 65779 | 4 | 2 |
-| example: Log Scout searches logs in a time window and follows them live | worker processes | passed | 0.9 s | Darwin arm64, Release build | 2026-10-12 | 2 | 65779 | 4 | 2 |
+| example: Log Scout searches logs in a time window and follows them live | in-process | passed | 0.8 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 65779 | 4 | 2 |
+| example: Log Scout searches logs in a time window and follows them live | worker processes | passed | 0.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 65779 | 4 | 2 |
 <!-- /results -->

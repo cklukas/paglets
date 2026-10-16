@@ -253,6 +253,6 @@ two pages and three words per summary. The test checks that:
 <!-- results: researcher -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts on the way | pages read and summarized |
 |---|---|---|---|---|---|---|---|
-| gateway: Web Researcher searches and reads on the web host, summarizes on the AI host, comes home | in-process | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 4 | 2 |
-| gateway: Web Researcher searches and reads on the web host, summarizes on the AI host, comes home | worker processes | passed | 0.2 s | Darwin arm64, Release build | 2026-10-12 | 4 | 2 |
+| gateway: Web Researcher searches and reads on the web host, summarizes on the AI host, comes home | in-process | passed | 0.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 2 |
+| gateway: Web Researcher searches and reads on the web host, summarizes on the AI host, comes home | worker processes | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 2 |
 <!-- /results -->

@@ -1,345 +1,69 @@
 % Copyright (c) 2026 by C. Klukas.
 % Licensed under the MIT License. See LICENSE for details.
 
-% This appendix is dense with monospaced option and script names that
-% cannot be hyphenated; the emergency stretch keeps such paragraphs inside
-% the text width (as in Appendix A).
-\begingroup\setlength{\emergencystretch}{3em}
+\subsection{Source versions and full implementations}
 
-Every number in Section~\ref{sec:evaluation}, every table of recorded
-results and every code excerpt whose caption names a source path is
-produced by a script or a tool in the repository \cite{pagletsCpp}. This
-appendix names them, in the order in which one would run them: build the
-edition, run the test suite and record its results, run the live
-measurements on real machines, run the protocol checker, and regenerate the
-documentation and this paper from the recorded results.
-Figure~\ref{fig:reproduce-pipeline} shows how the pieces connect. The
-commands below run from the repository root of the branch \code{cpp}; those
-that concern this paper (Section~\ref{sec:reproduce-generated}) need the
-branch \code{cpp-paper}, which carries \code{papers/} and takes \code{cpp}
-in by merge. The page \code{building.md} of the user documentation
-\cite{pagletsCppDocs} describes the build and the test suite in more
-detail; \code{examples/index.md} (``Test results'') says how the examples'
-results are recorded.
+The software studied here is the C++ branch of
+\paglets{}~\cite{pagletsCpp}, using library revision \code{c01902c93beb} and
+WAMR~2.4.5. Source links name the full library commit so their content
+does not change as the branch advances. This snapshot contains the
+implementation described here; the earlier software release,
+\code{cpp-v0.2.0}, does not contain all of these features and fixes.
+Each experiment's records identify its own source revision and
+executables. Links to current code do not imply that earlier measurements
+were rerun with that code.
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[node distance=5mm and 4mm]
-  \node[box] (tests) {\code{paglets\_tests}\\\footnotesize\code{PAGLETS\_RESULTS\_DIR}};
-  \node[box, right=of tests] (live) {\code{mesh\_bench.sh}\\\code{chronicle\_live.sh}};
-  \node[box, right=of live] (check) {\code{paglets-protocol-check}\\\footnotesize\code{-{}-results}};
-  \node[plain, below=of live] (json) {\code{docs/results/*.json}};
-  \node[box, left=of json, xshift=-6mm] (src) {sources\\\footnotesize\code{// -{}-8<-{}- [start:NAME]}};
-  \node[state, below=of json] (sync) {\code{paglets-docs-sync}};
-  \node[plain, below left=of sync, xshift=-2mm] (md) {\code{docs/*.md}};
-  \node[plain, below right=of sync, xshift=2mm] (tex) {\code{papers/.../chapters/*.tex}};
-  \node[box, below=of md] (site) {\code{ckdocs}: the documentation site};
-  \node[box, below=of tex] (pdf) {\code{latexmk}, \code{gnuplot}: this paper};
-  \draw[arrow] (tests) -- (json);
-  \draw[arrow] (live) -- (json);
-  \draw[arrow] (check) -- (json);
-  \draw[arrow] (json) -- (sync);
-  \draw[arrow] (src) |- (sync);
-  \draw[arrow] (sync) -- (md);
-  \draw[arrow] (sync) -- (tex);
-  \draw[arrow] (md) -- (site);
-  \draw[arrow] (tex) -- (pdf);
-\end{tikzpicture}
-\caption{Where the numbers and the excerpts come from. Tests, live scripts
-and the protocol checker record results as JSON; \code{paglets-docs-sync}
-writes tables from them, and code excerpts from marked regions of the
-sources, into the documentation pages and into the chapters of this paper.}
-\label{fig:reproduce-pipeline}
-\end{figure}
-
-\subsection{Building}
-\label{sec:reproduce-building}
-
-The host is C++26 code built with GCC~16 (\code{-std=c++26 -freflection});
-reflection generates the wire codecs and the guest schema code. Guest
-modules are compiled by clang for \code{wasm32-wasip1} with a WASI sysroot.
-The build fetches WAMR and cpp-httplib at pinned releases. On macOS the
-toolchain comes from Homebrew, on Linux GCC~16 is combined with the
-wasi-sdk in \code{/opt/wasi-sdk} (or \code{WASI\_SDK\_PATH}):
-
-\begin{lstlisting}[style=paglets-bash]
-# macOS
-brew install gcc@16 llvm lld wasi-libc wasi-runtimes cmake ninja \
-    libsodium openssl@3 zstd pkgconf
-# Linux
-apt install libsodium-dev libssl-dev libzstd-dev pkg-config
-\end{lstlisting}
-
-The build and the tests use CMake presets (Table~\ref{tab:reproduce-presets}).
-The presets configure \code{RelWithDebInfo} builds; the results recorded in
-\code{docs/results/} come from Release builds (configured with
-\code{CMAKE\_BUILD\_TYPE} set to \code{Release}), as their \code{build}
-field says:
-
-\begin{lstlisting}[style=paglets-bash]
-cd cpp
-cmake --preset macos-arm64
-cmake --build --preset macos-arm64
-ctest --preset macos-arm64
-build/macos-arm64/host/paglets-host --info
-\end{lstlisting}
-
-\code{paglets-host -{}-info} prints what a build contains: version,
-platform, compiler, whether reflection is on, the WAMR release with its
-interpreter and bound-check mode (for example \code{fast-interp, hardware
-bound checks}), the paglet ABI and the mesh protocol. The build directory
-is \code{cpp/build/<preset>}; the guest modules end up in its
-\code{guests/} directory. Two configure options matter for the
-measurements. \code{PAGLETS\_WAMR\_FAST\_INTERP}, on by default, selects
-WAMR's fast interpreter. \code{PAGLETS\_WAMR\_HW\_BOUND\_CHECK} must be
-off on kernels with a 39-bit address space such as Raspberry Pi OS, where
-guard-page bound checks limit a process to about 60 instances. A Linux
-host of this kind (a GCC~16 installed next to an older system compiler, as
-on Raspberry Pi OS) is built with the recipe in \code{docs/building.md}
-(``Build and test''): a Release build of \code{paglets-host} and
-\code{paglets-worker} only, guests and tests off, hardware bound checks
-off, the C++ library linked statically. Such a host needs no guest modules
-of its own; the modules travel from the machine that launches the paglets.
-The recorded runs describe the hosts only as
-Table~\ref{tab:eval-hosts} shows them; how each host was built is
-not recorded.
-
-\begin{table}[htbp]
+\begin{table}[!ht]
 \centering\small
-\caption{The CMake presets (\code{cpp/CMakePresets.json}).}
-\label{tab:reproduce-presets}
-\begin{tabular}{ll}
+\caption{Complete files and reproduction entry points. Every source label
+is a link to its full file; complete programs and reference manuals are
+omitted from the paper.}
+\label{tab:artifact-files}
+\begin{tabular}{p{0.29\linewidth}p{0.64\linewidth}}
 \toprule
-Preset & Use \\
+Mechanism & Full source / record \\
 \midrule
-\code{macos-arm64}, \code{linux-gcc16} & the regular builds \\
-\code{windows-mingw-gcc16} & the regular build with MinGW-w64 (MSYS2 UCRT64) \\
-\code{macos-arm64-asan}, \code{linux-gcc16-asan} & AddressSanitizer, UndefinedBehaviorSanitizer \\
-\code{linux-gcc16-tsan} & ThreadSanitizer \\
-\code{linux-host-only} & a C++23 compiler without reflection; prebuilt guests \\
+Module checks and images & \sourcefile{cpp/host/src/wasm_binary.cpp}{module validation}; \sourcefile{cpp/host/src/wasm_snapshot.cpp}{capture/restore} \\
+Scheduling and recovery & \sourcefile{cpp/host/src/runtime.cpp}{runtime}; \sourcefile{cpp/host/include/paglets/runtime/mobility.hpp}{travelling state} \\
+Transfer and routing & \sourcefile{cpp/host/src/node/movement.cpp}{move protocol}; \sourcefile{cpp/host/src/node/location.cpp}{location records} \\
+Jobs and examples & \sourcefile{cpp/host/src/runtime_jobs.cpp}{job pool}; \sourcefile{cpp/examples/pi/pi.cpp}{Pi}; \sourcefile{cpp/examples/counter/counter.cpp}{Counter}; \sourcefile{cpp/examples/chronicle/chronicle.cpp}{Chronicle} \\
+Replication checks & \sourcefile{cpp/common/include/paglets/protocols/zombie/model.hpp}{fault model}; \sourcefile{cpp/common/include/paglets/protocols/zombie/sim.hpp}{timed simulator}; \sourcefile{cpp/tools/protocol_check/protocol_check.cpp}{checker driver} \\
+Physical experiments & \sourcefile{cpp/tools/mesh_bench.sh}{measurement driver}; \sourcefile{cpp/tools/chronicle_live.sh}{fault schedule}; \sourcefile{docs/results/live_move.json}{move records}; \sourcefile{docs/results/live_three_host_jobs.json}{job records} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{The test suite and the recorded results}
-\label{sec:reproduce-tests}
+\subsection{Reproduction instructions and scope}
 
-\code{ctest} runs \code{paglets\_tests} twice, with \paglet{}s inside the
-test process (\code{unit}) and in sandboxed worker processes
-(\code{unit\_workers}), and a dozen tests of the programs: the sandbox
-check, memory images saved and resumed across processes, hosts that serve,
-move and find each other, the CLI ledger, and the installed package
-(\code{docs/building.md}, ``The test suite''). The \code{unit} test also
-explores six small worlds of the zombie protocol exhaustively and runs 200
-timed random runs (\code{cpp/tests/test\_protocol\_check.cpp}). A further
-test, \code{docs\_sync}, fails while a documentation page or a chapter of
-this paper is not current (Section~\ref{sec:reproduce-generated}).
+From \code{cpp/}, configure, build and test with the matching CMake preset:
+\code{macos-arm64}, \code{linux-gcc16} or \code{windows-mingw-gcc16}.
+The build requires GCC~16 with reflection and a WASI guest toolchain;
+the documentation gives exact platform instructions. \code{ctest} runs
+tests inside the host and in workers, plus configured command-line,
+sandbox, package and documentation checks. Saved results identify the
+source, modules, executables, compiler and configuration used.
 
-The tests of the example paglets record what they measure. With
-\code{PAGLETS\_RESULTS\_DIR} set, a test that reports to a topic is written to
-\code{<dir>/<topic>.json} after it ran: its name, mode, outcome, duration,
-platform, build type, date and the values it reported
-(\code{cpp/tests/test.hpp}). One script runs every recording test, in
-process and in worker processes, then the full protocol check, and then
-the generator:
+The physical benchmark script selects \code{move} and \code{jobs} tests
+and controls image sizes, repetition counts and integer workloads.
+Its header lists the options. It currently assumes directly reachable
+Linux remote hosts; Windows correctness tests are separate.
+\code{live\_move.json} covers all 48 combinations of host pair, image
+size and cache condition. Raw samples and executable identities are
+retained in \sourcefile{planning/validation/cpp-three-host-20261015.json}{the test record}.
+The \code{chronicle\_live.sh} script applies its failure schedule and
+collects protocol traces and the sink result.
 
-\begin{lstlisting}[style=paglets-bash]
-cpp/tools/update_results.sh [cpp/build/macos-arm64]   # the build directory (default)
-\end{lstlisting}
+Run \code{paglets-protocol-check} with
+\code{-{}-suite full -{}-simulate -{}-seeds 10000} for the twelve model
+worlds and timed simulations. The
+\sourcefile{docs/results/zombie_protocol.json}{recorded protocol results}
+state the platform, build and date for each case. \code{--trace SEED}
+selects a timed trace; violations of model properties are reported as
+shortest step sequences leading to the failure. A search that stops
+before its requested coverage is complete fails the check.
 
-It runs \code{paglets\_tests} with the filters \code{example:},
-\code{gateway:}, \code{exchange:} and \code{pi:}, the hello and ping-pong
-samples and the counter snapshot test, each once in the test process and
-once in worker processes (\code{PAGLETS\_TEST\_WORKER}). Then it runs the
-protocol checker with the full suite and 10\,000 timed runs
-(\code{-{}-suite full}, \code{-{}-simulate}, \code{-{}-seeds 10000}) and
-records the outcome in \code{zombie\_protocol.json}; the recorded run
-(\code{docs/results/zombie\_protocol.json}: Darwin arm64, Release build,
-2026-10-13) took 2393\,s in all, about 40 minutes, nearly all of it in the
-exhaustive worlds; the 10\,000 timed runs took 28\,s. Finally it runs
-\code{paglets-docs-sync}. The results are committed under
-\code{docs/results/}, one file per topic.
-
-\subsection{The live measurements}
-\label{sec:reproduce-live}
-
-Three scripts run the examples on real machines: the machine that runs the
-script (\emph{this machine} below; the Mac in the recorded runs) and remote
-Linux hosts reached over SSH. Each builds a fresh mesh for the run (keys,
-a ledger with one admin and one owner, every host enrolled), starts
-\code{paglets-host serve} on every host with explicit \code{-{}-peer}
-addresses and beacons off, waits until \code{remote landscape} shows every
-host, and tears everything down at the end (\code{chronicle\_live.sh
--{}-keep} leaves the mesh running for a look). Every host needs
-\code{paglets-host} and \code{paglets-worker} built from the same sources;
-the modules travel from this machine. Table~\ref{tab:reproduce-scripts}
-lists the scripts, their options are in their headers, and
-Table~\ref{tab:eval-hosts} shows the machines of the recorded runs as
-\code{mesh\_bench.sh} describes them (the Mac launches the paglets; the
-Linux hosts run only the host and the worker).
-
-\begin{lstlisting}[style=paglets-bash]
-cpp/tools/mesh_bench.sh \
-    --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
-    --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
-    [--local-name mac] [--build cpp/build/macos-arm64] [--port 7443] \
-    [--sizes "16 64 256"] [--pi-digits 100000] \
-    [--steps "network transfer latency benchmark pi"]
-cpp/tools/chronicle_live.sh --remote pi=... --remote uconsole=... \
-    [--lifetime-min 10] [--no-failures] [--keep] [--late NAME]
-cpp/tools/web_live.sh --remote pi=... [--check-only]
-\end{lstlisting}
-
-\code{mesh\_bench.sh} runs five steps. Four write a results file of their
-own (\code{live\_transfer}, \code{live\_latency}, \code{live\_benchmark},
-\code{live\_pi}); the network step's numbers go into every transfer entry
-as its TCP baseline, and \code{live\_hosts} is written on every run.
-\code{-{}-steps} selects steps; the files of the others stay as they are.
-\emph{network}: iperf3 over TCP for 5 seconds between every ordered pair
-of hosts. \emph{transfer}: a File Courier carries a file of random bytes of
-every size in \code{-{}-sizes} (MB) for every ordered pair; the rate is the
-size divided by the time the destination took to save it (fetching every
-part, checking the SHA-256, writing). \emph{latency}: the Latency Map, 20
-round trips between paglets for every ordered pair of hosts.
-\emph{benchmark}: the Mesh Benchmark in a compute slot on every host, with a
-budget of one second, 4\,MB of memory and 8\,MB of storage. \emph{pi}:
-\code{-{}-pi-digits} hex digits of pi in chunks of 500, up to 32 in flight,
-streamed in order to a file on this machine and converted to decimal; the
-step passes when the computation ends in the state \code{done} and the
-first 100 decimal digits are right. The hosts' logs are kept in
-\code{\$TMPDIR/paglets-bench-logs} for a look afterwards.
-
-\code{chronicle\_live.sh} needs at least two remote hosts. It starts one
-Mesh Chronicle with a lifetime of ten minutes (\code{-{}-lifetime-min})
-whose life log goes to this machine, and injects failures at fixed
-fractions of the lifetime: the host of the current main is frozen with
-\code{SIGSTOP} at 15\,\% and thawed at 30\,\%, so that two mains meet; the
-host of the main is killed at 45\,\% and restarted with its state at
-60\,\%; another host is killed at 70\,\% and restarted at 85\,\%; the
-sink's host shuts down normally at 87.5\,\% and is back at 92.5\,\%. With
-\code{-{}-late NAME} that host joins the mesh only at 10\,\%. Afterwards
-the script fetches the life log with \code{remote zombies result}, runs
-\code{remote zombies check}, which checks the protocol steps every live
-host recorded against the specification, and counts the replicas left. It
-records the outcome in \code{docs/results/live\_chronicle.json} and the
-life log, as delivered, in \code{docs/examples/mesh-chronicle-log.md}.
-
-\code{web\_live.sh} records nothing: it puts a counter on every host, a
-\code{hello} and a Mesh Chronicle on the same kind of mesh, checks the API
-of \code{paglets-web} against it (every host reports its status; a call
-through the UI reaches a \paglet{} on a remote host), and leaves the mesh
-running for a look at the page (\code{-{}-check-only} stops after the
-checks).
-
-\begin{table}[htbp]
-\centering\small
-\caption{The live scripts in \code{cpp/tools/}, what they need on this machine beyond the build, and what they record.}
-\label{tab:reproduce-scripts}
-\begin{tabular}{lll}
-\toprule
-Script & Needs & Records in \code{docs/results/} \\
-\midrule
-\code{mesh\_bench.sh} & jq, iperf3 (on every host) & \code{live\_hosts}, \code{live\_transfer}, \code{live\_latency}, \\
- & & \code{live\_benchmark}, \code{live\_pi} \\
-\code{chronicle\_live.sh} & jq & \code{live\_chronicle}; the life log in \code{docs/examples/} \\
-\code{web\_live.sh} & jq, curl & nothing: a check of the web UI on a real mesh \\
-\code{update\_results.sh} & a build with tests & one topic per example, and \code{zombie\_protocol} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{The protocol checker}
-\label{sec:reproduce-checker}
-
-\code{paglets-protocol-check} (\code{cpp/tools/protocol\_check}) checks the
-zombie protocol of Section~\ref{sec:zombies} in the two ways described
-there: every reachable state of a small world, and timed random runs with
-virtual clocks. Both run the same transition function that the guest SDK
-runs.
-
-\begin{lstlisting}[style=paglets-bash]
-C=cpp/build/macos-arm64/tools/protocol_check/paglets-protocol-check
-$C --suite full                       # the twelve worlds of the documentation
-$C --simulate --seeds 10000           # timed random runs (default: 1000)
-$C --trace 42                         # one simulated run: role changes and faults
-$C --replicas 2 --crashes 1 --cuts 1  # one world, given by its options;
-                                      # options not given keep the model's defaults
-\end{lstlisting}
-
-The suite \code{quick} is the set of worlds the \code{unit} test explores:
-two replicas with one kind of fault each, and two replicas with a host
-joining later and a crash. The suite \code{full} is the set recorded in
-the documentation and in Section~\ref{sec:evaluation}: ten two-replica
-worlds with two or three faults or owner actions (a cancel, a redirect)
-each, explored completely, and two three-replica worlds with at most two
-messages in flight per channel, explored to a depth of eleven steps, for
-safety only. A world can also be given by its options (the usage line of
-the tool lists them: replicas, work items, observations, each kind of
-fault, messages in flight per channel, a state limit). Options that are not
-given keep the defaults of \code{ModelConfig}
-(\code{cpp/common/include/paglets/protocols/zombie/model.hpp}): three
-replicas, one crash, cut, loss, duplicate and early timeout each, three
-messages in flight; the suites start from no faults instead. A violated
-property is reported with the shortest sequence of steps that leads to it.
-The exit status is 0 when every property holds, 1 when one is violated
-(or, for the full suite, when a role change of the table was reached by no
-world), and 2 for a usage error. \code{-{}-results FILE} writes the outcome
-in the format of \code{docs/results/}, which is how
-\code{update\_results.sh} records it; \code{-{}-quiet} reports a violated
-property without printing its steps.
-
-\subsection{Generated documentation and this paper}
-\label{sec:reproduce-generated}
-
-The markers that \code{paglets-docs-sync} expands (Section~\ref{sec:tools})
-have a LaTeX form in the chapters of this paper: they are LaTeX comments,
-\code{\% snippet: PATH\#SECTION} or \code{\% results: TOPIC} followed by
-listings options, and the generator writes a \code{lstlisting} (with the
-source path appended to the caption, when the options give one), or a
-booktabs table. Every listing in this paper whose caption ends in a source
-path, and every table of recorded results
-(Table~\ref{tab:eval-hosts} is one), was generated this way; the
-\code{docs\_sync} test fails while any of them is out of date. The
-generator needs only a C++23 compiler; the paper's workflow compiles it
-with one \code{g++} command. The documentation site is built with ckdocs
-from \code{docs/} and checked with \code{ckdocs check}.
-
-\begin{lstlisting}[style=paglets-bash]
-S=cpp/build/macos-arm64/tools/docs_sync/paglets-docs-sync
-$S --root .            # rewrite docs/ (and papers/, on cpp-paper)
-$S --root . --check    # change nothing; exit 1 if a page or a chapter is stale
-cd papers/paglets-cpp  # on the branch cpp-paper
-make sync              # the same, with the build in PAGLETS_BUILD
-make check
-make                   # the PDF: figures/data.sh (jq), gnuplot, latexmk
-\end{lstlisting}
-
-gnuplot draws the figures of Section~\ref{sec:evaluation} from TSV files
-in \code{build/data/}, which \code{figures/data.sh} extracts from the same
-JSON files with jq. The paper is built by a GitHub workflow on every push
-to the branch \code{cpp-paper} that changes the paper, the recorded results
-or \code{cpp/}: it checks that the excerpts and tables are current, builds
-the PDF, publishes it to a release tagged \code{cpp-paper-YYYY-MM-DD}, and
-starts the documentation workflow, which places the newest PDF on the
-documentation site.
-
-\subsection{Installing with Homebrew}
-\label{sec:reproduce-homebrew}
-
-On macOS the tap \code{cklukas/homebrew-paglets} builds the latest release
-from source. The formula depends on Homebrew's GCC, because its build turns
-reflection on and clang has none (\code{fails\_with :clang}), and on
-libsodium, OpenSSL~3 and zstd; it installs \code{paglets-host},
-\code{paglets-worker}, \code{paglets-web}, the guest SDK and the CMake
-package for \code{find\_package(paglets)}. Building paglets against it
-needs the guest toolchain as well.
-
-\begin{lstlisting}[style=paglets-bash]
-brew install cklukas/paglets/paglets           # the latest release (tag cpp-vX.Y.Z)
-brew install --HEAD cklukas/paglets/paglets    # the current cpp branch
-brew install llvm lld wasi-libc wasi-runtimes  # the guest toolchain
-\end{lstlisting}
-
-The installed package builds guest modules and runs them with
-\code{paglets-host}; it does not export the host runtime as a library.
-\par\endgroup
+\code{paglets-docs-sync} regenerates marked excerpts and selected result
+tables. Its check fails if a generated block no longer matches its source.
+The paper's Makefile invokes \code{latexmk}; numerical claims in the prose
+are checked separately against the records. Building the PDF does not
+rerun the experiments.

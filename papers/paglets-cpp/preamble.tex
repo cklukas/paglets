@@ -9,6 +9,7 @@
 \usepackage[utf8]{inputenc}
 \usepackage{libertinus}
 \usepackage{microtype}
+\DisableLigatures[-]{encoding=T1,family=tt*}
 \usepackage[a4paper,margin=26mm,headheight=22pt]{geometry}
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -24,6 +25,7 @@
 \usepackage{listings}
 \usepackage{titlesec}
 \usepackage{appendix}
+\PassOptionsToPackage{hyphens}{url}
 \usepackage{hyperref}
 \usepackage{url}
 \usetikzlibrary{arrows.meta,fit,positioning,shapes.misc,calc,decorations.pathreplacing}
@@ -66,6 +68,11 @@
   labelfont={bf,color=pagletsBlue},
   labelsep=period
 }
+\captionsetup[lstlisting]{justification=raggedright,singlelinecheck=false}
+
+\renewcommand{\floatpagefraction}{0.8}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\textfraction}{0.07}
 
 \setlist{itemsep=0.25em,topsep=0.45em}
 \renewcommand{\arraystretch}{1.05}
@@ -85,7 +92,9 @@
 % -- code -----------------------------------------------------------------
 % paglets-docs-sync renders snippets as lstlisting blocks of these styles,
 % and puts the source path into a caption with \src.
-\newcommand{\src}[1]{{\normalfont\footnotesize\color{pagletsMuted}(\texttt{#1})}}
+\newcommand{\sourcebase}{https://github.com/cklukas/paglets/blob/c01902c93beb0d31f427c34bac6573878636a501}
+\newcommand{\sourcefile}[2]{\href{\sourcebase/#1}{#2}}
+\newcommand{\src}[1]{{\normalfont\footnotesize\color{pagletsMuted}(\sourcefile{#1}{\texttt{#1}})}}
 \newcommand{\code}[1]{\texttt{#1}}
 
 \lstdefinestyle{paglets-base}{

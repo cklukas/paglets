@@ -64,7 +64,9 @@ forwarding) runs:
 2. **Records.** The responsible hosts are asked (`loc-get` / `loc-rec`);
    with answers from a majority, the record with the highest counter wins.
    Since every move commits with a majority, the answer is the latest
-   committed location. Each step waits at most 3 s.
+   committed location. At the 3 s deadline, fewer answers may still supply
+   the best record received, which can be stale. With no record, the
+   lookup advances to the whole-mesh phase. Each phase waits at most 3 s.
 3. **Who holds P.** If no responsible host knows the paglet (records lost,
    a partition), every live host is asked (`loc-who`); the host that holds
    it answers (`loc-here`).

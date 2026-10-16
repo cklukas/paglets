@@ -10,6 +10,40 @@ documentation is the `paglets/cpp` section of the documentation site
 [guest SDK reference](../docs/sdk-reference.md) and
 [configuration and troubleshooting](../docs/configuration.md).
 
+Compute jobs (ABI v1.3) run functions in separate fresh Wasm instances,
+with slot admission, cancellation, remote execution, artifacts and optional
+AOT compilation. The SDK provides continuations and C++ coroutines; Pi uses
+jobs for its chunks and decimal conversion. See
+[Compute jobs](../docs/compute-jobs.md). `paglets-wamrc` is built and installed
+when a supported LLVM is available; jobs otherwise use the interpreter.
+For the separate `compute-slots` service, release an existing lease before
+changing its job or core count.
+Leases and native jobs share admission priority: later work leaves capacity
+for an older waiting request as running allocations finish.
+Leases expire after 10 minutes by default, extended for longer estimates;
+renewal stays within a 24-hour continuous limit.
+
+Queued requests retain their expiry across hosts, timed deactivation wakes
+travel and survive stored recovery, and clones discard inherited SDK reply
+waits. Modules that mutate state outside the memory-image format are
+refused at admission. Import policies authorize function imports only,
+checking their kind as well as their name. Interface descriptions are checked against their C++
+schema, including examples and defaults. See the
+[SDK reference](../docs/sdk-reference.md) and
+[remaining issues](../planning/cpp-paper-audit.md).
+
+New root identities bind the owner, mesh and launch nonce. Mesh protocol 2
+requires upgraded hosts and clients together; saved paglets keep their IDs
+and can recover and move. `remote launch --nonce` replaces `--id`; the host
+C++ launch/passport APIs take a nonce too. Web launch forms use the same
+nonce and show the derived global ID. See [identity upgrades](../docs/hosts-and-meshes.md#paglet-identities-and-upgrades).
+
+Moves preserve replies already waiting for their SDK continuations, host
+reports and one-shot timers, including the timer message kind. A move that
+exceeds its notification or transport limit is refused without consuming
+those deliveries. Outstanding request budgets also count time spent moving;
+peers that cannot restore their timing metadata refuse the move. See [movement limits](../docs/configuration.md).
+
 Status: milestone M0 (feasibility) is closed
 ([results](../planning/cpp-m0-results.md)). Milestone M1 (single-host
 runtime) is closed ([results](../planning/cpp-m1-results.md)): the paglet
@@ -68,12 +102,36 @@ capabilities that work on every host, within data residency
 ([design](../planning/cpp-content-exchange.md)). Zombie paglets keep running
 as long as one host of the mesh is alive: a replica on every host, takeovers,
 journals merged across partitions, one result at the sink, restarts from
-memory images (ABI v1.2). The protocol is specified as a C++ state machine
+memory images (ABI v1.2). Permanent result refusals end the group with a
+failure notification. The protocol is specified as a C++ state machine
 and checked by `paglets-protocol-check`, a model checker and simulator in
 the code base; the Mesh Chronicle example writes the life log of its mesh
 ([design](../planning/cpp-zombie.md), [docs](../docs/zombie-protocol.md)).
 
+Revocations are rechecked on established channels, relay tunnels and
+polled results after the host learns the ledger change; bootstrap seeds
+and explicit host pins do not override a known revocation. Chronicle waits
+for creator admission and replies with its group ID, `accepted` and a refusal
+`reason`; other replicas form asynchronously. Inventory acknowledges dispatch
+startup; read its `report` for completion.
+
 ## Layout
+
+`paglets-host serve --memory-mb N` sets the per-paglet linear-memory cap
+(default 256 MB), separately from compute jobs (default and maximum 1 GB).
+Instances start with their module’s initial memory and grow as needed.
+`remote moves` exposes move
+and phase counters. `tools/mesh_bench.sh --steps move` measures 0, 1, 4 and
+16 MB ballast, with ten cold-page and return samples per direction and
+an explicit 32 MB host cap for the largest image.
+The script stores TCP baselines separately and reuses matching host pairs
+in partial transfer runs, retaining the baseline measurement date.
+Live benchmark records require the clone to confirm its compute slot.
+Chronicle records use each host's actual build; `--results-dir` and
+`--log-file` can keep a separate run outside the committed measurements.
+
+The memory limits are ceilings, not reservations of physical RAM for each
+instance. Intended move destinations must allow the image too.
 
 ```text
 common/include/paglets/   MessagePack primitives, the paglet ABI v1 documents and the service
@@ -103,6 +161,13 @@ macOS (Homebrew, the tap [cklukas/homebrew-paglets](https://github.com/cklukas/h
 
 ```bash
 brew install cklukas/paglets/paglets
+```
+
+To build your own paglets against the installed package, add the guest
+toolchain (host-only users do not need it):
+
+```bash
+brew install llvm lld wasi-libc wasi-runtimes
 ```
 
 Releases are tags `cpp-vMAJOR.MINOR.PATCH` matching `project(paglets_cpp VERSION ...)`;
@@ -142,6 +207,10 @@ cmake --build --preset macos-arm64
 ctest --preset macos-arm64
 ```
 
+`build/<preset>/tests/paglets_tests --list [FILTER]` lists the cases compiled
+into that build without executing them. Filters match test-name substrings;
+an unmatched filter exits with status 2. `--help` shows the invocation forms.
+
 Other presets: `linux-gcc16`, `windows-mingw-gcc16`, the sanitizer variants
 `macos-arm64-asan`, `linux-gcc16-asan` (AddressSanitizer and
 UndefinedBehaviorSanitizer) and `linux-gcc16-tsan` (ThreadSanitizer), and
@@ -177,6 +246,10 @@ paglets_add_module(my_paglet SOURCES my_paglet.cpp)
 The package has `paglets-host`, the guest SDK, the service clients and the
 schema generator; `examples/out-of-tree` is a complete project (see
 [Building and testing](../docs/building.md#modules-outside-the-repository)).
+Guest builds track included SDK and local headers, so header edits rebuild
+the affected modules automatically.
+`tests/guests/plain_counter.c` demonstrates the ABI in C without the guest
+SDK; the runtime test checks its lifecycle and saved state in both modes.
 
 ## Writing a paglet
 
@@ -212,7 +285,9 @@ clones and lifecycle operations (see `examples/ping_pong` and the
 [ABI specification](../planning/cpp-abi-v1.md)). Sends and replies can be
 asynchronous (`SendOptions::async`, `Message::reply_async`): they return at
 once, and a message that cannot be delivered reaches
-`Paglet::on_undelivered`.
+`Paglet::on_undelivered`. For remote asynchronous sends, receiving-host
+refusals report the original endpoint handle and follow a moving sender.
+Transport loss and old peers can still prevent a report.
 
 The patterns library ([design](../planning/cpp-patterns.md);
 `#include <paglets/patterns.hpp>`, `paglets_add_module(... PATTERNS)`)
@@ -241,10 +316,13 @@ Message bodies and arguments are JSON, passed to the paglet as MessagePack;
 replies are printed as JSON. Paglets run in worker processes
 (`paglets-worker`, found next to `paglets-host`; one per scheduler lane, set
 with `--threads`); `--in-process` runs them in the host process instead. The
-workers run in an operating-system sandbox (Linux: seccomp; macOS: a sandbox
-profile; Windows: a job object and a restricted token) and cannot open
-files, create sockets or start programs (`--no-sandbox` for debugging;
-`paglets-worker --check-sandbox` verifies it). Output a paglet writes to
+workers run in an operating-system sandbox (Linux: a seccomp allow list;
+macOS: a sandbox profile; Windows: an LPAC, job object and restricted token).
+Workers cannot access the network or start programs. Windows permits necessary
+runtime resources and private AppContainer storage; see
+[worker sandbox limits](../docs/configuration.md#worker-sandbox-limits).
+Use `--no-sandbox` for debugging;
+`paglets-worker --check-sandbox` verifies the restrictions. Output a paglet writes to
 stdout or stderr goes to the host log. The host runs the standard system paglets
 (files, server-info, directory, storage, artifacts, pubsub, user-info;
 [design](../planning/cpp-system-paglets.md)); `--root NAME=DIR` gives the
@@ -292,6 +370,27 @@ quorum) and `sign` (co-sign a record that needs several admins) complete the
 set; the [command-line reference](../docs/cli-reference.md#ledger)
 lists every command and option.
 
+`mesh create` defaults admin-set changes to two signatures with three or
+more initial admins, otherwise one. Other admin records still default to
+one signature; explicit quorum options override either threshold. Existing
+ledgers retain their recorded quorums.
+
+`remote call --timeout SECONDS` sets the reply deadline (default 30 s,
+range 0.1–120 s, up to three decimal places). Web-generated call commands
+preserve the effective timeout.
+
+The shared session client validates known reply fields before the CLI
+formats them. Missing or wrong-type fields produce `malformed answer`;
+the CLI also rejects malformed service records before printing a list.
+
+Host-tool messages use sender `trust: host`; authenticated remote calls
+and sends carry the acting owner's or admin's key ID in `sender.owner`.
+Native services keep `trust: system`.
+
+Linux ARM64 hardware-check builds warn at startup when a virtual
+address-space probe fails; the warning names the software bounds-check
+build option. This is separate from the paglet and job RAM ceilings.
+
 Access to host resources follows the mesh policy
 ([design](../planning/cpp-policy.md)): rules decide allow, ask or deny;
 paglets ask the `grants` system paglet; admins approve or deny requests from
@@ -337,6 +436,11 @@ channel to a host as an admin or owner, to show its status, push ledger records,
 (the module travels with the request), call it or move it with a transfer
 ticket (a host name, a key ID, `label:<label>`, `offer:<service>[.<op>]` or
 `any`, with `?retries=N&arrival=active|inactive`):
+
+Full host key IDs take precedence over display names; an unknown full ID
+never falls back to a name. Names and permitted prefixes must identify
+one enrolled host across both forms. Ambiguous shorthand is refused;
+use the full key ID. Compute-job host lists accept names or full IDs only.
 
 ```bash
 $H keys init --role owner --name olga --out olga.key          # prints <olga-key-id>
@@ -411,3 +515,9 @@ architecture and operating system):
 build/macos-arm64/host/paglets-spike image-save build/macos-arm64/guests/counter.wasm counter.pgimg --increments 5
 build/macos-arm64/host/paglets-spike image-resume build/macos-arm64/guests/counter.wasm counter.pgimg --increments 2 --expect 18
 ```
+
+Worker execution requires `paglets-worker` beside `paglets-host`. Missing,
+non-executable or unresponsive workers cause startup to fail; guests do not
+silently fall back into the host process. `--in-process` explicitly selects
+that mode. A requested worker sandbox must also initialize successfully;
+`--no-sandbox` explicitly disables it.

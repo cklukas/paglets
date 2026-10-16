@@ -47,7 +47,7 @@ public:
             carry_ = q;
             carried_ = CarryStatus{"carrying", 0, {}};
             (void)m.reply(carried_);
-            pt::pick_up(q.from_root, q.path, 1024 * 1024, [this](paglets::Result<pt::CarriedFile> f) {
+            pt::pick_up(q.from_root, q.path, 4 * 1024 * 1024, [this](paglets::Result<pt::CarriedFile> f) {
                 if (!f) return carry_failed(pt::error_text("pick up", f.error()));
                 file_ = std::move(*f);
                 carried_.size = static_cast<std::int64_t>(file_.data.size());
@@ -77,6 +77,7 @@ public:
                                     r.dispatch_while_pinned = std::string(paglets::abi::error_name(where.error()));
                                 }
                                 done();
+                                done();  // user completion may be repeated; release only once
                                 pinned_ = r;
                             });
         });

@@ -102,7 +102,10 @@ struct TransportStats {
 
 class Transport final : public mesh::GossipTransport {
 public:
-    // `accept` decides which identities may open channels to this host;
+    // `accept` checks peers at handshake and again for sending, receiving and
+    // releasing replies/polled data; revocation invalidates existing access.
+    // It may be called concurrently; referenced state must outlive the transport.
+    //
     // `handler` receives their frames (from its server threads).
     Transport(const mesh::SigningKey& identity, mesh::RecordId mesh, TransportConfig config, AcceptPeer accept,
               FrameHandler handler);
@@ -138,6 +141,7 @@ public:
 
     // Queues a frame for a peer (a host); returns at once.
     void send(const mesh::PublicKey& to, Bytes frame) override;
+    std::size_t frame_limit() const override;
     // Waits until every queued frame was sent or dropped.
     bool flush(std::chrono::milliseconds timeout = std::chrono::milliseconds(30000));
 
@@ -155,7 +159,8 @@ private:
 
 // A client-side channel for request and answer (CLI sessions, tools): opens
 // a channel to `url` as `identity` in `role`; `accept` checks the server's
-// identity.
+// identity at the handshake and before/after exchanges. Its captures must
+// stay valid for the session lifetime; a refusal permanently ends the session.
 class ClientSession {
 public:
     static std::expected<ClientSession, std::string> open(const std::string& url, const mesh::SigningKey& identity,

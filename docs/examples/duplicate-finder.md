@@ -276,6 +276,6 @@ small file of its own. The test checks that:
 <!-- results: dupes -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | files listed on three hosts | files hashed (same size as another) | groups of duplicates | bytes in extra copies |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Duplicate Finder finds the same content on different hosts | in-process | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 4 | 3 | 1 | 5000 |
-| example: Duplicate Finder finds the same content on different hosts | worker processes | passed | 0.6 s | Darwin arm64, Release build | 2026-10-12 | 4 | 3 | 1 | 5000 |
+| example: Duplicate Finder finds the same content on different hosts | in-process | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 3 | 1 | 5000 |
+| example: Duplicate Finder finds the same content on different hosts | worker processes | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 3 | 1 | 5000 |
 <!-- /results -->

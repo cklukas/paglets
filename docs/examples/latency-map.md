@@ -241,7 +241,7 @@ listed under `errors`.
 
 `cpp/tools/mesh_bench.sh` (see
 [File Courier](file-courier.md#transfer-speed-between-real-machines))
-runs this example on a mesh of real machines on a gigabit LAN (a Mac
+runs this example on a mesh of real machines on the recorded local network (a Mac
 Studio, a Raspberry Pi 4 and a Raspberry Pi Compute Module 5): round
 trips of messages between probes on every pair of hosts, 20 pings each,
 through the HTTPS channels between the hosts and the worker processes
@@ -276,10 +276,12 @@ that:
 <!-- results: latency -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | host pairs measured | pings per pair | mean round trip (in-memory test transport) (ms) |
 |---|---|---|---|---|---|---|---|---|
-| example: Latency Map measures round trips between every pair of hosts | in-process | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 6 | 3 | 9.8 |
-| example: Latency Map measures round trips between every pair of hosts | worker processes | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 6 | 3 | 7.24 |
+| example: Latency Map measures round trips between every pair of hosts | in-process | passed | 0.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 6 | 3 | 0.24 |
+| example: Latency Map measures round trips between every pair of hosts | worker processes | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 6 | 3 | 0.36 |
 <!-- /results -->
 
-The test hosts use the in-memory transport between hosts of one process,
-so the round trips show the overhead of the runtimes and the mesh
-protocol, not of a network.
+The test hosts use the in-memory transport between hosts of one process.
+The fixture delivers queued frames and ticks the hosts in rounds, sleeping
+2 ms only when a round delivered no frames. Its round trips still include
+test scheduling and runtime waits; use the live results for timings
+between physical hosts.
