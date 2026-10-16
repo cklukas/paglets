@@ -91,6 +91,12 @@ the job reports `not_found`. Job host lists do not accept key-ID prefixes.
 Jobs queue when their host has no slot. `cores` accounts for slots; it does
 not create guest threads or parallelize a function.
 
+A host can stop accepting jobs before its transport stops. If it refuses
+with `unsupported`, the submitting host excludes it from job selection for
+one snapshot freshness interval (20 seconds by default). The refused job
+still reports its error; a later submission can select another permitted
+host instead of repeatedly following the stale free-slot announcement.
+
 Memory and execution time default to unknown (`0`), with no host-imposed
 ceiling. A job starts with its module's initial memory and grows when
 needed; Wasm32 supports up to 4 GB per instance. `max_ms = -1` explicitly

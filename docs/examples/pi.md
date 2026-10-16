@@ -131,9 +131,10 @@ Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/c
 // host without a mesh they run here.
 void send_more() {
     if (state_ != "computing") return;
+    const auto now = now_ms();
     for (auto& c : chunks_) {
         if (in_flight() >= params_.max_in_flight) break;
-        if (c.sent || c.done) continue;
+        if (c.sent || c.done || now < c.retry_at) continue;
         if (++c.attempt > max_attempts) return fail("chunk " + std::to_string(c.start) + " failed every time");
         compute::Options o;
         o.hosts = local_only_ ? std::vector<std::string>{} : params_.hosts;
@@ -156,8 +157,11 @@ void send_more() {
 ```
 <!-- /snippet -->
 
-A failed job makes its chunk eligible for resubmission, bounded by the
-example's retry limit. A late result for an already completed chunk is ignored. `chunk_timeout_ms` caps running time; zero uses the host default.
+A failed job makes its chunk eligible for resubmission after an exponential
+backoff, starting at 200 ms and bounded by the example's five-attempt limit.
+Other completed chunks cannot bypass this delay, and one periodic timer
+drives retries. A late result for an already completed chunk is ignored.
+`chunk_timeout_ms` caps running time; zero uses the host default.
 A remote host leaving causes `gone`, which also permits retry.
 
 <!-- snippet: cpp/examples/pi/pi.cpp#result -->
@@ -177,7 +181,9 @@ void on_result(std::int64_t start, paglets::Result<compute::Output> r, Message& 
                                                                 std::string(p.begin(), p.end())));
         c.sent = false;
         ++resent_;
-        (void)paglets::after_raw(200, "tick", {});
+        // Other chunks can finish meanwhile: their send_more() calls
+        // must respect this delay too, rather than exhaust every retry.
+        c.retry_at = now_ms() + (200 << std::min<std::int64_t>(c.attempt - 1, 4));
         return;
     }
     c.done = true;

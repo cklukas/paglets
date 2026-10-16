@@ -125,7 +125,9 @@ std::optional<mesh::PublicKey> Node::Impl::pick_job_host(const std::vector<std::
     std::optional<mesh::PublicKey> best;
     std::int64_t best_free = 0;
     double best_score = 0;
+    const auto now = Clock::now();
     for (const auto& k : keys) {
+        if (auto it = jobs.unavailable_until.find(k); it != jobs.unavailable_until.end() && now < it->second) continue;
         std::int64_t slots = 0;
         std::int64_t free = 0;
         double load = 0;
@@ -282,8 +284,12 @@ bool Node::Impl::on_jobs_frame(std::string_view type, const mesh::PublicKey& fro
         auto it = jobs.sent.find({*paglet, correlation});
         if (it == jobs.sent.end() || it->second.host != from) return true;
         if (type == "job-refused") {
+            const auto error = static_cast<std::int32_t>(f.integer("e").value_or(abi::failed));
+            // During shutdown the runtime refuses jobs before the transport
+            // stops. A stale free-slot snapshot must not attract every retry.
+            if (error == abi::unsupported) jobs.unavailable_until[from] = Clock::now() + compute.timing.ttl;
             jobs.sent.erase(it);
-            runtime.fail_job(*paglet, correlation, static_cast<std::int32_t>(f.integer("e").value_or(abi::failed)));
+            runtime.fail_job(*paglet, correlation, error);
             return true;
         }
         abi::JobStatus status;
@@ -298,6 +304,7 @@ bool Node::Impl::on_jobs_frame(std::string_view type, const mesh::PublicKey& fro
 // mu held, every tick.
 void Node::Impl::jobs_tick() {
     const auto now = Clock::now();
+    std::erase_if(jobs.unavailable_until, [&](const auto& e) { return now >= e.second; });
     const auto lost_after = compute.timing.ttl;
     const mesh::PublicKey self = key.public_key();
     // Jobs of paglets here on other hosts: ended (the result came), or lost

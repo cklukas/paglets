@@ -590,6 +590,30 @@ PAGLETS_TEST("jobs: remote jobs run on a named host, or where the mesh has free 
     CHECK_EQ(run_in(m.net, *m.a, m.paglet, on(job("sum"), {"nowhere"})).status, abi::not_found);
 }
 
+PAGLETS_TEST("jobs: a host refusing work during shutdown is not selected again immediately") {
+    JobMesh m;
+    m.b->node->set_compute_slots(8);
+    for (auto& h : m.net.hosts)
+        h->node->set_compute_timing({.sample = 50ms, .gossip = 50ms, .ttl = 10000ms, .redirect_after = 0ms});
+    REQUIRE(m.net.settle([&] {
+        for (const auto& h : m.a->node->landscape()) {
+            if (h.host == key_id(m.b->key) && h.slots_free == 8) return true;
+        }
+        return false;
+    }, 2000));
+    // Its transport and heartbeats still run while the runtime has stopped.
+    // The stale free-slot announcement would make b win every retry.
+    m.b->f->runtime->shutdown(false);
+    CHECK_EQ(run_in(m.net, *m.a, m.paglet, on(job("sum"), {"b"})).status, abi::unsupported);
+    for (const auto& allowed : {std::vector<std::string>{"any"}, std::vector<std::string>{"b", "c"}}) {
+        const auto result = run_in(m.net, *m.a, m.paglet, on(job("sum", Bytes{7, 8}), allowed));
+        REQUIRE(result.status == abi::ok);
+        CHECK(result.host != key_id(m.b->key));
+        if (allowed.size() == 2) CHECK_EQ(result.host, key_id(m.c->key));
+        CHECK_EQ(value_of<std::int64_t>(result.output), 15);
+    }
+}
+
 PAGLETS_TEST("jobs: ambiguous names and unregistered keys cannot choose an execution host") {
     Mesh net;
     auto& a = net.add_host("a");

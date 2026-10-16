@@ -572,6 +572,8 @@ struct Node::Impl {
             Clock::time_point lost{};  // when its host left the view (epoch: in view)
         };
         std::map<std::pair<runtime::PagletId, std::uint64_t>, Sent> sent;
+        // A stopped job pool can refuse work before heartbeats disappear.
+        std::map<mesh::PublicKey, Clock::time_point> unavailable_until;
         // Hosts whose jobs run here, by requester host: when they left the view.
         std::map<mesh::PublicKey, Clock::time_point> requesters_lost;
         Clock::time_point next_status{};
