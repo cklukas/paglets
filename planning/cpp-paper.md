@@ -8,7 +8,7 @@ Its source is under `papers/paglets-cpp/`. It explains the execution and migrati
 mechanisms, compute jobs and replicated agents, with short implementation excerpts,
 measurements and explicit limits.
 
-[Download the paper](https://github.com/cklukas/paglets/releases/download/cpp-paper-2026-10-16/paglets-cpp.pdf).
+[Download the paper](https://cklukas.github.io/paglets/cpp/paglets-cpp.pdf).
 
 Current supported limitations are in [Documented limitations](cpp-limitations.md).
 Internal review catalogues, logs and intermediate paper revisions are retained
