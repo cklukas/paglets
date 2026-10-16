@@ -76,7 +76,7 @@ ctest --preset linux-gcc16
 
 The ASan/UBSan presets keep debug symbols and frame pointers and use `-O1`,
 following [AddressSanitizer's runtime guidance](https://clang.llvm.org/docs/AddressSanitizer.html#usage).
-CTest stops at the first undefined-behavior report. Protocol exploration
+Test processes stop at the first undefined-behavior report. Protocol exploration
 keeps the same worlds and property checks.
 
 Set `PAGLETS_TEST_TRACE=1` when diagnosing a long suite run; the test
