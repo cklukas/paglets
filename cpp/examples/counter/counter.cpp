@@ -41,7 +41,7 @@ public:
     // Optional start arguments (`--args '{"value": 10}'`).
     void on_created(paglets::Started& s) override {
         Start start;
-        if (!s.args.empty() && s.decode_args(start)) value_ = start.value;
+        if (s.decode_args(start)) value_ = start.value;
     }
 
 private:

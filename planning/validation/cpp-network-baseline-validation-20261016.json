@@ -1,0 +1,162 @@
+{
+  "date": "2026-10-16",
+  "base_cpp_commit": "8e64417e17d162bd799399650251a12798c8cbf6",
+  "status": "T-2 resolved; wider catalogue and paper review remain open.",
+  "problem": "tcp_mbits was populated only by the current network step; partial transfer runs wrote an empty TCP baseline.",
+  "behaviour": "Network measurements are stored separately with hashed physical machine/OS-installation identity, endpoint, ordered direction and original measurement date. Matching partial transfers reuse the measurement and date despite fresh mesh keys; missing or mismatched measurements omit the comparison. Invalid baseline files fail instead of producing misleading data. Raw iperf3 samples are retained.",
+  "regression": "The first helper draft matched ephemeral mesh keys; the rotation regression failed. Matching stable hashed machine identity and endpoint passes key rotation and rejects changed machines/endpoints, reversed directions, failed/missing/zero/wrong-unit samples and malformed/unknown-version files. This draft red run is not an old-runtime regression claim.",
+  "platforms": {
+    "mac": "Bash helper checks and newly registered mesh_network_baseline CTest passed.",
+    "uconsole": "Same exact helper/test bytes passed under Bash/jq; also participated in live integration.",
+    "rpi4": "Same exact helper/test bytes passed under Bash/jq.",
+    "workstation": "Same exact helper/test bytes passed with the isolated MSYS Bash/jq runtime. jq and oniguruma were added only inside D:/tmp/paglets-remaining-20261015-01/msys64; C:/msys64 untouched."
+  },
+  "live_integration": {
+    "status": "passed",
+    "physical_hosts": [
+      "mac",
+      "uconsole"
+    ],
+    "keys_rotated": true,
+    "machine_and_endpoint_identity_unchanged": true,
+    "baseline_file_unchanged_sha256": "ab10c65cfa5a87b45542c104f8f8f25236b601c0d8fa76f2af7986aec086529b",
+    "network_samples": 2,
+    "completed_transfers_initial": 2,
+    "completed_transfers_partial": 2,
+    "scope": "Recording correctness only. Two-host Mac/CM5 integration; no new performance comparison claim."
+  },
+  "checks": {
+    "runs": [
+      {
+        "name": "configure",
+        "start": "2026-10-16T06:56:30.214169+00:00",
+        "end": "2026-10-16T06:56:31.445669+00:00",
+        "seconds": 1.2308827090018895,
+        "exit": 0
+      },
+      {
+        "name": "ctest",
+        "start": "2026-10-16T06:56:31.445727+00:00",
+        "end": "2026-10-16T06:56:31.817878+00:00",
+        "seconds": 0.3721612910158001,
+        "exit": 0
+      }
+    ],
+    "native_executables_unchanged": {
+      "host/paglets-host": "df49083b78e7c08c0dd5d8bc3880fb11742c1fec6a1bf371407f1d0f10c4f444",
+      "host/paglets-worker": "70d18f92d9edcec4a5a268e5d40573099d94626f0ea832a8fe0d500d9b7493e5",
+      "tests/paglets_tests": "51ee665983be19800c11bda1f4e1d5fe276140d707268c7451a45edc017f195b"
+    }
+  },
+  "remote_checks": [
+    {
+      "host": "uconsole",
+      "start": "2026-10-16T06:55:06.419769+00:00",
+      "end": "2026-10-16T06:55:06.710662+00:00",
+      "seconds": 0.2906113750068471,
+      "exit": 0
+    },
+    {
+      "host": "rpi4",
+      "start": "2026-10-16T06:55:07.760595+00:00",
+      "end": "2026-10-16T06:55:08.191893+00:00",
+      "seconds": 0.43126308399951085,
+      "exit": 0
+    },
+    {
+      "host": "workstation",
+      "start": "2026-10-16T06:55:08.964860+00:00",
+      "end": "2026-10-16T06:55:10.726052+00:00",
+      "seconds": 1.7611978750210255,
+      "exit": 0
+    }
+  ],
+  "source_files": 330,
+  "source_fingerprint_sha256": "f5ecc9049ae837f81f2665089e0c5053fd9a5eacc7ff6de4ea4f7f785000af96",
+  "freshness": "CMake configuration took 1.23 s, then the new shell CTest and docs-sync passed. No native target was rebuilt or modified; current verified executable hashes remained identical. The live script verified exact absolute host executables/PIDs. This change concerns scripts and recording, not native runtime or guest bytes.",
+  "cleanup": {
+    "recorded_host_processes": [
+      {
+        "host": "mac",
+        "pid": 97833,
+        "expected_executable": "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64/host/paglets-host",
+        "now": "not running"
+      },
+      {
+        "host": "uconsole",
+        "pid": 770427,
+        "expected_executable": "/home/klukas/paglets-live/cpp/build/linux-gcc16/host/paglets-host",
+        "now": "not running"
+      },
+      {
+        "host": "mac",
+        "pid": 1663,
+        "expected_executable": "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64/host/paglets-host",
+        "now": "not running"
+      },
+      {
+        "host": "uconsole",
+        "pid": 771032,
+        "expected_executable": "/home/klukas/paglets-live/cpp/build/linux-gcc16/host/paglets-host",
+        "now": "not running"
+      }
+    ],
+    "removed": [
+      "/Volumes/S8T/tmp/paglets/remaining-bugs-20261016-01/network-baseline-01/mac-fixture",
+      "/Volumes/S8T/tmp/paglets/remaining-bugs-20261016-01/network-baseline-01/red-fixture",
+      "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64/tests/mesh-network-baseline"
+    ],
+    "retained_build": "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64",
+    "scope": "Live fixtures stopped and removed by the script; selected test fixtures removed. Current executable hashes unchanged."
+  },
+  "remote_cleanup": {
+    "uconsole": {
+      "hashes": {
+        "helper.sh": "1b378ec15f3c8fa09d7db546369cab7bac93c567042e8e6288d544344d641547",
+        "test.sh": "bcada1d3fd97497b0ad597cc9ef3252a826a1ed0bbf97603abb14e0497159c39"
+      },
+      "jq": "jq-1.7",
+      "removed": [
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/fixture",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/mesh_network_baseline.sh",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/helper.sh",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/test.sh"
+      ]
+    },
+    "rpi4": {
+      "hashes": {
+        "helper.sh": "1b378ec15f3c8fa09d7db546369cab7bac93c567042e8e6288d544344d641547",
+        "test.sh": "bcada1d3fd97497b0ad597cc9ef3252a826a1ed0bbf97603abb14e0497159c39"
+      },
+      "jq": "jq-1.7",
+      "removed": [
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/fixture",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/mesh_network_baseline.sh",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/helper.sh",
+        "/home/klukas/tmp/paglets-remaining-20261015-01/network-baseline-01/test.sh"
+      ]
+    },
+    "workstation": {
+      "hashes": {
+        "test.sh": "bcada1d3fd97497b0ad597cc9ef3252a826a1ed0bbf97603abb14e0497159c39",
+        "helper.sh": "1b378ec15f3c8fa09d7db546369cab7bac93c567042e8e6288d544344d641547"
+      },
+      "jq": "jq-1.8.2",
+      "scope": "Isolated task fixtures/cache removed. jq/oniguruma retained in the isolated current MSYS runtime; C:/msys64 untouched.",
+      "removed": [
+        "D:/tmp/paglets-remaining-20261015-01/network-baseline-01/fixture",
+        "D:/tmp/paglets-remaining-20261015-01/network-baseline-01/packages",
+        "D:/tmp/paglets-remaining-20261015-01/network-baseline-01/mesh_network_baseline.sh",
+        "D:/tmp/paglets-remaining-20261015-01/network-baseline-01/test.sh",
+        "D:/tmp/paglets-remaining-20261015-01/network-baseline-01/helper.sh"
+      ]
+    }
+  },
+  "scope": "Four-platform helper/JSON checks and physical Mac/CM5 recording integration. No new full native suite, sanitizer, benchmark comparison or rendered-PDF claim.",
+  "publishing": "rpi4 only; no GitHub update before final human review.",
+  "evidence": {
+    "archive": "/Volumes/SD24a/Archive/paglets-review-20261015/remaining-fixes/network-baseline-validation-20261016.json.gz",
+    "bytes": 31646,
+    "sha256": "97d2e2e7a5e3c486cf85696df516d5be186b3a0e95baa0f6c7d9ea64552f5ca2"
+  }
+}

@@ -241,8 +241,8 @@ to the other host and back with `remote dispatch`, and increments it on
 each host; `host_mesh_discovery` uses it as well.
 
 <!-- results: counter -->
-| Test | Mode | Outcome | Duration | Platform | Recorded | sum after ten increments, restored from its memory image | memory image size, serialized (bytes) |
-|---|---|---|---|---|---|---|---|
-| snapshot: counter state survives capture, serialize and restore | in-process | passed |  | Darwin arm64, Release build | 2026-10-12 | 55 | 131212 |
-| snapshot: counter state survives capture, serialize and restore | worker processes | passed | 0.1 s | Darwin arm64, Release build | 2026-10-12 | 55 | 131212 |
+| Test | Mode | Outcome | Platform | Recorded | sum after ten increments, restored from its memory image | memory image size, serialized (bytes) |
+|---|---|---|---|---|---|---|
+| snapshot: counter state survives capture, serialize and restore | in-process | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 55 | 131212 |
+| snapshot: counter state survives capture, serialize and restore | worker processes | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 55 | 131212 |
 <!-- /results -->

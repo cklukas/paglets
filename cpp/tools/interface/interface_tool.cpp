@@ -115,7 +115,11 @@ int main(int argc, char** argv) {
         if (!text) return fail("cannot read " + *description_file);
         description = Json::parse(*text);
         if (!description) return fail(*description_file + " is not valid JSON");
-        if (schema) description = wi::merge_schema_types(std::move(*description), *schema);
+        if (schema) {
+            if (auto ok = wi::validate_schema_types(*description, *schema); !ok)
+                return fail(*description_file + ": " + ok.error());
+            description = wi::merge_schema_types(std::move(*description), *schema);
+        }
         if (name && description->find("name") == nullptr && description->is_object()) {
             Json::Object members;
             for (std::size_t i = 0; i < description->keys().size(); ++i) {

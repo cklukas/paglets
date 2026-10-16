@@ -200,16 +200,17 @@ PAGLETS_TEST("location: without records the mesh is asked who holds the paglet")
     // A paglet on a host that does not keep its record, whose records get lost.
     // (a keeps the records of 3 in 4 paglets: try IDs until one fits)
     std::mt19937_64 random{std::random_device{}()};
-    std::string which;
-    for (int i = 0; i < 1000 && which.empty(); ++i) {
+    std::optional<Passport> chosen;
+    for (int i = 0; i < 1000 && !chosen; ++i) {
         std::string candidate;
         for (int n = 0; n < 32; ++n) candidate += "0123456789abcdef"[random() % 16];
-        const auto r = a.node->responsible(candidate);
-        if (std::ranges::find(r, a.key) == r.end()) which = candidate;
+        auto passport = net.passport(module, candidate);
+        const auto r = a.node->responsible(passport.paglet());
+        if (std::ranges::find(r, a.key) == r.end()) chosen = std::move(passport);
     }
-    REQUIRE(!which.empty());
+    REQUIRE(chosen.has_value());
     net.filter = [](const PublicKey&, const PublicKey&, Bytes& frame) { return frame_type(frame) != "loc-set"; };
-    auto created = a.node->create(module, net.passport(module, which));
+    auto created = a.node->create(module, *chosen);
     REQUIRE_OK(created);
     const auto id = *created;
     net.settle([] { return false; }, 20);
@@ -421,6 +422,56 @@ PAGLETS_TEST("location: messages follow a paglet whose host no longer remembers 
     REQUIRE(net.settle([&] { return contains(a.f->journal(sender), "reply:ok:where are you"); }, 2000));
 }
 
+PAGLETS_TEST("remote undelivered: a mesh location lookup failure reports to the asynchronous sender") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    net.add_host("c");
+    net.enroll_all();
+    fast(net);
+    const auto module = a.f->module("conformance.wasm");
+    const auto sender = start(net, a, module, '8');
+    rt::Cap endpoint;
+    endpoint.kind = rt::Cap::Kind::endpoint;
+    endpoint.target = paglet_id('9');
+    endpoint.host = key_id(b.key);
+    endpoint.ops = {"*"};
+    auto handle = a.f->runtime->add_capability(sender, std::move(endpoint));
+    REQUIRE_OK(handle);
+    const auto before = net.sent;
+    CHECK_EQ(a.f->code(sender, "send", Cmd{.handle = *handle, .name = "lookup-failure", .async = true}), 0);
+    REQUIRE(net.settle([&] { return contains(a.f->journal(sender), "undelivered:lookup-failure:not_found"); }, 3000));
+    CHECK(b.f->logged("remote one-way message refused: lookup-failure (not_found)"));
+    bool looked_up = false;
+    for (const auto& [name, count] : net.sent) if (name.starts_with("loc-") && count > (before.contains(name) ? before.at(name) : 0)) looked_up = true;
+    CHECK(looked_up);
+}
+
+PAGLETS_TEST("runtime safety: a transport frame limit refuses the move without losing the queued reply") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    net.enroll_all();
+    const auto module = a.f->module("conformance.wasm");
+    const auto sender = start(net, a, module, '7');
+    const auto receiver = start(net, b, b.f->module("conformance.wasm"), '6');
+    rt::Cap endpoint;
+    endpoint.kind = rt::Cap::Kind::endpoint;
+    endpoint.target = receiver;
+    endpoint.host = key_id(b.key);
+    endpoint.ops = {"*"};
+    auto handle = a.f->runtime->add_capability(sender, std::move(endpoint));
+    REQUIRE_OK(handle);
+    a.port.frame_bytes = 4096;
+    auto submitted = a.f->runtime->request(sender, "pause_request_then_move", enc(Cmd{.handle = *handle, .name = "b", .payload = text("frame-kept"), .ms = 500}));
+    REQUIRE(net.settle([&] { return a.f->logged("move offer exceeds the transport frame limit"); }, 4000));
+    REQUIRE(submitted.wait_for(0ms) == std::future_status::ready);
+    CHECK_EQ(dec<std::int32_t>(submitted.get().payload), 0);
+    CHECK(journal_eventually(*a.f, sender, "moved-reply:ok:frame-kept:1"));
+    CHECK(a.f->runtime->info(sender).has_value());
+    CHECK(!b.f->runtime->info(sender));
+}
+
 PAGLETS_TEST(
     "locator: a paglet moving continuously is located and pinned, also after a host is shut down (WP13 exit)") {
     Mesh net;
@@ -516,4 +567,36 @@ PAGLETS_TEST(
     }
     // It kept moving all along.
     CHECK(hops_seen >= 6);
+}
+
+PAGLETS_TEST("location: busy waits do not spend the movement redirect budget") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    net.enroll_all();
+    fast(net);
+    const auto id = start(net, b, b.f->module("conformance.wasm"), '1');
+    REQUIRE(net.settle([&] { return b.f->runtime->info(id).has_value(); }));
+    int busy = 0, redirects = 0;
+    net.filter = [&](const PublicKey& from, const PublicKey& to, Bytes& frame) {
+        if (from != b.key || to != a.key || frame_type(frame) != "pin-ok") return true;
+        auto decoded = decode(frame);
+        REQUIRE(decoded && decoded->as_map());
+        const Fields fields{*decoded->as_map()};
+        const auto request = fields.integer("r");
+        REQUIRE(request.has_value());
+        if (busy < 9) {
+            ++busy;
+            frame = encode(Value(Map{{"t", Value("pin-busy")}, {"r", Value(*request)}}));
+        } else if (redirects < 8) {
+            ++redirects;
+            frame = encode(Value(Map{{"t", Value("pin-moved")}, {"r", Value(*request)}, {"h", Value::bin(b.key)}}));
+        }
+        return true;
+    };
+    const auto found = locate(net, a, id, 60s);
+    CHECK(found.state == Located::State::found);
+    CHECK(found.host == b.key);
+    CHECK_EQ(busy, 9);
+    CHECK_EQ(redirects, 8);
 }

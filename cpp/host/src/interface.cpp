@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <limits>
 
 namespace paglets::wire::interface {
 
@@ -102,6 +104,79 @@ Json with_member(const Json& object, std::string_view key, Json value) {
     return Json(std::move(members));
 }
 
+// Values in descriptions are input documents too. Check the declared shape
+// before a generated form or an example can submit malformed guest input.
+std::expected<void, std::string> check_value(const Json& value, std::string_view type, const Json* types,
+                                             const std::string& path, unsigned depth = 0) {
+    auto mismatch = [&]() -> std::expected<void, std::string> {
+        return std::unexpected(path + ": expected " + std::string(type));
+    };
+    if (depth > 128) return std::unexpected(path + ": value nesting exceeds 128");
+    if (type == "any") return {};
+    if (type == "none") return value.is_null() ? std::expected<void, std::string>{} : mismatch();
+    if (type.starts_with("optional<") && type.ends_with('>')) {
+        if (value.is_null()) return {};
+        return check_value(value, type.substr(9, type.size() - 10), types, path, depth + 1);
+    }
+    if (type.starts_with("list<") && type.ends_with('>')) {
+        if (!value.is_array()) return mismatch();
+        std::size_t i = 0;
+        for (const auto& item : value.as_array()) {
+            if (auto ok = check_value(item, type.substr(5, type.size() - 6), types,
+                                      path + "[" + std::to_string(i++) + "]", depth + 1); !ok) return ok;
+        }
+        return {};
+    }
+    if (type == "bool") return value.is_bool() ? std::expected<void, std::string>{} : mismatch();
+    if (type == "string") return value.is_string() ? std::expected<void, std::string>{} : mismatch();
+    if (type == "bytes") {
+        const auto* hex = value.find("$bytes");
+        if (!value.is_object() || value.keys().size() != 1 || !hex || !hex->is_string() ||
+            hex->as_string().size() % 2 || hex->as_string().find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+            return mismatch();
+        return {};
+    }
+    if (type == "f32" || type == "f64") {
+        double n = 0;
+        if (!value.number_as(n) || !std::isfinite(n) ||
+            (type == "f32" && std::abs(n) > std::numeric_limits<float>::max())) return mismatch();
+        return {};
+    }
+    if (type == "i8" || type == "i16" || type == "i32" || type == "i64") {
+        std::int64_t n = 0;
+        if (!value.number_as(n)) return mismatch();
+        const unsigned bits = type == "i8" ? 8 : type == "i16" ? 16 : type == "i32" ? 32 : 64;
+        if (bits < 64 && (n < -(std::int64_t{1} << (bits - 1)) || n >= (std::int64_t{1} << (bits - 1)))) return mismatch();
+        return {};
+    }
+    if (type == "u8" || type == "u16" || type == "u32" || type == "u64") {
+        std::uint64_t n = 0;
+        if (!value.number_as(n)) return mismatch();
+        const unsigned bits = type == "u8" ? 8 : type == "u16" ? 16 : type == "u32" ? 32 : 64;
+        if (bits < 64 && n >= (std::uint64_t{1} << bits)) return mismatch();
+        return {};
+    }
+    if (types) for (const auto& declaration : types->as_array()) {
+        if (str_member(declaration, "name") != type) continue;
+        if (str_member(declaration, "kind") == "enum") {
+            if (!value.is_string()) return mismatch();
+            for (const auto& v : declaration.find("values")->as_array())
+                if (v.as_string() == value.as_string()) return {};
+            return mismatch();
+        }
+        if (!value.is_object()) return mismatch();
+        for (std::size_t i = 0; i < value.keys().size(); ++i) {
+            const auto& name = value.keys()[i];
+            const auto& fields = declaration.find("fields")->as_array();
+            const auto it = std::ranges::find_if(fields, [&](const Json& f) { return str_member(f, "name") == name; });
+            if (it == fields.end()) return std::unexpected(path + "." + name + ": unknown field");
+            if (auto ok = check_value(value.as_array()[i], str_member(*it, "type"), types, path + "." + name, depth + 1); !ok) return ok;
+        }
+        return {};  // omitted fields use guest defaults
+    }
+    return mismatch();
+}
+
 }  // namespace
 
 // -- custom sections -----------------------------------------------------------
@@ -148,10 +223,16 @@ bool is_known_type(std::string_view type, const std::vector<std::string>& known)
         }
         return std::nullopt;
     };
-    if (auto t = inner("list<")) return is_known_type(*t, known);
-    if (auto t = inner("optional<")) return is_known_type(*t, known);
-    if (std::ranges::find(builtin_types, type) != builtin_types.end()) return true;
-    return std::ranges::find(known, type) != known.end();
+    // Untrusted metadata can put thousands of wrappers inside one JSON
+    // string. Peel them iteratively and bound nesting before rendering or
+    // validating a value; do not consume one host stack frame per wrapper.
+    for (unsigned depth = 0; depth <= 128; ++depth) {
+        if (auto t = inner("list<")) { type = *t; continue; }
+        if (auto t = inner("optional<")) { type = *t; continue; }
+        if (std::ranges::find(builtin_types, type) != builtin_types.end()) return true;
+        return std::ranges::find(known, type) != known.end();
+    }
+    return false;
 }
 
 std::expected<void, std::string> validate(const Json& d) {
@@ -175,6 +256,8 @@ std::expected<void, std::string> validate(const Json& d) {
         for (const auto& t : types->as_array()) {
             const std::string name = str_member(t, "name");
             if (name.empty()) return std::unexpected(std::string("a type without a name"));
+            if (std::ranges::find(builtin_types, name) != builtin_types.end() || name == "none")
+                return std::unexpected("type " + name + ": built-in name is reserved");
             if (std::ranges::find(known, name) != known.end()) return std::unexpected("type " + name + " twice");
             known.push_back(name);
         }
@@ -186,15 +269,24 @@ std::expected<void, std::string> validate(const Json& d) {
                 if (values == nullptr || !values->is_array() || values->as_array().empty()) {
                     return std::unexpected("enum " + name + " has no values");
                 }
+                std::vector<std::string> unique;
+                for (const auto& value : values->as_array()) {
+                    if (!value.is_string() || value.as_string().empty()) return std::unexpected("enum " + name + ": values are nonempty strings");
+                    if (std::ranges::find(unique, value.as_string()) != unique.end()) return std::unexpected("enum " + name + ": duplicate value " + value.as_string());
+                    unique.push_back(value.as_string());
+                }
                 continue;
             }
             if (kind != "record") return std::unexpected("type " + name + ": kind is record or enum");
             const Json* fields = t.find("fields");
             if (fields == nullptr || !fields->is_array()) return std::unexpected("record " + name + " has no fields");
+            std::vector<std::string> field_names;
             for (const auto& f : fields->as_array()) {
                 const std::string field = str_member(f, "name");
                 const std::string type = str_member(f, "type");
                 if (field.empty()) return std::unexpected("record " + name + ": a field without a name");
+                if (std::ranges::find(field_names, field) != field_names.end()) return std::unexpected("record " + name + ": duplicate field " + field);
+                field_names.push_back(field);
                 if (!is_known_type(type, known)) {
                     return std::unexpected("record " + name + ", field " + field + ": unknown type '" + type + "'");
                 }
@@ -241,6 +333,30 @@ std::expected<void, std::string> validate(const Json& d) {
             }
         }
     }
+    // Validate values after all declarations have passed structural checks.
+    if (types) for (const auto& t : types->as_array()) {
+        if (str_member(t, "kind") != "record") continue;
+        for (const auto& f : t.find("fields")->as_array()) {
+            if (const auto* value = f.find("default")) {
+                if (auto ok = check_value(*value, str_member(f, "type"), types,
+                    "types." + str_member(t, "name") + "." + str_member(f, "name") + ".default"); !ok) return ok;
+            }
+        }
+    }
+    if (const auto* launch = d.find("launch")) {
+        if (const auto* value = launch->find("example")) {
+            const auto type = str_member(*launch, "type");
+            if (auto ok = check_value(*value, type.empty() ? "none" : type, types, "launch.example"); !ok) return ok;
+        }
+    }
+    if (messages) for (const auto& m : messages->as_array()) {
+        if (const auto* value = m.find("example")) {
+            const auto type = str_member(m, "request");
+            if (auto ok = check_value(*value, type.empty() ? "none" : type, types,
+                                      "messages." + str_member(m, "name") + ".example"); !ok) return ok;
+        }
+    }
+
     return {};
 }
 
@@ -269,6 +385,52 @@ Json merge_schema_types(Json description, const Json& schema) {
         types.push_back(t);
     }
     return with_member(description, "types", Json(std::move(types)));
+}
+
+std::expected<void, std::string> validate_schema_types(const Json& description, const Json& schema) {
+    const auto* own = description.find("types");
+    const auto* generated = schema.find("types");
+    if (!own || !own->is_array() || !generated || !generated->is_array()) return {};
+    for (const auto& type : own->as_array()) {
+        const auto name = str_member(type, "name");
+        const auto found = std::ranges::find_if(generated->as_array(), [&](const Json& t) { return str_member(t, "name") == name; });
+        if (found == generated->as_array().end()) continue;
+        const auto kind = str_member(type, "kind");
+        if (kind != str_member(*found, "kind")) return std::unexpected("type " + name + ": kind differs from schema");
+        if (kind == "record") {
+            const auto* fields = type.find("fields");
+            const auto* expected = found->find("fields");
+            if (!fields || !fields->is_array() || !expected || !expected->is_array())
+                return std::unexpected("record " + name + ": fields must match schema");
+            if (fields->as_array().size() != expected->as_array().size())
+                return std::unexpected("record " + name + ": field count differs from schema");
+            std::vector<std::string> seen;
+            for (const auto& field : fields->as_array()) {
+                const auto field_name = str_member(field, "name");
+                if (std::ranges::find(seen, field_name) != seen.end())
+                    return std::unexpected("record " + name + ", field " + field_name + ": repeated field");
+                seen.push_back(field_name);
+                const auto match = std::ranges::find_if(expected->as_array(), [&](const Json& f) { return str_member(f, "name") == field_name; });
+                if (match == expected->as_array().end() || str_member(field, "type") != str_member(*match, "type"))
+                    return std::unexpected("record " + name + ", field " + field_name + ": differs from schema");
+            }
+        } else if (kind == "enum") {
+            auto values = [](const Json& t) -> std::optional<std::vector<std::string>> {
+                const auto* v = t.find("values");
+                if (!v || !v->is_array()) return std::nullopt;
+                std::vector<std::string> out;
+                for (const auto& item : v->as_array()) {
+                    if (!item.is_string()) return std::nullopt;
+                    out.push_back(item.as_string());
+                }
+                std::ranges::sort(out);
+                return out;
+            };
+            const auto actual = values(type), expected = values(*found);
+            if (!actual || !expected || *actual != *expected) return std::unexpected("enum " + name + ": values differ from schema");
+        }
+    }
+    return {};
 }
 
 Json from_schema(const Json& schema, std::string_view name) {

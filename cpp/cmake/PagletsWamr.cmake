@@ -36,6 +36,8 @@ FetchContent_MakeAvailable(wamr)
 
 # Source fixes, applied (idempotently) on every configure so that existing
 # build directories pick up new ones too.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_LIST_DIR}/patch-wamr.cmake")
 execute_process(
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_LIST_DIR}/patch-wamr.cmake
     WORKING_DIRECTORY ${wamr_SOURCE_DIR}
@@ -74,7 +76,22 @@ if(PAGLETS_WAMR_FAST_INTERP)
 else()
     set(WAMR_BUILD_FAST_INTERP 0)
 endif()
-set(WAMR_BUILD_AOT 0)
+# The AOT loader: compute jobs may run ahead-of-time compiled code made by
+# the host's own wamrc (PagletsWamrc.cmake); paglets themselves always run
+# in the interpreter (their memory images must move between hosts).
+if(NOT DEFINED PAGLETS_WAMR_AOT)
+    if(WIN32)
+        set(_paglets_aot_default OFF)
+    else()
+        set(_paglets_aot_default ON)
+    endif()
+    option(PAGLETS_WAMR_AOT "Let compute jobs run AOT-compiled code (WAMR AOT loader)" ${_paglets_aot_default})
+endif()
+if(PAGLETS_WAMR_AOT)
+    set(WAMR_BUILD_AOT 1)
+else()
+    set(WAMR_BUILD_AOT 0)
+endif()
 set(WAMR_BUILD_JIT 0)
 set(WAMR_BUILD_FAST_JIT 0)
 set(WAMR_BUILD_LIBC_BUILTIN 0)
@@ -127,6 +144,15 @@ if(PAGLETS_SANITIZE)
 endif()
 find_package(Threads REQUIRED)
 target_link_libraries(paglets_vmlib PUBLIC Threads::Threads)
+if(PAGLETS_WAMR_AOT)
+    target_compile_definitions(paglets_vmlib PUBLIC PAGLETS_WAMR_AOT=1)
+endif()
+# AOT code must be compiled for the engine's bound checks (paglets-wamrc).
+if(PAGLETS_WAMR_HW_BOUND_CHECK)
+    target_compile_definitions(paglets_vmlib PUBLIC PAGLETS_WAMR_HW_BOUND_CHECK=1)
+else()
+    target_compile_definitions(paglets_vmlib PUBLIC PAGLETS_WAMR_HW_BOUND_CHECK=0)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(paglets_vmlib PUBLIC m dl)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")

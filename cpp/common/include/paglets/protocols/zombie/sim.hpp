@@ -8,9 +8,12 @@
 // messages. A run has a fault phase and a quiet phase; every run is
 // reproducible from its seed.
 //
-// Each run checks: at most one result is accepted; every replica ends; the
-// delivered journal holds every observation that was durable anywhere when
-// the result was delivered; every role change is in the table; and, after a
+// The sink accepts one result by construction; deduplication is assumed,
+// not independently checked here. Each run checks: a result is delivered;
+// every replica ends; the delivered journal holds every observation durable
+// on a host that is up and not ended when the sink first accepts the result
+// (a copy held only by a crashed host is excluded); every role change is in
+// the table; and, after a
 // main crashed while another replica was up, and nothing else happened
 // (no fault, restart or heal) until a main worked again, that took at most
 // takeover_bound().
@@ -70,7 +73,7 @@ struct SimRun {
     std::int64_t takeover_max_ms = 0;    // longest checked gap without a main
     std::uint64_t takeovers = 0;         // checked gaps
     std::int64_t two_mains_ms = 0;       // time with more than one working main
-    std::uint64_t faults = 0;
+    std::uint64_t faults = 0;  // draws, including ones that change nothing
     std::uint64_t messages = 0;
     std::vector<std::string> trace;  // with SimConfig::trace
 };
@@ -401,7 +404,7 @@ struct SimSummary {
 
     std::string text() const {
         std::ostringstream os;
-        os << (failures.empty() ? "ok    " : "FAIL  ") << runs << " timed runs, " << faults << " faults, " << messages
+        os << (failures.empty() ? "ok    " : "FAIL  ") << runs << " timed runs, " << faults << " fault draws, " << messages
            << " messages\n"
            << "      takeovers after a main crashed: " << takeovers << ", longest " << takeover_max_ms / 1000.0
            << " s\n"
@@ -418,7 +421,7 @@ struct SimSummary {
             return os.str();
         };
         return {{"runs", std::to_string(runs), ""},
-                {"faults (crashes, cuts)", std::to_string(faults), ""},
+                {"fault draws (including no-ops)", std::to_string(faults), ""},
                 {"takeovers after a main crashed", std::to_string(takeovers), ""},
                 {"longest takeover", fmt(takeover_max_ms / 1000.0), "s"},
                 {"time with two working mains", fmt(two_mains_ms / 1000.0), "s"},

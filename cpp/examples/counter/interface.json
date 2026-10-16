@@ -7,11 +7,15 @@
     {"name": "increment", "kind": "both", "summary": "Adds to or multiplies the value; replies with the status",
      "request": "Increment", "reply": "Status", "example": {"by": 1, "note": "from the web", "mode": "add"}},
     {"name": "status", "kind": "call", "summary": "The value and the latest notes", "request": "none", "reply": "Status"},
-    {"name": "echo", "kind": "call", "summary": "Returns the record unchanged (every field type)", "request": "Echo", "reply": "Echo"},
+    {"name": "echo", "kind": "call", "summary": "Returns the record unchanged (every field type)", "request": "Echo", "reply": "Echo",
+     "example": {"flag": true, "tiny": -7, "medium": 300, "big": 1234567890123,
+                 "ratio": 1.5, "precise": 2.25, "text": "hello", "blob": {"$bytes": "00ff"},
+                 "items": [{"by": 1, "note": "example", "mode": "add"}],
+                 "label": "sample", "nested": null, "mode": "add"}},
     {"name": "bloat", "kind": "call", "summary": "Keeps the given amount of memory (image size experiments)",
      "request": "Bloat", "reply": "Status"},
-    {"name": "log", "kind": "both", "summary": "Writes a line to the host's log", "request": "string", "reply": "Status"},
-    {"name": "schema", "kind": "call", "summary": "The schema descriptor of the messages (JSON text)", "request": "none", "reply": "string"}
+    {"name": "log", "kind": "both", "summary": "Writes a line to the host's log; the request is a bare string", "request": "string", "reply": "Status"},
+    {"name": "schema", "kind": "call", "summary": "The generated message schema as JSON text", "request": "none", "reply": "string"}
   ],
   "types": [
     {"name": "Start", "kind": "record", "fields": [

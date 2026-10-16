@@ -11,8 +11,9 @@ specifies the protocol and the guarantees it was checked
 against. The specification is code: the pure C++ state machine in
 `cpp/common/include/paglets/protocols/zombie/zombie.hpp`, from which the
 excerpts below are taken. The guest SDK runs this code, the model checker and the
-simulator explore it, and the `zombies` system paglet replays recorded
-traces through it.
+simulator explore it. The `zombies` system paglet checks recorded role,
+rank and sink-answer traces against trace invariants; it does not replay
+complete protocol inputs through `step()`.
 
 ## Ground rules
 
@@ -22,12 +23,19 @@ traces through it.
   main.
 - **One result counts.** Uniqueness is decided where it can be decided
   atomically: at the **sink**. The sink accepts the first result for a group
-  and answers every later one with `already_delivered`. A file written
-  "only if absent" and a sink paglet that records accepted groups durably
-  both have this property.
+  and answers every later one with `already_delivered`. The implemented
+  sink is a host's `zombies` system paglet (`host:NAME`); durable acceptance
+  uses that host's state directory and is saved before success is returned.
+  Without persistent host state, deduplication does not survive a restart.
+  A file written "only if absent" illustrates the same property, but is
+  not an implemented alternative sink type.
 - **Mains that meet agree on one.** The one further along wins. The other
   forgets its work, sleeps and takes checkpoints from the winner. Its
   observations are not lost; journals are merged.
+  An observation held only by a crashed host reaches the result only if
+  that host returns and shares it before the group ends. The model does not
+  check result completeness; the simulator compares the result with journals
+  on hosts that are up when the sink accepts it.
 - **Work repeats from the last checkpoint.** A replica that takes over
   continues from the checkpoint it holds, so work since then is done again
   (at least once). Side effects other than the result should be
@@ -125,7 +133,9 @@ Its beats carry the membership, and a replica that gets a message from a
 replica it does not know adds that one too, so every replica learns of the
 new member. The new replica starts sleeping, with the members it was made
 with, and takes the main's checkpoint with the next beat. Membership never
-shrinks: a host that is gone stays a member, and messages to it are lost.
+shrinks: a host that is gone stays a member. Every main beat attempts one
+send per departed member, so sustained host churn grows membership and
+that send cost. Safe pruning requires a separate protocol change.
 
 ## Ranks: which lineage is further along
 
@@ -228,23 +238,24 @@ The state of a zombie has two parts:
 | `beat` | main to every replica | rank of the main's checkpoint, its journal's version vector, its membership |
 | `ack` | replica to main | the replica's rank and version vector, when it lacks something |
 | `checkpoint` | main to a replica | the work (if the replica is behind) and the entries it lacks |
-| `entries` | replica to main | entries the main lacks |
+| `entries` | replica to main | entries the main lacks; term 0, merged independently of checkpoint reign |
 | `status?` | candidate to every replica | asks for role and rank |
 | `status` | answer to `status?` | role, rank, highest term seen |
 | `takeover` | candidate to the best replica of its round | take over as main |
 
 Timers drive everything else: `beat` (main: send a beat; delivering: also
 deliver again), `checkpoint` (main: make a checkpoint if anything
-changed), `suspect` (sleeping: no beat for a while), and `round`
+changed), `suspect` (sleeping or recovering: no beat for a while), and `round`
 (candidate: the round ends; main: a pause ends).
 
 ## Rules
 
 **Durable before visible.** A step's outputs are carried out in order, and
 a `Persist` output completes before any later output of the same step
-takes effect. Everything a replica sends is therefore covered by its
-durable state: a main's checkpoint is stored before any replica hears of
-it.
+takes effect. A checkpoint is stored before being advertised or adopted,
+and merged entries are stored before the reply. A beat can advertise a
+live journal vector or membership ahead of the last durable checkpoint;
+those changes become durable with a later persist or runtime image.
 
 **Becoming main.** A replica takes over with a new reign. The checkpoint
 keeps its content and gets the new term.
@@ -480,12 +491,32 @@ void on(const Recovered&) {
 <!-- /snippet -->
 
 **The end.** When the work is done, the main becomes `delivering` and
-delivers the result to the sink, retrying with every beat. Whatever the sink
-answers, the group is done. The host's registry records a tombstone and
+delivers the result to the sink, retrying with every beat after temporary
+errors. A successful acceptance or an already-stored result ends the group
+as delivered. A permanent input or policy refusal ends it as failed and
+calls `on_zombie_failed(reason)` on each running replica. The host's registry
+records a tombstone and
 spreads it to the other hosts by gossip. A replica learns of the tombstone
 from its host, even after being cut off for a long time, and ends. The owner
 can end a group at any time by writing a tombstone (cancel), and can
 redirect it to another sink if the sink cannot come back.
+
+The SDK treats `too_large`, `quota`, `denied`, `invalid_argument`, `malformed`
+and `unsupported` as permanent refusals. `timeout`, `gone`, `not_found` and
+storage errors remain retryable. Missing sinks produce a warning inviting
+owner redirection or cancellation. A failed registry write delays the
+ending; replicas dispose only after acknowledgement of a recorded ending.
+An immediate `quota` before the operation is admitted may mean a full service
+mailbox and remains retryable; a quota refusal returned by the sink is permanent.
+The SDK's encoded result request and replica checkpoint messages must fit
+the 1 MB document limit; the result registry's mesh-frame limit is 4 MB.
+With a state directory, results are written before successful acceptance is
+acknowledged. These guarantees cover process restart; no power-loss guarantee
+is implied. An embedded node without a state directory is explicitly in memory.
+
+Permanent refusals and failed registry writes are covered by SDK/host
+integration tests in both execution modes. The bounded protocol model below
+models successful sink answers and cancellation, rather than these I/O errors.
 
 <!-- snippet: cpp/common/include/paglets/protocols/zombie/zombie_impl.hpp#sink -->
 Source: [`cpp/common/include/paglets/protocols/zombie/zombie_impl.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/common/include/paglets/protocols/zombie/zombie_impl.hpp)
@@ -520,6 +551,10 @@ groups it knows:
   of a group it holds (its number, paglet and host). A replica asks its own
   host for endpoints to the others (`peers`), so the replicas reach each
   other without passing capabilities around, also after restarts.
+  The SDK binds each claimed replica number to the paglet ID from these
+  registry endpoints and host IDs, and accepts registry notices only from its
+  local
+  `system.zombies` paglet. Endpoints cannot inject the SDK's internal timers.
 - **Tombstones and redirects reach every host.** A replica that delivered
   the result records a tombstone on its host. The owner cancels a group or
   redirects it to another sink on any host. Every host sends what it knows
@@ -544,6 +579,11 @@ $H remote zombies check 0123456789abcdef0123456789abcdef $R
 $H remote zombies cancel 0123456789abcdef0123456789abcdef $R
 ```
 
+For live result delivery the host's registry chooses the authoritative sink.
+The `Deliver::sink` number is the replica's lower bound; the registry can
+already know a newer redirect. The delivery answer feeds the sink number
+used back to the replica.
+
 ## Restarts
 
 Every paglet on a host with a state directory comes back from its last
@@ -565,7 +605,7 @@ The protocol is checked against these properties:
 
 | Property | Kind | Meaning |
 |---|---|---|
-| `one_result` | safety | at most one sink holds a result (one more for every redirect the owner made) |
+| `one_result` | safety | at most one sink holds a result (one more for every redirect the owner made), assuming each sink deduplicates atomically |
 | `best_progress_kept` | safety | while the group lives, some replica durably holds the best checkpoint that was ever durable |
 | `observations_kept` | safety | while the group lives, every observation that was ever durable is durable on some replica |
 | `legal_transitions` | safety | every role change is in the table |
@@ -575,8 +615,11 @@ The protocol is checked against these properties:
 Safety properties hold in every reachable state, whatever the faults. A
 recovery property states that the goal stays reachable: whatever the faults
 did, once they stop, the group can still get there. No state is a dead end
-and no state traps the group. On a finite state graph, any scheduler that
-eventually takes every possible step reaches the goal with probability 1.
+and no state traps the group. This is a possibility property, not a liveness guarantee for every
+schedule. On a finite graph, a fixed, memoryless scheduler that gives every
+enabled step a time-independent positive probability reaches the goal with probability 1.
+History-dependent scheduling or fairness alone is not a proof supplied by
+this checker.
 
 ## How it is checked
 
@@ -589,12 +632,25 @@ in two ways, both built on `paglets::verify`
   healed, lost and duplicated messages, sinks that go down, cancels and
   redirects, timeouts that fire too early, and hosts that join the mesh
   while the group runs. Faults are limited by a
-  budget per world. Messages travel in one ordered channel per sender and
+  budget per world. Complete worlds check four safety and two recovery
+  properties. Depth-bounded and state-limited searches check safety only;
+  declared recovery predicates are not reported as completed recovery
+  checks. Messages travel in one ordered channel per sender and
   receiver, as the transport's queues per peer do.
 - **Timed**: thousands of random runs with virtual clocks, the real timer
   durations, message latency, crashes, cuts, losses, duplicates, and a host
   that joins during the run. They
-  check the same properties at scale and measure how long takeovers take.
+  check the assertions implemented by the simulator on those sampled
+  executions and measure takeover times. They do not perform the model
+  checker's backward reachability analysis and do not establish its two
+  recovery properties for all reachable states. The simulator's sink
+  accepts once by construction: delivery, termination, journal contents,
+  role changes and takeover delays are checked; sink deduplication is an
+  assumption rather than an independently tested simulator property.
+  Its journal check includes observations durable on hosts that are up
+  and whose replicas have not ended when the sink first accepts a result.
+  An observation held only by a crashed host is excluded; these runs do
+  not prove its recovery before the group ends.
 
 ```bash
 cpp/build/macos-arm64/tools/protocol_check/paglets-protocol-check --suite full
@@ -602,27 +658,73 @@ cpp/build/macos-arm64/tools/protocol_check/paglets-protocol-check --simulate --s
 cpp/build/macos-arm64/tools/protocol_check/paglets-protocol-check --trace 42
 ```
 
+Exploration reports the state count and next frontier on stderr after the
+first completed level, then at most once every two seconds at level
+boundaries. `--quiet` suppresses these progress lines.
+
+The explorer identifies states by a 128-bit hash of their canonical
+encoding (hash compaction). A collision can omit a distinct state, so
+completeness assumes no hash collision and a sound canonical encoding, as
+well as exploration finishing without its depth or state limit.
+
+For a custom world, unspecified fault budgets are zero. For example,
+`--replicas 2 --crashes 1 --cuts 1` enables only crashes and cuts. The tool
+prints the effective world before exploration; malformed or out-of-range
+numeric options are usage errors. CTest also runs the `protocol_cli`
+smoke test against the executable.
+
 A violated property is reported with the shortest sequence of steps that
 leads to it. `--trace SEED` prints the role changes and faults of one
 simulated run. The ctest `unit` runs small worlds and 200 timed runs on
 every build; `cpp/tools/update_results.sh` records the larger runs below.
 
+The command-line options are:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--protocol zombie` | `zombie` | the supported protocol |
+| `--suite quick` or `--suite full` | no suite | built-in worlds; suite configurations take precedence over custom world options |
+| `--simulate` | off | run timed simulations; alone it selects simulations, with a suite it follows the explored worlds |
+| `--seeds N` | 1000 | number of timed random runs |
+| `--trace SEED` | none | print one simulated run and return its outcome, without exploring worlds or writing `--results` |
+| `--results FILE` | none | write results in the `docs/results/TOPIC.json` format |
+| `--quiet` | off | omit world-start lines, exploration progress and violation step traces; summaries and violations remain, and suites still report unreached role changes |
+| `--replicas N` | 3 | replicas in a custom world |
+| `--work N` | 1 | progress steps needed to finish |
+| `--observations N` | 1 | observations that mains may make in total |
+| `--crashes N`, `--cuts N`, `--drops N`, `--duplicates N` | 0 each | custom fault budgets |
+| `--sink-downs N`, `--cancels N`, `--redirects N`, `--early-timeouts N` | 0 each | further custom fault budgets |
+| `--late-hosts N` | 0 | replicas whose hosts join later |
+| `--in-flight N` | 3 | queued messages per ordered channel; excess messages are lost |
+| `--max-states N` | 60 000 000 | state budget per explored world |
+
+Numeric arguments are non-negative decimal integers that fit the option's
+integer type. The full suite's two three-replica worlds use depth 11 and
+two in-flight messages per channel; they check safety only. The depth bound
+is part of those suite definitions, with no separate CLI depth option.
+
+Exit status is 0 when the selected checks pass, 1 for a failed property,
+an incomplete search, a full suite that misses a declared role change, or a
+results-file write failure, and 2 for invalid usage. A bounded world passes
+when exploration covers its declared bound without reaching the state
+budget. It does not establish recovery beyond that bound.
+
 <!-- results: zombie_protocol -->
 | Test | Mode | Outcome | Duration | Platform | Recorded |
 |---|---|---|---|---|---|
-| zombie protocol, exhaustive: three replicas: crash, cut | model checker, bounded | passed | 1 min 19 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: three replicas: two crashes | model checker, bounded | passed | 40.7 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, cancel | model checker | passed | 54.9 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, cut | model checker | passed | 9 min 25 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, duplicate | model checker | passed | 3 min 25 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, early timeout | model checker | passed | 5 min 08 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: crash, loss | model checker | passed | 3 min 02 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: cut, loss, early timeout | model checker | passed | 1 min 25 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: one joining later: crash, cut | model checker | passed | 3 min 35 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: one joining later: crash, early timeout | model checker | passed | 1 min 42 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: sink down, redirect | model checker | passed | 5.0 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol, exhaustive: two replicas: two crashes | model checker | passed | 8 min 39 s | Darwin arm64, Release build | 2026-10-13 |
-| zombie protocol: 10000 timed random runs with faults | simulation | passed | 27.9 s | Darwin arm64, Release build | 2026-10-13 |
+| zombie protocol, exhaustive: three replicas: crash, cut | model checker, bounded | passed | 33.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: three replicas: two crashes | model checker, bounded | passed | 17.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: crash, cancel | model checker | passed | 28.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: crash, cut | model checker | passed | 1 min 16 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: crash, duplicate | model checker | passed | 32.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: crash, early timeout | model checker | passed | 54.5 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: crash, loss | model checker | passed | 24.0 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: cut, loss, early timeout | model checker | passed | 28.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: one joining later: crash, cut | model checker | passed | 1 min 12 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: one joining later: crash, early timeout | model checker | passed | 47.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: sink down, redirect | model checker | passed | 1.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol, exhaustive: two replicas: two crashes | model checker | passed | 2 min 23 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| zombie protocol: 10000 timed random runs with faults | simulation | passed | 12.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
 
 zombie protocol, exhaustive: three replicas: crash, cut:
 
@@ -631,7 +733,7 @@ zombie protocol, exhaustive: three replicas: crash, cut:
 | reachable states | 9188336 |
 | steps | 24420885 |
 | explored to (bounded) | 11 steps |
-| properties | 6 |
+| properties | 4 |
 
 zombie protocol, exhaustive: three replicas: two crashes:
 
@@ -640,7 +742,7 @@ zombie protocol, exhaustive: three replicas: two crashes:
 | reachable states | 5461027 |
 | steps | 14745614 |
 | explored to (bounded) | 11 steps |
-| properties | 6 |
+| properties | 4 |
 
 zombie protocol, exhaustive: two replicas: crash, cancel:
 
@@ -737,7 +839,7 @@ zombie protocol: 10000 timed random runs with faults:
 | Measured | simulation |
 |---|---|
 | runs | 10000 |
-| faults (crashes, cuts) | 119289 |
+| fault draws (including no-ops) | 119289 |
 | takeovers after a main crashed | 3370 |
 | longest takeover | 18.9 s |
 | time with two working mains | 213901.2 s |

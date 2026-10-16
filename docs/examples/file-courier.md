@@ -11,7 +11,7 @@ Directory: [`cpp/examples/file_courier/`](https://github.com/cklukas/paglets/tre
 ## What it shows
 
 - **Files of any size, carried as capabilities.** A paglet moves as a
-  memory image of at most 16 MB, so it must not carry large data in its
+  memory image with a default ceiling of 256 MB, so it should avoid carrying large data in its
   memory. The courier asks the source host to *share* each file, and gets
   an artifact capability of a few bytes for it. Only the capabilities move
   with the courier. On the destination host it *saves* each file: that
@@ -249,7 +249,7 @@ cpp/tools/mesh_bench.sh --sizes "16 64 256" \
 
 The same run also records the [Latency Map](latency-map.md#on-real-machines)
 and the [Mesh Benchmark](mesh-benchmark.md#on-real-machines) of these
-hosts. The hosts of the last run, on a gigabit LAN:
+hosts. The hosts of the last run, on the recorded local network:
 
 <!-- results: live_hosts -->
 | Test | Platform | Recorded |
@@ -305,11 +305,17 @@ side: a 20 MB file is shared, moved as a capability, saved on one host and
 read on another; a host that the residency rule excludes gets nothing; a
 file that changed after it was shared is no longer served.
 
+The recorded results below used the earlier 16 MB paglet ceiling. The
+current default is 256 MB; artifact transfer still keeps file contents
+outside the courier's linear memory.
+
 <!-- results: file_courier -->
 | Test | Mode | Outcome | Duration | Platform | Recorded |
 |---|---|---|---|---|---|
-| example: File Courier carries files of any size between hosts with checksums, within data residency | in-process | passed | 30.6 s | Darwin arm64, Release build | 2026-10-12 |
-| example: File Courier carries files of any size between hosts with checksums, within data residency | worker processes | passed | 40.6 s | Darwin arm64, Release build | 2026-10-12 |
+| example: File Courier carries files of any size between hosts with checksums, within data residency | in-process | passed | 30.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| example: File Courier carries files of any size between hosts with checksums, within data residency | worker processes | passed | 40.6 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| exchange: a large shared file travels as a capability | in-process | passed | 20.8 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
+| exchange: a large shared file travels as a capability | worker processes | passed | 31.0 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 |
 | exchange: a shared file larger than a paglet's memory travels as a capability | in-process | passed | 30.7 s | Darwin arm64, Release build | 2026-10-12 |
 | exchange: a shared file larger than a paglet's memory travels as a capability | worker processes | passed | 21.3 s | Darwin arm64, Release build | 2026-10-12 |
 
@@ -319,12 +325,18 @@ example: File Courier carries files of any size between hosts with checksums, wi
 |---|---|---|
 | files carried | 3 | 3 |
 | bytes carried | 25169798 | 25169798 |
-| largest file (a paglet's memory holds 16 MB) | 24 MB | 24 MB |
-| sharing (hashing) on the source host | 31 ms | 25 ms |
-| saving (transfer and check) on the destination | 70 ms | 44 ms |
-| transfer rate (in-memory test transport) | 342.91 MB/s | 545.54 MB/s |
-| whole errand, start to receipt | 20149 ms | 30192 ms |
+| largest file transferred as an artifact | 24 MB | 24 MB |
+| sharing (hashing) on the source host | 41 ms | 14 ms |
+| saving (transfer and check) on the destination | 193 ms | 80 ms |
+| transfer rate (in-memory test transport) | 124.37 MB/s | 300.05 MB/s |
+| whole errand, start to receipt | 20322 ms | 30153 ms |
 | host-only root: refused, nothing delivered | yes | yes |
+
+exchange: a large shared file travels as a capability:
+
+| Measured | in-process | worker processes |
+|---|---|---|
+| a 20 MB file shared, moved as a capability, saved and read on two other hosts | yes | yes |
 
 exchange: a shared file larger than a paglet's memory travels as a capability:
 

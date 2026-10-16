@@ -230,13 +230,6 @@ private:
     // --8<-- [end:become_main]
 
     void become_candidate(Cause cause) {
-        if (s_.role == Role::main) {
-            checkpoint();
-            out_.push_back(StopWork{});
-            stop(Timer::beat);
-            stop(Timer::checkpoint);
-            s_.frozen = false;
-        }
         stop(Timer::suspect);
         s_.replies.clear();
         become(Role::candidate, cause);

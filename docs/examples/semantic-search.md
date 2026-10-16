@@ -267,6 +267,6 @@ checks that:
 <!-- results: semantic -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | documents indexed from two hosts | questions answered by meaning |
 |---|---|---|---|---|---|---|---|
-| gateway: Semantic Mesh Search indexes documents on the AI host and answers by meaning | in-process | passed | 0.2 s | Darwin arm64, Release build | 2026-10-12 | 3 | 2 |
-| gateway: Semantic Mesh Search indexes documents on the AI host and answers by meaning | worker processes | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 3 | 2 |
+| gateway: Semantic Mesh Search indexes documents on the AI host and answers by meaning | in-process | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 2 |
+| gateway: Semantic Mesh Search indexes documents on the AI host and answers by meaning | worker processes | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 2 |
 <!-- /results -->

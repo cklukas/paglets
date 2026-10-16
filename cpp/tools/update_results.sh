@@ -33,8 +33,7 @@ for worker in "" "$build/host/paglets-worker"; do
         fi
     done
 done
-# The zombie protocol: the larger worlds and 10 000 timed runs (about half
-# an hour).
+# The zombie protocol: the larger worlds and 10 000 timed runs.
 echo "== zombie protocol"
 "$build/tools/protocol_check/paglets-protocol-check" --suite full --simulate --seeds 10000 --quiet \
     --results "$PAGLETS_RESULTS_DIR/zombie_protocol.json" || status=1

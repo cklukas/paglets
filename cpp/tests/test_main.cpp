@@ -5,6 +5,7 @@
 
 #include <paglets/wire/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -56,7 +57,9 @@ void write_reports(const std::string& test, const std::string& outcome, double s
                 for (const auto& t : j->find("tests")->as_array()) {
                     const Json* n = t.find("test");
                     const Json* m = t.find("mode");
-                    if (n && m && n->as_string() == test && m->as_string() == mode) continue;
+                    const Json* platform = t.find("platform");
+                    if (n && m && platform && n->as_string() == test && m->as_string() == mode &&
+                        platform->as_string() == PAGLETS_TEST_PLATFORM) continue;
                     tests.push_back(t);
                 }
             }
@@ -113,15 +116,39 @@ std::string guest_path(const std::string& file) {
 
 int main(int argc, char** argv) {
     using namespace paglets::test;
-    if (argc > 1) g_guest_dir = argv[1];
-    // An optional second argument runs only the cases whose names contain it.
+    auto usage = [](std::ostream& out) {
+        out << "usage: paglets_tests [GUEST_DIR [FILTER]]\n"
+               "       paglets_tests --list [FILTER]\n"
+               "       paglets_tests --help\n"
+               "FILTER matches a substring of the test name; an unmatched filter exits 2.\n";
+    };
+    if (argc > 1 && std::string_view(argv[1]) == "--help") {
+        usage(argc == 2 ? std::cout : std::cerr);
+        return argc == 2 ? 0 : 2;
+    }
+    const bool list = argc > 1 && std::string_view(argv[1]) == "--list";
+    if (argc > 3 || (!list && argc > 1 && std::string_view(argv[1]).starts_with("--"))) {
+        usage(std::cerr);
+        return 2;
+    }
     const std::string only = argc > 2 ? argv[2] : "";
+    auto matches = [&](const Case& c) { return std::string_view(c.name).find(only) != std::string_view::npos; };
+    if (std::ranges::none_of(registry(), matches)) {
+        std::cerr << (only.empty() ? "no tests registered\n" : "no tests match '" + only + "'\n");
+        return 2;
+    }
+    if (list) {
+        for (const auto& c : registry()) if (matches(c)) std::cout << c.name << '\n';
+        return 0;
+    }
+    if (argc > 1) g_guest_dir = argv[1];
 
     int passed = 0;
     int failed = 0;
     int skipped = 0;
     for (const Case& c : registry()) {
-        if (!only.empty() && std::string_view(c.name).find(only) == std::string_view::npos) continue;
+        if (!matches(c)) continue;
+        if (std::getenv("PAGLETS_TEST_TRACE")) std::cout << "[run ] " << c.name << std::endl;
         failures_in_case = 0;
         reports.clear();
         const auto began = std::chrono::steady_clock::now();

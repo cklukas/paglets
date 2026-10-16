@@ -10,8 +10,17 @@ namespace paglets::mesh {
 namespace {
 
 constexpr std::string_view root_domain = "paglets passport v1";
+constexpr std::string_view bound_root_domain = "paglets passport v2";
 constexpr std::string_view link_domain = "paglets passport link v1";
 constexpr std::size_t max_links = 64;
+
+std::string root_id(const RecordId& mesh, const PublicKey& owner, std::string_view nonce) {
+    const auto hash = sha256(encode(Value(Map{{"domain", Value("paglets root identity v2")},
+                                             {"mesh", Value::bin(mesh)},
+                                             {"owner", Value::bin(owner)},
+                                             {"nonce", Value(std::string(nonce))}})));
+    return to_hex(std::span<const std::uint8_t>(hash).first(16));
+}
 
 Bytes signing_message(std::string_view domain, const Bytes& body) {
     Bytes m(domain.begin(), domain.end());
@@ -46,6 +55,19 @@ std::expected<PassportRoot, std::string> parse_root(const Bytes& body) {
     r.issued = *issued;
     r.expires = *expires;
     r.manifest = *manifest;
+    if (f.get("v") != nullptr) {
+        auto version = f.integer("v");
+        auto nonce = f.str("nonce");
+        if (!version || *version != 2 || !nonce || nonce->empty() || nonce->size() > 128) {
+            return std::unexpected(std::string("malformed owner-bound passport"));
+        }
+        r.nonce = *nonce;
+        if (r.paglet != root_id(r.mesh, r.owner, *r.nonce)) {
+            return std::unexpected(std::string("paglet ID is not bound to its owner and mesh"));
+        }
+    } else if (f.get("nonce") != nullptr) {
+        return std::unexpected(std::string("passport nonce needs version 2"));
+    }
     return r;
 }
 
@@ -74,13 +96,16 @@ std::expected<std::pair<PassportLink, Digest>, std::string> parse_link(const Byt
 }  // namespace
 
 std::expected<Passport, std::string> Passport::issue(const SigningKey& owner, const RecordId& mesh,
-                                                     const Digest& module, std::string paglet, Value manifest,
+                                                     const Digest& module, std::string nonce, Value manifest,
                                                      std::int64_t issued, std::int64_t expires) {
-    if (paglet.empty()) return std::unexpected(std::string("a passport needs a paglet ID"));
+    if (nonce.empty() || nonce.size() > 128) return std::unexpected(std::string("a launch nonce has 1..128 bytes"));
     if (expires <= issued) return std::unexpected(std::string("a passport must expire after it is issued"));
     Passport p;
-    p.root_ = PassportRoot{mesh, owner.public_key(), module, std::move(paglet), std::move(manifest), issued, expires};
+    p.root_ = PassportRoot{mesh, owner.public_key(), module, root_id(mesh, owner.public_key(), nonce),
+                           std::move(manifest), issued, expires, std::move(nonce)};
     p.root_element_.body = mesh::encode(Value(Map{{"type", Value("passport")},
+                                                  {"v", Value(std::int64_t{2})},
+                                                  {"nonce", Value(*p.root_.nonce)},
                                                   {"mesh", Value::bin(mesh)},
                                                   {"owner", Value::bin(owner.public_key())},
                                                   {"module", Value::bin(module)},
@@ -88,7 +113,7 @@ std::expected<Passport, std::string> Passport::issue(const SigningKey& owner, co
                                                   {"manifest", p.root_.manifest},
                                                   {"issued", Value(issued)},
                                                   {"expires", Value(expires)}}));
-    p.root_element_.signature = owner.sign(signing_message(root_domain, p.root_element_.body));
+    p.root_element_.signature = owner.sign(signing_message(bound_root_domain, p.root_element_.body));
     return p;
 }
 
@@ -149,7 +174,8 @@ std::expected<Passport, std::string> Passport::decode(std::span<const std::uint8
     auto parsed_root = parse_root(p.root_element_.body);
     if (!parsed_root) return std::unexpected(parsed_root.error());
     p.root_ = std::move(*parsed_root);
-    if (!verify(p.root_.owner, signing_message(root_domain, p.root_element_.body), p.root_element_.signature)) {
+    if (!verify(p.root_.owner, signing_message(p.root_.nonce ? bound_root_domain : root_domain, p.root_element_.body),
+                p.root_element_.signature)) {
         return std::unexpected(std::string("passport not signed by its owner"));
     }
     const Bytes* previous = &p.root_element_.body;

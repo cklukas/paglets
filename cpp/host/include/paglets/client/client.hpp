@@ -130,7 +130,8 @@ struct Location {
 class Session {
 public:
     // Opens a channel to the host at `url`. The host must be enrolled in the
-    // identity's ledger copy, or be `host_key` when given.
+    // identity's ledger copy, or be `host_key` when given. Recorded revocation
+    // always wins over an explicit pin.
     static std::expected<Session, std::string> open(const std::string& url, const Identity& identity,
                                                     std::optional<mesh::PublicKey> host_key = std::nullopt,
                                                     std::chrono::seconds read_timeout = std::chrono::seconds(150));
@@ -149,8 +150,10 @@ public:
     std::expected<std::string, std::string> push_module(Bytes module);
     // Starts a paglet of the identity (an owner) from `module`; returns its ID.
     // `module_bytes` may be empty when the host already has the module.
+    // `nonce` is an owner-local launch nonce; empty chooses a random one.
+    // The global ID is derived from mesh + owner + nonce, not chosen directly.
     std::expected<std::string, std::string> launch(const Identity& identity, const paglets::Digest& module,
-                                                   Bytes module_bytes, Bytes args, std::string id = {},
+                                                   Bytes module_bytes, Bytes args, std::string nonce = {},
                                                    std::int64_t hours = 24);
     std::expected<CallResult, std::string> call(const std::string& paglet, const std::string& name, Bytes payload,
                                                 std::int64_t timeout_ms = 30000);
@@ -179,7 +182,9 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// A new random paglet ID (32 hex digits).
+// A new random owner-local launch nonce (32 hex digits).
+std::string new_paglet_nonce();
+[[deprecated("Use new_paglet_nonce; launch derives the global ID from owner, mesh and nonce")]]
 std::string new_paglet_id();
 
 // -- shell commands ------------------------------------------------------------

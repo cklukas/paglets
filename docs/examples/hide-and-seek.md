@@ -50,31 +50,28 @@ simply tries again after the next interval:
 Source: [`cpp/examples/seek/seek.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/seek/seek.cpp)
 
 ```cpp
-    void on_created(paglets::Started& s) override {
-        // Created by a seeker: hide (args: the hop interval).
-        if (!s.decode_args(hop_ms_) || hop_ms_ <= 0) return;
-        hiding_ = true;
-        (void)paglets::after_raw(hop_ms_, "hop", {});
-    }
+void on_created(paglets::Started& s) override {
+    // Created by a seeker: hide (args: the hop interval).
+    if (!s.decode_args(hop_ms_) || hop_ms_ <= 0) return;
+    hiding_ = true;
+    (void)paglets::after_raw(hop_ms_, "hop", {});
+}
 
-    void on_arrived(const paglets::abi::ArrivedEvent&) override {
-        if (!hiding_) return;
-        ++moves_;
-        (void)paglets::after_raw(hop_ms_, "hop", {});
-    }
+void on_arrived(const paglets::abi::ArrivedEvent&) override {
+    if (!hiding_) return;
+    ++moves_;
+    (void)paglets::after_raw(hop_ms_, "hop", {});
+}
 
-    void on_move_failed(const paglets::abi::MoveFailed&) override {
-        if (hiding_) (void)paglets::after_raw(hop_ms_, "hop", {});  // pinned, or nowhere to go: later
-    }
+void on_move_failed(const paglets::abi::MoveFailed&) override {
+    if (hiding_) (void)paglets::after_raw(hop_ms_, "hop", {});  // pinned, or nowhere to go: later
+}
 
-private:
-    // -- the hider ----------------------------------------------------------------------
-
-    void hop() {
-        if (!hiding_) return;
-        // While pinned, dispatch says so at once: try again later.
-        if (!paglets::dispatch("any")) (void)paglets::after_raw(hop_ms_, "hop", {});
-    }
+void hop() {
+    if (!hiding_) return;
+    // While pinned, dispatch says so at once: try again later.
+    if (!paglets::dispatch("any")) (void)paglets::after_raw(hop_ms_, "hop", {});
+}
 ```
 <!-- /snippet -->
 
@@ -216,6 +213,6 @@ that:
 <!-- results: seek -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | catches | moves of the hider |
 |---|---|---|---|---|---|---|---|
-| example: Hide and Seek finds and pins a paglet that keeps moving | in-process | passed | 1.7 s | Darwin arm64, Release build | 2026-10-12 | 4 | 35 |
-| example: Hide and Seek finds and pins a paglet that keeps moving | worker processes | passed | 1.8 s | Darwin arm64, Release build | 2026-10-12 | 4 | 30 |
+| example: Hide and Seek finds and pins a paglet that keeps moving | in-process | passed | 1.9 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 35 |
+| example: Hide and Seek finds and pins a paglet that keeps moving | worker processes | passed | 1.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 35 |
 <!-- /results -->

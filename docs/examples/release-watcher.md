@@ -347,6 +347,6 @@ checks that:
 <!-- results: watcher -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | checks of the release feed | times inactive between checks | new versions reported | release file delivered home by a Download Courier |
 |---|---|---|---|---|---|---|---|---|---|
-| gateway: Release Watcher stays on the web host, tells its owner about new versions, sends a courier | in-process | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 2 | 2 | 1 | yes |
-| gateway: Release Watcher stays on the web host, tells its owner about new versions, sends a courier | worker processes | passed | 0.9 s | Darwin arm64, Release build | 2026-10-12 | 2 | 2 | 1 | yes |
+| gateway: Release Watcher stays on the web host, tells its owner about new versions, sends a courier | in-process | passed | 0.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 2 | 1 | yes |
+| gateway: Release Watcher stays on the web host, tells its owner about new versions, sends a courier | worker processes | passed | 0.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 2 | 2 | 1 | yes |
 <!-- /results -->

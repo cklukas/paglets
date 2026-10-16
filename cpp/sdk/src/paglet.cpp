@@ -4,6 +4,7 @@
 // Guest side of the paglet ABI v1: exports called by the host and wrappers
 // around the `paglets` imports.
 
+#include <paglets/compute.hpp>
 #include <paglets/paglet.hpp>
 
 #include <cstdlib>
@@ -39,6 +40,11 @@ namespace {
 std::map<std::uint64_t, ReplyHandler>& pending_replies() {
     static std::map<std::uint64_t, ReplyHandler> pending;
     return pending;
+}
+
+std::map<std::uint64_t, std::function<void()>>& clone_cleanup() {
+    static std::map<std::uint64_t, std::function<void()>> cleanup;
+    return cleanup;
 }
 
 // Calls an import that writes a document into (out, cap), growing the buffer
@@ -333,6 +339,14 @@ std::int32_t paglets_on_event(std::int32_t kind, const std::uint8_t* ptr, std::u
             if (static_cast<abi::EventKind>(kind) == abi::EventKind::created) {
                 p.on_created(s);
             } else {
+                // Host operations belong to the parent. Clear handlers before
+                // freeing copied coroutine frames; neither may run in a clone.
+                auto pending = std::move(paglets::pending_replies());
+                paglets::pending_replies().clear();
+                auto cleanup = std::move(paglets::clone_cleanup());
+                paglets::clone_cleanup().clear();
+                pending.clear();
+                for (auto& [correlation, release] : cleanup) release();
                 p.on_cloned(s);
             }
             return abi::handled;
@@ -368,6 +382,7 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
         if (auto it = pending.find(m.correlation()); it != pending.end()) {
             paglets::ReplyHandler handler = std::move(it->second);
             pending.erase(it);
+            paglets::clone_cleanup().erase(m.correlation());
             handler(m);
             return abi::handled;
         }
@@ -401,6 +416,53 @@ std::int32_t paglets_on_message(const std::uint8_t* ptr, std::uint32_t len) {
         paglets_cap_drop(m.reply_handle());
     }
     return result;
+}
+
+}  // extern "C"
+
+// ---------------------------------------------------------------------------
+// Compute jobs (ABI v1.3)
+
+namespace paglets {
+
+void detail::abandon_on_clone(std::uint64_t correlation, std::function<void()> cleanup) {
+    clone_cleanup()[correlation] = std::move(cleanup);
+}
+
+void detail::await_reply(std::uint64_t correlation, ReplyHandler handler) {
+    pending_replies()[correlation] = std::move(handler);
+}
+
+namespace {
+
+std::map<std::string, compute::JobFunction, std::less<>>& job_functions() {
+    static std::map<std::string, compute::JobFunction, std::less<>> functions;
+    return functions;
+}
+
+}  // namespace
+
+void compute::register_job(std::string_view name, JobFunction fn) {
+    job_functions()[std::string(name)] = fn;
+}
+
+}  // namespace paglets
+
+extern "C" {
+
+// A job: a fresh instance of the module, called once. 0: done (the output
+// is what the job wrote), else an abi::Error.
+PAGLETS_EXPORT(paglets_on_job)
+std::int32_t paglets_on_job(const std::uint8_t* ptr, std::uint32_t len) {
+    namespace abi = paglets::abi;
+    abi::JobCall call;
+    if (!abi::decode(view(ptr, len), call)) return abi::malformed;
+    auto& functions = paglets::job_functions();
+    auto it = functions.find(call.function);
+    if (it == functions.end()) return abi::not_found;
+    paglets::compute::JobContext job(call.function, call.input_size);
+    it->second(job);
+    return job.status();
 }
 
 }  // extern "C"

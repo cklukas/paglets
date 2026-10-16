@@ -21,6 +21,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <tuple>
 
@@ -164,6 +165,20 @@ PAGLETS_TEST("policy: the most specific rule wins, the default is deny") {
     const Record rogue = add(ledger, "policy-rule",
                              data::policy_rule({"rogue", Decision::allow, "*", {"*"}, {}, {}, {}, 100}), {&k.host_a});
     CHECK(ignored(ledger.state(), rogue, "admin quorum"));
+}
+
+PAGLETS_TEST("policy: large rule durations preserve valid host grants without signed overflow") {
+    Keys k;
+    Ledger ledger = enrolled_ledger(k);
+    const auto maximum = std::numeric_limits<std::int64_t>::max();
+    const Record allow = rule(ledger, k, {"long read", Decision::allow, "files", {"read"}, {}, {}, maximum, 0});
+    const auto principal = principal_of(k.owner);
+    for (const auto expires : {unix_ms() + 60'000, maximum}) {
+        const Record grant = add(ledger, "grant",
+            data::grant(principal, files({"read"}, "docs/a"), HostSelector{{k.host_a.public_key()}, {}},
+                        expires, {}, allow.id(), k.host_a.public_key()), {&k.host_a}, false);
+        CHECK(ledger.state().grants.contains(grant.id()));
+    }
 }
 
 PAGLETS_TEST("policy: grants from hosts stay within their rules; revocations and releases end grants") {
@@ -520,10 +535,33 @@ PAGLETS_TEST("policy: denials reach the paglet; server-info only with a rule; re
                               [&](const RecordId& g) { return record_id_hex(g) == grant_id; }));
 }
 
+PAGLETS_TEST("policy: grant status does not report an expired approval as granted") {
+    for (bool expired : {false, true}) {
+        TwoHosts net;
+        const auto id = net.explorer();
+        net.admin("policy-rule", data::policy_rule({"ask for documents", Decision::ask, "files", {"read"}, {}, {}, {}, 0}));
+        net.settle();
+        const auto pending = net.ask(id, "request_access", explorer::Access{"files", {"read"}, "data", "docs"});
+        REQUIRE(pending.starts_with("pending:"));
+        net.settle();
+        const auto request = net.ledger_b->state().grant_requests.front();
+        CHECK(net.ask(id, "grant_status", explorer::Text{record_id_hex(request.id)}) == "pending");
+        const auto approval = net.admin("grant", data::grant(request.principal, request.items.front(), {},
+            unix_ms() + (expired ? -1000 : 3'600'000), request.id, {}, {}));
+        net.settle();
+        REQUIRE(net.ledger_b->state().grants.contains(approval.id()));
+        CHECK(net.ask(id, "grant_status", explorer::Text{record_id_hex(request.id)}) == (expired ? "denied" : "granted"));
+    }
+}
+
 PAGLETS_TEST("policy: early approval of a manifest before the paglet exists") {
     TwoHosts net;
     // The owner asks for the mission's access before launching the paglet.
-    const std::string planned(32, 'c');
+    const auto planned_passport = Passport::issue(net.k.owner, net.a->mesh(),
+        *parse_key_id(net.f->module("explorer.wasm")), std::string(32, 'c'),
+        manifest_value({Item{"files", {"read"}, "data", "docs"}}), unix_ms(), unix_ms() + 3'600'000);
+    REQUIRE_OK(planned_passport);
+    const std::string planned = planned_passport->paglet();
     const Principal principal{planned, net.k.owner.id(), net.f->module("explorer.wasm"), "roaming"};
     Record request = signed_record(*net.ledger_b, "grant-request",
                                    data::grant_request(principal, net.k.owner.public_key(),
@@ -536,9 +574,7 @@ PAGLETS_TEST("policy: early approval of a manifest before the paglet exists") {
     // The owner's passport for the paglet names the same ID; the host
     // creates it from the passport and delivers the grant.
     const std::string module = net.f->module("explorer.wasm");
-    auto passport =
-        Passport::issue(net.k.owner, net.a->mesh(), *parse_key_id(module), planned,
-                        manifest_value({Item{"files", {"read"}, "data", "docs"}}), unix_ms(), unix_ms() + 3'600'000);
+    auto passport = planned_passport;
     REQUIRE_OK(passport);
     auto id = net.a->create(module, *passport);
     REQUIRE_OK(id);
@@ -614,4 +650,45 @@ PAGLETS_TEST("module trust: a mesh host runs only modules the ledger allows; pag
     net.admin("revoke", data::revoke_module(hash, "vulnerable"));
     net.settle();
     CHECK(ended_because(trusted, "module revoked"));
+}
+
+PAGLETS_TEST("policy: approvals must match the complete paglet principal") {
+    for (int mismatch = 0; mismatch != 3; ++mismatch) {
+        TwoHosts net;
+        const auto id = net.explorer();
+        const std::string module = net.f->module("explorer.wasm");
+        const Principal actual{id, net.k.owner.id(), module, "roaming"};
+        auto wrong = actual;
+        if (mismatch == 0) wrong.owner = net.k.other_owner.id();
+        if (mismatch == 1) wrong.module = std::string(64, 'f');
+        if (mismatch == 2) wrong.trust = "resident";
+        const Item item{"files", {"read"}, "data", "docs"};
+        const auto approval = net.admin("grant", data::grant(wrong, item, {}, unix_ms() + 60'000, {}, {}, {}));
+        net.settle();
+        net.f->runtime->wait_idle();
+        const abi::SenderRecord caller{id, actual.owner, actual.trust, actual.module, {}};
+        CHECK(!net.a->allows(caller, item));
+        const auto journal = net.f->call(id, "journal");
+        REQUIRE(journal.status == 0);
+        const auto entries = dec<std::vector<std::string>>(journal.payload);
+        CHECK(std::ranges::none_of(entries, [](const auto& e) { return e.starts_with("granted-late:"); }));
+        CHECK(net.ask(id, "release", explorer::Text{record_id_hex(approval.id())}) == "release:denied");
+        auto request = signed_record(*net.ledger_b, "grant-request",
+            data::grant_request(wrong, net.k.host_b.public_key(), {item}, 60'000, "wrong principal"),
+            {&net.k.host_b}, false);
+        REQUIRE_OK(net.b->submit(request));
+        net.settle();
+        CHECK(net.ask(id, "grant_status", explorer::Text{record_id_hex(request.id())}) == "status:denied");
+        net.admin("request-deny", data::request_deny(request.id(), "declined"));
+        net.settle();
+        net.f->runtime->wait_idle();
+        const auto after_denial = net.f->call(id, "journal");
+        REQUIRE(after_denial.status == 0);
+        CHECK(std::ranges::none_of(dec<std::vector<std::string>>(after_denial.payload),
+            [](const auto& e) { return e.starts_with("denied-late:"); }));
+        net.admin("grant", data::grant(actual, item, {}, unix_ms() + 60'000, {}, {}, {}));
+        net.settle();
+        CHECK(net.a->allows(caller, item));
+        CHECK(!net.journal_entry(id, "granted-late:").empty());
+    }
 }

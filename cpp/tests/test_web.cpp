@@ -200,14 +200,33 @@ PAGLETS_TEST("web: the UI shows the mesh, launches, calls and ends paglets") {
         return std::pair{r->status, parse(r->body)};
     };
 
-    // Launch the counter on b from the module directory, with a start value.
+    // A launch nonce determines the owner-scoped identity, including when
+    // supplied through the web API rather than the CLI.
+    auto counter_bytes = paglets::wasm::read_file(counter);
+    REQUIRE_OK(counter_bytes);
+    const std::string nonce = "web launch ' nonce";
+    auto passport = Passport::issue(*owner, genesis->id(), paglets::sha256(*counter_bytes), nonce, Value(),
+                                    unix_ms(), unix_ms() + 3'600'000);
+    REQUIRE_OK(passport);
     auto [launched_status, launched] =
-        post("launch", R"({"host":")" + b_key + R"(","file":"counter.wasm","args":{"value":5}})");
+        post("launch", R"({"host":")" + b_key + R"(","file":"counter.wasm","args":{"value":5},"nonce":)" +
+                           Json(nonce).dump() + "}");
     REQUIRE(launched_status == 200);
     const std::string paglet = member(launched, "paglet");
     CHECK_EQ(paglet.size(), 32u);
+    REQUIRE(paglet == passport->paglet());
     CHECK(member(launched, "shell").find("remote launch --connect " + b.transport->url()) != std::string::npos);
     CHECK(member(launched, "shell").find(R"(--args '{"value":5}')") != std::string::npos);
+    CHECK(member(launched, "shell").find(" --nonce " + pc::shell_quote(nonce)) != std::string::npos);
+    CHECK(member(launched, "shell").find(" --id ") == std::string::npos);
+    for (const std::string field : std::vector<std::string>{R"("nonce":123)", R"("nonce":null)", R"("nonce":true)",
+                                   R"("nonce":[])", R"("nonce":{})", R"("id":"legacy")",
+                                   R"("id":null)", R"("id":"legacy","nonce":"new")",
+                                   std::string(R"("nonce":)") + Json(std::string(129, 'n')).dump()}) {
+        auto [status, reply] = post("launch", R"({"host":")" + b_key + R"(","file":"counter.wasm",)" + field + "}");
+        CHECK_EQ(status, 400);
+        CHECK(!member(reply, "error").empty());
+    }
 
     // Its interface, then a send and a call.
     auto described = web.Get("/api/paglet?host=" + b_key + "&id=" + paglet, auth);
@@ -264,5 +283,23 @@ PAGLETS_TEST("web: the UI shows the mesh, launches, calls and ends paglets") {
         post("call", R"({"host":")" + b_key + R"(","paglet":")" + paglet + R"(","name":"status"})");
     CHECK_EQ(gone_status, 422);
     CHECK(member(gone, "error").find("no paglet") != std::string::npos);
+    // Omitting a nonce still creates a fresh identity; the maximum valid
+    // byte length must not be rejected along with oversized nonces.
+    for (const auto& extra_nonce : std::vector<std::string>{"", std::string(128, 'n')}) {
+        const auto field = extra_nonce.empty() ? std::string() : ",\"nonce\":" + Json(extra_nonce).dump();
+        auto [status, reply] = post("launch", R"({"host":")" + b_key + R"(","file":"counter.wasm")" + field + "}");
+        REQUIRE(status == 200);
+        const auto id = member(reply, "paglet");
+        CHECK_EQ(id.size(), 32u);
+        if (extra_nonce.empty()) {
+            CHECK(member(reply, "shell").find(" --nonce ") == std::string::npos);
+        } else {
+            auto expected = Passport::issue(*owner, genesis->id(), paglets::sha256(*counter_bytes), extra_nonce,
+                                            Value(), unix_ms(), unix_ms() + 3'600'000);
+            REQUIRE_OK(expected);
+            CHECK_EQ(id, expected->paglet());
+        }
+        CHECK_EQ(post("dispose", R"({"host":")" + b_key + R"(","paglet":")" + id + R"("})").first, 200);
+    }
     app.stop();
 }

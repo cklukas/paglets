@@ -77,7 +77,7 @@ Source: [`cpp/examples/ping_pong/ping_pong.cpp`](https://github.com/cklukas/pagl
 void bounce(std::uint32_t n) {
     if (n >= target_) {
         (void)paglets::reply_to(pending_run_, n);
-        (void)pong_.send("stop");
+        stop_child();
         return;
     }
     auto sent = pong_.request("ping", n, [this](paglets::Message& reply) {
@@ -85,18 +85,29 @@ void bounce(std::uint32_t n) {
         if (!reply.ok() || !reply.decode(value)) {
             paglets::log(paglets::abi::LogLevel::error,
                          "ping failed: " + std::string(paglets::abi::error_name(reply.status())));
+            stop_child();
             (void)pending_run_.drop();
             return;
         }
         bounce(value);
     });
-    if (!sent) (void)pending_run_.drop();
+    if (!sent) {
+        stop_child();
+        (void)pending_run_.drop();
+    }
+}
+
+void stop_child() {
+    (void)pong_.send("stop");
+    (void)pong_.drop();
+    pong_ = {};
+    target_ = 0;
 }
 ```
 <!-- /snippet -->
 
-If a `ping` fails, the parent logs the error and drops the reply
-capability. Dropping it answers the `run` request with `gone`, so the
+If a `ping` fails, the parent tells its child to stop, releases the child
+endpoint, logs the error and drops the reply capability. Dropping it answers the `run` request with `gone`, so the
 caller does not wait for its timeout.
 
 The body of `run` and `ping` is a single unsigned integer. The paglet
@@ -123,8 +134,10 @@ the runtime is idle only one paglet is left: the child has disposed of
 itself.
 
 <!-- results: ping_pong -->
-| Test | Mode | Outcome | Duration | Platform | Recorded | messages bounced between parent and child | paglets left afterwards (the child disposed itself) |
-|---|---|---|---|---|---|---|---|
-| runtime: ping-pong sample bounces between parent and child | in-process | passed |  | Darwin arm64, Release build | 2026-10-12 | 25 | 1 |
-| runtime: ping-pong sample bounces between parent and child | worker processes | passed | 0.1 s | Darwin arm64, Release build | 2026-10-12 | 25 | 1 |
+| Test | Mode | Outcome | Platform | Recorded | messages bounced between parent and child | paglets left afterwards (the child disposed itself) |
+|---|---|---|---|---|---|---|
+| runtime: ping-pong sample bounces between parent and child | in-process | passed | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 25 | 1 |
+| runtime: ping-pong sample bounces between parent and child | in-process | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 25 | 1 |
+| runtime: ping-pong sample bounces between parent and child | worker processes | passed | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 25 | 1 |
+| runtime: ping-pong sample bounces between parent and child | worker processes | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 25 | 1 |
 <!-- /results -->

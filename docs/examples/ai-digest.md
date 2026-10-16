@@ -283,6 +283,6 @@ answers: a summary is the first `max_words` words of the text, followed by
 <!-- results: digest -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts on the way | documents summarized | host-only root: kept off the AI host |
 |---|---|---|---|---|---|---|---|---|
-| gateway: AI Document Digest reads on two hosts, summarizes on the AI host, writes on a third (WP17 exit) | in-process | passed | 20.3 s | Darwin arm64, Release build | 2026-10-12 | 4 | 2 | yes |
-| gateway: AI Document Digest reads on two hosts, summarizes on the AI host, writes on a third (WP17 exit) | worker processes | passed | 40.3 s | Darwin arm64, Release build | 2026-10-12 | 4 | 2 | yes |
+| gateway: AI Document Digest reads on two hosts, summarizes on the AI host, writes on a third (WP17 exit) | in-process | passed | 20.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 2 | yes |
+| gateway: AI Document Digest reads on two hosts, summarizes on the AI host, writes on a third (WP17 exit) | worker processes | passed | 40.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 2 | yes |
 <!-- /results -->

@@ -6,3 +6,4 @@
 add_executable(paglets-protocol-check protocol_check.cpp)
 target_include_directories(paglets-protocol-check PRIVATE ${PROJECT_SOURCE_DIR}/common/include)
 target_compile_options(paglets-protocol-check PRIVATE ${PAGLETS_WARNINGS})
+target_compile_definitions(paglets-protocol-check PRIVATE PAGLETS_PROTOCOL_BUILD="$<CONFIG>")

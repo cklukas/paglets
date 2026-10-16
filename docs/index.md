@@ -6,7 +6,12 @@ modules, run by the embedded
 They move between hosts as **memory images**: the paglet's whole state is
 ordinary C++ objects in its linear memory, and a move sends that memory
 (only the pages that changed since the target last saw it), not
-serialized fields.
+serialized fields. Images contain Wasm memory and globals, without native
+machine code, and work across supported CPU architectures and operating
+systems, independent of the host compiler and standard library. The
+destination needs the same module hash and compatible memory limits. See
+[what moves with a paglet](writing-paglets.md#when-a-paglet-moves-and-what-moves)
+and the [cross-platform milestone results](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-m0-results.md).
 
 > [!NOTE]
 > paglets/cpp lives on the `cpp` branch, in the `cpp/` directory of the
@@ -18,12 +23,15 @@ serialized fields.
 ## What it offers
 
 - **Code mobility.** Modules travel with the paglet. A host that lacks a
-  module fetches it from its sources or from other hosts, verified by hash.
+  module tries its configured module directories, then the host the paglet
+  comes from, then other hosts of the mesh, in that order. It verifies the
+  content hash before using it.
   Hosts do not need the same code installed.
 - **Sandboxing.** Paglets run in worker processes that the operating system
-  sandboxes: seccomp on Linux, a sandbox profile on macOS, and a job object
-  with a restricted token on Windows. Paglets cannot open files, create
-  sockets or start programs. They reach host resources only through
+  sandboxes: a seccomp allow list on Linux, a sandbox profile on macOS, and
+  an LPAC with a restricted token and job object on Windows. Workers cannot
+  access the network or start programs; Windows allows necessary runtime
+  resources and private AppContainer storage. Paglets reach host resources through
   **system paglets**, within the rules of the mesh policy.
 - **A secured mesh.** Hosts, admins, owners and signers have keys. A
   signed ledger, spread by gossip, records who belongs to the mesh, which
@@ -61,14 +69,14 @@ serialized fields.
 
 ## The paper
 
-A paper on the C++ edition, *Paglets: Mobile Agents as Migrating
-WebAssembly Instances*, is in preparation on the `cpp-paper` branch of the
-repository: the model, the lifecycle and event semantics, movement as
-memory images, the mesh, the zombie paglets and their checked protocol,
-the tools, and the measurements on a three-machine mesh, with code
-excerpts throughout and the complete examples in its appendix. It will be
-published as a PDF next to this documentation. The Python edition has its
-own [application note](https://cklukas.github.io/paglets/paglets-application-note.pdf).
+The paper [*Paglets: Mobile Agents as Migrating WebAssembly Instances*](https://github.com/cklukas/paglets/releases/download/cpp-paper-2026-10-16/paglets-cpp.pdf)
+explains state capture between handler calls, migration with host-managed
+permissions, separate compute jobs and the replicated-agent protocol. It uses
+short implementation excerpts and reports the scope and limits of the
+experimental evidence. Full programs and API references are linked from its
+source appendix. The [paper source](https://github.com/cklukas/paglets/tree/cpp-paper/papers/paglets-cpp)
+is on the `cpp-paper` branch. The Python edition has its own
+[application note](https://cklukas.github.io/paglets/paglets-application-note.pdf).
 
 ## Wire formats and interoperability
 
@@ -86,6 +94,10 @@ edition cannot run on the other.
 | Messages to paglets | MessagePack payloads; the CLI converts JSON to MessagePack and back | Python values |
 | Moving a paglet | a signed move offer with a page manifest, then the missing 64 KB pages of the memory image, compressed with zstd | pickled dataclass state, streamed over HTTP |
 | Paglet code | WebAssembly modules (paglet ABI v1), fetched by SHA-256 hash | Python classes importable on every host |
+| Isolation | pooled workers with an OS sandbox and validated Wasm imports | a child Python process per active paglet; imported code has ordinary Python access |
+| Authority | capabilities and policy in a signed mesh ledger | trusted Python code, with an optional shared API key at the HTTP boundary |
+| Host restart | stored images with restart enabled restore object state; ordinary mailboxes are not replayed | durable inactive dataclass envelopes and managed storage; activation on startup is a deactivation-policy choice |
+| Tools | host/remote CLI, C++ client SDK and `paglets-web` | CLI and Python `HostClient` |
 
 Channels also check the mesh protocol version (`paglets-host --info`
 prints it) and the paglet ABI. Hosts refuse peers of another mesh, another

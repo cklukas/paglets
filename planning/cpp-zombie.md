@@ -61,6 +61,10 @@ the framework gives each one a key (group ID, term, sequence number).
 
 ## 3. Group, replicas, roles
 
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
+
 - **Group**: a 128-bit group ID, the owner, the module, the replica policy
   (every host, the default, or at most N), the sink. Fixed at creation.
 - **Replica**: one paglet per host and group (its own paglet ID). The host's
@@ -80,9 +84,10 @@ the framework gives each one a key (group ID, term, sequence number).
   images stay the local restart mechanism; replication uses the paglet's own
   state, which is smaller and independent of the module version.
 - **Membership**: the replica hosts, part of the replicated state, changed
-  by the main only: hosts that join the mesh (ledger) get a replica by clone,
-  hosts removed from the ledger lose theirs. A replica that is not in the
-  membership of the current main ends.
+  by a main: hosts that join the mesh get a replica by clone. The current
+  protocol grows membership but does not remove departed hosts; messages
+  to them may be lost indefinitely. Membership pruning needs a protocol
+  design and checks, rather than deleting entries independently on each host.
 
 ## 4. Protocol
 
@@ -111,6 +116,10 @@ nobody is further. After a full mesh shutdown the group is down until the
 hosts come back, then the most advanced replica continues.
 
 ## 5. When mains meet again
+
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
 
 Two mains (or a main and a replica that ran alone) meet when a beat, status
 or vote of another lineage arrives. Both compute the same winner:
@@ -149,6 +158,10 @@ are counted in the tombstone (`late entries`).
 
 ## 6. Roles, timeouts, and exits (no dead ends)
 
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
+
 | Role | Leaves on | To |
 | --- | --- | --- |
 | `recovering` | beat of a current lineage | `sleeping` |
@@ -184,7 +197,7 @@ deliver a second result, because the sink refuses it.
 
 **Redirecting the sink.** If a sink cannot come back (for example its host
 was removed from the mesh), the owner redirects the group:
-`paglets-host mesh zombies redirect GROUP SINK` writes a signed sink record
+`paglets-host remote zombies redirect GROUP SINK` writes a signed sink record
 with a sink number that only grows; it spreads by gossip like tombstones and
 reaches offline replicas when they return. Mains deliver only to the sink
 with the highest number they know; a main that learns a higher number while
@@ -196,7 +209,7 @@ tombstone record this case ("delivered to sinks 1 and 2"), it cannot go
 unnoticed.
 
 **Kill switch.** The owner (or an admin) can always end a group:
-`paglets-host mesh zombies cancel GROUP` writes the tombstone, which reaches
+`paglets-host remote zombies cancel GROUP` writes the tombstone, which reaches
 offline replicas when they come back. A module that loses the mesh's trust
 ends all replicas, as for any paglet.
 
@@ -224,6 +237,10 @@ later gets no replica; the group's status lists it, and it gets a replica
 once it offers the service.
 
 ## 8. SDK
+
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
 
 ```cpp
 struct Chronicle : paglets::patterns::Zombie<ChronicleWork, ChronicleEntry> {
@@ -253,6 +270,10 @@ messages and actions), so the same code runs in the guest and in a
 deterministic simulator on the host.
 
 ## 9. Demo: the Mesh Chronicle
+
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
 
 A zombie that writes down the life of its mesh and nothing else:
 
@@ -310,35 +331,49 @@ compiled one (`paglets-docs-sync`, checked by the `docs_sync` ctest).
   properties on every state, recoverability on the finite state graph
   (from every reachable state, once faults stop and the network is
   connected, the goal stays reachable: no dead end and no trap; a check
-  that no fair cycle avoids the goal is planned, planning/cpp-paper.md),
+  that no fair cycle avoids the goal is future research; see
+  planning/cpp-limitations.md),
   and counterexamples as the shortest event trace. Other protocols of the mesh (moves, location records) can be
   specified and checked the same way later.
 - A deterministic simulator in the same library: the protocol under timed
   random fault schedules with virtual clocks, thousands of seeds per run,
-  timing bounds (a main within `E + R` after the main disappears),
+  timing bounds from `takeover_bound()` (25.2 s after a main crashes with
+  the default timing and latency),
   reproducible by seed.
 - `paglets-protocol-check` (`cpp/tools/protocol_check`): runs both for a
-  protocol and its parameters (`--protocol zombie --replicas 3 --terms 3`,
-  `--simulate --seeds 10000`), prints counterexamples as readable traces, and
-  writes `docs/results/zombie-protocol.json` (states explored, properties,
-  seeds, bounds), which the docs page shows via `<!-- results: ... -->`. The
+  protocol and its parameters (`--suite quick`, or
+  `--suite full --simulate --seeds 10000`), prints counterexamples as
+  readable traces, and writes `docs/results/zombie_protocol.json` with
+  `--results`. Custom worlds use `--replicas`, `--work`, `--observations`
+  and explicit fault budgets; unspecified fault budgets are zero. The
   ctest runs it with small bounds on every build; `update_results.sh` runs
   the larger bounds.
 
-**Properties checked** (named in the specification): at most one result
-accepted; no observation that reached a checkpoint is lost by a hand-over;
-journals of connected replicas converge; after partitions heal, one main;
-after a tombstone in a connected network, every replica ends; no dead end
-(every state has a way out without new faults), no cycle without progress.
+**Properties checked** (named in the specification): the model checks
+`one_result`, `best_progress_kept`, `observations_kept` and `legal_transitions`
+as safety invariants. In completely explored worlds it also checks that
+`one_main` and `group_ends` remain reachable from every reachable state over
+fault-free steps (AG EF). This permits cycles with exits; it does not prove
+that every weakly fair run makes progress. Depth-bounded worlds report
+only their safety checks. The timed simulator separately checks the result
+journal against hosts that are up when the sink accepts it; it does not
+guarantee recovery of an observation held only by a crashed host.
+
+Verification improvements remain research work: an exact mode without
+hash compaction; liveness under weak fairness (AG AF, using a fair-cycle
+search); seeded-bug mutation tests; a checked argument for term-renaming
+soundness; and full three-replica exploration or a justified cutoff.
+The transition-table coverage check already exists. These proposals are
+limits of the current evidence, not promises of implemented guarantees.
 
 **Live conformance (the services).** The `zombies` system paglet records
 each replica's protocol events on its host (role changes with term and
 cause, checkpoints, hand-overs, deliveries; a bounded ring, kept in its
-state directory). `paglets-host mesh zombies check GROUP` collects these
-traces from the hosts and replays them through the same transition function
-and properties: every recorded step must be a legal transition, and the
-properties must hold on the merged trace. Violations are reported to the
-owner through `user-info` and by the CLI, with the offending trace. The same
+state directory). `paglets-host remote zombies check GROUP` collects these
+traces from the hosts and checks recorded role changes against the
+transition table, nondecreasing ranks, endings and sink answers. It does
+not replay complete inputs through `step()` or prove every model property
+for the live execution. The CLI reports violations in the recorded trace. The same
 check runs on the traces of the `cli_mesh` fault tests and the live runs.
 
 **Mesh tests**: real hosts on one machine (ctest `cli_mesh`), with
@@ -347,15 +382,19 @@ transport for partitions; then live machines.
 
 ## 11. Work packages
 
+> Historical sketch: superseded by the decisions in section 12 and
+> [the implemented protocol](../docs/zombie-protocol.md). The old
+> `handing-over` role and `reconciled()` hook are not current API.
+
 | WP | Content |
 | --- | --- |
 | WP23 | Protocol specification as code (`protocols/zombie`: states, messages, transitions, properties) and the docs page `docs/zombie-protocol.md` with snippets from it |
 | WP24 | Runtime/ABI v1.2: `recovered` event, `checkpoint()`, restart policy; store and CLI; tests |
-| WP25 | `paglets::verify` (model checker with fault model, canonical states, recoverability as liveness, counterexamples; deterministic simulator) and `paglets-protocol-check`; results JSON; ctest with small bounds |
-| WP26 | `zombies` system paglet: per-host group registry, one replica per host, tombstones with gossip, `cancel`, protocol event traces, `mesh zombies check` (live conformance), contract; node frames |
+| WP25 | `paglets::verify` (model checker with fault model, canonical states, recoverability as AG EF over fault-free steps, counterexamples; deterministic simulator) and `paglets-protocol-check`; results JSON; ctest with small bounds |
+| WP26 | `zombies` system paglet: per-host group registry, one replica per host, tombstones with gossip, `cancel`, protocol event traces, `remote zombies check` (live conformance), contract; node frames |
 | WP27 | SDK `patterns::Zombie<Work, Entry>` on the specification's state machine: roles on timers, journals and hand-over, endpoints between replicas, inline and artifact checkpoints, placement by clone, sinks (file `create_new`, sink paglet), term fencing |
 | WP28 | Links in `mesh-info` snapshots; Mesh Chronicle example (lifetime, link changes, partitions, reconciliation summaries), peer block in the transport (tests only), `cli_mesh` fault tests |
-| WP29 | CLI (`mesh zombies list/status/cancel/redirect/check`), docs pages (concept, SDK, example with results), README updates |
+| WP29 | CLI (`remote zombies list/cancel/redirect/traces/check/result`), docs pages (concept, SDK, example with results), README updates |
 | WP30 | Live runs on real machines; results recorded |
 
 ## 12. Decisions made while implementing

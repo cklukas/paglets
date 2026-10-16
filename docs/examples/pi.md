@@ -1,404 +1,46 @@
+<!-- Copyright (c) 2026 by C. Klukas.
+     Licensed under the MIT License. See LICENSE for details. -->
+
 # Pi
 
-The Pi example computes digits of pi on the hosts of the mesh. A job
-paglet cuts the hexadecimal digits into chunks and sends each chunk, in a
-clone of itself, to a host with free compute slots. The workers compute
-their digits, send them to the job and end. The job takes the chunks in
-order as they come in, writes them to a file on its host, and sends a
-chunk out again when its host does not answer in time, so the result is
-complete even when a host is lost during the run. At the end it converts
-the hexadecimal digits into the familiar decimal ones, `3.14159...`.
+The Pi paglet computes hexadecimal digits of pi as compute jobs across
+its mesh. It stays responsive while the jobs run, takes completed chunks
+in order, retries failed chunks and converts the complete hex fraction to
+decimal in one separate job. It creates no worker paglets and needs no
+manual slices of the computation. See [Compute jobs](../compute-jobs.md).
 
-Directory: [`cpp/examples/pi/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/pi)
+## Messages
 
-## What it shows
-
-- **Choosing hosts with `mesh-info`.** Every host spreads a snapshot of
-  itself by gossip: its load, its free compute slots, its labels and
-  offers. The job asks `mesh-info` to `select` hosts with a free slot and
-  a moderate load (see [System paglets](../system-paglets.md#services)).
-- **Compute slots and redirects.** A worker asks its host's
-  `compute-slots` for a slot. It runs at once, waits in the host's queue
-  until it receives `compute.granted`, or receives `compute.redirect` with
-  a host that has free slots now, moves there and asks again. The hosts
-  only advise; the scheduler never moves paglets, the worker moves itself.
-- **Clones with a destination.** The job clones itself directly onto the
-  chosen host. The clone gets its chunk as arguments and the job's
-  endpoint as its only capability.
-- **Resilience without a central scheduler.** The job keeps the state of
-  every chunk in its own memory. A chunk that is not answered in time goes
-  out again, so the loss of a host costs only the chunks it held.
-- **Results that do not fill the paglet's memory.** A paglet has at most
-  16 MB of memory, and a message at most 1 MB. The job therefore keeps
-  only the chunks that came early: every chunk that is next in order goes
-  to a file below a named root of its host (`files.write`, with a grant)
-  and leaves the job's memory. `status` shows the first 4096 digits and
-  the progress; the files have all of them.
-
-## Why it is useful
-
-Pi stands for any computation that splits into independent parts:
-parameter sweeps, rendering tiles, batches of files. The
-Bailey-Borwein-Plouffe (BBP) formula gives the hexadecimal digits of pi at
-any position without the digits before them, so every chunk can be
-computed on its own and the result is easy to check. The example shows the
-whole pattern in about 300 lines: the job finds hosts with spare capacity,
-each host decides when work runs, and lost work is sent again. The mesh
-needs no job server and no shared storage.
-
-## Hexadecimal and decimal digits
-
-The BBP formula gives hexadecimal digits: `3.243F6A88...` is pi in base 16.
-No such formula is known for decimal digits, and turning hexadecimal
-digits into decimal ones cannot be done chunk by chunk either: a change of
-base touches every digit. The job does it once, at the end. While the
-chunks come in, it keeps the fraction of pi as a binary number, half a
-byte per hexadecimal digit (8 digits in a 32-bit word). Then it multiplies
-that number by 10^9 again and again; each time, the nine decimal digits
-that move in front of the point are the next ones. `n` hexadecimal digits
-fix `n × log10(16) ≈ 1.2 n` decimal digits; the job leaves out the last two,
-so that a carry hidden in a run of nines or zeros cannot make one wrong.
-As the digits come out, it also drops the binary digits that the
-remaining decimal digits no longer need, so the conversion takes about
-`n² / 120` multiplications, in slices of 200 ms between messages, so
-that no handler call runs long.
-
-The fraction takes half a byte per hexadecimal digit, so a paglet's
-memory holds the conversion of up to 20 million hexadecimal digits; the
-job refuses more when `decimal` is set. Without `decimal`, and with
-output files, the number of digits is limited only by time. The time is
-what limits it in practice: the BBP formula needs work proportional to
-the position for every digit, so `n` digits take about `n²` steps. The
-[live run](#on-real-machines) shows what that means on real machines.
-
-## How it works
-
-The digits come from the BBP formula in `bbp.hpp`. A `Block` computes six
-digits after the point from any position, which is well within the
-precision of a `double`. Its powers of 16 are taken modulo `8k + j` in
-64-bit integers, which is exact and much faster than floating-point
-`fmod` (WebAssembly has no instruction for it). `step` computes a bounded
-number of terms, so the work of a block can be spread over several
-handler calls. The host tests use the same header to check the result:
-
-<!-- snippet: cpp/examples/pi/bbp.hpp#digits -->
-Source: [`cpp/examples/pi/bbp.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/bbp.hpp)
-
-```cpp
-// Up to six hex digits of pi after the point, starting at `position` (0: the
-// first digit after "3."), from
-//   pi = sum_k 16^-k (4/(8k+1) - 2/(8k+4) - 1/(8k+5) - 1/(8k+6)).
-// The work grows with the position: about 4 * position terms. step()
-// computes at most `terms` of them, so a paglet can spread a block over
-// several handler calls (the parts of a sum add up modulo 1).
-class Block {
-public:
-    Block() = default;
-    Block(std::int64_t position, int count) : at_(position), count_(count) {}
-
-    // True when the digits are there.
-    bool step(std::int64_t terms) {
-        static constexpr int js[4] = {1, 4, 5, 6};
-        while (series_ < 4 && terms > 0) {
-            const std::int64_t end = std::min(at_ + 1, k_ + terms);
-            part_[series_] += series_head(js[series_], at_, k_, end);
-            part_[series_] -= std::floor(part_[series_]);
-            terms -= end - k_;
-            k_ = end;
-            if (k_ == at_ + 1) {
-                part_[series_] += series_tail(js[series_], at_);
-                ++series_;
-                k_ = 0;
-            }
-        }
-        return series_ == 4;
-    }
-
-    std::string digits() const {
-        static constexpr char hex[] = "0123456789ABCDEF";
-        double x = 4.0 * part_[0] - 2.0 * part_[1] - part_[2] - part_[3];
-        x -= std::floor(x);
-        std::string out;
-        for (int i = 0; i < count_; ++i) {
-            x *= 16.0;
-            const int digit = static_cast<int>(x);
-            out.push_back(hex[digit]);
-            x -= digit;
-        }
-        return out;
-    }
-
-private:
-    std::int64_t at_ = 0;
-    int count_ = 0;
-    int series_ = 0;
-    std::int64_t k_ = 0;
-    double part_[4] = {0, 0, 0, 0};
-};
-```
-<!-- /snippet -->
-
-The job starts with a `start` message. It cuts the digits into chunks of
-`chunk` digits and keeps at most `max_in_flight` of them out at a time.
-For each batch it asks `mesh-info` to `select` as many hosts as it has
-chunks to send, with at least one free slot and a load of at most 4 per
-CPU. If `mesh-info` names no host, it uses its own. It then clones
-itself onto the hosts, one chunk per clone, round robin:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#clone -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-// `n` chunks, round robin over `hosts` ("" is this host).
-void send_to(const std::vector<std::string>& hosts, std::int64_t n) {
-    std::size_t next = 0;
-    for (auto& c : chunks_) {
-        if (n <= 0) break;
-        if (c.sent || c.done) continue;
-        const std::string& host = hosts[next++ % hosts.size()];
-        Task t{c.start, c.count, ++c.attempt, params_.work_ms};
-        std::optional<std::string> destination;
-        if (!host.empty() && host != host_) destination = host;
-        auto worker = paglets::clone_raw(paglets::encode(t), {paglets::self()}, destination);
-        if (!worker) {
-            paglets::log("pi: no worker for chunk " + std::to_string(c.start) + ": " +
-                         std::string(abi::error_name(worker.error())));
-            break;
-        }
-        (void)worker->drop();  // the worker answers through its own endpoint to the job
-        c.sent = true;
-        c.sent_ms = now_ms();
-        --n;
-    }
-}
-```
-<!-- /snippet -->
-
-A worker asks the `compute-slots` of its host for one core. With
-`run_now` it computes. With `queued` it waits for `compute.granted`. With a
-redirect it moves to the host named in the decision and asks there again
-when it arrives; if the move fails, it stays where it is. A host
-without `compute-slots`, or one that rejects the request, lets it compute
-at once:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#worker -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-void ask_for_slot() {
-    auto slots = paglets::service("compute-slots");
-    if (!slots) return compute();  // a host without compute-slots: just run
-    svc::compute_slots::Client client{*slots};
-    svc::compute_slots::SlotRequest q;
-    q.job = "pi";
-    q.cores = 1;
-    auto sent = client.request_slot(q, [this](paglets::Result<svc::compute_slots::Decision> d, Message&) {
-        if (!d) return compute();
-        switch (d->verdict) {
-            case svc::compute_slots::Verdict::run_now: run(d->lease); break;
-            case svc::compute_slots::Verdict::queued: break;  // compute.granted comes later
-            case svc::compute_slots::Verdict::redirect:
-                if (!paglets::dispatch(d->host)) compute();
-                break;
-            case svc::compute_slots::Verdict::rejected: compute(); break;
-        }
-    });
-    if (!sent) compute();
-}
-```
-<!-- /snippet -->
-
-A handler call may take at most 5 seconds; the host ends a paglet whose
-handler runs longer. Far out, a single block of six digits takes seconds,
-so the worker computes in slices of about 200 ms: each slice sums a few
-thousand terms of the series (the parts of a sum add up modulo 1), and a
-message to itself continues where it stopped:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#slices -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-// A slice of about 200 ms: a handler call may take at most 5 s, and far
-// out a single block of six digits takes seconds. The rest follows in
-// the next message.
-void compute_more() {
-    const std::int64_t began = now_ms();
-    while (static_cast<std::int64_t>(digits_.size()) < task_.count) {
-        if (block_.step(20'000)) {
-            digits_ += block_.digits();
-            const std::int64_t at = task_.start + static_cast<std::int64_t>(digits_.size());
-            const std::int64_t left = task_.start + task_.count - at;
-            if (left > 0) block_ = pi_bbp::Block(at, static_cast<int>(std::min<std::int64_t>(6, left)));
-        }
-        if (now_ms() - began >= 200 && static_cast<std::int64_t>(digits_.size()) < task_.count) {
-            (void)paglets::after_raw(0, "compute-more", {});
-            return;
-        }
-    }
-    report_digits();
-}
-```
-<!-- /snippet -->
-
-The worker sends its digits to the job in a `result` message, with the
-name of the host that computed them, releases its lease and disposes of
-itself. With `work_ms`, a worker holds its slot at least that long before
-it computes; the tests use this to make the chunks take time.
-
-The job takes chunks in order as they arrive. Each chunk that is next in
-order goes into the file and into the fraction, and its digits leave the
-job's memory:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#in_order -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-// Chunks that are next in order leave the job's memory: into the file,
-// and into the fraction for the decimal conversion.
-void take_in_order() {
-    while (next_ < chunks_.size() && chunks_[next_].done) {
-        Chunk& c = chunks_[next_++];
-        done_ += c.count;
-        if (shown_hex_.size() < shown_digits) shown_hex_ += c.digits.substr(0, shown_digits - shown_hex_.size());
-        if (params_.decimal) {
-            for (char h : c.digits) add_nibble(static_cast<std::uint32_t>(h <= '9' ? h - '0' : h - 'A' + 10));
-        }
-        if (dir_) {
-            hex_file_.pending += c.digits;
-            flush(hex_file_);
-        }
-        std::string().swap(c.digits);
-    }
-    if (finished() && state_ == "computing") {
-        if (params_.decimal) return start_conversion();
-        state_ = "writing";
-        maybe_done();
-    }
-}
-
-// The fraction, 8 hex digits per 32-bit limb, the most significant first.
-void add_nibble(std::uint32_t v) {
-    partial_ = (partial_ << 4) | v;
-    if (++partial_n_ == 8) {
-        limbs_.push_back(partial_);
-        partial_ = 0;
-        partial_n_ = 0;
-    }
-}
-```
-<!-- /snippet -->
-
-When every hexadecimal digit is there, the job converts the fraction, one
-slice of passes per message:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#convert -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-// A slice of the conversion: passes of multiplying the fraction by 10^9,
-// whose overflow above the point is the next nine decimal digits.
-void convert() {
-    if (state_ != "converting") return;
-    const std::int64_t began = now_ms();
-    std::string digits;
-    while (decimal_done_ + static_cast<std::int64_t>(digits.size()) < decimal_total_ && now_ms() - began < 200) {
-        // Only the precision the remaining digits need (and two limbs more).
-        const std::int64_t remaining = decimal_total_ - decimal_done_ - static_cast<std::int64_t>(digits.size());
-        const auto need = static_cast<std::size_t>(static_cast<double>(remaining) * 3.3219280949 / 32.0) + 2;
-        if (limbs_.size() > need) limbs_.resize(need);
-        std::uint64_t carry = 0;
-        for (std::size_t i = limbs_.size(); i-- > 0;) {
-            const std::uint64_t t = static_cast<std::uint64_t>(limbs_[i]) * 1'000'000'000ULL + carry;
-            limbs_[i] = static_cast<std::uint32_t>(t);
-            carry = t >> 32;
-        }
-        char nine[16];
-        std::snprintf(nine, sizeof nine, "%09u", static_cast<unsigned>(carry));
-        digits.append(nine, static_cast<std::size_t>(std::min<std::int64_t>(9, remaining)));
-    }
-    decimal_done_ += static_cast<std::int64_t>(digits.size());
-    if (shown_dec_.size() < shown_digits) shown_dec_ += digits.substr(0, shown_digits - shown_dec_.size());
-    if (dir_) {
-        dec_file_.pending += digits;
-        flush(dec_file_);
-    }
-    if (decimal_done_ < decimal_total_) {
-        (void)paglets::after_raw(0, "convert", {});
-        return;
-    }
-    std::vector<std::uint32_t>().swap(limbs_);
-    state_ = "writing";
-    maybe_done();
-}
-```
-<!-- /snippet -->
-
-The job keeps each chunk's state: waiting, sent (with the time and the
-attempt), or done with its digits until they are taken in order. Every 500 ms it checks the chunks in
-flight. A chunk that has had no answer for `chunk_timeout_ms` counts as
-waiting again and goes out with the next batch, to the hosts `mesh-info`
-selects then. A host that is gone no longer sends snapshots, so it drops
-out of the selection once its last snapshot is too old. A late answer for a chunk that is already done is
-ignored:
-
-<!-- snippet: cpp/examples/pi/pi.cpp#resend -->
-Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
-
-```cpp
-// Chunks without an answer in time go out again (their host may be gone).
-void tick() {
-    if (worker_) return;
-    const std::int64_t now = now_ms();
-    for (auto& c : chunks_) {
-        if (c.sent && !c.done && now - c.sent_ms > params_.chunk_timeout_ms) {
-            c.sent = false;
-            ++resent_;
-        }
-    }
-    send_more();
-    if (!finished()) (void)paglets::after_raw(500, "tick", {});
-}
-```
-<!-- /snippet -->
-
-The messages, the worker's task and the status:
-
-<!-- snippet: cpp/examples/pi/pi_msgs.hpp -->
+<!-- snippet: cpp/examples/pi/pi_msgs.hpp#messages -->
 Source: [`cpp/examples/pi/pi_msgs.hpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi_msgs.hpp)
 
 ```cpp
-// Messages of the pi compute example (planning/cpp-compute.md, section 5).
-
-#pragma once
-
-#include <cstdint>
-#include <string>
-#include <vector>
-
-namespace pi_msgs {
-
 // `start`: compute `digits` hex digits of pi in chunks of `chunk` digits,
-// at most `max_in_flight` chunks at a time on hosts mesh-info selects. A
-// chunk not answered within `chunk_timeout_ms` (its host may be gone) is
-// sent again elsewhere. `work_ms` makes each chunk take at least that long
-// (for demonstrations and tests).
+// each a compute job (planning/cpp-compute-jobs.md) on one of `hosts`
+// ({"any"}: the hosts of the mesh with free slots; empty: this host), at
+// most `max_in_flight` at a time. A chunk whose job fails (its host went
+// away, it ran longer than `chunk_timeout_ms`) is submitted again.
+// `work_ms` makes each chunk take at least that long (for demonstrations
+// and tests).
 //
 // With `output_root`, the digits go, in order as they come in, to files
-// below that named root of the job's host (a grant for `write` and
+// below that named root of the job's host (a grant for `read`, `write` and
 // `create`): `<output_path>.hex` and, with `decimal`, `<output_path>.txt`.
-// The job then keeps only the chunks that came early, not all digits.
-// With `decimal`, the job converts the hex digits into decimal digits at the
-// end (about 1.2 per hex digit; the conversion needs every digit, so it
-// cannot run per chunk).
+// The paglet then keeps only the chunks that came early, not all digits.
+// With `decimal`, one long compute job converts the hex digits into decimal
+// digits at the end (about 1.2 per hex digit; the conversion needs every
+// digit, so it cannot run per chunk). Without `output_root` it converts at
+// most 800 000 hex digits (its input and output are messages).
 struct Start {
     std::int64_t digits = 1000;
-    std::int64_t chunk = 60;
+    std::int64_t chunk = 1000;
     std::int64_t max_in_flight = 8;
-    std::int64_t chunk_timeout_ms = 30'000;
+    std::int64_t chunk_timeout_ms = 0;  // wall time of a chunk's job; 0: the host's default
     std::int64_t work_ms = 0;
     bool decimal = true;
-    std::string output_root;  // empty: the digits stay in the job's memory
+    std::string output_root;  // empty: the digits stay in the paglet's memory
     std::string output_path = "pi";
+    std::vector<std::string> hosts = {"any"};
 };
 
 struct Started {
@@ -406,156 +48,332 @@ struct Started {
     std::string reason;
 };
 
-// The arguments of a worker (a clone of the job paglet on another host).
+// The input of a chunk's job.
 struct Task {
     std::int64_t start = 0;
     std::int64_t count = 0;
-    std::int64_t attempt = 0;
     std::int64_t work_ms = 0;
 };
-
-// `result`: a worker's digits.
-struct Result {
-    std::int64_t start = 0;
-    std::int64_t count = 0;
-    std::int64_t attempt = 0;
-    std::string digits;
-    std::string host;  // key ID of the host that computed it
-    std::string host_name;
-};
-
-struct StatusRequest {};
-
-// `status`: progress. `hex` and `decimal` show at most the first `shown`
-// digits (the files have all of them).
-struct Status {
-    std::string state;        // idle, computing, converting, done, failed
-    std::int64_t digits = 0;  // hex digits asked for
-    std::int64_t done = 0;    // hex digits contiguous from the start
-    std::int64_t chunks = 0;
-    std::int64_t chunks_done = 0;
-    std::int64_t in_flight = 0;
-    std::int64_t resent = 0;  // chunks sent again (no answer in time)
-    bool finished = false;    // every hex digit is there
-    std::string hex;          // "3." followed by hex digits
-    std::int64_t decimal_digits = 0;  // decimal digits that hex `digits` give
-    std::int64_t decimal_done = 0;    // converted so far
-    std::string decimal;              // "3." followed by decimal digits
-    std::int64_t shown = 0;
-    std::vector<std::string> files;  // the files written, below `output_root`
-    std::vector<std::string> hosts;  // names of the hosts that computed chunks
-    std::string error;
-};
-
-}  // namespace pi_msgs
 ```
 <!-- /snippet -->
 
-## Running it on a live mesh
+Send `start` with parameters, then poll `status`. `status` gives contiguous
+hex digits completed, chunks in flight, retries, participating host names,
+AOT chunks and job-reported elapsed times (`compute_ms`, `convert_ms`).
+`compute_ms` sums successful chunk jobs; these can overlap on different
+hosts and include any configured minimum hold. `convert_ms` reports the
+successful conversion job. These values are separate from the benchmark
+driver's coarse polling observations, which include RPC and scheduling
+delays. Its hex and decimal previews show at most the first 4096 digits.
 
-Without output files, Pi needs no policy rule. A host offers one compute
-slot per CPU unless `serve` is given `--slots N` (see
-[serve](../cli-reference.md#serve)). For output files, the job's host needs
-a named root, for example `--root results=/srv/results`, and a rule that
-lets the owner's paglets write there:
-
-```bash
-$H ledger rule --ledger ledger --admin alice.key --name "pi results" --decision allow \
-    --service files --op write --op create --root results
-```
-
-Launch the job on any host and start it:
+Using the connection, owner key and local ledger from the mesh setup:
 
 ```bash
-H=build/macos-arm64/host/paglets-host
-R="--connect https://lab-1:7443 --key olga.key --ledger ledger"
-ID=$($H remote launch $R build/macos-arm64/guests/pi.wasm)
-$H remote call $R $ID start '{"digits": 100000, "chunk": 500, "max_in_flight": 32,
-    "chunk_timeout_ms": 600000, "decimal": true, "output_root": "results", "output_path": "pi/run-1"}'
-$H remote call $R $ID status
+PAGLET=$(paglets-host remote launch --connect "$URL" --key "$OWNER_KEY" --ledger "$LEDGER" pi.wasm)
+paglets-host remote call --connect "$URL" --key "$OWNER_KEY" --ledger "$LEDGER" "$PAGLET" start '{"digits":1000,"chunk":1000,"hosts":["any"],"decimal":true}'
+paglets-host remote call --connect "$URL" --key "$OWNER_KEY" --ledger "$LEDGER" "$PAGLET" status
 ```
 
-`status` shows the progress: `state` (`computing`, `converting`,
-`writing`, then `done`), the chunks done and in flight, how many were sent
-again, the names of the hosts that computed chunks, and the first 4096
-digits so far, in hexadecimal (`hex`) and, once converted, in decimal
-(`decimal`). `finished` is `true` when every chunk is done. The files are
-`pi/run-1.hex` and `pi/run-1.txt` below the root, each `3.` followed by
-the digits.
-`remote landscape` shows the free slots that `mesh-info` sees, and
-`remote slots` a host's leases and queue (see
-[Working with live hosts](../hosts-and-meshes.md#working-with-live-hosts)).
+With `output_root`, the host needs a named root and a grant for read,
+write and create. `output_path` defaults to `pi`; output files are `pi.hex`
+and `pi.txt`. Without a root, results remain in the paglet's memory and
+decimal conversion accepts at most 800,000 hex digits. Large file-backed
+conversions still need the whole fraction in the conversion job's memory;
+the configured job memory and time caps apply.
 
-> [!NOTE]
-> Set `chunk_timeout_ms` well above the time a chunk takes, including the
-> wait in a host's queue. A chunk that is merely slow is otherwise
-> computed twice; the result stays correct, because the job keeps the
-> first answer.
+## Digit jobs
 
-## On real machines
+The Bailey–Borwein–Plouffe formula computes digits at any hexadecimal
+position without calculating earlier digits. The registered `digits`
+function computes one chunk in a fresh instance and reports progress:
 
-`cpp/tools/mesh_bench.sh` (see
-[File Courier](file-courier.md#transfer-speed-between-real-machines)) runs
-the job on a mesh of a Mac Studio, a Raspberry Pi 4 and a Raspberry Pi
-Compute Module 5 on a LAN, every host with one compute slot per CPU, and
-writes the digits into files on the Mac. It checks the first 100 decimal
-digits. The last run:
+<!-- snippet: cpp/examples/pi/pi.cpp#digits_job -->
+Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
 
-<!-- results: live_pi -->
-| Test | Mode | Outcome | Duration | Platform | Recorded | hex digits in the file | decimal digits in the file | chunks of 500 digits | hosts that computed chunks | computing the hex digits (s) | converting into decimal digits (s) |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| pi, 100000 hex digits | LAN, worker processes | passed | 5 min 13 s | Release build | 2026-10-12 | 100000 | 120409 | 200 | mac, pi, uconsole | 313 | < 1 |
-<!-- /results -->
+```cpp
+// A chunk of hex digits: as long as it takes, no slicing. The paglet's
+// handlers run meanwhile; this is a separate instance of the module.
+void digits(compute::JobContext& job) {
+    Task t;
+    if (!job.input(t) || t.count <= 0) return job.fail(abi::malformed);
+    const std::int64_t began = now_ms();
+    std::string out;
+    out.reserve(static_cast<std::size_t>(t.count));
+    while (static_cast<std::int64_t>(out.size()) < t.count) {
+        const std::int64_t at = t.start + static_cast<std::int64_t>(out.size());
+        pi_bbp::Block block(at, static_cast<int>(std::min<std::int64_t>(6, t.count - static_cast<std::int64_t>(out.size()))));
+        while (!block.step(20'000)) {
+            if (job.cancelled()) return job.fail(abi::cancelled);
+        }
+        out += block.digits();
+        job.progress(static_cast<std::int64_t>(out.size()), t.count);
+    }
+    // Demonstrations and tests: a chunk takes at least work_ms.
+    while (now_ms() - began < t.work_ms) {
+        if (job.cancelled()) return job.fail(abi::cancelled);
+    }
+    (void)job.output(out);
+}
+PAGLETS_JOB(digits)
+```
+<!-- /snippet -->
 
-## Test results
+The coordinator submits up to `max_in_flight` chunks. The host selects
+among `hosts` using the mesh's free-slot snapshots, then admits or queues
+each job. An empty host list means this host; `{"any"}` permits the mesh.
 
-The test runs the job on a mesh of three hosts inside one test process,
-each with two compute slots
-(`pi: the pi example computes across three hosts ...` in
-`cpp/tests/test_compute.cpp`). It asks for 1200 digits in chunks of 30,
-with at most six in flight, a chunk timeout of 3 s, and 250 ms of work per
-chunk. It checks that:
+<!-- snippet: cpp/examples/pi/pi.cpp#submit -->
+Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
 
-- the chunks spread over all three hosts before the job is finished;
-- when the third host has a worker of its own running, the test shuts
-  that host down, and the job still finishes;
-- all 1200 digits and 40 chunks are done, and at least one chunk was sent
-  again after the loss;
-- the result starts with `3.243F6A8885A308D3...` and equals the digits the
-  BBP formula gives on the test host;
-- the job converts them into 1442 decimal digits, which start with the
-  first 100 decimal digits of pi.
+```cpp
+// Chunks go out as jobs while fewer than max_in_flight run. The host
+// picks where (`hosts: any`: the one with the most free slots); on a
+// host without a mesh they run here.
+void send_more() {
+    if (state_ != "computing") return;
+    for (auto& c : chunks_) {
+        if (in_flight() >= params_.max_in_flight) break;
+        if (c.sent || c.done) continue;
+        if (++c.attempt > max_attempts) return fail("chunk " + std::to_string(c.start) + " failed every time");
+        compute::Options o;
+        o.hosts = local_only_ ? std::vector<std::string>{} : params_.hosts;
+        o.max_ms = params_.chunk_timeout_ms;
+        const bool elsewhere = !o.hosts.empty();
+        auto job = compute::submit("digits", Task{c.start, c.count, params_.work_ms},
+                                   [this, start = c.start](paglets::Result<compute::Output> r, Message& m) {
+                                       on_result(start, std::move(r), m);
+                                   },
+                                   std::move(o));
+        if (!job && job.error() == abi::unsupported && elsewhere) {
+            local_only_ = true;  // no mesh: this host only
+            --c.attempt;
+            return send_more();
+        }
+        if (!job) return fail("submitting a job: " + std::string(abi::error_name(job.error())));
+        c.sent = true;
+    }
+}
+```
+<!-- /snippet -->
 
-A second test (`example: Pi writes its digits to files ...` in
-`cpp/tests/test_examples.cpp`) writes 3000 hexadecimal digits to files
-below a named root and checks that the `.hex` file has every digit in
-order and the `.txt` file 3610 decimal digits that start with those of
-pi, and that a conversion too large for the paglet's memory is refused.
-The decimal digits were also checked against `bc` (`4*a(1)`), for 8000
-hexadecimal digits: all 9630 decimal digits agree.
+A failed job makes its chunk eligible for resubmission, bounded by the
+example's retry limit. A late result for an already completed chunk is ignored. `chunk_timeout_ms` caps running time; zero uses the host default.
+A remote host leaving causes `gone`, which also permits retry.
 
-<!-- results: pi -->
+<!-- snippet: cpp/examples/pi/pi.cpp#result -->
+Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
+
+```cpp
+void on_result(std::int64_t start, paglets::Result<compute::Output> r, Message& m) {
+    auto it = std::ranges::find_if(chunks_, [&](const Chunk& c) { return c.start == start; });
+    if (it == chunks_.end() || it->done) return;
+    Chunk& c = *it;
+    std::string digits;
+    if (!r || !r->decode(digits) || digits.size() != static_cast<std::size_t>(c.count)) {
+        // Its host went away, or it ran too long: again, elsewhere.
+        const auto p = m.payload();
+        paglets::log("pi: chunk " + std::to_string(c.start) + " again: " +
+                     (r ? std::string("malformed output") : std::string(abi::error_name(r.error())) + " " +
+                                                                std::string(p.begin(), p.end())));
+        c.sent = false;
+        ++resent_;
+        (void)paglets::after_raw(200, "tick", {});
+        return;
+    }
+    c.done = true;
+    c.digits = std::move(digits);
+    auto name = names_.find(r->info.host);
+    hosts_.insert(name != names_.end() ? name->second : r->info.host.substr(0, 8));
+    if (r->info.aot) ++chunks_aot_;
+    compute_ms_ += r->info.elapsed_ms;
+    take_in_order();
+    send_more();
+}
+```
+<!-- /snippet -->
+
+## Ordered output and conversion
+
+Chunks completed early wait in the coordinator until all preceding chunks
+are available. Contiguous chunks go to the output file, or into the
+in-memory hex result:
+
+<!-- snippet: cpp/examples/pi/pi.cpp#in_order -->
+Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
+
+```cpp
+// Chunks that are next in order leave the paglet's memory: into the file
+// (or, without files, into the digits kept for the conversion).
+void take_in_order() {
+    while (next_ < chunks_.size() && chunks_[next_].done) {
+        Chunk& c = chunks_[next_++];
+        done_ += c.count;
+        if (shown_hex_.size() < shown_digits) shown_hex_ += c.digits.substr(0, shown_digits - shown_hex_.size());
+        if (dir_) {
+            hex_file_.pending += c.digits;
+            flush(hex_file_);
+        } else if (params_.decimal) {
+            all_hex_ += c.digits;
+        }
+        std::string().swap(c.digits);
+    }
+    if (finished() && state_ == "computing") {
+        state_ = "writing";
+        maybe_converted();
+    }
+}
+```
+<!-- /snippet -->
+
+The `to_decimal` job reads the hex fraction as inline input or an artifact,
+then performs the whole conversion outside the handler lane. The paglet
+stores the resulting bytes, or saves the output artifact as the decimal
+file. It remains available for status calls throughout.
+
+<!-- snippet: cpp/examples/pi/pi.cpp#convert -->
+Source: [`cpp/examples/pi/pi.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/pi/pi.cpp)
+
+```cpp
+// Every hex digit is there (and in the file): one job converts them all,
+// here. Its input is the hex file (an artifact of this host) or, without
+// files, the digits themselves; its output is the decimal text.
+void start_conversion() {
+    state_ = "converting";
+    decimal_total_ = std::max<std::int64_t>(0, static_cast<std::int64_t>(static_cast<double>(done_) * std::log10(16.0)) - 2);
+    compute::Options o;
+    o.max_ms = 24LL * 3'600'000;                     // capped by the host
+    o.memory_mb = done_ / 2 / (1024 * 1024) + 32;    // the fraction, half a byte per digit
+    auto converted = [this](paglets::Result<compute::Output> r, Message& m) {
+        if (!r) {
+            const auto p = m.payload();
+            return fail("conversion: " + std::string(abi::error_name(r.error())) + " " + std::string(p.begin(), p.end()));
+        }
+        convert_ms_ += r->info.elapsed_ms;
+        if (r->artifact) return save_decimal(std::move(*r->artifact));
+        std::string text(r->data.begin(), r->data.end());
+        decimal_done_ = std::max<std::int64_t>(0, static_cast<std::int64_t>(text.size()) - 2);
+        shown_dec_ = text.size() > 2 ? text.substr(2, shown_digits) : std::string();
+        converted_ = true;
+        if (dir_) {
+            dec_file_.path = dec_path_;
+            dec_file_.pending = std::move(text);
+            flush(dec_file_);
+        }
+        maybe_done();
+    };
+    if (!dir_) {
+        auto job = compute::submit_raw("to_decimal", paglets::Bytes(all_hex_.begin(), all_hex_.end()), converted,
+                                       std::move(o));
+        std::string().swap(all_hex_);
+        if (!job) fail("conversion: " + std::string(abi::error_name(job.error())));
+        return;
+    }
+    pt::share_file(*dir_, hex_file_.path, [this, o, converted](paglets::Result<pt::SharedFile> f) mutable {
+        if (!f) return fail(pt::error_text("share " + hex_file_.path, f.error()));
+        o.input_artifact = f->content;
+        auto job = compute::submit_raw("to_decimal", {}, converted, std::move(o));
+        (void)f->content.drop();
+        if (!job) fail("conversion: " + std::string(abi::error_name(job.error())));
+    });
+}
+
+// A large decimal text came as an artifact: into the file, and its
+// beginning into the status.
+void save_decimal(paglets::Capability content) {
+    pt::save_file(*dir_, dec_path_, content, [this, content](paglets::Result<svc::files::Entry> e) mutable {
+        (void)content.drop();
+        if (!e) return fail(pt::error_text("save " + dec_path_, e.error()));
+        decimal_done_ = static_cast<std::int64_t>(e->size) - 2;
+        dec_file_.path = dec_path_;
+        converted_ = true;
+        pt::endpoint("files", [this](paglets::Result<paglets::Endpoint> files) {
+            if (!files) return maybe_done();
+            svc::files::Client client{*files};
+            auto sent = client.read(
+                svc::files::ReadRequest{dec_path_, 2, shown_digits},
+                [this](paglets::Result<svc::files::ReadReply> r, Message&) {
+                    if (r) shown_dec_.assign(r->data.begin(), r->data.end());
+                    maybe_done();
+                },
+                pt::lending(*dir_));
+            if (!sent) maybe_done();
+        });
+    });
+}
+```
+<!-- /snippet -->
+
+Approximately 1.2 decimal digits are determined per hex digit; the example
+omits two trailing digits to avoid rounding the truncated fraction. The
+conversion repeatedly multiplies the fraction by 10^9. Large conversions
+can be expensive even with AOT; use `decimal: false` when only hex digits
+are required.
+
+## Validation and live measurements
+
+The `pi:` and `example: Pi` tests check digits, retries and file output.
+The jobs tests check local and remote execution, cancellation, artifacts,
+recovery and interpreter/AOT result identity. Run them through the CMake
+test preset; [Building](../building.md) explains filtering.
+
+Historical live results in `docs/results/live_pi.json` were collected with
+the earlier sliced-worker implementation. They are not performance results
+for the compute-jobs implementation. New measurements must record the
+host build, execution mode and the same input on each host.
+
+The compute-jobs integration run below used two slots per host and a
+200 ms minimum chunk hold to exercise scheduling across the Mac, rpi4 and
+uconsole. All three computed chunks; there were no retries, the output
+sizes matched and the decimal prefix was checked. This short cold run had
+no AOT chunks. Its timing includes the artificial hold and one-second
+status polling, so it is an integration measurement. The historical
+large Pi results above remain from the earlier implementation.
+
+<!-- results: live_jobs_pi -->
 | Test | Mode | Outcome | Duration | Platform | Recorded |
 |---|---|---|---|---|---|
-| example: Pi writes its digits to files in order and converts them into decimal digits | in-process | passed | 0.8 s | Darwin arm64, Release build | 2026-10-12 |
-| example: Pi writes its digits to files in order and converts them into decimal digits | worker processes | passed | 0.9 s | Darwin arm64, Release build | 2026-10-12 |
-| pi: the pi example computes across three hosts and survives the loss of one (WP16 exit) | in-process | passed | 6.1 s | Darwin arm64, Release build | 2026-10-12 |
-| pi: the pi example computes across three hosts and survives the loss of one (WP16 exit) | worker processes | passed | 4.2 s | Darwin arm64, Release build | 2026-10-12 |
+| Pi compute jobs, 6000 hex digits | LAN, worker processes | passed | 3.0 s | Mac RelWithDebInfo; both Pis Release build | 2026-10-14 |
 
-example: Pi writes its digits to files in order and converts them into decimal digits:
+Pi compute jobs, 6000 hex digits:
 
-| Measured | in-process | worker processes |
-|---|---|---|
-| hex digits written to a file in order | 3000 | 3000 |
-| decimal digits written to a file | 3610 | 3610 |
+| Measured | LAN, worker processes |
+|---|---|
+| hex digits in the file | 6000 |
+| decimal digits in the file | 7222 |
+| minimum chunk hold | 200 ms |
+| chunks of 500 digits | 12 |
+| hosts that computed chunks | mac, pi, uconsole |
+| computing the hex digits | 3 s |
+| converting into decimal digits | < 1 s |
+<!-- /results -->
 
-pi: the pi example computes across three hosts and survives the loss of one (WP16 exit):
+The final 2026-10-15 run completed 100,000 hexadecimal digits on all three
+physical hosts and converted the output to decimal. The first 100 decimal
+digits were checked; this does not independently verify every generated
+digit. Two chunks were resubmitted. The conversion took 147 ms as reported
+by the job, while the driver includes one-second polling. Compiled jobs use
+explicit software bounds checks, correcting the earlier large-conversion
+trap. Full receipts are in `planning/validation/cpp-three-host-20261015.json`.
 
-| Measured | in-process | worker processes |
-|---|---|---|
-| hex digits computed | 1200 | 1200 |
-| decimal digits converted from them | 1442 | 1442 |
-| chunks | 40 | 40 |
-| hosts used before one was lost | 3 | 3 |
-| chunks sent again after the loss | 6 | 3 |
+New `mesh_bench.sh` records name the run `Pi example`, report successful job
+elapsed times in milliseconds and AOT chunk counts, and label the separate
+poll observations and their one-second clock resolution. Historical records
+above retain their original names and observation scope.
+
+<!-- results: live_three_host_pi -->
+| Test | Mode | Outcome | Duration | Platform | Recorded |
+|---|---|---|---|---|---|
+| pi, 100000 hex digits | LAN, worker processes | passed | 1 min 09 s | mixed; see live_hosts build | 2026-10-15 |
+
+pi, 100000 hex digits:
+
+| Measured | LAN, worker processes |
+|---|---|
+| hex digits in the file | 100000 |
+| decimal digits in the file | 120409 |
+| minimum chunk hold | 0 ms |
+| chunks of 500 digits | 200 |
+| hosts that computed chunks | mac, pi, uconsole |
+| computing the hex digits | 69 s |
+| converting into decimal digits | < 1 s |
 <!-- /results -->

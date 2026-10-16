@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 #include "runtime_exec.hpp"
+#include "wasm_address_space.hpp"
 
 #include "ipc.hpp"
 #include "shm_ring.hpp"
@@ -10,8 +11,10 @@
 #include <paglets/abi.hpp>
 #include <paglets/msgpack.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -21,6 +24,7 @@
 
 #ifndef _WIN32
 #include <csignal>
+#include <unistd.h>
 #endif
 
 namespace paglets::runtime {
@@ -139,6 +143,26 @@ Bytes serve_import(wasm::HostImports& h, msgpack::Reader& r) {
             result = h.lifecycle(h32, data);
         } else if (name == "timer_set") {
             result = h.timer_set(a, data);
+        } else if (name == "job_submit") {
+            result = h.job_submit(data);
+        } else if (name == "job_cancel") {
+            result = h.job_cancel(a);
+        } else if (name == "job_status") {
+            document(h.job_status(a));
+        } else if (name == "job_input") {
+            Bytes buf(static_cast<std::size_t>(std::clamp<std::int64_t>(b, 0, abi::job_chunk)));
+            const std::int32_t n = h.job_input(a, buf);
+            result = n;
+            if (n >= 0) {
+                buf.resize(static_cast<std::size_t>(n));
+                doc = std::move(buf);
+            }
+        } else if (name == "job_output") {
+            result = h.job_output(data);
+        } else if (name == "job_progress") {
+            result = h.job_progress(a, b);
+        } else if (name == "job_cancelled") {
+            result = h.job_cancelled();
         } else {
             result = abi::unsupported;
         }
@@ -184,6 +208,11 @@ public:
         stop("host stopping");
     }
 
+    std::expected<void, std::string> start() override {
+        std::lock_guard lock(mu_);
+        return ensure_started();
+    }
+
     void retain_modules(const std::set<std::string>& keep) override {
         std::lock_guard lock(mu_);
         if (!alive_) return;
@@ -212,13 +241,15 @@ public:
                                                               wasm::HostImports& imports) override {
         std::lock_guard lock(mu_);
         if (auto ok = ensure_started(); !ok) return std::unexpected(ok.error());
-        const std::string hash = module->hash_hex();
+        // AOT code (compute jobs) is a module of its own in the worker.
+        const std::string hash = module->hash_hex() + (module->aot() ? ":aot" : "");
         if (!loaded_.contains(hash)) {
             msgpack::Writer w;
-            w.write_array_header(3);
+            w.write_array_header(module->aot() ? 4 : 3);
             w.write_int(static_cast<std::int32_t>(ipc::Op::load_module));
             w.write_str(hash);
             w.write_bin(module->bytes());
+            if (module->aot()) w.write_bin(module->aot_bytes());
             if (auto r = round_trip(w.bytes()); !r) return std::unexpected(r.error());
             loaded_.insert(hash);
         }
@@ -358,7 +389,7 @@ private:
         for (auto v : values) args.push_back(std::to_string(v));
         args.push_back(std::to_string(capacity));
         if (!sandbox_) args.emplace_back("--no-sandbox");
-        auto process = job ? ipc::Process::spawn(executable_, args, handles, *job)
+        auto process = job ? ipc::Process::spawn(executable_, args, handles, *job, sandbox_)
                            : std::expected<ipc::Process, std::string>(std::unexpected(job.error()));
         ipc::close_ends(doorbell->child);
         ipc::close_ends(control->child);
@@ -377,6 +408,48 @@ private:
         }
         loaded_.clear();
         alive_ = true;
+        // A noop unload is supported by existing workers and proves that
+        // initialization and the requested sandbox completed. Bound this
+        // exchange: an executable that never answers must not stall serve.
+        std::mutex startup_mu;
+        std::condition_variable_any startup_cv;
+        bool completed = false;
+        bool timed_out = false;
+        std::jthread watchdog([&](std::stop_token token) {
+            std::unique_lock lock(startup_mu);
+            if (!startup_cv.wait_for(lock, token, std::chrono::seconds(5), [&] { return completed; }) &&
+                !token.stop_requested()) {
+                timed_out = true;
+                process_.stop(std::chrono::milliseconds(0));  // closes the peer ends and wakes receive()
+            }
+        });
+        msgpack::Writer probe;
+        probe.write_array_header(2);
+        probe.write_int(static_cast<std::int32_t>(ipc::Op::unload_module));
+        probe.write_str("");
+        const auto sent = main_.send(probe.bytes());
+        auto answer = sent ? main_.receive() : std::expected<Bytes, std::string>(std::unexpected(sent.error()));
+        {
+            std::lock_guard lock(startup_mu);
+            completed = true;
+        }
+        watchdog.request_stop();
+        startup_cv.notify_all();
+        watchdog.join();
+        if (timed_out) return fail("worker startup handshake timed out after 5 s");
+        if (!answer) return fail("worker startup handshake: " + answer.error());
+        msgpack::Reader reader(*answer);
+        std::uint32_t fields = 0;
+        if (auto ready = answer_status(reader, fields); !ready) return fail("worker startup handshake: " + ready.error());
+        // An optional diagnostic preserves the one-field legacy acknowledgement.
+        // Workers have no inherited stderr; startup warnings travel over IPC.
+        if (fields > 1) {
+            std::string warning;
+            if (fields != 2 || !msgpack::read_value(reader, warning))
+                return fail("worker startup handshake: malformed diagnostic");
+            if (warning.ends_with('\n')) warning.pop_back();
+            if (warn_ && !warning.empty()) warn_(warning);
+        }
         return {};
     }
 
@@ -501,6 +574,39 @@ public:
     std::int32_t timer_set(std::int64_t delay_ms, std::span<const std::uint8_t> msg) override {
         return result32(forward("timer_set", delay_ms, 0, msg));
     }
+    std::int64_t job_submit(std::span<const std::uint8_t> spec) override {
+        auto r = forward("job_submit", 0, 0, spec);
+        return r ? r->first : std::int64_t{abi::internal};
+    }
+    std::int32_t job_cancel(std::int64_t correlation) override {
+        return result32(forward("job_cancel", correlation, 0, {}));
+    }
+    Document job_status(std::int64_t correlation) override { return document("job_status", correlation, 0, {}); }
+    std::int32_t job_input(std::int64_t offset, std::span<std::uint8_t> out) override {
+        auto r = forward("job_input", offset, static_cast<std::int64_t>(out.size()), {});
+        if (!r) return abi::internal;
+        if (r->first < 0) return static_cast<std::int32_t>(r->first);
+        const Bytes& data = r->second ? *r->second : Bytes{};
+        const std::size_t n = std::min(out.size(), data.size());
+        std::copy_n(data.begin(), n, out.begin());
+        return static_cast<std::int32_t>(n);
+    }
+    std::int32_t job_output(std::span<const std::uint8_t> data) override {
+        return result32(forward("job_output", 0, 0, data));
+    }
+    // Progress goes one way; nothing to wait for.
+    std::int32_t job_progress(std::int64_t done, std::int64_t total) override {
+        msgpack::Writer w;
+        w.write_array_header(5);
+        w.write_int(ipc::notify_marker);
+        w.write_str("job_progress");
+        w.write_int(done);
+        w.write_int(total);
+        w.write_bin({});
+        if (!channel_.send(w.bytes())) std::_Exit(3);  // the host is gone
+        return abi::ok;
+    }
+    std::int32_t job_cancelled() override { return result32(forward("job_cancelled", 0, 0, {})); }
 
 private:
     using Answer = std::pair<std::int64_t, std::optional<Bytes>>;
@@ -571,9 +677,14 @@ std::unique_ptr<Executor> make_in_process_executor() {
 
 std::expected<std::unique_ptr<Executor>, std::string> make_worker_executor(
     std::filesystem::path executable, bool sandbox, std::function<void(const std::string&)> warn) {
-    if (!std::filesystem::exists(executable)) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(executable, ec)) {
         return std::unexpected("worker executable not found: " + executable.string());
     }
+#ifndef _WIN32
+    if (::access(executable.c_str(), X_OK) != 0)
+        return std::unexpected("worker is not executable: " + executable.string());
+#endif
     return std::make_unique<WorkerExecutor>(std::move(executable), sandbox, std::move(warn));
 }
 
@@ -593,7 +704,8 @@ int run_worker(ipc::Ends doorbell, ipc::Ends control_ends, std::intptr_t shm_han
         std::uint8_t warm[8];
         wasm::fill_random(warm);
         if (auto ok = sandbox_worker(); !ok) {
-            std::cerr << "paglets-worker: running without OS sandbox: " << ok.error() << "\n";
+            std::cerr << "paglets-worker: cannot apply OS sandbox: " << ok.error() << "\n";
+            return 2;
         }
     }
     ipc::RingChannel main(std::move(*memory), ring_capacity, doorbell, false);
@@ -631,14 +743,17 @@ int run_worker(ipc::Ends doorbell, ipc::Ends control_ends, std::intptr_t shm_han
             case ipc::Op::load_module: {
                 std::string hash;
                 Bytes bytes;
-                if (!msgpack::read_value(r, hash) || !msgpack::read_value(r, bytes)) {
+                Bytes aot;
+                if (!msgpack::read_value(r, hash) || !msgpack::read_value(r, bytes) ||
+                    (n == 4 && !msgpack::read_value(r, aot))) {
                     answer = error_frame("malformed load_module");
                     break;
                 }
-                auto module = wasm::Module::load(std::move(bytes), wasm::ImportPolicy::system());
+                auto module = n == 4 ? wasm::Module::load_aot(std::move(bytes), std::move(aot), wasm::ImportPolicy::system())
+                                     : wasm::Module::load(std::move(bytes), wasm::ImportPolicy::system());
                 if (!module) {
                     answer = error_frame(module.error());
-                } else if ((*module)->hash_hex() != hash) {
+                } else if ((*module)->hash_hex() + ((*module)->aot() ? ":aot" : "") != hash) {
                     answer = error_frame("module hash mismatch");
                 } else {
                     modules[hash] = std::move(*module);
@@ -653,7 +768,16 @@ int run_worker(ipc::Ends doorbell, ipc::Ends control_ends, std::intptr_t shm_han
                     break;
                 }
                 modules.erase(hash);
-                answer = ok_frame();
+                const auto& warning = wasm::detail::startup_address_space_warning();
+                if (hash.empty() && !warning.empty()) {
+                    msgpack::Writer w;
+                    w.write_array_header(2);
+                    w.write_int(0);
+                    w.write_str(warning);
+                    answer = w.take();
+                } else {
+                    answer = ok_frame();
+                }
                 break;
             }
             case ipc::Op::create: {

@@ -134,13 +134,11 @@ private:
         std::string destination = next_ < itinerary_.size() ? itinerary_[next_++] : home_;
         left_ms_ = now_ms();
         if (auto moved = paglets::dispatch(destination); !moved) {
-            if (destination == home_) {
-                journal_.state = "failed";
-                journal_.skipped.push_back("home: " + pt::error_text("dispatch", moved.error()));
-                return;
-            }
+            // This is an admission error (for example pinned or denied),
+            // before any destination was tried. Later host-specific failures
+            // arrive through on_move_failed and may try the next host.
+            journal_.state = "failed";
             journal_.skipped.push_back(destination + ": " + pt::error_text("dispatch", moved.error()));
-            go_on();
         }
     }
     // --8<-- [end:go_on]

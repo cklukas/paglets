@@ -11,12 +11,24 @@
 //
 // - `run_now`: it holds a lease (`lease`) for `cores` slots and runs; it
 //   releases the lease when done (also when it ends or leaves the host).
+//   Lifetime is max(10 min, twice estimated_ms), capped at 24 h by default.
+//   Repeating the same job/core request renews it, retaining its ID, but
+//   cannot exceed the original continuous lifetime cap. Expired requests
+//   rejoin admission. `expires_ms` is diagnostic Unix time; enforcement
+//   uses a monotonic clock. `compute.expired` carries the expired Decision
+//   (rejected, with the old lease ID); a late release returns false.
 // - `queued`: it waits (it may deactivate); when slots are free it receives
 //   the message `compute.granted` (a Decision with run_now and the lease).
 //   While it waits, the host may find a host with free slots instead: then
 //   it receives `compute.redirect` (a Decision with the host) and should
 //   dispatch itself there and ask again. The scheduler never moves paglets.
-// - `rejected`: this host can never run it (more cores than it has).
+// - `redirect`: an oversized request first tries a peer with enough free
+//   slots. If none is known, it is rejected.
+// - `rejected`: this host cannot run it and no suitable peer is known.
+//   A capacity reduction can reject an existing waiter with compute.rejected.
+//
+// Leases account for cooperative work; they do not preempt its CPU use.
+// They are transient: ask again after a host restart or arrival elsewhere.
 
 #pragma once
 
@@ -30,7 +42,7 @@ namespace paglets::services::compute_slots {
 struct SlotRequest {
     std::string job;  // the job it belongs to (for status)
     std::int64_t cores = 1;
-    std::int64_t estimated_ms = 0;
+    std::int64_t estimated_ms = 0;  // nonpositive: default lifetime; positive: twice the estimate, within host limits
 };
 
 enum class Verdict { run_now, queued, redirect, rejected };
@@ -43,6 +55,7 @@ struct Decision {
     std::string host_name;      // its name
     std::int64_t position = 0;  // queued: place in the queue (0: next)
     std::string reason;
+    std::int64_t expires_ms = 0;  // run_now: Unix ms; renewal cannot exceed the continuous lifetime cap
 };
 
 struct ReleaseRequest {
@@ -61,6 +74,7 @@ struct Lease {
     std::string job;
     std::int64_t cores = 0;
     std::int64_t granted_ms = 0;
+    std::int64_t expires_ms = 0;
 };
 
 struct Waiting {

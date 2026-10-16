@@ -12,10 +12,13 @@
 #include <paglets/net/transport.hpp>
 #include <paglets/sha256.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <random>
+#include <string>
 #include <mutex>
 #include <thread>
 
@@ -343,11 +346,24 @@ PAGLETS_TEST("network: failed deliveries are logged once, summarized, and when t
     CHECK_EQ(count_logged("dropped:"), 1);  // the first failure only
     REQUIRE(a.transport->send_failure(b_key).has_value());
     CHECK(a.transport->send_failure(b_key)->find("opening a channel to https://127.0.0.1:1") != std::string::npos);
-    // Repeats are summarized at most every interval.
+    // Windows may spend more than one interval rejecting those connections.
+    // Count every summary, rather than assuming the first five attempts fit
+    // inside 300 ms. After a full quiet interval, the next failure must log.
+    const auto summaries_before = count_logged("still dropped (");
     std::this_thread::sleep_for(350ms);
     a.transport->send(b_key, frame_of(5));
     CHECK(a.transport->flush(10s));
-    CHECK_EQ(count_logged("still dropped (5 more times"), 1);
+    CHECK_EQ(count_logged("still dropped ("), summaries_before + 1);
+    {
+        std::lock_guard lock(a.mu);
+        unsigned summarized = 0;
+        const std::string prefix = "still dropped (";
+        for (const auto& line : a.log) {
+            const auto at = line.find(prefix);
+            if (at != std::string::npos) summarized += static_cast<unsigned>(std::stoul(line.substr(at + prefix.size())));
+        }
+        CHECK_EQ(summarized, 5u);  // all failures after the first, with no loss or duplication
+    }
     // A new reason is logged at once.
     a.transport->set_address(b_key, "https://127.0.0.1:2");
     a.transport->send(b_key, frame_of(6));
@@ -365,7 +381,7 @@ PAGLETS_TEST("network: failed deliveries are logged once, summarized, and when t
 PAGLETS_TEST("network: hosts of another mesh protocol are refused; probe finds a host by its address") {
     Host a;
     TransportConfig other;
-    other.protocol = mesh_protocol + 1;
+    other.protocol = 1;  // pre-owner-binding hosts must not share channels with v2
     Host b(other);
     introduce(a, b);
     a.transport->send(b.key.public_key(), frame_of(1));
@@ -396,4 +412,187 @@ PAGLETS_TEST("network: hosts of another mesh protocol are refused; probe finds a
     auto refused = c.transport->probe(b.transport->url());
     REQUIRE(!refused);
     CHECK(refused.error().find("incompatible") != std::string::npos);
+}
+
+PAGLETS_TEST("network: established CLI channels lose access when their peer is revoked") {
+    for (PeerRole role : {PeerRole::owner, PeerRole::admin}) {
+        const auto host_key = mesh::SigningKey::generate();
+        const auto peer_key = mesh::SigningKey::generate();
+        std::atomic<bool> allowed{true};
+        std::atomic<int> delivered{0};
+        Transport host(host_key, mesh_id, {},
+            [&](const Identity&) -> std::expected<void, std::string> {
+                if (!allowed) return std::unexpected(std::string("revoked"));
+                return {};
+            }, [&](const Identity&, Bytes frame) -> std::vector<Bytes> { ++delivered; return {frame}; });
+        REQUIRE_OK(host.start());
+        auto session = ClientSession::open(host.url(), peer_key, role, mesh_id, {});
+        REQUIRE_OK(session);
+        REQUIRE_OK(session->exchange({Bytes{1}}));
+        allowed = false;
+        CHECK(!session->exchange({Bytes{2}}));
+        CHECK_EQ(delivered.load(), 1);
+        CHECK(!ClientSession::open(host.url(), peer_key, role, mesh_id, {}));
+    }
+}
+
+PAGLETS_TEST("network: an established client checks whether its server is still allowed") {
+    Host host;
+    const auto owner = mesh::SigningKey::generate();
+    std::atomic<bool> allowed{true};
+    auto session = ClientSession::open(host.transport->url(), owner, PeerRole::owner, mesh_id,
+        [&](const Identity&) -> std::expected<void, std::string> {
+            if (!allowed) return std::unexpected(std::string("server revoked"));
+            return {};
+        });
+    REQUIRE_OK(session);
+    REQUIRE_OK(session->exchange({Bytes{1}}));
+    allowed = false;
+    CHECK(!session->exchange({Bytes{2}}));
+    CHECK_EQ(host.count(), 1u);
+}
+
+PAGLETS_TEST("network: cached host channels enforce revocation in both directions") {
+    for (bool incoming : {false, true}) {
+        Host a, b;
+        introduce(a, b);
+        a.transport->send(b.key.public_key(), Bytes{1});
+        REQUIRE(a.transport->flush());
+        REQUIRE(b.wait_for(1));
+        if (incoming) { std::lock_guard lock(b.mu); b.allowed.erase(a.key.public_key()); }
+        else { std::lock_guard lock(a.mu); a.allowed.erase(b.key.public_key()); }
+        a.transport->send(b.key.public_key(), Bytes{2});
+        REQUIRE(a.transport->flush());
+        b.transport->stop();  // joins/drains its inbox, making the negative check deterministic
+        CHECK_EQ(b.count(), 1u);
+    }
+}
+
+namespace {
+template<class F> bool network_until(F condition, std::chrono::milliseconds timeout = 10s) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (!condition() && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(5ms);
+    return condition();
+}
+}
+
+PAGLETS_TEST("network: queued frames are checked again after their sender is revoked") {
+    Host source;
+    const auto key = mesh::SigningKey::generate();
+    std::atomic<bool> allowed{true};
+    std::atomic<int> delivered{0};
+    std::promise<void> entered, release;
+    auto entering = entered.get_future();
+    auto released = release.get_future().share();
+    Transport target(key, mesh_id, {},
+        [&](const Identity&) -> std::expected<void, std::string> {
+            if (!allowed) return std::unexpected(std::string("revoked"));
+            return {};
+        }, [&](const Identity&, Bytes frame) -> std::vector<Bytes> {
+            if (frame == Bytes{1}) { entered.set_value(); released.wait(); }
+            ++delivered;
+            return {};
+        });
+    struct Unblock { std::promise<void>& p; ~Unblock() { try { p.set_value(); } catch (...) {} } } unblock{release};
+    REQUIRE_OK(target.start());
+    source.allowed.insert(key.public_key());
+    source.transport->set_address(key.public_key(), target.url());
+    source.transport->send(key.public_key(), Bytes{1});
+    REQUIRE(source.transport->flush());
+    REQUIRE(entering.wait_for(10s) == std::future_status::ready);
+    source.transport->send(key.public_key(), Bytes{2});
+    REQUIRE(source.transport->flush());
+    allowed = false;
+    release.set_value();
+    target.stop();
+    CHECK_EQ(delivered.load(), 1);
+}
+
+PAGLETS_TEST("network: revocation during a request withholds replies and later batch frames") {
+    for (bool batch : {false, true}) {
+        const auto key = mesh::SigningKey::generate();
+        const auto owner = mesh::SigningKey::generate();
+        std::atomic<bool> allowed{true};
+        std::atomic<int> delivered{0};
+        Transport host(key, mesh_id, {},
+            [&](const Identity&) -> std::expected<void, std::string> {
+                if (!allowed) return std::unexpected(std::string("revoked"));
+                return {};
+            }, [&](const Identity&, Bytes frame) -> std::vector<Bytes> {
+                ++delivered; allowed = false; return {frame};
+            });
+        REQUIRE_OK(host.start());
+        auto session = ClientSession::open(host.url(), owner, PeerRole::owner, mesh_id, {});
+        REQUIRE_OK(session);
+        CHECK(!session->exchange(batch ? std::vector<Bytes>{Bytes{1}, Bytes{2}} : std::vector<Bytes>{Bytes{1}}));
+        CHECK_EQ(delivered.load(), 1);
+    }
+}
+
+PAGLETS_TEST("network: a long poll cannot release queued data after revocation") {
+    Host leaf(TransportConfig{.listen = false});
+    const auto key = mesh::SigningKey::generate();
+    std::atomic<bool> allowed{true};
+    std::atomic<int> checks{0};
+    Transport relay(key, mesh_id, TransportConfig{.poll_wait = 30s},
+        [&](const Identity&) -> std::expected<void, std::string> {
+            const bool admitted = allowed.load();
+            ++checks;
+            if (!admitted) return std::unexpected(std::string("revoked"));
+            return {};
+        }, {});
+    REQUIRE_OK(relay.start());
+    leaf.allowed.insert(key.public_key());
+    leaf.transport->set_uplinks({{key.public_key(), relay.url()}});
+    // One check at the handshake, then the poll's admission check. Its
+    // authorizer snapshots the decision before publishing the counter.
+    REQUIRE(network_until([&] { return checks >= 2 && !leaf.transport->live_uplinks().empty(); }));
+    allowed = false;
+    REQUIRE(network_until([&] {
+        relay.send(leaf.key.public_key(), Bytes{42});
+        if (!relay.flush(2s)) return false;
+        return relay.stats().frames_sent != 0;
+    }));
+    REQUIRE(network_until([&] { return leaf.transport->live_uplinks().empty(); }));
+    relay.stop();
+    leaf.transport->stop();
+    CHECK(checks >= 3);
+    CHECK_EQ(leaf.count(), 0u);
+}
+
+PAGLETS_TEST("network: cached relay tunnels enforce revocation at either endpoint") {
+    for (bool incoming : {false, true}) {
+        Host source;
+        Host relay(TransportConfig{.poll_wait = 100ms});
+        Host target(TransportConfig{.listen = false});
+        for (Host* h : {&source, &relay, &target}) {
+            for (Host* other : {&source, &relay, &target}) if (other != h) h->allowed.insert(other->key.public_key());
+        }
+        source.transport->set_address(relay.key.public_key(), relay.transport->url());
+        relay.transport->set_address(source.key.public_key(), source.transport->url());
+        target.transport->set_uplinks({{relay.key.public_key(), relay.transport->url()}});
+        source.transport->set_relays(target.key.public_key(), {relay.key.public_key()});
+        REQUIRE(network_until([&] { return !target.transport->live_uplinks().empty(); }));
+        // live_uplinks reports the handshake; a successful downlink confirms
+        // that the first poll is registered before starting the inner handshake.
+        REQUIRE(network_until([&] {
+            relay.transport->send(target.key.public_key(), Bytes{0});
+            if (!relay.transport->flush(2s)) return false;
+            return !relay.transport->send_failure(target.key.public_key());
+        }));
+        REQUIRE(target.wait_for(1));
+        source.transport->send(target.key.public_key(), Bytes{1});
+        REQUIRE(source.transport->flush());
+        REQUIRE(target.wait_for(2));
+        const auto dropped = target.transport->stats().frames_dropped;
+        if (incoming) { std::lock_guard lock(target.mu); target.allowed.erase(source.key.public_key()); }
+        else { std::lock_guard lock(source.mu); source.allowed.erase(target.key.public_key()); }
+        source.transport->send(target.key.public_key(), Bytes{2});
+        REQUIRE(source.transport->flush());
+        if (incoming) REQUIRE(network_until([&] {
+            return target.count() > 2 || target.transport->stats().frames_dropped > dropped;
+        }));
+        target.transport->stop();
+        CHECK_EQ(target.count(), 2u);
+    }
 }

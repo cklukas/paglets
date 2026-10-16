@@ -2,6 +2,7 @@
 // Licensed under the MIT License. See LICENSE for details.
 
 #include <paglets/mesh/ledger.hpp>
+#include "../time_arithmetic.hpp"
 
 #include <paglets/wasm/engine.hpp>
 
@@ -394,7 +395,7 @@ struct Deriver {
         if (it == st.rules.end()) return "grant from a rule that is not valid";
         if (it->decision != Decision::allow) return "grant from a rule that does not allow";
         if (!rule_covers(st, *it, g.principal, g.issuer, g.item)) return "grant outside its rule";
-        if (it->max_duration_ms && g.expires > r.time() + *it->max_duration_ms) {
+        if (it->max_duration_ms && g.expires > time_detail::saturating_add(r.time(), *it->max_duration_ms)) {
             return "grant longer than its rule allows";
         }
         return {};

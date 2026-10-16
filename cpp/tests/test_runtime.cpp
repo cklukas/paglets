@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -334,6 +335,31 @@ PAGLETS_TEST("abi C23: timers fire; dropped timers do not") {
 // ---------------------------------------------------------------------------
 // Lifecycle
 
+PAGLETS_TEST("abi plain C: SDK-independent exports and state survive deactivation") {
+    Fixture f;
+    const auto id = f.create("plain_counter.wasm");
+    f.runtime->wait_idle();
+    CHECK(f.logged_exactly("plain-c-created"));
+    for (int count = 1; count <= 2; ++count) {
+        REQUIRE(f.runtime->send(id, "notification"));
+        f.runtime->wait_idle();
+        CHECK(f.logged_exactly("plain-c-count: " + std::to_string(count)));
+    }
+    REQUIRE(f.runtime->deactivate(id));
+    f.runtime->wait_idle();
+    REQUIRE(f.runtime->info(id).has_value());
+    CHECK(f.runtime->info(id)->state == rt::PagletState::inactive);
+    CHECK(f.logged_exactly("plain-c-deactivating"));
+    REQUIRE(f.runtime->send(id, "notification"));
+    f.runtime->wait_idle();
+    CHECK(f.runtime->info(id)->state == rt::PagletState::active);
+    CHECK(f.logged_exactly("plain-c-activated"));
+    CHECK(f.logged_exactly("plain-c-count: 3"));
+    CHECK_EQ(f.call(id, "unsupported").status, abi::unknown_message);
+    std::lock_guard lock(f.log_mu);
+    CHECK_EQ(std::ranges::count(f.log, std::string("plain-c-created")), 1);
+}
+
 PAGLETS_TEST("abi C24: deactivate and activate keep the state") {
     Fixture f;
     auto id = f.create("conformance.wasm");
@@ -517,11 +543,14 @@ PAGLETS_TEST("runtime: hello sample") {
 PAGLETS_TEST("runtime: ping-pong sample bounces between parent and child") {
     Fixture f;
     auto id = f.create("ping_pong.wasm");
+    f.runtime->wait_idle();
+    const auto caps = f.runtime->capabilities(id).size();
     auto r = f.call(id, "run", enc(std::uint32_t{25}));
     CHECK_EQ(r.status, 0);
     CHECK_EQ(dec<std::uint32_t>(r.payload), 25u);
     f.runtime->wait_idle();
     CHECK_EQ(f.runtime->list().size(), std::size_t{1});  // the child disposed itself
+    CHECK_EQ(f.runtime->capabilities(id).size(), caps);
     ::paglets::test::report("ping_pong", "messages bounced between parent and child", 25);
     ::paglets::test::report("ping_pong", "paglets left afterwards (the child disposed itself)", f.runtime->list().size());
 }
@@ -671,6 +700,75 @@ PAGLETS_TEST("runtime: checkpoint policy per paglet") {
             CHECK_EQ(dec<std::int64_t>(g.call(lazy, "count").payload), 1);
             CHECK_EQ(dec<std::int64_t>(g.call(kid, "count").payload), 3);
         }
+    }
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: checkpoint refuses absent storage or disabled restart") {
+    {
+        Fixture f;
+        const auto id = f.create("conformance.wasm");
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::checkpoint)}),
+                 abi::unsupported);
+    }
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("paglets-checkpoint-policy-" + std::to_string(std::random_device{}()));
+    {
+        Fixture f(rt::Config{.state_dir = dir});
+        const auto id = f.create("conformance.wasm");
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::restart), .ms = 0}), 0);
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::checkpoint)}), abi::bad_state);
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::restart), .ms = 1}), 0);
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::checkpoint)}), 0);
+        f.runtime->wait_idle();
+        CHECK(std::filesystem::is_regular_file(dir / "paglets" / (id + ".paglet")));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: a failed checkpoint or deactivation write stops the paglet before its next delivery") {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("paglets-checkpoint-write-" + std::to_string(std::random_device{}()));
+    for (const auto operation : {abi::LifecycleOp::checkpoint, abi::LifecycleOp::deactivate}) {
+        Fixture f(rt::Config{.state_dir = dir});
+        const auto id = f.create("conformance.wasm");
+        f.runtime->wait_idle();
+        std::filesystem::create_directory(dir / "paglets" / (id + ".paglet.tmp"));
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(operation)}), 0);
+        f.runtime->wait_idle();
+        REQUIRE(f.runtime->ending(id).has_value());
+        CHECK(f.runtime->ending(id)->failed);
+        CHECK(f.runtime->ending(id)->reason.find(operation == abi::LifecycleOp::checkpoint ? "checkpoint" : "deactivating") != std::string::npos);
+        CHECK(!f.runtime->info(id).has_value());
+    }
+    std::filesystem::remove_all(dir);
+}
+
+PAGLETS_TEST("runtime: an automatic checkpoint retries after a failed first image write") {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("paglets-checkpoint-retry-" + std::to_string(std::random_device{}()));
+    const std::string id(32, 'a');
+    rt::Config config;
+    config.state_dir = dir;
+    config.checkpoint_interval = std::chrono::hours(1);
+    {
+        Fixture f(config);
+        const auto blocked = dir / "paglets" / (id + ".paglet.tmp");
+        std::filesystem::create_directory(blocked);
+        REQUIRE_OK(f.runtime->create(f.module("conformance.wasm"), rt::CreateOptions{.id = id}));
+        f.runtime->wait_idle();
+        REQUIRE(f.runtime->info(id).has_value());
+        CHECK(f.logged("persisting the paglet failed"));
+        std::filesystem::remove(blocked);
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
+        f.runtime->wait_idle();
+        CHECK(std::filesystem::is_regular_file(dir / "paglets" / (id + ".paglet")));
+        f.runtime->shutdown(false);
+    }
+    {
+        Fixture f(config);
+        REQUIRE(f.runtime->info(id).has_value());
+        CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 2);
     }
     std::filesystem::remove_all(dir);
 }
@@ -865,3 +963,99 @@ PAGLETS_TEST("runtime: paglets run in worker processes when configured") {
     CHECK_EQ(dec<std::int64_t>(f.call(id, "count").payload), 1);
     CHECK(!f.runtime->worker_processes().empty());
 }
+
+#ifdef _WIN32
+PAGLETS_TEST("worker startup: Windows reuses the host job and keeps the restricted token") {
+    std::wstring path(32768, L'\0');
+    const DWORD size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    REQUIRE(size > 0 && size < path.size());
+    path.resize(size);
+    rt::Config config;
+    config.worker_executable = std::filesystem::path(path).parent_path().parent_path() / "host/paglets-worker.exe";
+    config.sandbox_workers = true;
+    Fixture f(config);
+    const auto id = f.create("hello.wasm");
+    CHECK_EQ(f.call(id, "greet", enc(std::string("Windows"))).status, 0);
+    const auto workers = f.runtime->worker_processes();
+    REQUIRE(!workers.empty());
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(workers.front()));
+    REQUIRE(process != nullptr);
+    HANDLE token = nullptr;
+    const bool opened = OpenProcessToken(process, TOKEN_QUERY, &token);
+    std::wstring running(32768, L'\0');
+    DWORD length = static_cast<DWORD>(running.size());
+    const bool named = QueryFullProcessImageNameW(process, 0, running.data(), &length);
+    CloseHandle(process);
+    struct CloseToken { HANDLE value; ~CloseToken() { if(value) CloseHandle(value); } } close{token};
+    REQUIRE(named);
+    running.resize(length);
+    auto file_bytes = [](const std::filesystem::path& p) {
+        std::ifstream input(p, std::ios::binary);
+        REQUIRE(input.good());
+        return std::string(std::istreambuf_iterator<char>(input), {});
+    };
+    CHECK(file_bytes(std::filesystem::path(running)) == file_bytes(config.worker_executable));
+    REQUIRE(opened);
+
+    DWORD container = 0, size_needed = 0;
+    REQUIRE(GetTokenInformation(token, TokenIsAppContainer, &container, sizeof container, &size_needed));
+    CHECK_EQ(container, 1u);
+    std::vector<std::uint8_t> bytes(1024);
+    DWORD required = 0;
+    REQUIRE(GetTokenInformation(token, TokenIntegrityLevel, bytes.data(), static_cast<DWORD>(bytes.size()), &required));
+    const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(bytes.data());
+    const auto rid = *GetSidSubAuthority(label->Label.Sid, *GetSidSubAuthorityCount(label->Label.Sid) - 1);
+    CHECK(rid <= SECURITY_MANDATORY_LOW_RID);
+    REQUIRE(GetTokenInformation(token, TokenPrivileges, bytes.data(), static_cast<DWORD>(bytes.size()), &required));
+    CHECK_EQ(reinterpret_cast<const TOKEN_PRIVILEGES*>(bytes.data())->PrivilegeCount, 0u);
+}
+#endif
+
+PAGLETS_TEST("worker startup: an explicitly configured missing worker never falls back in-process") {
+    rt::Config c;
+    c.worker_executable = std::filesystem::temp_directory_path() /
+        ("missing-paglets-worker-" + std::to_string(std::random_device{}()));
+    bool rejected = false;
+    try { rt::Runtime runtime(c); }
+    catch (const std::exception& e) {
+        rejected = true;
+        CHECK(std::string(e.what()).find("worker executable not found") != std::string::npos);
+    }
+    CHECK(rejected);
+}
+
+#ifndef _WIN32
+PAGLETS_TEST("worker startup: non-executable, failing and silent executables are rejected before activation") {
+    const auto dir = std::filesystem::temp_directory_path() /
+        ("worker-startup-" + std::to_string(std::random_device{}()));
+    std::filesystem::create_directories(dir);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } cleanup{dir};
+    const auto worker = dir / "paglets-worker";
+    for (int kind : {0, 1, 2}) {
+        {
+            std::ofstream script(worker);
+            script << "#!/bin/sh\n" << (kind == 2 ? "exec /bin/sleep 30\n" : "exit 1\n");
+        }
+        std::filesystem::permissions(worker, kind == 0 ? std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write : std::filesystem::perms::owner_all);
+        rt::Config c;
+        c.worker_executable = worker;
+        c.threads = 1;
+        c.sandbox_workers = false;
+        bool rejected = false;
+        const auto start = std::chrono::steady_clock::now();
+        try { rt::Runtime runtime(c); }
+        catch (const std::exception& e) {
+            rejected = true;
+            const std::string reason = e.what();
+            CHECK(reason.find(kind == 0 ? "not executable" : "startup handshake") != std::string::npos);
+            if (kind == 2) CHECK(reason.find("timed out") != std::string::npos);
+        }
+        CHECK(rejected);
+        CHECK(std::chrono::steady_clock::now() - start < 10s);
+    }
+}
+#endif

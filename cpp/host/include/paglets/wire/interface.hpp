@@ -56,6 +56,10 @@ std::expected<void, std::string> validate(const Json& description);
 // Parses and validates a description given as JSON text.
 std::expected<Json, std::string> parse(std::string_view text);
 
+// Overlapping record/enum definitions must have the same wire shape.
+// Description-only documentation and defaults may differ.
+std::expected<void, std::string> validate_schema_types(const Json& description, const Json& schema);
+
 // Adds the records and enums of a schema descriptor (wire/schema.hpp,
 // <name>.schema.json) that the description does not define itself.
 Json merge_schema_types(Json description, const Json& schema);

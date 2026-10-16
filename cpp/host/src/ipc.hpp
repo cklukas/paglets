@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <string>
 #include <utility>
@@ -21,7 +22,8 @@
 
 namespace paglets::ipc {
 
-inline constexpr std::size_t max_frame = 256u * 1024 * 1024;
+// A full default 256 MB paglet image also carries page/global metadata.
+inline constexpr std::size_t max_frame = 512u * 1024 * 1024;
 
 // Operations of the control process (first array element of a request).
 enum class Op : std::int32_t {
@@ -98,10 +100,14 @@ public:
     // them under the values returned by child_values() (POSIX: descriptors
     // 3, 4, ... in order; Windows: unchanged, inherited through a handle
     // list), so arguments can name them. On Windows the process runs in
-    // `job` (if given) from its first instruction.
+    // `job` (if given) from its first instruction. Sandboxed Windows workers
+    // also receive a distinct LPAC identity and read-only launch files.
+    // Only runtime/loader environment settings are retained; service secrets
+    // and unrelated descriptors are never inherited. Sandboxed POSIX workers
+    // receive /dev/null on standard input/output/error.
     static std::expected<Process, std::string> spawn(const std::filesystem::path& executable,
                                                      const std::vector<std::string>& args,
-                                                     const std::vector<std::intptr_t>& handles, std::intptr_t job = -1);
+                                                     const std::vector<std::intptr_t>& handles, std::intptr_t job = -1, bool sandbox = false);
     static std::vector<std::intptr_t> child_values(const std::vector<std::intptr_t>& handles);
 
     bool running() const { return pid_ > 0; }
@@ -112,6 +118,7 @@ public:
     void stop(std::chrono::milliseconds grace);
 
 private:
+    std::shared_ptr<void> sandbox_;  // Windows profile and pinned launch files
     int pid_ = -1;
     std::intptr_t handle_ = -1;  // Windows process handle
 };

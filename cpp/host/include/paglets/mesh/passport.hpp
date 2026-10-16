@@ -35,6 +35,9 @@ struct PassportRoot {
     Value manifest;            // capability manifest (WP9); nil if none is declared
     std::int64_t issued = 0;   // Unix milliseconds
     std::int64_t expires = 0;  // Unix milliseconds
+    // Present in v2 roots. The ID binds this owner-local nonce to mesh + owner.
+    // Absent only in saved v1 passports, which cannot launch new roots.
+    std::optional<std::string> nonce;
 };
 
 struct PassportLink {
@@ -48,9 +51,11 @@ struct PassportLink {
 
 class Passport {
 public:
-    // A root passport for a paglet the owner is about to create.
+    // A root passport for a paglet the owner is about to create. `nonce` is
+    // an owner-local launch nonce (1..128 bytes), not a global paglet ID.
+    // Read the resulting global ID with paglet(), also before requesting grants.
     static std::expected<Passport, std::string> issue(const SigningKey& owner, const RecordId& mesh,
-                                                      const Digest& module, std::string paglet, Value manifest,
+                                                      const Digest& module, std::string nonce, Value manifest,
                                                       std::int64_t issued, std::int64_t expires);
     static std::expected<Passport, std::string> decode(std::span<const std::uint8_t> bytes);
     Bytes encode() const;

@@ -66,11 +66,11 @@ public:
     }
     // --8<-- [end:clone]
 
+private:
     void on_move_failed(const paglets::abi::MoveFailed& f) override {
         if (!f.clone.empty()) fan_.clone_failed(f);
     }
 
-private:
     void start(const Collect& c, Message& m) {
         report_ = Report{};
         auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
@@ -156,10 +156,9 @@ private:
     }
 
     void finish(std::string error) {
-        if (!error.empty()) return pt::report_error(parent_, std::move(error));
-        pt::report(parent_, paglets::encode(inv_));
-        (void)paglets::after_raw(2000, "done", {});
-        router().on("done", [](Message&) { (void)paglets::dispose(); });
+        const auto sent = [] { (void)paglets::dispose(); };
+        if (!error.empty()) return pt::report_error(parent_, std::move(error), sent);
+        pt::report(parent_, paglets::encode(inv_), {}, sent);
     }
     // --8<-- [end:processes]
 

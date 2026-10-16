@@ -14,6 +14,8 @@
 #include <paglets/services/compute_slots.hpp>
 #include <paglets/services/mesh_info.hpp>
 
+#include <limits>
+
 namespace paglets::node {
 
 namespace {
@@ -23,6 +25,7 @@ namespace cs = services::compute_slots;
 
 constexpr std::size_t max_snapshot_bytes = 64 * 1024;
 constexpr int max_redirects_per_tick = 4;
+constexpr std::int64_t max_lease_ms = 24LL * 60 * 60 * 1000;
 
 std::int64_t now_ms() {
     return mesh::unix_ms();
@@ -73,10 +76,14 @@ void Node::Impl::sample_self() {
     const fs::path work = runtime.config().state_dir.empty() ? fs::temp_directory_path(ec) : runtime.config().state_dir;
     if (auto space = fs::space(work, ec); !ec) s.work_free = static_cast<std::int64_t>(space.available);
     s.paglets = std::ranges::count_if(runtime.list(), [](const auto& p) { return !p.module.empty(); });
-    if (c.slots == 0) c.slots = s.cpus;
+    if (c.slots == 0) {
+        c.slots = s.cpus;
+        runtime.set_job_slots(static_cast<unsigned>(c.slots));
+    }
+    refresh_job_load();
     s.slots = c.slots;
     s.slots_free = c.slots - c.used();
-    s.queued = static_cast<std::int64_t>(c.queue.size());
+    s.queued = static_cast<std::int64_t>(c.queue.size()) + c.jobs_queued;
     for (const auto& [service, offer] : c.offers) s.offers.push_back(offer);
     // Links to the other hosts of the mesh, as this host sees them.
     for (const auto& [k, h] : st.hosts) {
@@ -109,8 +116,9 @@ void Node::Impl::compute_tick() {
     // whole mesh from what it hears).
     if (now >= c.next_gossip) {
         c.next_gossip = now + c.timing.gossip;
+        refresh_job_load();
         c.own.slots_free = c.slots - c.used();
-        c.own.queued = static_cast<std::int64_t>(c.queue.size());
+        c.own.queued = static_cast<std::int64_t>(c.queue.size()) + c.jobs_queued;
         const runtime::Bytes snapshot = wire::to_msgpack(c.own);
         for (const auto& k : view) {
             if (k == key.public_key()) continue;
@@ -135,8 +143,9 @@ void Node::Impl::on_mesh_info(const mesh::PublicKey& from, const mesh::Fields& f
 std::vector<services::mesh_info::Snapshot> Node::Impl::fresh_snapshots(std::int64_t max_age_ms, bool include_self) {
     std::vector<mi::Snapshot> out;
     if (include_self) {
+        refresh_job_load();
         compute.own.slots_free = compute.slots - compute.used();
-        compute.own.queued = static_cast<std::int64_t>(compute.queue.size());
+        compute.own.queued = static_cast<std::int64_t>(compute.queue.size()) + compute.jobs_queued;
         out.push_back(compute.own);
     }
     const std::int64_t oldest = now_ms() - max_age_ms;
@@ -211,47 +220,98 @@ std::vector<services::mesh_info::OfferMatch> Node::Impl::find_offers(const mi::O
 // -- compute-slots ----------------------------------------------------------------------------
 
 std::int64_t Node::Impl::ComputeState::used() const {
-    std::int64_t n = 0;
+    std::int64_t n = job_cores;
     for (const auto& [id, l] : leases) n += l.cores;
     return n;
 }
 
-// Leases of paglets that ended or left, and waiters that are gone.
+// Expired leases, leases of paglets that ended or left, and gone waiters.
 void Node::Impl::end_stale_leases() {
     ComputeState& c = compute;
-    std::erase_if(c.leases, [&](const auto& e) { return !runtime.info(e.second.paglet).has_value(); });
     std::erase_if(c.queue, [&](const auto& w) { return !runtime.info(w.paglet).has_value(); });
+    sync_compute_waiter();
+    const auto now = Clock::now();
+    std::erase_if(c.leases, [&](const auto& e) {
+        const auto& lease = e.second;
+        const bool alive = runtime.info(lease.paglet).has_value();
+        if (alive && now < lease.until) return false;
+        runtime.release_compute_slots(lease.cores);
+        if (alive && c.ctx != nullptr) {
+            cs::Decision d;
+            d.verdict = cs::Verdict::rejected;
+            d.lease = lease.id;
+            d.cores = lease.cores;
+            d.host = mesh::key_id(key.public_key());
+            d.host_name = c.own.host_name;
+            d.reason = "the compute lease expired";
+            d.expires_ms = lease.expires;
+            (void)c.ctx->send(lease.paglet, "compute.expired", wire::to_msgpack(d));
+        }
+        return true;
+    });
 }
 
-std::string Node::Impl::grant(const runtime::PagletId& paglet, const std::string& job, std::int64_t cores) {
+void Node::Impl::sync_compute_waiter() {
+    if (compute.queue.empty()) runtime.set_compute_waiter(0);
+    else runtime.set_compute_waiter(compute.queue.front().cores, compute.queue.front().queued_at);
+}
+
+std::chrono::milliseconds Node::Impl::lease_duration(std::int64_t estimated_ms) const {
+    const auto cap = compute.timing.lease_cap.count();
+    const auto hint = std::clamp<std::int64_t>(estimated_ms, 0, cap);
+    // Saturate before multiplying, including for an INT64_MAX estimate.
+    const auto slack = hint > cap / 2 ? cap : 2 * hint;
+    return std::chrono::milliseconds(std::max(compute.timing.lease_base.count(), slack));
+}
+
+bool Node::Impl::renew_lease(ComputeState::Lease& lease, std::int64_t estimated_ms) {
+    const auto now = Clock::now();
+    if (now >= lease.until) return false;
+    // A smaller estimate never shortens an existing allocation; repeated
+    // extensions cannot pass the continuous deadline fixed at its grant.
+    lease.until = std::max(lease.until, std::min(lease.limit, now + lease_duration(estimated_ms)));
+    lease.expires = lease.granted + std::chrono::duration_cast<std::chrono::milliseconds>(lease.until - lease.began).count();
+    return true;
+}
+
+std::string Node::Impl::grant(const runtime::PagletId& paglet, const std::string& job, std::int64_t cores,
+                              Clock::time_point queued_at, std::int64_t estimated_ms) {
+    if (!runtime.reserve_compute_slots_for(cores, queued_at)) return {};
     const std::string id = "lease-" + new_cap_id().substr(0, 16);
-    compute.leases[id] = ComputeState::Lease{id, paglet, job, cores, now_ms()};
+    const auto now = Clock::now();
+    const auto duration = lease_duration(estimated_ms);
+    ComputeState::Lease lease{id, paglet, job, cores, now_ms()};
+    lease.began = now;
+    lease.until = now + duration;
+    lease.limit = now + compute.timing.lease_cap;
+    lease.expires = lease.granted + duration.count();
+    compute.leases[id] = std::move(lease);
     return id;
 }
 
-// Oldest-fit: the first waiter that fits gets the slots.
+// FIFO: later leases cannot repeatedly consume capacity the head needs.
 void Node::Impl::grant_queued() {
     ComputeState& c = compute;
     if (c.ctx == nullptr) return;
     for (auto it = c.queue.begin(); it != c.queue.end();) {
-        if (it->cores > c.slots - c.used()) {
-            ++it;
-            continue;
-        }
-        const std::string lease = grant(it->paglet, it->job, it->cores);
+        const std::string lease = grant(it->paglet, it->job, it->cores, it->queued_at, it->estimated_ms);
+        if (lease.empty()) break;
         cs::Decision d;
         d.verdict = cs::Verdict::run_now;
         d.lease = lease;
         d.cores = it->cores;
+        d.expires_ms = c.leases.at(lease).expires;
         d.host = mesh::key_id(key.public_key());
         d.host_name = compute.own.host_name;
         // Removed from the queue only when the message was delivered.
         if (c.ctx->send(it->paglet, "compute.granted", wire::to_msgpack(d))) {
             it = c.queue.erase(it);
         } else {
+            runtime.release_compute_slots(it->cores);
             c.leases.erase(lease);
             it = c.queue.erase(it);
         }
+        sync_compute_waiter();
     }
 }
 
@@ -299,6 +359,7 @@ void Node::Impl::redirect_queued() {
         }
         it = c.queue.erase(it);
     }
+    sync_compute_waiter();
 }
 
 class MeshInfoService final : public services::ContractPaglet<mi::Contract, MeshInfoService> {
@@ -368,16 +429,37 @@ public:
         std::lock_guard lock(node_.mu);
         auto& c = node_.compute;
         if (c.slots == 0) node_.sample_self();
+        node_.end_stale_leases();
+        node_.grant_queued();
         const std::int64_t cores = std::max<std::int64_t>(1, q.cores);
         cs::Decision d;
         d.cores = cores;
         d.host = mesh::key_id(node_.key.public_key());
         d.host_name = c.own.host_name;
-        // It holds a lease already (asked twice): run.
-        for (const auto& [id, l] : c.leases) {
+        // Repeating the same request keeps the allocation. A new job or
+        // core count must not turn the old reservation into a fictitious one.
+        for (auto& [id, l] : c.leases) {
             if (l.paglet == caller->id) {
+                if (Node::Impl::Clock::now() >= l.until) {
+                    node_.end_stale_leases();
+                    node_.grant_queued();
+                    break;
+                }
+                if (l.job != q.job || l.cores != cores) {
+                    d.verdict = cs::Verdict::rejected;
+                    d.cores = 0;
+                    d.reason = "release the existing lease before changing its job or cores";
+                    return d;
+                }
+                if (!node_.renew_lease(l, q.estimated_ms)) {
+                    node_.end_stale_leases();
+                    node_.grant_queued();
+                    break;
+                }
                 d.verdict = cs::Verdict::run_now;
                 d.lease = id;
+                d.cores = l.cores;
+                d.expires_ms = l.expires;
                 return d;
             }
         }
@@ -395,11 +477,25 @@ public:
             d.reason = "this host has " + std::to_string(c.slots) + " slots";
             return d;
         }
-        std::erase_if(c.queue, [&](const auto& w) { return w.paglet == caller->id; });
-        if (c.queue.empty() && cores <= c.slots - c.used()) {
-            d.verdict = cs::Verdict::run_now;
-            d.lease = node_.grant(caller->id, q.job, cores);
+        auto waiting = std::ranges::find_if(c.queue, [&](const auto& w) { return w.paglet == caller->id; });
+        if (waiting != c.queue.end() && waiting->job == q.job && waiting->cores == cores) {
+            waiting->estimated_ms = q.estimated_ms;
+            d.verdict = cs::Verdict::queued;
+            d.position = std::distance(c.queue.begin(), waiting);
             return d;
+        }
+        if (waiting != c.queue.end()) {
+            c.queue.erase(waiting);
+            node_.sync_compute_waiter();
+        }
+        const auto queued_at = Node::Impl::Clock::now();
+        if (c.queue.empty()) {
+            d.lease = node_.grant(caller->id, q.job, cores, queued_at, q.estimated_ms);
+            if (!d.lease.empty()) {
+                d.verdict = cs::Verdict::run_now;
+                d.expires_ms = c.leases.at(d.lease).expires;
+                return d;
+            }
         }
         // Local work first, but a host with free slots now beats a queue.
         if (auto peer = node_.peer_with_slots(cores, shadow, {})) {
@@ -415,8 +511,10 @@ public:
         w.job = q.job;
         w.cores = cores;
         w.since = now_ms();
-        w.queued_at = Node::Impl::Clock::now();
+        w.queued_at = queued_at;
+        w.estimated_ms = q.estimated_ms;
         c.queue.push_back(std::move(w));
+        node_.sync_compute_waiter();
         d.verdict = cs::Verdict::queued;
         d.position = static_cast<std::int64_t>(c.queue.size()) - 1;
         return d;
@@ -427,9 +525,12 @@ public:
         if (!caller) return std::unexpected(abi::denied);
         std::lock_guard lock(node_.mu);
         auto& c = node_.compute;
+        node_.end_stale_leases();
+        node_.grant_queued();
         auto it = c.leases.find(q.lease);
         if (it == c.leases.end()) return cs::ReleaseReply{false};
         if (it->second.paglet != caller->id && caller->id != "host") return std::unexpected(abi::denied);
+        node_.runtime.release_compute_slots(it->second.cores);
         c.leases.erase(it);
         node_.grant_queued();
         return cs::ReleaseReply{true};
@@ -463,13 +564,16 @@ private:
 };
 
 services::compute_slots::Status Node::Impl::compute_status() {
+    end_stale_leases();
+    grant_queued();
+    refresh_job_load();
     const ComputeState& c = compute;
     cs::Status s;
     s.self = slots_of(compute.own);
     s.self.free = c.slots - c.used();
     s.self.slots = c.slots;
     s.self.queued = static_cast<std::int64_t>(c.queue.size());
-    for (const auto& [id, l] : c.leases) s.leases.push_back(cs::Lease{id, l.paglet, l.job, l.cores, l.granted});
+    for (const auto& [id, l] : c.leases) s.leases.push_back(cs::Lease{id, l.paglet, l.job, l.cores, l.granted, l.expires});
     for (const auto& w : c.queue) s.queue.push_back(cs::Waiting{w.paglet, w.job, w.cores, w.since});
     for (const auto& snap : fresh_snapshots(c.timing.ttl.count(), false)) s.peers.push_back(slots_of(snap));
     return s;
@@ -483,12 +587,30 @@ std::vector<std::shared_ptr<runtime::SystemPaglet>> make_compute_services(Node::
 
 void Node::set_compute_slots(std::int64_t slots) {
     std::lock_guard lock(impl_->mu);
-    impl_->compute.slots = std::max<std::int64_t>(1, slots);
+    impl_->compute.slots = std::clamp<std::int64_t>(slots, 1, std::numeric_limits<unsigned>::max());
+    impl_->runtime.set_job_slots(static_cast<unsigned>(impl_->compute.slots));
+    auto& c = impl_->compute;
+    std::erase_if(c.queue, [&](const auto& w) {
+        if (w.cores <= c.slots) return false;
+        cs::Decision d;
+        d.verdict = cs::Verdict::rejected;
+        d.reason = "this host now has " + std::to_string(c.slots) + " slots";
+        d.host = mesh::key_id(impl_->key.public_key());
+        d.host_name = c.own.host_name;
+        d.cores = w.cores;
+        if (c.ctx != nullptr) (void)c.ctx->send(w.paglet, "compute.rejected", wire::to_msgpack(d));
+        return true;
+    });
+    impl_->sync_compute_waiter();
+    impl_->grant_queued();
     impl_->sample_self();
 }
 
 void Node::set_compute_timing(ComputeTiming timing) {
     std::lock_guard lock(impl_->mu);
+    const auto hard_cap = std::chrono::milliseconds(max_lease_ms);
+    timing.lease_base = std::clamp(timing.lease_base, std::chrono::milliseconds(1), hard_cap);
+    timing.lease_cap = std::clamp(timing.lease_cap, timing.lease_base, hard_cap);
     impl_->compute.timing = timing;
     impl_->compute.next_gossip = {};
     impl_->compute.next_sample = {};

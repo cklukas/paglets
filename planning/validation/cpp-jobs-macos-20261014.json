@@ -1,0 +1,77 @@
+{
+  "head": "9fa07fd05949829cf0862dbcd9444bc2d3933bc8",
+  "source_sha256": "cd471a65c5346f85a400d2d8180250262227c5be8e9d271c806f9d87660e4fbc",
+  "target": "macos-arm64 / RelWithDebInfo",
+  "output": "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64",
+  "baseline": "Fresh retained checkout: no comparable full-clean wall duration. Recent broad header rebuilds in the prior checkout took 147\u2013178 s; those were incremental, not clean baselines.",
+  "configure": {
+    "start": "2026-10-14T21:08:23.300255+00:00",
+    "end": "2026-10-14T21:08:27.068907+00:00",
+    "elapsed_seconds": 3.7686919999832753,
+    "exit": 0
+  },
+  "build": {
+    "start": "2026-10-14T21:08:27.069276+00:00",
+    "end": "2026-10-14T21:12:57.772648+00:00",
+    "elapsed_seconds": 270.70372220801073,
+    "exit": 0
+  },
+  "assets": {
+    "host/paglets-host": {
+      "sha256": "eb9131b3b31f75e53538b8e1c9b91916a2944b88bc74c8b52380db750630a29d",
+      "mtime": 1792012214.555249
+    },
+    "host/paglets-worker": {
+      "sha256": "3b34e1ccced32c4a2802b0850c694f27f2f7f3c7d551f6f069b28ca5faef84b3",
+      "mtime": 1792012196.9733813
+    },
+    "host/paglets-wamrc": {
+      "sha256": "8072cbdc006f6a16fdc38c80e8946bc7cf7a7a59fd9df60b67fd3796de85116d",
+      "mtime": 1792012122.5830007
+    },
+    "tests/paglets_tests": {
+      "sha256": "0d6274802aae251fc40272f4e0ac64ed8948d9beef17e8d207c7773041e124d6",
+      "mtime": 1792012377.7464716
+    },
+    "guests/pi.wasm": {
+      "sha256": "b4d9cffdae59b8d82bab4054d18b4c5b0f9571271cd880a795b97ef59e09ffbe",
+      "mtime": 1792012252.1264756
+    },
+    "guests/benchmark.wasm": {
+      "sha256": "f8a35339f7d1195fa954d7768526fea2b9af116fec55db8ca4c5eabb2caf1755",
+      "mtime": 1792012264.954098
+    },
+    "guests/jobs.wasm": {
+      "sha256": "aa859e9abd0ff9e9c471f71602c7ad747b905685d027704dbbf6bf04104af694",
+      "mtime": 1792012277.6833217
+    }
+  },
+  "test": {
+    "start": "2026-10-14T21:12:57.786232+00:00",
+    "end": "2026-10-14T21:25:16.989938+00:00",
+    "elapsed_seconds": 739.2050815830007,
+    "exit": 0
+  },
+  "ctest": {
+    "passed": 15,
+    "failed": 0,
+    "unit_seconds": 339.17,
+    "worker_unit_seconds": 364.39,
+    "total_seconds": 739.18
+  },
+  "changes_commit": "9fa07fd05949829cf0862dbcd9444bc2d3933bc8",
+  "git_delivery": "rpi4 ckgit only; GitHub requires final user review",
+  "status": "Mac validation complete; 15/15 CTest entries passed",
+  "cleanup": {
+    "removed_worktree": "/Volumes/S8T/tmp/paglets/jobs-20261014/wt",
+    "merged_tip": "9fa07fd05949829cf0862dbcd9444bc2d3933bc8",
+    "retained_verified_build": "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64",
+    "original_failure": "Worker report: shutdown hung before sticky interpreter termination and AOT polling fixes; original work committed f9c11c6."
+  },
+  "configuration": {
+    "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+    "CMAKE_CXX_COMPILER": "/opt/homebrew/bin/g++-16",
+    "PAGLETS_LLVM_DIR": "",
+    "PAGLETS_WAMR_HW_BOUND_CHECK": "ON"
+  }
+}

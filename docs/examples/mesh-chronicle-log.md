@@ -4,6 +4,14 @@ The [Mesh Chronicle](mesh-chronicle.md) on this machine (mac) and two
 Raspberry Pi class Linux hosts (pi, uconsole), with failures on schedule
 (`cpp/tools/chronicle_live.sh --late uconsole`). This is the life log it delivered, as it is.
 
+> [!NOTE]
+> The historical summary below labels 53 s as time without a working main.
+> That value is the sum of takeover sample gaps beyond one nominal 10 s
+> interval each; 38 s is the longest raw gap. Gaps from different lineages
+> can overlap, and delayed sample callbacks contribute. These values do
+> not measure exact main downtime. Current Chronicle output names the two
+> quantities separately and explains their limits.
+
 What happened to the hosts (seconds after the start):
 
 - 60 s: uconsole joins the mesh (its host starts)

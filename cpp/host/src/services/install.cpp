@@ -86,6 +86,25 @@ std::expected<std::shared_ptr<SystemServices>, std::string> install_system_servi
     installed->artifacts = std::make_shared<impl::Artifacts>(artifacts_root, artifacts_temporary, config.artifacts_limit,
                                                              state.empty() ? fs::path() : state / "shares.state");
     installed->files->set_artifacts(installed->artifacts);
+    // Compute jobs: large inputs and outputs as artifacts.
+    runtime::JobArtifacts job_artifacts;
+    job_artifacts.store = [artifacts = std::weak_ptr(installed->artifacts)](
+                              std::span<const std::uint8_t> data,
+                              std::vector<std::string> marks) -> std::expected<runtime::Cap, std::int32_t> {
+        auto a = artifacts.lock();
+        if (!a) return std::unexpected(abi::gone);
+        auto hash = a->store(data, "application/octet-stream", marks);
+        if (!hash) return std::unexpected(hash.error());
+        return a->capability(*hash);
+    };
+    job_artifacts.load = [artifacts = std::weak_ptr(installed->artifacts)](
+                             runtime::Cap cap, std::uint64_t max,
+                             std::function<void(std::expected<runtime::JobArtifactInput, std::int32_t>)> done) {
+        auto a = artifacts.lock();
+        if (!a) return done(std::unexpected(abi::gone));
+        a->load(cap, max, std::move(done));
+    };
+    runtime.set_job_artifacts(std::move(job_artifacts));
 
     std::vector<std::shared_ptr<runtime::SystemPaglet>> all{
         installed->directory,

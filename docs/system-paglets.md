@@ -18,22 +18,38 @@ admin approves the request.
 
 ## Services
 
-| Service | Operations | Purpose |
-|---|---|---|
-| `files` | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove`, `hash`, `share`, `save` | files inside a directory capability; the capability's rights limit what is possible. `hash` gives a file's SHA-256 without reading it into the paglet; `share` and `save` move files of any size between hosts |
-| `grants` | `request`, `status`, `release`, `list` | ask the mesh policy for a resource, such as a directory of a named root |
-| `server-info` | `summary`, `load`, `volumes`, `processes` | the host's system, load, volumes and processes, in one schema on every platform |
-| `directory` | `lookup`, `publish`, `unpublish`, `list` | finds system services and paglets that published themselves under a name |
-| `storage` | `get`, `put`, `remove`, `list` | persistent key-value storage of each paglet, within a quota |
-| `artifacts` | `put`, `get`, `stat` | content-addressed blobs (SHA-256), for results larger than a message; artifact capabilities work on every host |
-| `pubsub` | `create`, `publish`, `subscribe`, `unsubscribe` | topics on a host |
-| `user-info` | `notify` | notifications to the owner of a paglet |
-| `locator` | `locate`, `locate_and_pin`, `release` | find a paglet anywhere in the mesh and pin it |
-| `mesh-info` | `snapshot`, `landscape`, `select`, `find_offers` | every host's snapshot (load, free slots, labels, offers, and its connections to the other hosts: up or down, since when, why frames fail), spread by gossip |
-| `compute-slots` | `request_slot`, `release_slot`, `status`, `candidates` | admission of compute work on a host, with a queue and redirects to hosts with free slots |
-| `zombies` | `join`, `peers`, `trace`, `ended`, `state`, `deliver`, `result`, `cancel`, `redirect`, `list`, `traces` | the host's registry of zombie groups ([The zombie protocol](zombie-protocol.md)): one replica per group and host, tombstones and sink redirects that reach every host, the replicas' protocol traces |
-| `web` | `capabilities`, `fetch`, `extract_text`, `download`, `search` | mediated web access, on hosts started with `--web` |
-| `ai` | `capabilities`, `summarize`, `classify`, `extract`, `generate`, `embed`, `describe_image` | local inference, on hosts started with `--ai` |
+| Service | Endpoint | Operations | Purpose |
+|---|---|---|---|
+| `files` | directory | `list`, `stat`, `find`, `read`, `write`, `mkdir`, `move`, `remove`, `hash`, `share`, `save` | files inside a directory capability; the capability's rights limit what is possible. `hash` gives a file's SHA-256 without reading it into the paglet; `share` and `save` move files of any size between hosts |
+| `grants` | default (mesh) | `request`, `status`, `release`, `list` | ask the mesh policy for a resource, such as a directory of a named root; requested durations are clamped to 1 s through 30 days, then limited by the matching rule; `status` reports `granted` only while an approval remains active and unexpired |
+| `server-info` | directory, policy-narrowed | `summary`, `load`, `volumes`, `processes` | the host's system, load, volumes and processes, in one schema on every platform |
+| `directory` | default | `lookup`, `publish`, `unpublish`, `list` | finds system services and paglets that published themselves under a name |
+| `storage` | default | `get`, `put`, `remove`, `list` | host-local persistent key-value storage within a quota; survives local deactivation and restart with a state directory, removed when a move commits; a clone starts empty |
+| `artifacts` | directory | `put`, `get`, `stat` | content-addressed blobs (SHA-256), for results larger than a message; artifact capabilities work on every host |
+| `pubsub` | directory | `create`, `publish`, `subscribe`, `unsubscribe` | topics on a host |
+| `user-info` | default | `notify` | notifications to the owner of a paglet |
+| `locator` | default (mesh) | `locate`, `locate_and_pin`, `release` | find a paglet anywhere in the mesh and pin it |
+| `mesh-info` | default (mesh) | `snapshot`, `landscape`, `select`, `find_offers` | every host's snapshot (load, free slots, labels, offers, and its connections to the other hosts: up or down, since when, why frames fail), sent directly to every live host |
+| `compute-slots` | default (mesh) | `request_slot`, `release_slot`, `status`, `candidates` | admission of compute work on a host, with FIFO lease grants and shared priority with native jobs; later work preserves the older head's required capacity; repeating a queued request retains its position; repeating an allocated job/core request renews its lease within the original lifetime cap; changed allocation parameters require releasing the old lease; an oversized request first tries a known peer with enough free slots and is rejected if none is suitable; reducing host capacity rejects impossible waiters with `compute.rejected` |
+| `zombies` | default (mesh) | `join`, `peers`, `trace`, `ended`, `failed`, `state`, `deliver`, `result`, `cancel`, `redirect`, `list`, `traces` | the host's registry of zombie groups ([The zombie protocol](zombie-protocol.md)): one replica per group and host, tombstones and sink redirects that reach every host, the replicas' protocol traces |
+| `web` | directory, with `--web` | `capabilities`, `fetch`, `extract_text`, `download`, `search` | mediated web access, on hosts started with `--web` |
+| `ai` | directory, with `--ai` | `capabilities`, `summarize`, `classify`, `extract`, `generate`, `embed`, `describe_image` | local inference, on hosts started with `--ai` |
+
+Default endpoints appear in `self_info().services`; `paglets::service`
+reads that list. Directory endpoints require a `directory.lookup` call
+(or the patterns `endpoint` helper). Mesh-only services are installed by
+the mesh node and need not exist in a minimal embedded runtime.
+
+A published paglet name is visible to paglets of the publisher's owner.
+Publishing it with `is_public` makes it visible to every owner. The same
+visibility rule applies to lookup and listing.
+
+Services operating on the caller's own state or lent capabilities need no
+ambient policy rule. `server-info` has ambient authority: on a mesh, its
+directory lookup returns only allowed operations and returns `denied` if
+none are allowed. `web` and `ai` instead check policy per request, against
+the URL host/path or operation/model. A service endpoint does not bypass
+the rights of a lent directory or artifact capability.
 
 The
 [system paglets design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-system-paglets.md)
@@ -41,9 +57,39 @@ and the
 [compute design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-compute.md)
 describe the services in detail.
 
+`mesh-info.select` returns matching hosts first. If none fit its resource
+and label requirements, it returns the least loaded hosts with `fallback`
+set. Callers must inspect that flag when the requirements are mandatory;
+selection is advice, not admission to compute slots or compute jobs. The
+[Pi example](examples/pi.md) submits compute jobs directly to available
+hosts rather than using the older select-and-worker-paglet approach.
+
+## Compute-slot leases
+
+By default a lease lasts the greater of 10 minutes and twice its positive
+`estimated_ms`, capped at 24 hours. A nonpositive estimate uses 10 minutes.
+Repeating the same job and core request renews the lease without shortening
+it, but cannot pass the continuous deadline fixed at the original grant.
+An expired request rejoins normal admission. Waiting in the queue does not
+spend lease lifetime, and updating an estimate keeps the queue position.
+
+`run_now` decisions and status leases report `expires_ms` in Unix
+milliseconds; status also retains the original `granted_ms`. The host
+enforces expiry with a monotonic clock. Expiry releases the slots and sends
+`compute.expired`: a rejected Decision containing the old lease ID, core
+count and expiry. Releasing that expired ID returns `released=false`.
+
+Leases account for cooperative work; they do not preempt CPU execution.
+Native compute jobs have their own enforced running-time limits.
+Leases and queues are transient: ask again after a host restart or arrival
+on another host. Host embedders can tune `Node::ComputeTiming::lease_base`
+and `lease_cap`, normalized to 1 ms through 24 hours with cap at least base.
+Timing changes affect new grants and renewal extensions; an existing
+lease's original continuous deadline remains fixed.
+
 ## Moving content between hosts
 
-A paglet moves as a memory image of at most 16 MB, so it should not carry
+A paglet moves as a memory image (default ceiling 256 MB), so it should avoid carrying
 large data in its memory. Instead, it carries **artifact capabilities**: a
 capability names its content by SHA-256 and names the host that holds it,
 together with a token that this host made. The capability is a few bytes.
@@ -165,3 +211,12 @@ host.
 
 See the
 [web and AI design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-web-ai.md).
+
+## Compute jobs
+
+[Compute jobs](compute-jobs.md) are ABI imports backed by the runtime and
+mesh, not another endpoint in the system-paglet table. Mesh policy uses
+service `compute-jobs`, operation `submit`, to admit work and cap duration.
+Running jobs share the host's compute-slot accounting; status and admin
+cancellation are available through `paglets-host remote jobs`. Artifact
+services carry input and output over the message-size limit.

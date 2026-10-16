@@ -1,0 +1,131 @@
+{
+  "topic": "live_three_host_latency",
+  "tests": [
+    {
+      "test": "mac \u2192 uconsole",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "mac=RelWithDebInfo; uconsole=Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.63",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.26",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "mac \u2192 pi",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "mac=RelWithDebInfo; pi=Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.28",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "0.84",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi \u2192 mac",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "pi=Release; mac=RelWithDebInfo",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "0.92",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "0.72",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "pi \u2192 uconsole",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "pi=Release; uconsole=Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.22",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "0.8",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole \u2192 mac",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "uconsole=Release; mac=RelWithDebInfo",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.57",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.17",
+          "unit": "ms"
+        }
+      ]
+    },
+    {
+      "test": "uconsole \u2192 pi",
+      "mode": "LAN, worker processes",
+      "outcome": "passed",
+      "seconds": 0,
+      "platform": "",
+      "build": "uconsole=Release; pi=Release",
+      "date": "2026-10-15",
+      "values": [
+        {
+          "name": "round trip, mean of 20",
+          "value": "1.44",
+          "unit": "ms"
+        },
+        {
+          "name": "round trip, fastest",
+          "value": "1.14",
+          "unit": "ms"
+        }
+      ]
+    }
+  ]
+}

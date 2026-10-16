@@ -7,9 +7,13 @@
 #include <array>
 #include <cstring>
 #include <thread>
+#include <cstdlib>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
+#include <map>
+#include "windows_sandbox.hpp"
 #else
 #include <cerrno>
 #include <csignal>
@@ -19,7 +23,6 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
-extern char** environ;
 #endif
 
 namespace paglets::ipc {
@@ -235,11 +238,12 @@ std::expected<std::vector<std::uint8_t>, std::string> Channel::receive() {
 // Processes
 
 Process::Process(Process&& other) noexcept
-    : pid_(std::exchange(other.pid_, -1)), handle_(std::exchange(other.handle_, -1)) {}
+    : sandbox_(std::move(other.sandbox_)), pid_(std::exchange(other.pid_, -1)), handle_(std::exchange(other.handle_, -1)) {}
 
 Process& Process::operator=(Process&& other) noexcept {
     if (this != &other) {
         stop(std::chrono::milliseconds(0));
+        sandbox_ = std::move(other.sandbox_);
         pid_ = std::exchange(other.pid_, -1);
         handle_ = std::exchange(other.handle_, -1);
     }
@@ -264,10 +268,29 @@ std::vector<std::intptr_t> Process::child_values(const std::vector<std::intptr_t
 
 std::expected<Process, std::string> Process::spawn(const std::filesystem::path& executable,
                                                    const std::vector<std::string>& args,
-                                                   const std::vector<std::intptr_t>& handles, std::intptr_t job) {
+                                                   const std::vector<std::intptr_t>& handles, std::intptr_t job, bool sandbox) {
     Process p;
+    if (handles.size() > static_cast<std::size_t>(std::numeric_limits<int>::max() - 3))
+        return std::unexpected(std::string("too many child handles"));
 #ifdef _WIN32
+    std::shared_ptr<WindowsSandbox> isolated;
+    auto actual_executable = executable;
+    if (sandbox) {
+        auto prepared = prepare_windows_sandbox(executable, job);
+        if (!prepared) return std::unexpected(prepared.error());
+        isolated = *prepared;
+        actual_executable = isolated->executable;
+    }
     std::vector<HANDLE> inherit;
+    std::vector<std::uint8_t> attribute_storage;
+    struct Attributes {
+        std::vector<HANDLE>& handles;
+        LPPROC_THREAD_ATTRIBUTE_LIST list = nullptr;
+        ~Attributes() {
+            if (list) DeleteProcThreadAttributeList(list);
+            for (HANDLE h : handles) SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+        }
+    } cleanup{inherit};
     for (auto h : handles) {
         if (std::find(inherit.begin(), inherit.end(), to_handle(h)) != inherit.end()) continue;
         if (!SetHandleInformation(to_handle(h), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
@@ -275,42 +298,89 @@ std::expected<Process, std::string> Process::spawn(const std::filesystem::path& 
         }
         inherit.push_back(to_handle(h));
     }
+    const DWORD count = (inherit.empty() ? 0 : 1) + (sandbox ? 2 : 0);
     SIZE_T size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
-    std::vector<std::uint8_t> attribute_storage(size);
+    InitializeProcThreadAttributeList(nullptr, count, 0, &size);
+    attribute_storage.resize(size);
     auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
-    if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) {
+    if (count && !InitializeProcThreadAttributeList(attributes, count, 0, &size)) {
         return std::unexpected(last_error("InitializeProcThreadAttributeList"));
     }
     // Only the listed handles are inherited, whatever else is inheritable.
-    const bool listed = UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
+    cleanup.list = count ? attributes : nullptr;
+    const bool listed = inherit.empty() || UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
                                                   inherit.size() * sizeof(HANDLE), nullptr, nullptr);
     if (!listed) {
-        DeleteProcThreadAttributeList(attributes);
         return std::unexpected(last_error("UpdateProcThreadAttribute"));
     }
+    SECURITY_CAPABILITIES caps{};
+    SID_AND_ATTRIBUTES registry{};
+    ULONG all_packages_policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+    if (isolated) {
+        registry.Sid = isolated->registry.data(); registry.Attributes = SE_GROUP_ENABLED;
+        caps.AppContainerSid = isolated->sid.data(); caps.Capabilities = &registry; caps.CapabilityCount = 1;
+        if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                                       &caps, sizeof caps, nullptr, nullptr) ||
+            !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                                       &all_packages_policy, sizeof all_packages_policy, nullptr, nullptr))
+            return std::unexpected(last_error("AppContainer attributes"));
+    }
     STARTUPINFOEXW si{};
-    si.StartupInfo.cb = sizeof si;
-    si.lpAttributeList = attributes;
+    si.StartupInfo.cb = count ? sizeof si : sizeof(STARTUPINFOW);
+    si.lpAttributeList = count ? attributes : nullptr;
+    if (sandbox) si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;  // all three remain null
     std::wstring cmd;
-    append_quoted(cmd, executable.wstring());
-    for (const auto& a : args) append_quoted(cmd, std::wstring(a.begin(), a.end()));
+    append_quoted(cmd, actual_executable.wstring());
+    for (const auto& a : args) {
+        const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a.data(), static_cast<int>(a.size()), nullptr, 0);
+        if (!a.empty() && n == 0) return std::unexpected(last_error("UTF-8 worker argument"));
+        std::wstring wide(n, L'\0');
+        if (n) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, a.data(), static_cast<int>(a.size()), wide.data(), n);
+        append_quoted(cmd, wide);
+    }
     PROCESS_INFORMATION pi{};
-    const BOOL created = CreateProcessW(executable.wstring().c_str(), cmd.data(), nullptr, nullptr, TRUE,
-                                        EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
-                                        nullptr, &si.StartupInfo, &pi);
-    DeleteProcThreadAttributeList(attributes);
-    for (HANDLE h : inherit) SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+    std::map<std::wstring, std::wstring> environment;
+    for (const wchar_t* name : {L"SYSTEMROOT", L"SYSTEMDRIVE", L"WINDIR", L"USERPROFILE", L"LOCALAPPDATA", L"APPDATA", L"PATH", L"TEMP", L"TMP", L"TMPDIR", L"LANG", L"LC_ALL", L"TZ",
+                                 L"ASAN_OPTIONS", L"UBSAN_OPTIONS", L"TSAN_OPTIONS", L"LSAN_OPTIONS"}) {
+        const DWORD n = GetEnvironmentVariableW(name, nullptr, 0);
+        if (n) {
+            std::wstring value(n, L'\0');
+            const DWORD copied = GetEnvironmentVariableW(name, value.data(), n);
+            if (copied >= n) return std::unexpected(std::string("worker environment changed during launch"));
+            value.resize(copied); environment.emplace(name, std::move(value));
+        }
+    }
+    if (isolated) {
+        wchar_t system[32768];
+        const UINT n = GetSystemDirectoryW(system, 32768);
+        if (!n || n >= 32768) return std::unexpected(last_error("system DLL directory"));
+        environment[L"PATH"] = actual_executable.parent_path().wstring() + L";" + system;
+    }
+    std::wstring block;
+    for (const auto& [key, value] : environment) { block += key + L"=" + value; block += L'\0'; }
+    block += L'\0';
+    if (environment.empty()) block += L'\0';
+    const auto directory = actual_executable.parent_path();
+    const BOOL created = CreateProcessW(actual_executable.wstring().c_str(), cmd.data(), nullptr, nullptr, !inherit.empty(),
+                                        (count ? EXTENDED_STARTUPINFO_PRESENT : 0) | CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, block.data(),
+                                        isolated ? directory.c_str() : nullptr, &si.StartupInfo, &pi);
     if (!created) return std::unexpected(last_error("CreateProcess"));
     if (job >= 0 && !AssignProcessToJobObject(to_handle(job), pi.hProcess)) {
         const std::string error = last_error("AssignProcessToJobObject");
         TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return std::unexpected(error);
     }
-    ResumeThread(pi.hThread);
+    if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        const auto error = last_error("ResumeThread");
+        TerminateProcess(pi.hProcess, 1); WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return std::unexpected(error);
+    }
     CloseHandle(pi.hThread);
+    p.sandbox_ = std::move(isolated);
     p.pid_ = static_cast<int>(pi.dwProcessId);
     p.handle_ = from_handle(pi.hProcess);
 #else
@@ -322,7 +392,7 @@ std::expected<Process, std::string> Process::spawn(const std::filesystem::path& 
         for (int fd : sources) ::close(fd);
     };
     for (auto h : handles) {
-        const int copy = ::fcntl(static_cast<int>(h), F_DUPFD_CLOEXEC, 64);
+        const int copy = ::fcntl(static_cast<int>(h), F_DUPFD_CLOEXEC, std::max(64, static_cast<int>(3 + handles.size())));
         if (copy < 0) {
             close_sources();
             return std::unexpected(std::string("cannot pass a descriptor: ") + std::strerror(errno));
@@ -330,17 +400,41 @@ std::expected<Process, std::string> Process::spawn(const std::filesystem::path& 
         sources.push_back(copy);
     }
     posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    for (std::size_t i = 0; i < sources.size(); ++i) {
-        posix_spawn_file_actions_adddup2(&actions, sources[i], static_cast<int>(3 + i));
+    int rc = posix_spawn_file_actions_init(&actions);
+    if (rc) { close_sources(); return std::unexpected(std::string("spawn file actions: ") + std::strerror(rc)); }
+    auto action = [&](int result) { if (!rc) rc = result; };
+    for (int fd = 0; fd < 3; ++fd) {
+        if (sandbox || ::fcntl(fd, F_GETFD) < 0)
+            action(posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0));
+        else action(posix_spawn_file_actions_adddup2(&actions, fd, fd));
     }
+    for (std::size_t i = 0; i < sources.size(); ++i)
+        action(posix_spawn_file_actions_adddup2(&actions, sources[i], static_cast<int>(3 + i)));
+    posix_spawnattr_t attributes;
+    const int initialized = posix_spawnattr_init(&attributes);
+    if (!rc) rc = initialized;
+#ifdef __APPLE__
+    if (!initialized) action(posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT));
+#else
+    action(posix_spawn_file_actions_addclosefrom_np(&actions, static_cast<int>(3 + sources.size())));
+#endif
+    std::vector<std::string> environment;
+    for (const char* name : {"PATH", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ", "LD_LIBRARY_PATH",
+                             "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH",
+                             "ASAN_OPTIONS", "UBSAN_OPTIONS", "TSAN_OPTIONS", "LSAN_OPTIONS"}) {
+        if (const char* value = std::getenv(name)) environment.push_back(std::string(name) + "=" + value);
+    }
+    std::vector<char*> env;
+    for (auto& entry : environment) env.push_back(entry.data());
+    env.push_back(nullptr);
     const std::string exe = executable.string();
     std::vector<std::string> storage(args.begin(), args.end());
     std::vector<char*> argv{const_cast<char*>(exe.c_str())};
     for (auto& a : storage) argv.push_back(a.data());
     argv.push_back(nullptr);
     pid_t pid = -1;
-    const int rc = ::posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv.data(), environ);
+    if (!rc) rc = ::posix_spawn(&pid, exe.c_str(), &actions, &attributes, argv.data(), env.data());
+    if (!initialized) posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     close_sources();
     if (rc != 0) return std::unexpected("cannot start " + exe + ": " + std::strerror(rc));
@@ -361,6 +455,7 @@ bool Process::exited() {
     if (r == 0) return false;
 #endif
     pid_ = -1;
+    sandbox_.reset();
     return true;
 }
 
@@ -380,6 +475,7 @@ void Process::stop(std::chrono::milliseconds grace) {
             ::waitpid(pid_, &status, 0);
 #endif
             pid_ = -1;
+            sandbox_.reset();
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));

@@ -56,7 +56,7 @@ until(TRIES 40 ARGS remote locate --connect ${A} ${OLGA} ${paglet} EXPECT "host:
 
 # d has no inbound port: every host reaches it through its relays, and the
 # paglet moves there by name (WP15).
-until(TRIES 160 ARGS remote hosts --connect ${A} ${OLGA} EXPECT "d  [0-9a-f]+  online  \\(no address\\)  protocol 1 abi [0-9.]+  relays [0-9a-f]+ [0-9a-f]+")
+until(TRIES 160 ARGS remote hosts --connect ${A} ${OLGA} EXPECT "d  [0-9a-f]+  online  \\(no address\\)  protocol 2 abi [0-9.]+  relays [0-9a-f]+ [0-9a-f]+")
 message(STATUS "a sees:\n${OUT}")
 until(ARGS remote dispatch --connect ${B} ${OLGA} ${paglet} d)
 until(TRIES 80 ARGS remote locate --connect ${A} ${OLGA} ${paglet} EXPECT "host:  d ")

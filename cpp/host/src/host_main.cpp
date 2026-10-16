@@ -18,12 +18,13 @@
 // MessagePack; replies are printed as JSON. With a state directory, paglets
 // survive the host process: `run --keep` leaves them there, `list` and
 // `call` resume them from their last memory image. Paglets run in worker
-// processes (paglets-worker next to this binary) unless --in-process is given
-// or no worker executable is found; on Linux the workers run in a seccomp
+// processes (paglets-worker next to this binary) unless --in-process is given.
+// A missing worker is an error; on Linux the workers run in a seccomp
 // sandbox (--no-sandbox turns it off, for debugging).
 
 #include "mesh_cli.hpp"
 #include "serve_cli.hpp"
+#include "cli_integer.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/net/channel.hpp>
@@ -111,6 +112,7 @@ int info() {
     std::cout << "paglets-host " << PAGLETS_VERSION << "\n"
               << "  platform:   " << platform() << " " << architecture() << "\n"
               << "  compiler:   " << compiler() << "\n"
+              << "  build:      " << PAGLETS_HOST_BUILD << "\n"
               << "  reflection: "
 #if PAGLETS_HAVE_REFLECTION
               << "yes"
@@ -119,7 +121,7 @@ int info() {
 #endif
               << "\n"
               << "  runtime:    " << PAGLETS_WAMR_TAG << " (" << PAGLETS_WAMR_MODE << ")\n"
-              << "  paglet ABI: v" << abi::version << "\n"
+              << "  paglet ABI: v" << abi::version << "." << abi::minor_version << "\n"
               << "  protocol:   mesh v" << paglets::net::mesh_protocol << "\n";
     return 0;
 }
@@ -165,7 +167,9 @@ std::optional<Options> parse(int argc, char** argv) {
         } else if (a == "--threads") {
             auto v = value(i);
             if (!v) return std::nullopt;
-            o.threads = static_cast<unsigned>(std::stoul(*v));
+            auto n = paglets::cli::decimal_integer<unsigned>(*v);
+            if (!n) return std::nullopt;
+            o.threads = *n;
         } else if (a == "--root") {
             auto v = value(i);
             if (!v) return std::nullopt;
@@ -226,13 +230,13 @@ rt::Config config_of(const Options& o) {
     c.threads = o.threads;
     if (o.state_dir) c.state_dir = *o.state_dir;
     c.sandbox_workers = !o.no_sandbox;
-    if (!o.in_process && !self_path.empty()) {
+    if (!o.in_process) {
+        if (self_path.empty()) throw std::runtime_error("cannot locate paglets-worker; use --in-process explicitly");
         auto worker = self_path.parent_path() / "paglets-worker";
 #ifdef _WIN32
         worker += ".exe";
 #endif
-        std::error_code ec;
-        if (std::filesystem::exists(worker, ec)) c.worker_executable = worker;
+        c.worker_executable = worker;
     }
     c.log = [](const rt::LogRecord& r) {
         std::cerr << "[" << (r.paglet.empty() ? std::string("host") : r.paglet.substr(0, 8)) << "] " << r.text << "\n";

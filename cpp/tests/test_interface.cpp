@@ -152,4 +152,55 @@ PAGLETS_TEST("interface: type names") {
     for (std::string_view t : {"", "list<>", "list<S>", "optional<", "int", "none"}) {
         CHECK(!wi::is_known_type(t, known));
     }
+    std::string hostile = "i64";
+    for (int i = 0; i < 4096; ++i) hostile = "optional<" + hostile + ">";
+    CHECK(!wi::is_known_type(hostile, known));
+}
+
+PAGLETS_TEST("interface: examples and defaults are checked recursively with a useful path") {
+    auto example = [](const std::string& type, const std::string& value) {
+        return json("{\"interface\":1,\"messages\":[{\"name\":\"go\",\"request\":\"" + type + "\",\"example\":" + value + "}]}");
+    };
+    for (const auto& [type, value] : std::vector<std::pair<std::string, std::string>>{
+        {"bool", "1"}, {"string", "false"}, {"i8", "-129"}, {"u8", "256"}, {"u64", "-1"},
+        {"i64", "9223372036854775808"}, {"u64", "18446744073709551616"}, {"f32", "1e99"},
+        {"bytes", R"({"$bytes":"0g"})"}, {"bytes", R"({"$bytes":"f"})"}, {"list<u8>", "[0,256]"},
+        {"optional<string>", "12"}, {"none", "{}"}}) {
+        auto r = wi::validate(example(type, value));
+        CHECK(!r);
+        if (!r) CHECK(r.error().find("messages.go.example") != std::string::npos);
+    }
+    for (const auto& [type, value] : std::vector<std::pair<std::string, std::string>>{
+        {"i8", "-128"}, {"u8", "255"}, {"u64", "18446744073709551615"}, {"f32", "1.5"},
+        {"bytes", R"({"$bytes":"00FF"})"}, {"optional<string>", "null"}, {"list<u8>", "[0,255]"}, {"any", "{}"}}) {
+        CHECK_HAS_VALUE(wi::validate(example(type, value)));
+    }
+    auto bad = wi::validate(json(R"({"interface":1,"types":[
+        {"name":"R","kind":"record","fields":[{"name":"items","type":"optional<list<u8>>","default":[0,256]}]}]})"));
+    REQUIRE(!bad);
+    CHECK(bad.error().find("types.R.items.default[1]") != std::string::npos);
+    CHECK(!wi::validate(json(R"({"interface":1,"types":[{"name":"E","kind":"enum","values":["a","b"]}],
+        "launch":{"type":"E","example":"c"}})")));
+    CHECK(!wi::validate(json(R"({"interface":1,"types":[{"name":"R","kind":"record","fields":[]}],
+        "launch":{"type":"R","example":{"unknown":0}}})")));
+    CHECK(!wi::validate(json(R"({"interface":1,"types":[{"name":"E","kind":"enum","values":[1]}]})")));
+    CHECK(!wi::validate(json(R"({"interface":1,"types":[{"name":"R","kind":"record","fields":[
+        {"name":"x","type":"i64"},{"name":"x","type":"string"}]}]})")));
+}
+
+PAGLETS_TEST("interface: descriptions cannot silently replace a schema's wire shape") {
+    const auto schema = json(R"({"types":[{"name":"R","kind":"record","fields":[
+        {"name":"x","type":"i64"},{"name":"label","type":"string"}]},
+        {"name":"E","kind":"enum","values":["a","b"]}]})");
+    // Metadata and field order do not change the wire shape.
+    CHECK_HAS_VALUE(wi::validate_schema_types(json(R"({"types":[{"name":"R","kind":"record","fields":[
+        {"name":"label","type":"string","doc":"label"},{"name":"x","type":"i64","default":1}]}]})"), schema));
+    for (const auto own : {
+        R"({"types":[{"name":"R","kind":"record","fields":[{"name":"x","type":"i64"}]}]})",
+        R"({"types":[{"name":"R","kind":"record","fields":[{"name":"x","type":"string"},{"name":"label","type":"string"}]}]})",
+        R"({"types":[{"name":"R","kind":"record","fields":[{"name":"renamed","type":"i64"},{"name":"label","type":"string"}]}]})",
+        R"({"types":[{"name":"R","kind":"enum","values":["a"]}]})",
+        R"({"types":[{"name":"E","kind":"enum","values":["a","c"]}]})"}) {
+        CHECK(!wi::validate_schema_types(json(own), schema));
+    }
 }

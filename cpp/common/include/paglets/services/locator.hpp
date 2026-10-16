@@ -13,6 +13,9 @@
 //   what the mesh policy allows (a rule for service `locator`, operation
 //   `pin`). While pinned the paglet cannot leave its host: its dispatch
 //   returns `pinned`.
+//   The request defaults to 60 s and is clamped to 1 s through 30 days,
+//   then capped by the rule's duration maximum, or 1 h when that maximum
+//   is absent. Owner/admin CLI session pins use their separate limits.
 // - `release`: the caller lends the `pin` capability; the pin ends at once.
 //   Pins also end when they expire, and admins can end them.
 

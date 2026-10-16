@@ -36,6 +36,18 @@ $H ledger approve --ledger ledger --admin alice.key <request-id>
 $H ledger revoke --ledger ledger --admin alice.key <key-id> --reason retired
 ```
 
+Host labels (`--label`) and owner groups (`--group`) are the attributes
+selected by policy and residency rules. For direct enrollment, add labels
+to `ledger enroll ... host ...` and groups to `ledger enroll ... owner ...`.
+
+Once a host learns a revocation or admin removal, it checks the current
+membership on existing channels as well as new handshakes. This includes
+queued frames, relay tunnels and long-poll results. A bootstrap seed does
+not override an explicit key revocation. Work already admitted can finish,
+but channel replies are checked again before release. Clients must learn
+ledger changes through their local ledger copy; revocation is not global
+until that change has reached the relevant host.
+
 More ledger commands:
 
 - `enroll` and `remove` add and remove members directly;
@@ -43,17 +55,67 @@ More ledger commands:
 - `admins` adds or removes admins and changes the quorum;
 - `sign` co-signs a record that needs several admins.
 
+### Quorums
+
+The ledger has two signature thresholds. `--admin-quorum` controls changes
+of the admin set and the thresholds themselves; `--quorum` controls other
+admin records, such as enrollment and policy changes. `mesh create`
+defaults to an admin-set quorum of 2 with three or more initial admins,
+otherwise 1; the other quorum defaults to 1. Explicit options take precedence.
+With several admins, a quorum of 1 lets any one admin change the admin set,
+so creation prints a note. Use `--admin-quorum 2` or more to require agreement.
+
+Existing ledgers retain their recorded thresholds. Use `ledger admins`
+with enough current admins' signatures to change them. A record missing
+signatures has no effect until another admin adds them with `ledger sign`.
+Concurrent admin removals win; additions and quorum changes count only if
+their signatures still meet the quorum after those removals. See the
+ledger design for the full conflict rules.
+
 The [command-line reference](cli-reference.md#ledger) lists every ledger
 command and option. The
 [ledger design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-ledger.md)
 describes the records and their signatures.
+
+## Paglet identities and upgrades
+
+New root passports use version 2. Their 32-digit paglet ID is the first
+16 bytes of SHA-256 over a canonical record containing the domain
+`paglets root identity v2`, mesh ID, owner public key and owner-local
+launch nonce. Hosts recompute this ID before accepting the passport. A
+valid owner signature cannot claim another owner's chosen global ID.
+Children and clones retain their host-signed passport links; moves retain
+the same ID.
+
+Launch normally generates a random nonce. `remote launch --nonce NONCE`
+lets an owner prepare a repeatable identity, for example for grant approval
+before launch; the nonce has 1–128 bytes. Choose a fresh nonce for each new
+paglet. Reusing it selects the same identity, even when the module changes;
+it is not a mesh-wide reservation or a new incarnation. The previous
+`--id` option is refused with a migration message. The C++ host client
+`Session::launch` and `Passport::issue` now take a nonce in that argument
+position; read the resulting ID from the returned value or `paglet()`.
+
+This change uses **mesh protocol 2**. Upgrade hosts, CLI tools and the web
+UI together; protocol 1 channels are refused. Existing state directories,
+ledgers, saved passports and paglet IDs are retained. Saved version 1
+paglets can recover and move between upgraded hosts, whose authenticated
+host signatures vouch for the transfer. Version 1 passports cannot launch
+new roots through local, owner-session or forwarded mesh launch requests.
+Holder metadata is saved on creation and arrival. Upgrades also recover
+independently saved passports when an older host left no node metadata file.
+This preserves the enrolled-host trust model: a compromised enrolled host
+can still lie about the paglets it runs.
 
 ## Policy
 
 Rules decide whether a request for a host resource is **allowed**, **asked**
 or **denied**. Paglets ask the `grants` system paglet. Admins approve or
 deny the asked requests from any host. Every decision lands in the audit
-log.
+log. An approval belongs to the complete paglet principal: ID, owner,
+module hash and trust class. Reusing an ID with a different principal does
+not transfer its approvals or grant notifications. The same identity check
+applies to compute-job admission and grants recreated after movement.
 
 ```bash
 $H ledger rule --ledger ledger --admin alice.key --name "staff docs" --decision ask \
@@ -63,7 +125,33 @@ $H ledger approve --ledger ledger --admin alice.key <grant-request-id>
 $H ledger audit --ledger ledger
 ```
 
+Among matching rules, the winner is chosen in this order:
+
+1. Higher `--priority` (default 0).
+2. More match fields: owner, group, module, signer, trust class
+   and host each count as one field when present.
+3. A resource scope, such as `--root`, rather than no scope.
+4. `deny` before `ask` before `allow`.
+5. Earlier ledger order.
+
+For example, at equal priority the staff rule below wins for staff reading
+`data`, because it has a group match and a resource scope. The broad denial
+does not automatically override it. Give the denial `--priority 1` to make
+it win instead:
+
+```bash
+$H ledger rule --ledger ledger --admin alice.key --name "deny file reads" --decision deny \
+    --service files --op read
+$H ledger rule --ledger ledger --admin alice.key --name "staff data" --decision allow \
+    --service files --op read --group staff --root data
+```
+
 See the [policy design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-policy.md).
+
+Admin grants follow a paglet to hosts covered by their host selector and
+are materialized there. A grant derived by a host from an allow rule
+covers only that host: after a move the paglet asks again, and the
+destination evaluates its policy.
 
 ## Module trust
 
@@ -86,7 +174,8 @@ See the [module design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp
 A paglet that reads from a named root carries that root's mark for good. A
 residency rule decides where a marked paglet may go:
 
-- `host-only` keeps it on the host where it read;
+- `host-only` keeps it on its current host when the rule is enforced
+  (the host where it read, unless the rule took effect after a later move);
 - `hosts` lets it move only to some hosts, chosen by name, key ID or
   `--host-label`.
 
@@ -117,7 +206,7 @@ $H keys init --role host --name lab-2 --out lab-2.key         # prints <lab-2-ke
 $H keys init --role host --name laptop --out laptop.key       # prints <laptop-key-id>
 $H ledger enroll --ledger ledger --admin alice.key host <lab-2-key-id> lab-2   # lab-1 is enrolled above
 $H ledger enroll --ledger ledger --admin alice.key host <laptop-key-id> laptop
-$H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga
+$H ledger enroll --ledger ledger --admin alice.key owner <olga-key-id> olga --group staff
 cp -r ledger ledger-lab-1 && cp -r ledger ledger-lab-2 && cp -r ledger ledger-laptop
 $H serve --key lab-1.key --ledger ledger-lab-1 --state state-1 --listen 0.0.0.0:7443 \
     --advertise https://lab-1:7443 &
@@ -153,6 +242,14 @@ Hosts talk over HTTPS. Inside it they use end-to-end encrypted, mutually
 authenticated Noise channels. A host without inbound ports (`--no-listen`)
 polls a few reachable hosts that relay for it. Everybody else reaches it
 through channels tunneled through those relays, still encrypted end to end.
+
+## Review status
+
+The Noise channel, record and passport signatures, key handling and worker
+sandboxes have internal tests, including platform checks. They have not
+had an independent external security review. The
+[hardening plan](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-hardening.md)
+tracks the pending cryptographic, key/sandbox and threat-model reviews.
 
 ## TLS certificates
 
@@ -275,18 +372,33 @@ $H remote describe --connect https://lab-1:7443 --key olga.key --ledger ledger <
 `dispatch` takes a transfer
 ticket, which names the destination in one of these forms:
 
-- a host name or key ID;
+- a host name, a full key ID, or an unambiguous key-ID prefix of at least
+  8 hexadecimal digits;
 - `label:<label>`;
 - `offer:<service>[.<op>]`: a host that offers the service;
 - `any`.
 
-A ticket can add `?retries=N&arrival=active|inactive`.
+A full, lowercase 64-digit key ID selects only that enrolled host, even
+when another host uses the ID as its name. An unknown full ID never falls
+back to a name. Names and short key IDs must identify exactly one enrolled
+host across both forms; ambiguous addresses fail before placement filters
+are applied. Use a full key ID to resolve ambiguity.
+
+A ticket can add `?retries=N&arrival=active|inactive`. `retries` is 1 to 16,
+default 3; arrival defaults to `active`.
 
 `remote dispatch` waits until the move ended, at most 120 s. It prints
 `moved to lab-2 <key-id>`, or exits with status 1 and the reason, for
-example `the move failed, the paglet stays: no host matches label:gpu`.
-A `call` to a paglet that is moving waits for the move as well (up to
-30 s).
+example `the move failed, the paglet stays: no enrolled host matches label:gpu`.
+If hosts match but all are excluded, the reason starts with
+`every host matching label:gpu was excluded` and lists their reasons.
+If eligible hosts are tried but none takes the paglet, the final report
+also retains excluded hosts' reasons and names eligible hosts not tried
+because of the ticket's retry limit. The combined diagnostic is limited
+to 8 KB; oversized or excess reasons are counted as omitted.
+A `call` accepted while the paglet is moving waits for the move as well
+(up to 30 s). After the paglet has left, `remote call` and `remote send`
+require a connection to its current host. Use `remote locate` to find it.
 
 `remote hosts` shows each enrolled host with its state:
 
@@ -319,13 +431,65 @@ Admin work against a live host:
 > with its load and paglets, forms for the messages paglets describe, and
 > next to each view the `remote` command that does the same.
 
+Each host caches pages it has seen, with a default budget of 256 MB. A
+returning paglet transfers only pages the destination no longer has; cache
+eviction can require unchanged pages to be sent again. Embedders adjust
+this with `Node::set_page_cache_bytes`.
+
+The paglet memory ceiling defaults to 256 MB (`serve --memory-mb N`),
+separate from compute jobs' 1 GB default. Growth beyond it fails; an
+unhandled allocation failure or abort ends the paglet as `failed`. See
+[allocation and image limits](configuration.md#limits).
+
 ## Location and pins
 
-Location records live on hosts chosen by consistent hashing. A majority of
-them is updated on every move, and they fail over when hosts go down. So a
-paglet can be found from any host (`remote locate`, or the `locator` system
-paglet). A pin keeps a paglet on its host for a while. Pinning needs a
-policy rule for service `locator`, operation `pin`. See the
+Location records live on up to three hosts chosen by consistent hashing
+among the hosts currently considered up. A move waits for a majority of
+those responsible hosts to record the new location before committing it.
+The responsible set changes as hosts go down and return. Returning hosts
+retain cached records until a newer move counter replaces them or the
+records expire (one hour without refresh), and forward them to hosts that
+are now responsible.
+
+`remote locate` and the `locator` system paglet first use a local holder
+record when the paglet is here. Otherwise they ask the responsible hosts
+for their newest move counter. A majority answer with a record completes
+that phase. At its deadline, even fewer answers can supply the best record
+received. With no record, the lookup asks every live host who holds the
+paglet; an unanswered second phase ends with `not_found`. Each phase has a
+default 3 s deadline, so an unsuccessful lookup can take about 6 s, plus
+host scheduling and transport delays. Known-empty answers can advance it
+earlier. Message routing also keeps a 10 s location cache and forwarding
+tombstones after a move.
+
+A pin keeps a paglet on its current host. The authorization and duration
+depend on how it is requested:
+
+| Path | Who may pin | Default request and limits |
+|---|---|---|
+| `remote pin` owner/admin session | the owner of the target paglet, or an admin; no `locator` policy rule required | 10 min by default, clamped to 1 s through 24 h |
+| `locator.locate_and_pin` from a paglet | an endpoint with the `pin` right or `*`, and an `allow` rule for service `locator`, operation `pin` | 60 s by default; request clamped to 1 s through 30 days, then capped by the rule's duration maximum, or 1 h when that maximum is absent |
+
+Pins expire automatically. Their capability can release them, and admins
+can force release. A moving target can redirect pin requests up to eight
+times. A busy target permits up to 40 waits of 100 ms, with new lookups
+between waits; target timeouts and redirects add further delay. The whole
+operation can exceed 4 s. Set request timeouts for lookup and pinning
+together.
+
+| Timing or limit | Default | Configuration |
+|---|---|---|
+| Heartbeat to enrolled hosts | 2 s | `Node::LocationTiming::heartbeat` |
+| Host considered down after silence | 10 s | `host_timeout` |
+| Holder record refresh | 5 min | `refresh` |
+| Unrefreshed record expiry | 1 h | `record_ttl` |
+| Each lookup phase deadline | 3 s | `lookup_timeout` |
+| Message-routing location cache | 10 s | compiled in |
+| Forwarding tombstone lifetime | 10 min | `runtime::Config::tombstone_ttl` |
+| Message forwarding bound | 4 | compiled in |
+
+An embedder changes the five `LocationTiming` fields through
+`Node::set_location_timing`; `serve` has no switches for them. See the
 [location design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-location.md).
 
 ## Limits

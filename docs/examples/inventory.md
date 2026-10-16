@@ -71,8 +71,8 @@ are optional: if the policy denies one of them, the inventory of that
 host lacks those fields. For the processes, `server-info` lists the
 largest resident memory first. Without a process name, the clone asks
 for the `top` processes. With a name, it asks for up to 10 000 and keeps
-those whose name contains the given text. Then it reports and ends two
-seconds later:
+those whose name contains the given text. It disposes after handing its
+report to the host, including when it reports an error:
 
 <!-- snippet: cpp/examples/inventory/inventory.cpp#processes -->
 Source: [`cpp/examples/inventory/inventory.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/inventory/inventory.cpp)
@@ -96,10 +96,9 @@ void processes() {
 }
 
 void finish(std::string error) {
-    if (!error.empty()) return pt::report_error(parent_, std::move(error));
-    pt::report(parent_, paglets::encode(inv_));
-    (void)paglets::after_raw(2000, "done", {});
-    router().on("done", [](Message&) { (void)paglets::dispose(); });
+    const auto sent = [] { (void)paglets::dispose(); };
+    if (!error.empty()) return pt::report_error(parent_, std::move(error), sent);
+    pt::report(parent_, paglets::encode(inv_), {}, sent);
 }
 ```
 <!-- /snippet -->
@@ -257,6 +256,6 @@ operations of `server-info` (`example: Inventory Collector ...` in
 <!-- results: inventory -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts reporting | volumes reported on the first host | processes on the first host | hosts where the process finder found the test process |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Inventory Collector and Process Finder ask server-info on every host | in-process | passed | 0.2 s | Darwin arm64, Release build | 2026-10-12 | 3 | 6 | 714 | 3 |
-| example: Inventory Collector and Process Finder ask server-info on every host | worker processes | passed | 0.7 s | Darwin arm64, Release build | 2026-10-12 | 3 | 6 | 768 | 3 |
+| example: Inventory Collector and Process Finder ask server-info on every host | in-process | passed | 0.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 6 | 568 | 3 |
+| example: Inventory Collector and Process Finder ask server-info on every host | worker processes | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 6 | 619 | 3 |
 <!-- /results -->

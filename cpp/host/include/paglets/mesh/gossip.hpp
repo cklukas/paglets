@@ -22,6 +22,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -36,6 +37,8 @@ class GossipTransport {
 public:
     virtual ~GossipTransport() = default;
     virtual void send(const PublicKey& to, Bytes frame) = 0;
+    // The complete encoded frame limit, if the transport has one.
+    virtual std::size_t frame_limit() const { return std::numeric_limits<std::size_t>::max(); }
     // Network addresses of hosts, for transports that use them (the node's
     // host registry learns and spreads them, planning/cpp-mesh.md).
     virtual std::optional<std::string> address(const PublicKey&) const { return std::nullopt; }

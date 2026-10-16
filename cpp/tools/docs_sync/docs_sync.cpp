@@ -22,6 +22,10 @@
 // caption gets the source path appended as `\src{PATH}`). Results become
 // booktabs tabulars inside a `table` with OPTIONS `caption={...}` and
 // `label={...}`. The paper's preamble defines `\src` and the styles.
+// Results may select `layout={compact}` or `layout={transpose}` with
+// `columns={field|measured name|...}`, optional `headers={title|...}`,
+// `test-prefix={...}`, `strip-prefix={prefix|...}`, `header={Host}` and
+// `widths={0.2|0.3|...}` (fractions of linewidth). Unknown columns fail.
 //
 // Usage: paglets-docs-sync [--root DIR] [--check] [--only FILE]...
 //   --root   the repository root (default: the current directory)
@@ -144,7 +148,13 @@ std::string render_snippet(const fs::path& root, const std::string& spec) {
 // Text in LaTeX: the special characters escaped.
 std::string latex(std::string_view text) {
     std::string out;
-    for (char c : text) {
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text.substr(i).starts_with("→")) {
+            out += "$\\rightarrow$";
+            i += 2;
+            continue;
+        }
+        const char c = text[i];
         switch (c) {
             case '\\': out += "\\textbackslash{}"; break;
             case '&': case '%': case '$': case '#': case '_': case '{': case '}':
@@ -309,7 +319,7 @@ struct Table {
     std::vector<std::vector<std::string>> rows;
 };
 
-std::vector<Table> result_tables(const fs::path& root, const std::string& topics) {
+std::vector<Json> result_tests(const fs::path& root, const std::string& topics) {
     std::vector<Json> tests;
     std::stringstream list(topics);
     for (std::string topic; std::getline(list, topic, ',');) {
@@ -320,6 +330,11 @@ std::vector<Table> result_tables(const fs::path& root, const std::string& topics
         if (!j || !j->find("tests") || !j->find("tests")->is_array()) throw Failure{"malformed " + file.string()};
         for (const auto& t : j->find("tests")->as_array()) tests.push_back(t);
     }
+    return tests;
+}
+
+std::vector<Table> result_tables(const fs::path& root, const std::string& topics) {
+    auto tests = result_tests(root, topics);
     if (tests.empty()) return {};
     std::ranges::stable_sort(tests, [](const Json& a, const Json& b) {
         const int c = natural_compare(str(a, "test"), str(b, "test"));
@@ -444,9 +459,91 @@ std::string render_results(const fs::path& root, const std::string& topics) {
     return out;
 }
 
+std::vector<std::string> result_options_list(const std::string& text) {
+    std::vector<std::string> items;
+    std::stringstream stream(text);
+    for (std::string item; std::getline(stream, item, '|');) items.push_back(trim(item));
+    return items;
+}
+
+std::optional<Table> selected_results(const fs::path& root, const std::string& topics, const std::string& options) {
+    const auto layout = option_value(options, "layout");
+    if (!layout) return std::nullopt;
+    if (*layout != "compact" && *layout != "transpose") throw Failure{"unknown results layout: " + *layout};
+    const auto selected = option_value(options, "columns");
+    if (!selected) throw Failure{"compact/transposed results require columns={name|name|...}"};
+    const auto columns = result_options_list(*selected);
+    if (columns.empty()) throw Failure{"results columns are empty"};
+    auto tests = result_tests(root, topics);
+    if (auto prefix = option_value(options, "test-prefix"))
+        std::erase_if(tests, [&](const Json& t) { return !str(t, "test").starts_with(*prefix); });
+    if (tests.empty()) return Table{};
+    std::ranges::stable_sort(tests, [](const Json& a, const Json& b) {
+        const auto order = natural_compare(str(a, "test"), str(b, "test"));
+        return order != 0 ? order < 0 : str(a, "mode") < str(b, "mode");
+    });
+    const auto strip = result_options_list(option_value(options, "strip-prefix").value_or(""));
+    auto name_of = [&](const Json& t) {
+        auto name = str(t, "test");
+        for (const auto& prefix : strip) if (name.starts_with(prefix)) name = trim(name.substr(prefix.size()));
+        return name;
+    };
+    const std::set<std::string> metadata{"test", "mode", "outcome", "seconds", "platform", "build", "date"};
+    auto value_of = [&](const Json& t, const std::string& column) {
+        if (column == "test") return name_of(t);
+        if (metadata.contains(column)) return rounded(str(t, column));
+        if (const auto* values = t.find("values"); values && values->is_array())
+            for (const auto& item : values->as_array()) if (str(item, "name") == column) return rounded(str(item, "value"));
+        return std::string();
+    };
+    std::vector<std::string> headers = columns;
+    for (std::size_t i = 0; i < columns.size(); ++i) {
+        bool known = metadata.contains(columns[i]);
+        for (const auto& t : tests) {
+            if (const auto* values = t.find("values"); values && values->is_array())
+                for (const auto& item : values->as_array()) if (str(item, "name") == columns[i]) {
+                    known = true;
+                    headers[i] = value_header(item);
+                }
+        }
+        if (!known) throw Failure{"unknown results column: " + columns[i]};
+    }
+    if (auto labels = option_value(options, "headers")) {
+        headers = result_options_list(*labels);
+        if (headers.size() != columns.size()) throw Failure{"results headers/columns differ in length"};
+    }
+    Table table;
+    if (*layout == "compact") {
+        table.columns = headers;
+        for (const auto& t : tests) {
+            std::vector<std::string> row;
+            for (const auto& column : columns) row.push_back(value_of(t, column));
+            table.rows.push_back(std::move(row));
+        }
+    } else {
+        table.columns = {option_value(options, "header").value_or("Measured")};
+        for (const auto& t : tests) {
+            auto name = name_of(t);
+            if (std::ranges::count_if(tests, [&](const Json& other) { return str(other, "test") == str(t, "test"); }) > 1)
+                name += " / " + str(t, "mode");
+            table.columns.push_back(std::move(name));
+        }
+        for (std::size_t i = 0; i < columns.size(); ++i) {
+            std::vector<std::string> row{headers[i]};
+            for (const auto& t : tests) row.push_back(value_of(t, columns[i]));
+            table.rows.push_back(std::move(row));
+        }
+    }
+    return table;
+}
+
 std::string render_results_tex(const fs::path& root, const std::string& argument) {
     const auto [topics, options] = split_tex_argument(argument);
-    const auto tables = result_tables(root, topics);
+    auto tables = result_tables(root, topics);
+    const bool selected = option_value(options, "layout").has_value();
+    if (auto table = selected_results(root, topics, options)) tables = table->columns.empty() ? std::vector<Table>{} : std::vector<Table>{std::move(*table)};
+    if (!selected) if (auto header = option_value(options, "header"))
+        for (auto& table : tables) if (!table.columns.empty() && table.columns.front() == "Test") table.columns.front() = *header;
     if (tables.empty()) return "% no results are recorded yet (cpp/tools/update_results.sh)\n";
     std::string out = "\\begin{table}[htbp]\n\\centering\\small\n";
     if (auto caption = option_value(options, "caption")) out += "\\caption{" + *caption + "}\n";
@@ -454,7 +551,20 @@ std::string render_results_tex(const fs::path& root, const std::string& argument
     for (const auto& t : tables) {
         if (!t.title.empty()) out += "\\par\\medskip\\noindent\\textit{" + latex(t.title) + "}\\par\\smallskip\n";
         std::string spec;
-        for (std::size_t i = 0; i < t.columns.size(); ++i) spec += i == 0 ? "l" : "r";
+        const auto widths = result_options_list(option_value(options, "widths").value_or(""));
+        if (!widths.empty() && widths.size() != t.columns.size()) throw Failure{"results widths/columns differ in length"};
+        for (std::size_t i = 0; i < t.columns.size(); ++i) {
+            if (!widths.empty()) {
+                if (!std::ranges::all_of(widths[i], [](unsigned char c) { return std::isdigit(c) || c == '.'; }))
+                    throw Failure{"invalid results width"};
+                std::size_t used = 0;
+                double width = 0;
+                try { width = std::stod(widths[i], &used); } catch (...) { throw Failure{"invalid results width"}; }
+                if (used != widths[i].size() || width <= 0 || width > 1) throw Failure{"invalid results width"};
+                spec += "p{" + widths[i] + "\\linewidth}";
+            } else spec += i == 0 ? (selected ? "p{0.43\\linewidth}" : "l") : "r";
+        }
+        if (selected || !widths.empty()) out += "\\setlength{\\tabcolsep}{3pt}\n";
         out += "\\begin{tabular}{" + spec + "}\n\\toprule\n";
         for (std::size_t i = 0; i < t.columns.size(); ++i) out += (i ? " & " : "") + latex(t.columns[i]);
         out += " \\\\\n\\midrule\n";

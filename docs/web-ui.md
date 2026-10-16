@@ -88,7 +88,8 @@ CPU model, memory, paglet storage and compute slots. Further sections:
 - fields come from the message's request type;
 - a JSON tab edits the same value as text;
 - **Call** sends a request and shows the reply, **Send** a one-way message
-  with a priority;
+  with a priority; sending a `both` message runs its handler without a reply
+  capability, so the caller receives no reply;
 - messages marked as dangerous ask before they are sent;
 - *Other message* sends any message by name with a JSON payload.
 
@@ -107,8 +108,11 @@ A log lists what this page sent.
 holds: name (from module signatures or the interface description), hash,
 size, which hosts have it, and whether it is described. **Launch** opens a
 form with the target host, the start arguments (a form made from the
-module's `launch` type), an optional paglet ID and how long the passport
-is valid. **Push only** stores a module file on a host without starting
+module's `launch` type), an optional owner-local nonce and how long the
+passport is valid. The mesh, owner and nonce determine the global paglet
+ID; leaving the nonce blank generates a fresh identity. Launch needs an
+owner key; with an admin key the form explains the requirement and the
+API refuses the request. **Push only** stores a module file on a host without starting
 it. **Upload a module** takes a `.wasm` file from this computer: the browser
 reads its interface description, and the module travels with the launch
 or push.
@@ -126,6 +130,14 @@ Owners see their own groups, admins all.
 
 Every page refreshes itself without losing what you typed or which
 sections you opened.
+
+The UI covers part of `paglets-host remote`. Use the CLI for ledger
+operations (`push`, `pull`, `requests`, `approve`, `deny`, `audit`),
+`unpin`, compute lease/queue details (`slots`), compute job listing and
+cancellation (`jobs`), and zombie `traces` and `result`. Slot counts are
+visible on host pages, but those commands have no form or result page.
+Some have copyable commands in **Shell** boxes; run them in a terminal
+(see the [remote command reference](cli-reference.md#remote)).
 
 > [!NOTE]
 > Forms need an [interface description](interface-descriptions.md) in the
@@ -147,7 +159,20 @@ cpp/tools/web_live.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/buil
 ```
 
 `--check-only` stops after the checks; otherwise Ctrl-C ends `paglets-web`
-and the mesh.
+and the mesh. The driver needs Bash 4+, jq, curl and SSH, with Linux remote
+hosts reachable directly over IPv4. Use names and absolute build paths without
+spaces or shell metacharacters. On macOS, set `TMPDIR` to a unique directory
+below the mounted `/Volumes/S8T/tmp` or `/Volumes/PRO-BLADE/tmp` first.
+
+Each run creates its own local workspace and a matching directory below each
+remote user's `tmp/`. It refuses to start while a `paglets-host serve` process
+already runs on any selected host. Cleanup signals only its recorded web
+process after checking its executable and workspace, and stops its hosts via
+their own stop files. It verifies that the recorded host processes have ended
+before removing their directories. If SSH fails or process identity cannot be
+confirmed, it reports the retained workspace for manual cleanup and exits with
+an error. Host and web logs and process records remain in the printed local
+`-logs` directory.
 
 ## The commands next to the views
 
@@ -166,11 +191,17 @@ by its address. **Copy** puts a command on the clipboard.
 
 ## Security
 
+Connections from `paglets-web` to mesh hosts use the shared session client.
+It does not check their TLS certificates and has no CA option. The Noise
+handshake authenticates the host key against the ledger copy or an explicit
+host-key pin. This is separate from the local browser-to-UI connection.
+
 `paglets-web` acts with your key, so it protects its API from other
 programs and websites:
 
-- it listens on `127.0.0.1` only, unless `--listen` and `--allow-remote`
-  say otherwise;
+- it listens on `127.0.0.1` by default; `--listen ::1` and
+  `--listen localhost` are also allowed. Other addresses require
+  `--allow-remote`;
 - the API needs the token: the HttpOnly, `SameSite=Strict` cookie that the
   printed link sets, or an `Authorization: Bearer TOKEN` header;
 - the `Host` header must name `127.0.0.1`, `localhost` or `[::1]` with
@@ -183,6 +214,12 @@ programs and websites:
 
 The hosts check every request as they check `paglets-host remote`. An
 owner sees and acts on their own paglets, an admin on all of them.
+
+The integration test `web: the UI shows the mesh, launches, calls and ends
+paglets` (`cpp/tests/test_web.cpp`) starts two mesh hosts and the real HTTP
+API server. It checks launch nonces and copied commands, describe, send,
+call, bytes payloads, module upload, zombies and disposal, plus refusals
+without the token, with another Host header and from another origin.
 
 ## JSON API
 
@@ -201,7 +238,7 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8470/api/mesh
 | `GET /api/zombies` | the zombie groups of every host, with state and replicas |
 | `POST /api/call` | `{host, paglet, name, payload?, timeout_ms?}` → `{status, status_name, reply, shell}` |
 | `POST /api/send` | `{host, paglet, name, payload?, priority?}` → `{sent, shell}` |
-| `POST /api/launch` | `{host, module (hash), file (in --module-dir) or name and data (an upload, base64), args?, id?, hours?}` → `{paglet, host, shell}` |
+| `POST /api/launch` | `{host, module (hash), file (in --module-dir) or name and data (an upload, base64), args?, nonce?, hours?}` → `{paglet, host, shell}` |
 | `POST /api/push-module` | `{host, file}` or `{host, name, data}` → `{hash, shell}` |
 | `POST /api/dispatch` | `{host, paglet, destination}` → `{moved, pending, reason, host_name, to, shell}` |
 | `POST /api/pin` | `{host, paglet, minutes?, reason?}` → `{pin, until_ms, host_name, shell}` |
@@ -210,13 +247,30 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8470/api/mesh
 | `POST /api/zombie-check` | `{host, group}` → `{records, hosts, replicas, takeovers, restarts, accepted, violations, shell}` |
 | `POST /api/zombie-cancel`, `POST /api/zombie-redirect` | `{host, group, reason?}`, `{host, group, sink}` → `{state, shell}` |
 
+A launch nonce must be a string of at most 128 bytes. Omitting it or
+supplying an empty string generates a fresh nonce. The old `id` field is
+refused with HTTP 400: use `nonce` and read the derived ID from `paglet`
+in the response. Copied shell commands use `remote launch --nonce`.
+
+The call API defaults to 30000 ms and clamps `timeout_ms` to 100–120000 ms.
+Generated shell commands include a nondefault effective timeout as
+`--timeout SECONDS`, preserving millisecond precision.
+
+A dispatch answers with `pending:true` while the move has not ended,
+including an older host's acknowledgement that it started. Completed moves
+and failed moves answer with `pending:false`; `moved` and `reason`
+distinguish their outcomes.
+
 Payloads and arguments are JSON values. They become MessagePack for the
 paglet, and `{"$bytes": "00ff"}` becomes a binary string (for `bytes`
-fields). Failures answer with an HTTP status and `{error, shell}`:
+fields). The shared session client rejects missing or wrong-type protocol
+fields rather than inventing default values for a malformed reply. Optional
+metadata may be absent on older hosts; unknown extension fields are accepted.
+Failures answer with an HTTP status and `{error, shell}`:
 
 - 400 for a malformed request;
 - 401 without the token;
 - 403 for a refused origin or host;
 - 404 for an unknown route;
-- 422 when the host refused;
+- 422 for a failed session request, including refusal or a malformed reply;
 - 502 when the host could not be reached.

@@ -141,7 +141,7 @@ void hash_next(std::size_t i) {
 
 > [!NOTE]
 > `files.hash` computes the SHA-256 on the host, so files of any size are
-> hashed without entering the clone's memory (16 MB at most). The content
+> hashed without entering the clone's memory (256 MB ceiling by default). The content
 > does not travel; only the hash goes home.
 
 When every host has reported or timed out, the paglet at home groups the
@@ -317,6 +317,6 @@ missing on `c`; `extra.txt` exists only on `b`. The test checks that:
 <!-- results: tree_compare -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts compared by size | files compared | differences by size (missing or other size) | differences by content (two hosts, SHA-256) |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Tree Compare finds missing and different files on several hosts | in-process | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 3 | 4 | 3 | 2 |
-| example: Tree Compare finds missing and different files on several hosts | worker processes | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 3 | 4 | 3 | 2 |
+| example: Tree Compare finds missing and different files on several hosts | in-process | passed | 0.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 4 | 3 | 2 |
+| example: Tree Compare finds missing and different files on several hosts | worker processes | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 4 | 3 | 2 |
 <!-- /results -->

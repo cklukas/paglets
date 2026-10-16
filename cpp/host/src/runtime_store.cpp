@@ -7,6 +7,7 @@
 
 #include <paglets/sha256.hpp>
 
+#include <charconv>
 #include <fstream>
 #include <system_error>
 
@@ -21,6 +22,39 @@ using abi::detail::put_opt;
 constexpr std::string_view file_magic = "PGPAGLET1";
 
 }  // namespace
+
+std::expected<TransferTicket, std::string> parse_transfer_ticket(std::string_view text) {
+    TransferTicket t;
+    const auto q = text.find('?');
+    t.target = std::string(text.substr(0, q));
+    if (t.target.empty()) return std::unexpected(std::string("empty destination"));
+    if (q == std::string_view::npos) return t;
+    std::string_view rest = text.substr(q + 1);
+    while (!rest.empty()) {
+        const auto amp = rest.find('&');
+        const std::string_view param = rest.substr(0, amp);
+        rest = amp == std::string_view::npos ? std::string_view() : rest.substr(amp + 1);
+        const auto eq = param.find('=');
+        if (eq == std::string_view::npos) return std::unexpected("malformed ticket parameter " + std::string(param));
+        const std::string_view key = param.substr(0, eq);
+        const std::string_view value = param.substr(eq + 1);
+        if (key == "retries") {
+            int n = 0;
+            auto [p, ec] = std::from_chars(value.data(), value.data() + value.size(), n);
+            if (ec != std::errc() || p != value.data() + value.size() || n < 1 || n > 16) {
+                return std::unexpected(std::string("retries is 1 to 16"));
+            }
+            t.retries = n;
+        } else if (key == "arrival") {
+            if (value != "active" && value != "inactive")
+                return std::unexpected(std::string("arrival is active or inactive"));
+            t.activate = value == "active";
+        } else {
+            return std::unexpected("unknown ticket parameter " + std::string(key));
+        }
+    }
+    return t;
+}
 
 void encode_cap(msgpack::Writer& w, const Cap& c) {
     w.write_map_header(18);
@@ -76,7 +110,8 @@ bool decode_cap(msgpack::Reader& r, Cap& c) {
 namespace {
 
 void encode_record(msgpack::Writer& w, const PagletRecord& p) {
-    w.write_map_header(16);
+    w.write_map_header(18);
+    put(w, "wake_at_ms", p.wake_at_ms);
     put(w, "id", p.id);
     put(w, "module", p.module);
     put(w, "trust", p.trust);
@@ -93,6 +128,7 @@ void encode_record(msgpack::Writer& w, const PagletRecord& p) {
         encode_cap(w, cap);
     }
     put(w, "pending_requests", p.pending_requests);
+    put(w, "pending_jobs", p.pending_jobs);
     put(w, "checkpoint_ms", p.checkpoint_ms);
     w.write_str("services");
     w.write_array_header(p.services.size());
@@ -132,10 +168,12 @@ bool decode_record(msgpack::Reader& r, PagletRecord& p) {
             return true;
         }
         if (k == "pending_requests") return msgpack::read_value(r, p.pending_requests);
+        if (k == "pending_jobs") return msgpack::read_value(r, p.pending_jobs);
         if (k == "checkpoint_ms") return msgpack::read_value(r, p.checkpoint_ms);
         if (k == "marks") return msgpack::read_value(r, p.marks);
         if (k == "restart") return msgpack::read_value(r, p.restart);
         if (k == "notify_recovered") return msgpack::read_value(r, p.notify_recovered);
+        if (k == "wake_at_ms") return msgpack::read_value(r, p.wake_at_ms);
         if (k == "image_ms") return msgpack::read_value(r, p.image_ms);
         if (k == "services") {
             std::uint32_t n = 0;
@@ -258,12 +296,46 @@ std::vector<std::string> Store::load_revoked(const Warn& warn) const {
 
 namespace {
 constexpr std::int32_t state_version = 1;
+constexpr std::int32_t ready_state_version = 2;
+constexpr std::int32_t timed_state_version = 3;
 }  // namespace
+
+Bytes encode_ready(const ReadyMessage& message) {
+    msgpack::Writer w;
+    w.write_array_header(3);
+    msgpack::write_value(w, abi::encode(message.delivered));
+    msgpack::write_value(w, encode_caps(message.caps));
+    msgpack::write_value(w, message.residency_marks);
+    return w.bytes();
+}
+std::expected<ReadyMessage, std::string> decode_ready(std::span<const std::uint8_t> bytes) {
+    msgpack::Reader r(bytes);
+    ReadyMessage message;
+    Bytes doc, caps;
+    std::uint32_t fields = 0;
+    if (!r.read_array_header(fields) || fields != 3 || !msgpack::read_value(r, doc) ||
+        !abi::decode(doc, message.delivered) || !msgpack::read_value(r, caps) ||
+        !msgpack::read_value(r, message.residency_marks) || !r.at_end())
+        return std::unexpected("malformed ready notification");
+    auto parsed = decode_caps(caps);
+    if (!parsed) return std::unexpected(parsed.error());
+    message.caps = std::move(*parsed);
+    return message;
+}
 
 Bytes encode_state(const TravelState& s) {
     msgpack::Writer w;
-    w.write_map_header(15);
-    put(w, "v", state_version);
+    w.write_map_header(18);
+    const auto captured_ms = s.pending.empty() ? std::int64_t{0} : s.pending_captured_ms;
+    put(w, "pending_captured_ms", captured_ms);
+    w.write_str("ready");
+    w.write_array_header(s.ready.size());
+    for (const auto& message : s.ready) msgpack::write_value(w, encode_ready(message));
+    put(w, "wake_at_ms", s.wake_at_ms);
+    // An old peer must refuse unsupported timing/completion state rather
+    // than silently extending a deadline or dropping a continuation.
+    put(w, "v", captured_ms > 0 ? timed_state_version :
+                 (s.ready.empty() ? state_version : ready_state_version));
     put(w, "id", s.id);
     put(w, "module", s.module);
     put(w, "trust", s.trust);
@@ -303,7 +375,27 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
     TravelState s;
     std::int32_t version = 0;
     msgpack::Reader r(bytes);
+    bool ready_seen = false, captured_seen = false;
     const bool ok = abi::detail::read_map(r, [&](std::string_view k) {
+        if (k == "pending_captured_ms") {
+            if (captured_seen) return false;
+            captured_seen = true;
+            return msgpack::read_value(r, s.pending_captured_ms);
+        }
+        if (k == "ready") {
+            if (ready_seen) return false;
+            ready_seen = true;
+            std::uint32_t count = 0;
+            if (!r.read_array_header(count) || count > r.remaining()) return false;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                Bytes notification;
+                if (!msgpack::read_value(r, notification)) return false;
+                auto message = decode_ready(notification);
+                if (!message) return false;
+                s.ready.push_back(std::move(*message));
+            }
+            return true;
+        }
         if (k == "v") return msgpack::read_value(r, version);
         if (k == "id") return msgpack::read_value(r, s.id);
         if (k == "module") return msgpack::read_value(r, s.module);
@@ -313,6 +405,7 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         if (k == "next_correlation") return msgpack::read_value(r, s.next_correlation);
         if (k == "next_timer") return msgpack::read_value(r, s.next_timer);
         if (k == "checkpoint_ms") return msgpack::read_value(r, s.checkpoint_ms);
+        if (k == "wake_at_ms") return msgpack::read_value(r, s.wake_at_ms);
         if (k == "marks") return msgpack::read_value(r, s.marks);
         if (k == "restart") return msgpack::read_value(r, s.restart);
         if (k == "notify_recovered") return msgpack::read_value(r, s.notify_recovered);
@@ -355,7 +448,12 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         return r.skip();
     });
     if (!ok || !r.at_end()) return std::unexpected(std::string("malformed paglet state"));
-    if (version != state_version) return std::unexpected("paglet state version " + std::to_string(version));
+    if (version < state_version || version > timed_state_version ||
+        (version >= ready_state_version && !ready_seen) ||
+        (version == state_version && !s.ready.empty()) ||
+        (version < timed_state_version && s.pending_captured_ms != 0) ||
+        (version == timed_state_version && (!captured_seen || s.pending_captured_ms <= 0)))
+        return std::unexpected("paglet state version " + std::to_string(version));
     if (s.id.empty() || s.module.empty()) return std::unexpected(std::string("incomplete paglet state"));
     return s;
 }
@@ -379,9 +477,45 @@ std::expected<std::vector<Cap>, std::string> decode_caps(std::span<const std::ui
     return out;
 }
 
+std::optional<RemoteMessage> undelivered_report(const RemoteMessage& m, std::int32_t status) {
+    if (m.kind != RemoteMessage::Kind::message || !m.failure || m.failure->paglet.empty() ||
+        m.failure->host.empty() || m.failure->handle <= 0 || status >= 0) return std::nullopt;
+    RemoteMessage report;
+    report.kind = RemoteMessage::Kind::undelivered;
+    report.target = m.failure->paglet;
+    report.host = m.failure->host;
+    report.name = std::string(abi::undelivered_message);
+    report.payload = abi::encode(abi::Undelivered{m.name, m.failure->handle, status});
+    report.priority = abi::max_priority;
+    return report;
+}
+
 Bytes encode_remote(const RemoteMessage& m) {
     msgpack::Writer w;
-    w.write_map_header(16);
+    w.write_map_header(19);
+    w.write_str("failure");
+    if (m.failure) {
+        w.write_map_header(3);
+        put(w, "paglet", m.failure->paglet);
+        put(w, "host", m.failure->host);
+        put(w, "handle", m.failure->handle);
+    } else {
+        w.write_nil();
+    }
+    auto deadline = m.deadline_ms;
+    auto timeout = m.timeout_ms;
+    if (m.expires_at) {
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
+            *m.expires_at - std::chrono::steady_clock::now()).count();
+        timeout = std::max<std::int64_t>(0, remaining);
+        if (remaining <= 0) {
+            const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            deadline = now - 1;
+        }
+    }
+    put(w, "deadline_ms", deadline);
+    put(w, "residency_marks", m.residency_marks);
     put(w, "kind", static_cast<std::int32_t>(m.kind));
     put(w, "target", m.target);
     put(w, "host", m.host);
@@ -401,7 +535,7 @@ Bytes encode_remote(const RemoteMessage& m) {
     put(w, "requester", m.requester);
     put(w, "requester_host", m.requester_host);
     put(w, "correlation", m.correlation);
-    put(w, "timeout_ms", m.timeout_ms);
+    put(w, "timeout_ms", timeout);
     put(w, "status", m.status);
     put(w, "hops", m.hops);
     put(w, "v", std::int32_t{1});
@@ -413,6 +547,17 @@ std::expected<RemoteMessage, std::string> decode_remote(std::span<const std::uin
     std::int32_t kind = -1;
     msgpack::Reader r(bytes);
     const bool ok = abi::detail::read_map(r, [&](std::string_view k) {
+        if (k == "failure") {
+            if (r.peek() == msgpack::Kind::nil) return r.read_nil();
+            auto& route = m.failure.emplace();
+            return abi::detail::read_map(r, [&](std::string_view field) {
+                if (field == "paglet") return msgpack::read_value(r, route.paglet);
+                if (field == "host") return msgpack::read_value(r, route.host);
+                if (field == "handle") return msgpack::read_value(r, route.handle);
+                return r.skip();
+            }) && !route.paglet.empty() && !route.host.empty() && route.handle > 0;
+        }
+        if (k == "residency_marks") return msgpack::read_value(r, m.residency_marks);
         if (k == "kind") return msgpack::read_value(r, kind);
         if (k == "target") return msgpack::read_value(r, m.target);
         if (k == "host") return msgpack::read_value(r, m.host);
@@ -440,12 +585,23 @@ std::expected<RemoteMessage, std::string> decode_remote(std::span<const std::uin
         if (k == "requester_host") return msgpack::read_value(r, m.requester_host);
         if (k == "correlation") return msgpack::read_value(r, m.correlation);
         if (k == "timeout_ms") return msgpack::read_value(r, m.timeout_ms);
+        if (k == "deadline_ms") return msgpack::read_value(r, m.deadline_ms);
         if (k == "status") return msgpack::read_value(r, m.status);
         if (k == "hops") return msgpack::read_value(r, m.hops);
         return r.skip();
     });
-    if (!ok || !r.at_end() || kind < 0 || kind > 2) return std::unexpected(std::string("malformed remote message"));
+    if (!ok || !r.at_end() || kind < 0 || kind > 3 || m.hops < 0 || (m.failure && kind != 0) || m.deadline_ms < 0 || m.timeout_ms < 0) return std::unexpected(std::string("malformed remote message"));
     m.kind = static_cast<RemoteMessage::Kind>(kind);
+    if (m.kind == RemoteMessage::Kind::request && (m.timeout_ms > 0 || m.deadline_ms != 0)) {
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        auto remaining = m.deadline_ms != 0 ? m.deadline_ms - now : m.timeout_ms;
+        if (m.timeout_ms > 0) remaining = std::min(remaining, m.timeout_ms);
+        const auto limit = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::duration::max() / 4).count();
+        m.expires_at = std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(std::clamp<std::int64_t>(remaining, 0, limit));
+    }
     return m;
 }
 

@@ -41,7 +41,9 @@ std::optional<PeerRole> parse_peer_role(std::string_view text);
 
 // The mesh protocol this build speaks (planning/cpp-mesh.md, section 4):
 // channels between peers of different protocol versions are refused.
-inline constexpr std::int64_t mesh_protocol = 1;
+// v2 refuses new unbound owner passports. Saved v1 paglets retain their IDs
+// and may move between upgraded hosts; old hosts cannot vouch for new roots.
+inline constexpr std::int64_t mesh_protocol = 2;
 
 struct Identity {
     mesh::PublicKey key{};

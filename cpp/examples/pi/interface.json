@@ -1,22 +1,23 @@
 {
   "interface": 1,
   "name": "pi",
-  "summary": "Computes digits of pi on the compute slots of the mesh (BBP, then decimal conversion)",
+  "summary": "Computes digits of pi as compute jobs on the hosts of the mesh (BBP, then decimal conversion)",
   "launch": {"type": "none"},
   "messages": [
-    {"name": "start", "kind": "call", "summary": "Starts the job: chunks go to workers on hosts with free slots",
-     "request": "Start", "reply": "Started", "example": {"digits": 1000, "chunk": 60}},
+    {"name": "start", "kind": "call", "summary": "Starts: chunks of digits go out as compute jobs to hosts with free slots",
+     "request": "Start", "reply": "Started", "example": {"digits": 1000, "chunk": 250}},
     {"name": "status", "kind": "call", "summary": "Progress, and the digits computed so far", "request": "none", "reply": "Status"}
   ],
   "types": [
     {"name": "Start", "kind": "record", "fields": [
       {"name": "digits", "type": "i64", "doc": "Hex digits to compute", "default": 1000},
-      {"name": "chunk", "type": "i64", "doc": "Hex digits per worker task", "default": 60},
-      {"name": "max_in_flight", "type": "i64", "doc": "Tasks running at once", "default": 8},
-      {"name": "chunk_timeout_ms", "type": "i64", "doc": "A task without an answer is sent again after", "default": 30000},
-      {"name": "work_ms", "type": "i64", "doc": "Extra work per task (benchmarks)", "default": 0},
+      {"name": "chunk", "type": "i64", "doc": "Hex digits per job", "default": 1000},
+      {"name": "max_in_flight", "type": "i64", "doc": "Jobs running at once", "default": 8},
+      {"name": "chunk_timeout_ms", "type": "i64", "doc": "Wall time of a chunk's job (0: the host's default); a failed chunk goes out again", "default": 0},
+      {"name": "work_ms", "type": "i64", "doc": "Each job takes at least this long (demonstrations)", "default": 0},
       {"name": "decimal", "type": "bool", "doc": "Convert to decimal digits at the end", "default": true},
       {"name": "output_root", "type": "string", "doc": "Root to write the digits to (empty: keep them in memory)"},
-      {"name": "output_path", "type": "string", "doc": "File name below the root", "default": "pi"}]}
+      {"name": "output_path", "type": "string", "doc": "File name below the root", "default": "pi"},
+      {"name": "hosts", "type": "list<string>", "doc": "Where the jobs run: [\"any\"] for hosts with free slots, [] for this host, or host names"}]}
   ]
 }

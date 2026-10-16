@@ -117,7 +117,7 @@ loop until `budget_ms` has passed and counts the operations: three
 xor-shifts, an `and` and an add per integer step; the iteration
 `z = z^2 + c` of a bounded orbit for floating point; `memcpy` between two
 buffers of `memory_mb` MB for memory (4 MB by default, at most 6 MB, so
-both fit the paglet's 16 MB of memory). The results go into `check`, so the
+both fit the paglet's default memory allowance). The results go into `check`, so the
 compiler cannot drop the loops. Then the clone asks `mesh-info` about its
 host (name, operating system, architecture, CPUs):
 
@@ -167,7 +167,10 @@ void cpu_int() {
 <!-- /snippet -->
 
 The disk test writes `disk_mb` MB in blocks of 256 KB as storage keys
-`bench-0`, `bench-1`, ..., reads them back, and removes them. A message
+`bench-0`, `bench-1`, ..., reads them back, and removes them. Reads verify
+the block length, sequence marker and every payload byte; missing or
+corrupt blocks fail the benchmark. The read time includes this validation.
+A message
 holds at most 1 MB, so the blocks stay well below that:
 
 <!-- snippet: cpp/examples/benchmark/benchmark.cpp#disk -->
@@ -277,6 +280,23 @@ struct Ranking {
     std::vector<std::string> errors;
 };
 
+// `jobs`: repeat the same integer kernel locally. Every sample reports
+// its actual execution mode; a host without a compiler stays interpreted.
+struct JobBench {
+    std::int64_t iterations = 3'000'000;
+    std::int64_t samples = 20;
+};
+struct JobSample {
+    bool aot = false;
+    std::int64_t elapsed_ms = 0;
+    std::int64_t queued_ms = 0;
+    std::uint64_t check = 0;
+};
+struct JobComparison {
+    std::vector<JobSample> samples;
+    std::string error;
+};
+
 }  // namespace benchmark_msgs
 ```
 <!-- /snippet -->
@@ -316,12 +336,16 @@ the leases while the clones run.
 
 `cpp/tools/mesh_bench.sh` (see
 [File Courier](file-courier.md#transfer-speed-between-real-machines))
-runs this example on a mesh of real machines on a gigabit LAN (a Mac
+runs this example on a mesh of real machines on the recorded local network (a Mac
 Studio, a Raspberry Pi 4 and a Raspberry Pi Compute Module 5). Each host
 is measured in a compute slot of its own: CPU and memory tests of 1 s
 each, and 8 MB through the paglet's storage. The CPU numbers are of the
-WAMR fast interpreter that runs paglets, not of native code. The last
-run:
+WAMR fast interpreter that runs paglets, not of native code. The table below is the historical 2026-10-12 run.
+
+The older collector labelled every row as holding a compute slot without
+retaining the clone's confirmation. Current runs check the actual `slot`
+flag and fail a controlled sample without it; the historical rows alone
+do not establish that allocation.
 
 <!-- results: live_benchmark -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | integer (Mops) | floating point (Mflops) | memory copying (MB/s) | storage write, 8 MB (MB/s) | storage read, 8 MB (MB/s) |
@@ -350,9 +374,739 @@ budget of 30 ms per test and 2 MB for memory and disk, it checks that:
 <!-- results: benchmark -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts measured, each in a compute slot | integer speed of the fastest host (fast interpreter) (Mops) | floating point of the fastest host (Mflops) | memory copying of the fastest host (MB/s) |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Mesh Benchmark measures every host in a compute slot and ranks them | in-process | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 3 | 258.26 | 383.61 | 15135.63 |
-| example: Mesh Benchmark measures every host in a compute slot and ranks them | worker processes | passed | 0.3 s | Darwin arm64, Release build | 2026-10-12 | 3 | 348.46 | 443.28 | 35466.67 |
+| example: Mesh Benchmark measures every host in a compute slot and ranks them | in-process | passed | 0.3 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 275.87 | 474.27 | 14297.6 |
+| example: Mesh Benchmark measures every host in a compute slot and ranks them | worker processes | passed | 0.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 355.64 | 475.76 | 31251.04 |
 <!-- /results -->
 
 The test hosts share one machine and use the in-memory transport between
 hosts, so the three results describe the same CPU.
+
+## Interpreter and AOT jobs
+
+The `jobs` message runs the same integer kernel repeatedly in separate
+compute-job instances on the current host. It accepts `iterations`
+(default 3,000,000) and `samples` (default 20, maximum 100), and replies
+with samples containing `aot`, `elapsed_ms`, `queued_ms` and a checksum.
+Each checksum must match; `error` reports a mismatch or execution failure.
+
+```bash
+paglets-host remote call PAGLET jobs '{"iterations":3000000,"samples":20}'
+```
+
+<!-- snippet: cpp/examples/benchmark/benchmark.cpp#jobs_kernel -->
+Source: [`cpp/examples/benchmark/benchmark.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/benchmark/benchmark.cpp)
+
+```cpp
+void integer_job(paglets::compute::JobContext& job) {
+    std::int64_t iterations = 0;
+    if (!job.input(iterations) || iterations < 1) return job.fail(paglets::abi::invalid_argument);
+    std::uint64_t x = 88172645463325252ull;
+    for (std::int64_t i = 0; i < iterations; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+    }
+    (void)job.output(x);
+}
+PAGLETS_JOB(integer_job)
+```
+<!-- /snippet -->
+
+A host with a compiler may switch from interpreter to AOT during the
+samples. Compare only samples whose `aot` flags identify the intended
+modes; compilation time and queue time are not kernel time. Increase the
+sample count or repeat the command if compilation is not ready. With
+`serve --no-aot` every sample remains interpreted. Use the same input and
+record the host build for a live comparison.
+
+Run the jobs comparison on each physical host with the `jobs` step of
+`cpp/tools/mesh_bench.sh`. It writes `live_jobs.json` and preserves the raw
+samples. The comparison waits up to five minutes per host for compiled jobs;
+missing or failed AOT compilation makes the comparison fail. Compiled jobs
+use explicit software bounds checks on every platform, including hosts whose
+interpreted paglets use hardware checks. This avoids a reproducible memory-growth
+failure in the guard-page AOT path. Compiler options are part of the cache key.
+
+The driver also preserves each host's `--info` output. The first samples can be interpreted
+while the module compiles; later samples report their actual AOT mode. A
+host without the compiler produces interpreter samples only and fails the comparison. Compare the
+same iteration count and report both elapsed and queued time.
+
+```bash
+cpp/tools/mesh_bench.sh --remote pi=klukas@rpi4:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
+  --remote uconsole=uconsole:/home/klukas/paglets-live/cpp/build/linux-gcc16/host \
+  --steps "jobs pi" --slots 2 --pi-digits 6000 --sizes "1"
+```
+
+On a Mac, set `TMPDIR` to a unique directory under a mounted
+`/Volumes/S8T/tmp` or `/Volumes/PRO-BLADE/tmp` before running the script.
+`--results-dir DIR` preserves a separate run without replacing the published
+results. `--jobs-iterations` and `--jobs-samples` select the kernel size and
+sample count. `--pi-work-ms` adds a minimum chunk hold for scheduling
+experiments; its default is zero and any nonzero hold must be reported with
+Pi timings.
+
+### Recorded compute-job run
+
+The October 2026 run repeated 30 million integer iterations per job on a
+Mac Studio, Raspberry Pi 4 and Compute Module 5. Each host has at least
+three samples in each mode, including a complete warm AOT batch. The
+checksum agrees across every sample and every host. Elapsed time includes
+instance setup and worker startup; queued time is separate. Cold interpreter
+samples overlap background compilation, so these figures describe the
+recorded job execution rather than isolated kernel speed. The Mac uses
+hardware bounds checks; the Pis use software checks. Compiler versions,
+binary/guest fingerprints and raw samples are preserved in
+`planning/validation/cpp-jobs-live-20261014.json` and its host records.
+
+## Timing moves
+
+`cpp/tools/mesh_bench.sh --steps move` moves the counter between every
+ordered pair of physical hosts. The default ballast sizes are 0, 1, 4 and
+16 MB, with ten samples per size/direction. The script uses a 32 MB paglet
+cap because 16 MB of ballast also needs space for the SDK and allocator.
+Use `--move-sizes`, `--move-samples` and `--move-memory-mb` to change these.
+
+Before each outbound trial it clears both hosts' image-page caches; modules
+remain cached after their first use. The return move benefits from retained
+pages. Ballast is uniformly filled with a nonzero byte, so compressed bytes
+are reported alongside logical image size and pages sent/reused.
+
+The recorded phases are capture, source processing/transfer until the
+destination is prepared, destination host-record preparation, activation/restore and commit. The
+source's capture-to-arrival receipt ends after the guest's `on_arrived`
+returns and includes the acknowledgement's network return. CLI dispatch
+plus a confirmed destination call is timed separately. Local monotonic
+durations are used; timestamps from different hosts are never subtracted.
+Results preserve medians/ranges and every raw sample in `live_move.json`
+and `raw/move-samples.json`. Host compiler, build and WAMR configurations
+are collected from each executable, rather than copied from the Mac.
+
+The final three-host campaign on 2026-10-15 completed 480 moves: all six
+ordered pairs, four image sizes, ten cold/return samples per group. Every
+arrival preserved the counter and memory. Full phase medians/ranges are in
+`docs/results/live_move.json`, with raw evidence and fingerprints in
+`planning/validation/cpp-three-host-20261015.json`. A later run on the AOT
+bounds correction passed twelve control moves, both job modes on all hosts,
+and 100,000-digit Pi with decimal-prefix verification. Its separate topics
+are named `live_three_host_*`; the earlier two-host data below is historical.
+
+The two-host campaign on 2026-10-15 completed 160 moves between the Mac
+and uconsole. Each size and direction has ten cold/return pairs, with a
+32 MB host limit and uniform nonzero ballast. This ballast compresses
+well; the experiment measures movement and page reuse, rather than bulk
+network throughput. Arrival time includes the acknowledgement's return
+trip; CLI confirmation is recorded separately. The source Mac used
+RelWithDebInfo and the uconsole Release, with their actual compiler and
+WAMR configuration recorded in the validation receipt. This first campaign
+measured host-record preparation separately; instance restoration is
+included in acknowledgement time. The follow-up collector reports
+activation/restore as its own destination measurement.
+
+<!-- results: live_move_two_host -->
+| Test | Mode | Outcome | Duration | Platform | Recorded |
+|---|---|---|---|---|---|
+| mac → uconsole, 0 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 2.3 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 0 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 2.3 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 1 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 2.6 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 1 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 2.4 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 4 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 3.3 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 4 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 2.9 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 16 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 7.6 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| mac → uconsole, 16 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 5.8 s | Darwin arm64, Mac13,1, 10 CPUs → Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, mac=RelWithDebInfo; uconsole=Release build | 2026-10-15 |
+| uconsole → mac, 0 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 2.3 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 0 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 2.3 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 1 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 2.7 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 1 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 2.6 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 4 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 3.6 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 4 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 3.1 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 16 MB ballast, cold pages | LAN, worker processes; uniform nonzero ballast | passed | 8.3 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+| uconsole → mac, 16 MB ballast, return | LAN, worker processes; uniform nonzero ballast | passed | 6.7 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs → Darwin arm64, Mac13,1, 10 CPUs, uconsole=Release; mac=RelWithDebInfo build | 2026-10-15 |
+
+mac → uconsole, 0 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 1.97 ms |
+| capture, minimum | 1.86 ms |
+| capture, maximum | 2.22 ms |
+| transfer and source control, excluding destination prepare, median | 6.18 ms |
+| transfer and source control, excluding destination prepare, minimum | 5.92 ms |
+| transfer and source control, excluding destination prepare, maximum | 15.28 ms |
+| destination host-record preparation, median | 0.06 ms |
+| destination host-record preparation, minimum | 0.06 ms |
+| destination host-record preparation, maximum | 0.09 ms |
+| destination commit, median | 0.29 ms |
+| destination commit, minimum | 0.24 ms |
+| destination commit, maximum | 0.32 ms |
+| capture to arrival-hook acknowledgement, median | 13.54 ms |
+| capture to arrival-hook acknowledgement, minimum | 13.23 ms |
+| capture to arrival-hook acknowledgement, maximum | 39.33 ms |
+| CLI dispatch plus confirmed destination call, median | 227.24 ms |
+| CLI dispatch plus confirmed destination call, minimum | 223.65 ms |
+| CLI dispatch plus confirmed destination call, maximum | 238.44 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 128 KB |
+| linear memory, minimum | 128 KB |
+| linear memory, maximum | 128 KB |
+| compressed page bytes, median | 2568 bytes |
+| compressed page bytes, minimum | 2566 bytes |
+| compressed page bytes, maximum | 2570 bytes |
+
+mac → uconsole, 0 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 1.99 ms |
+| capture, minimum | 1.93 ms |
+| capture, maximum | 3.88 ms |
+| transfer and source control, excluding destination prepare, median | 6.21 ms |
+| transfer and source control, excluding destination prepare, minimum | 4.93 ms |
+| transfer and source control, excluding destination prepare, maximum | 7.46 ms |
+| destination host-record preparation, median | 0.07 ms |
+| destination host-record preparation, minimum | 0.05 ms |
+| destination host-record preparation, maximum | 0.07 ms |
+| destination commit, median | 0.29 ms |
+| destination commit, minimum | 0.25 ms |
+| destination commit, maximum | 1.38 ms |
+| capture to arrival-hook acknowledgement, median | 13.78 ms |
+| capture to arrival-hook acknowledgement, minimum | 11.54 ms |
+| capture to arrival-hook acknowledgement, maximum | 16.87 ms |
+| CLI dispatch plus confirmed destination call, median | 230.16 ms |
+| CLI dispatch plus confirmed destination call, minimum | 223.11 ms |
+| CLI dispatch plus confirmed destination call, maximum | 238.85 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 128 KB |
+| linear memory, minimum | 128 KB |
+| linear memory, maximum | 128 KB |
+| compressed page bytes, median | 2956 bytes |
+| compressed page bytes, minimum | 2954 bytes |
+| compressed page bytes, maximum | 2957 bytes |
+
+mac → uconsole, 1 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 17.94 ms |
+| capture, minimum | 17.46 ms |
+| capture, maximum | 18.53 ms |
+| transfer and source control, excluding destination prepare, median | 22.21 ms |
+| transfer and source control, excluding destination prepare, minimum | 21.04 ms |
+| transfer and source control, excluding destination prepare, maximum | 22.38 ms |
+| destination host-record preparation, median | 0.07 ms |
+| destination host-record preparation, minimum | 0.07 ms |
+| destination host-record preparation, maximum | 0.08 ms |
+| destination commit, median | 1.52 ms |
+| destination commit, minimum | 1.47 ms |
+| destination commit, maximum | 1.67 ms |
+| capture to arrival-hook acknowledgement, median | 64.62 ms |
+| capture to arrival-hook acknowledgement, minimum | 62.33 ms |
+| capture to arrival-hook acknowledgement, maximum | 65.85 ms |
+| CLI dispatch plus confirmed destination call, median | 257.07 ms |
+| CLI dispatch plus confirmed destination call, minimum | 253.01 ms |
+| CLI dispatch plus confirmed destination call, maximum | 265.49 ms |
+| pages sent, median | 18 |
+| pages sent, minimum | 18 |
+| pages sent, maximum | 18 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 1152 KB |
+| linear memory, minimum | 1152 KB |
+| linear memory, maximum | 1152 KB |
+| compressed page bytes, median | 3404 bytes |
+| compressed page bytes, minimum | 3403 bytes |
+| compressed page bytes, maximum | 3407 bytes |
+
+mac → uconsole, 1 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 17.84 ms |
+| capture, minimum | 17.53 ms |
+| capture, maximum | 18.57 ms |
+| transfer and source control, excluding destination prepare, median | 6.6 ms |
+| transfer and source control, excluding destination prepare, minimum | 6.08 ms |
+| transfer and source control, excluding destination prepare, maximum | 6.71 ms |
+| destination host-record preparation, median | 0.07 ms |
+| destination host-record preparation, minimum | 0.07 ms |
+| destination host-record preparation, maximum | 0.08 ms |
+| destination commit, median | 1.34 ms |
+| destination commit, minimum | 1.3 ms |
+| destination commit, maximum | 1.43 ms |
+| capture to arrival-hook acknowledgement, median | 48.87 ms |
+| capture to arrival-hook acknowledgement, minimum | 45.77 ms |
+| capture to arrival-hook acknowledgement, maximum | 51.88 ms |
+| CLI dispatch plus confirmed destination call, median | 243.03 ms |
+| CLI dispatch plus confirmed destination call, minimum | 237.62 ms |
+| CLI dispatch plus confirmed destination call, maximum | 252.56 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 16 |
+| pages reused, minimum | 16 |
+| pages reused, maximum | 16 |
+| linear memory, median | 1152 KB |
+| linear memory, minimum | 1152 KB |
+| linear memory, maximum | 1152 KB |
+| compressed page bytes, median | 2942 bytes |
+| compressed page bytes, minimum | 2942 bytes |
+| compressed page bytes, maximum | 2943 bytes |
+
+mac → uconsole, 4 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 65.41 ms |
+| capture, minimum | 63.69 ms |
+| capture, maximum | 68.47 ms |
+| transfer and source control, excluding destination prepare, median | 46.44 ms |
+| transfer and source control, excluding destination prepare, minimum | 45.15 ms |
+| transfer and source control, excluding destination prepare, maximum | 71.02 ms |
+| destination host-record preparation, median | 0.06 ms |
+| destination host-record preparation, minimum | 0.06 ms |
+| destination host-record preparation, maximum | 0.08 ms |
+| destination commit, median | 4.7 ms |
+| destination commit, minimum | 4.27 ms |
+| destination commit, maximum | 5.27 ms |
+| capture to arrival-hook acknowledgement, median | 169.31 ms |
+| capture to arrival-hook acknowledgement, minimum | 167.06 ms |
+| capture to arrival-hook acknowledgement, maximum | 209.15 ms |
+| CLI dispatch plus confirmed destination call, median | 330.63 ms |
+| CLI dispatch plus confirmed destination call, minimum | 300.72 ms |
+| CLI dispatch plus confirmed destination call, maximum | 355.89 ms |
+| pages sent, median | 66 |
+| pages sent, minimum | 66 |
+| pages sent, maximum | 66 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 4224 KB |
+| linear memory, minimum | 4224 KB |
+| linear memory, maximum | 4224 KB |
+| compressed page bytes, median | 4356 bytes |
+| compressed page bytes, minimum | 4354 bytes |
+| compressed page bytes, maximum | 4357 bytes |
+
+mac → uconsole, 4 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 66.25 ms |
+| capture, minimum | 65.27 ms |
+| capture, maximum | 71.38 ms |
+| transfer and source control, excluding destination prepare, median | 6.17 ms |
+| transfer and source control, excluding destination prepare, minimum | 6.08 ms |
+| transfer and source control, excluding destination prepare, maximum | 9 ms |
+| destination host-record preparation, median | 0.05 ms |
+| destination host-record preparation, minimum | 0.05 ms |
+| destination host-record preparation, maximum | 0.06 ms |
+| destination commit, median | 4.23 ms |
+| destination commit, minimum | 4.16 ms |
+| destination commit, maximum | 4.6 ms |
+| capture to arrival-hook acknowledgement, median | 127.53 ms |
+| capture to arrival-hook acknowledgement, minimum | 126.21 ms |
+| capture to arrival-hook acknowledgement, maximum | 134.63 ms |
+| CLI dispatch plus confirmed destination call, median | 292.57 ms |
+| CLI dispatch plus confirmed destination call, minimum | 286.76 ms |
+| CLI dispatch plus confirmed destination call, maximum | 303.07 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 64 |
+| pages reused, minimum | 64 |
+| pages reused, maximum | 64 |
+| linear memory, median | 4224 KB |
+| linear memory, minimum | 4224 KB |
+| linear memory, maximum | 4224 KB |
+| compressed page bytes, median | 2934 bytes |
+| compressed page bytes, minimum | 2932 bytes |
+| compressed page bytes, maximum | 2934 bytes |
+
+mac → uconsole, 16 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 258.87 ms |
+| capture, minimum | 255.09 ms |
+| capture, maximum | 265.62 ms |
+| transfer and source control, excluding destination prepare, median | 182.4 ms |
+| transfer and source control, excluding destination prepare, minimum | 164.63 ms |
+| transfer and source control, excluding destination prepare, maximum | 203.68 ms |
+| destination host-record preparation, median | 0.06 ms |
+| destination host-record preparation, minimum | 0.06 ms |
+| destination host-record preparation, maximum | 0.07 ms |
+| destination commit, median | 17.08 ms |
+| destination commit, minimum | 15.86 ms |
+| destination commit, maximum | 18.26 ms |
+| capture to arrival-hook acknowledgement, median | 656.26 ms |
+| capture to arrival-hook acknowledgement, minimum | 632.27 ms |
+| capture to arrival-hook acknowledgement, maximum | 678.53 ms |
+| CLI dispatch plus confirmed destination call, median | 767.1 ms |
+| CLI dispatch plus confirmed destination call, minimum | 736.01 ms |
+| CLI dispatch plus confirmed destination call, maximum | 787.44 ms |
+| pages sent, median | 258 |
+| pages sent, minimum | 258 |
+| pages sent, maximum | 258 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 16512 KB |
+| linear memory, minimum | 16512 KB |
+| linear memory, maximum | 16512 KB |
+| compressed page bytes, median | 8192.5 bytes |
+| compressed page bytes, minimum | 8192 bytes |
+| compressed page bytes, maximum | 8197 bytes |
+
+mac → uconsole, 16 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 257.53 ms |
+| capture, minimum | 251.04 ms |
+| capture, maximum | 263.04 ms |
+| transfer and source control, excluding destination prepare, median | 10.11 ms |
+| transfer and source control, excluding destination prepare, minimum | 9.76 ms |
+| transfer and source control, excluding destination prepare, maximum | 12.2 ms |
+| destination host-record preparation, median | 0.06 ms |
+| destination host-record preparation, minimum | 0.05 ms |
+| destination host-record preparation, maximum | 0.07 ms |
+| destination commit, median | 16.9 ms |
+| destination commit, minimum | 15.43 ms |
+| destination commit, maximum | 17.5 ms |
+| capture to arrival-hook acknowledgement, median | 479.72 ms |
+| capture to arrival-hook acknowledgement, minimum | 472.88 ms |
+| capture to arrival-hook acknowledgement, maximum | 490.02 ms |
+| CLI dispatch plus confirmed destination call, median | 587.2 ms |
+| CLI dispatch plus confirmed destination call, minimum | 567.41 ms |
+| CLI dispatch plus confirmed destination call, maximum | 594.45 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 256 |
+| pages reused, minimum | 256 |
+| pages reused, maximum | 256 |
+| linear memory, median | 16512 KB |
+| linear memory, minimum | 16512 KB |
+| linear memory, maximum | 16512 KB |
+| compressed page bytes, median | 2929 bytes |
+| compressed page bytes, minimum | 2928 bytes |
+| compressed page bytes, maximum | 2931 bytes |
+
+uconsole → mac, 0 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 4 ms |
+| capture, minimum | 2.57 ms |
+| capture, maximum | 4.17 ms |
+| transfer and source control, excluding destination prepare, median | 5.42 ms |
+| transfer and source control, excluding destination prepare, minimum | 4.57 ms |
+| transfer and source control, excluding destination prepare, maximum | 8.44 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.03 ms |
+| destination host-record preparation, maximum | 0.09 ms |
+| destination commit, median | 0.52 ms |
+| destination commit, minimum | 0.41 ms |
+| destination commit, maximum | 1.65 ms |
+| capture to arrival-hook acknowledgement, median | 14.28 ms |
+| capture to arrival-hook acknowledgement, minimum | 11.71 ms |
+| capture to arrival-hook acknowledgement, maximum | 17.15 ms |
+| CLI dispatch plus confirmed destination call, median | 232.38 ms |
+| CLI dispatch plus confirmed destination call, minimum | 221.99 ms |
+| CLI dispatch plus confirmed destination call, maximum | 241.5 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 128 KB |
+| linear memory, minimum | 128 KB |
+| linear memory, maximum | 128 KB |
+| compressed page bytes, median | 2557 bytes |
+| compressed page bytes, minimum | 2549 bytes |
+| compressed page bytes, maximum | 2557 bytes |
+
+uconsole → mac, 0 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 4.02 ms |
+| capture, minimum | 3.98 ms |
+| capture, maximum | 4.07 ms |
+| transfer and source control, excluding destination prepare, median | 5.34 ms |
+| transfer and source control, excluding destination prepare, minimum | 4.97 ms |
+| transfer and source control, excluding destination prepare, maximum | 5.77 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.03 ms |
+| destination host-record preparation, maximum | 0.04 ms |
+| destination commit, median | 0.74 ms |
+| destination commit, minimum | 0.42 ms |
+| destination commit, maximum | 2.44 ms |
+| capture to arrival-hook acknowledgement, median | 14.21 ms |
+| capture to arrival-hook acknowledgement, minimum | 12.97 ms |
+| capture to arrival-hook acknowledgement, maximum | 16.43 ms |
+| CLI dispatch plus confirmed destination call, median | 228.85 ms |
+| CLI dispatch plus confirmed destination call, minimum | 225.75 ms |
+| CLI dispatch plus confirmed destination call, maximum | 245.74 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 128 KB |
+| linear memory, minimum | 128 KB |
+| linear memory, maximum | 128 KB |
+| compressed page bytes, median | 2963 bytes |
+| compressed page bytes, minimum | 2962 bytes |
+| compressed page bytes, maximum | 2970 bytes |
+
+uconsole → mac, 1 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 36.19 ms |
+| capture, minimum | 34.93 ms |
+| capture, maximum | 36.83 ms |
+| transfer and source control, excluding destination prepare, median | 14.75 ms |
+| transfer and source control, excluding destination prepare, minimum | 14.14 ms |
+| transfer and source control, excluding destination prepare, maximum | 17.43 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.04 ms |
+| destination host-record preparation, maximum | 0.07 ms |
+| destination commit, median | 6.49 ms |
+| destination commit, minimum | 0.65 ms |
+| destination commit, maximum | 7.21 ms |
+| capture to arrival-hook acknowledgement, median | 69.68 ms |
+| capture to arrival-hook acknowledgement, minimum | 62.25 ms |
+| capture to arrival-hook acknowledgement, maximum | 74.95 ms |
+| CLI dispatch plus confirmed destination call, median | 273.51 ms |
+| CLI dispatch plus confirmed destination call, minimum | 264.57 ms |
+| CLI dispatch plus confirmed destination call, maximum | 280.12 ms |
+| pages sent, median | 18 |
+| pages sent, minimum | 18 |
+| pages sent, maximum | 18 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 1152 KB |
+| linear memory, minimum | 1152 KB |
+| linear memory, maximum | 1152 KB |
+| compressed page bytes, median | 3403 bytes |
+| compressed page bytes, minimum | 3402 bytes |
+| compressed page bytes, maximum | 3403 bytes |
+
+uconsole → mac, 1 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 36.24 ms |
+| capture, minimum | 34.28 ms |
+| capture, maximum | 36.56 ms |
+| transfer and source control, excluding destination prepare, median | 6.09 ms |
+| transfer and source control, excluding destination prepare, minimum | 5.54 ms |
+| transfer and source control, excluding destination prepare, maximum | 8.92 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.03 ms |
+| destination host-record preparation, maximum | 0.05 ms |
+| destination commit, median | 1.09 ms |
+| destination commit, minimum | 0.65 ms |
+| destination commit, maximum | 6.75 ms |
+| capture to arrival-hook acknowledgement, median | 57.12 ms |
+| capture to arrival-hook acknowledgement, minimum | 53.81 ms |
+| capture to arrival-hook acknowledgement, maximum | 63.69 ms |
+| CLI dispatch plus confirmed destination call, median | 259.84 ms |
+| CLI dispatch plus confirmed destination call, minimum | 255.34 ms |
+| CLI dispatch plus confirmed destination call, maximum | 269.92 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 16 |
+| pages reused, minimum | 16 |
+| pages reused, maximum | 16 |
+| linear memory, median | 1152 KB |
+| linear memory, minimum | 1152 KB |
+| linear memory, maximum | 1152 KB |
+| compressed page bytes, median | 2948.5 bytes |
+| compressed page bytes, minimum | 2947 bytes |
+| compressed page bytes, maximum | 2950 bytes |
+
+uconsole → mac, 4 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 85.95 ms |
+| capture, minimum | 85.48 ms |
+| capture, maximum | 117.81 ms |
+| transfer and source control, excluding destination prepare, median | 40.6 ms |
+| transfer and source control, excluding destination prepare, minimum | 39.19 ms |
+| transfer and source control, excluding destination prepare, maximum | 58.15 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.04 ms |
+| destination host-record preparation, maximum | 0.06 ms |
+| destination commit, median | 13.49 ms |
+| destination commit, minimum | 12.49 ms |
+| destination commit, maximum | 24.49 ms |
+| capture to arrival-hook acknowledgement, median | 183.21 ms |
+| capture to arrival-hook acknowledgement, minimum | 176.25 ms |
+| capture to arrival-hook acknowledgement, maximum | 231.99 ms |
+| CLI dispatch plus confirmed destination call, median | 349.07 ms |
+| CLI dispatch plus confirmed destination call, minimum | 339.36 ms |
+| CLI dispatch plus confirmed destination call, maximum | 405.27 ms |
+| pages sent, median | 66 |
+| pages sent, minimum | 66 |
+| pages sent, maximum | 66 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 4224 KB |
+| linear memory, minimum | 4224 KB |
+| linear memory, maximum | 4224 KB |
+| compressed page bytes, median | 4367 bytes |
+| compressed page bytes, minimum | 4365 bytes |
+| compressed page bytes, maximum | 4367 bytes |
+
+uconsole → mac, 4 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 87.17 ms |
+| capture, minimum | 86.51 ms |
+| capture, maximum | 87.99 ms |
+| transfer and source control, excluding destination prepare, median | 5.62 ms |
+| transfer and source control, excluding destination prepare, minimum | 4.99 ms |
+| transfer and source control, excluding destination prepare, maximum | 6.44 ms |
+| destination host-record preparation, median | 0.04 ms |
+| destination host-record preparation, minimum | 0.03 ms |
+| destination host-record preparation, maximum | 0.06 ms |
+| destination commit, median | 13.32 ms |
+| destination commit, minimum | 12.52 ms |
+| destination commit, maximum | 25.25 ms |
+| capture to arrival-hook acknowledgement, median | 145.88 ms |
+| capture to arrival-hook acknowledgement, minimum | 141.36 ms |
+| capture to arrival-hook acknowledgement, maximum | 159.04 ms |
+| CLI dispatch plus confirmed destination call, median | 313.83 ms |
+| CLI dispatch plus confirmed destination call, minimum | 291.95 ms |
+| CLI dispatch plus confirmed destination call, maximum | 321.6 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 64 |
+| pages reused, minimum | 64 |
+| pages reused, maximum | 64 |
+| linear memory, median | 4224 KB |
+| linear memory, minimum | 4224 KB |
+| linear memory, maximum | 4224 KB |
+| compressed page bytes, median | 2949 bytes |
+| compressed page bytes, minimum | 2948 bytes |
+| compressed page bytes, maximum | 2951 bytes |
+
+uconsole → mac, 16 MB ballast, cold pages:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 356.76 ms |
+| capture, minimum | 338.08 ms |
+| capture, maximum | 382.28 ms |
+| transfer and source control, excluding destination prepare, median | 149.02 ms |
+| transfer and source control, excluding destination prepare, minimum | 142.1 ms |
+| transfer and source control, excluding destination prepare, maximum | 156.02 ms |
+| destination host-record preparation, median | 0.05 ms |
+| destination host-record preparation, minimum | 0.04 ms |
+| destination host-record preparation, maximum | 0.07 ms |
+| destination commit, median | 77.83 ms |
+| destination commit, minimum | 45.78 ms |
+| destination commit, maximum | 118.8 ms |
+| capture to arrival-hook acknowledgement, median | 725.66 ms |
+| capture to arrival-hook acknowledgement, minimum | 663.03 ms |
+| capture to arrival-hook acknowledgement, maximum | 780.33 ms |
+| CLI dispatch plus confirmed destination call, median | 834.54 ms |
+| CLI dispatch plus confirmed destination call, minimum | 769.89 ms |
+| CLI dispatch plus confirmed destination call, maximum | 894.22 ms |
+| pages sent, median | 258 |
+| pages sent, minimum | 258 |
+| pages sent, maximum | 258 |
+| pages reused, median | 0 |
+| pages reused, minimum | 0 |
+| pages reused, maximum | 0 |
+| linear memory, median | 16512 KB |
+| linear memory, minimum | 16512 KB |
+| linear memory, maximum | 16512 KB |
+| compressed page bytes, median | 8207 bytes |
+| compressed page bytes, minimum | 8204 bytes |
+| compressed page bytes, maximum | 8207 bytes |
+
+uconsole → mac, 16 MB ballast, return:
+
+| Measured | LAN, worker processes; uniform nonzero ballast |
+|---|---|
+| samples | 10 |
+| capture, median | 339.92 ms |
+| capture, minimum | 336.75 ms |
+| capture, maximum | 343.67 ms |
+| transfer and source control, excluding destination prepare, median | 7.98 ms |
+| transfer and source control, excluding destination prepare, minimum | 6.63 ms |
+| transfer and source control, excluding destination prepare, maximum | 11.42 ms |
+| destination host-record preparation, median | 0.08 ms |
+| destination host-record preparation, minimum | 0.04 ms |
+| destination host-record preparation, maximum | 0.15 ms |
+| destination commit, median | 50.17 ms |
+| destination commit, minimum | 45.85 ms |
+| destination commit, maximum | 126.02 ms |
+| capture to arrival-hook acknowledgement, median | 539.34 ms |
+| capture to arrival-hook acknowledgement, minimum | 528.21 ms |
+| capture to arrival-hook acknowledgement, maximum | 616.3 ms |
+| CLI dispatch plus confirmed destination call, median | 652.17 ms |
+| CLI dispatch plus confirmed destination call, minimum | 634.51 ms |
+| CLI dispatch plus confirmed destination call, maximum | 727.74 ms |
+| pages sent, median | 2 |
+| pages sent, minimum | 2 |
+| pages sent, maximum | 2 |
+| pages reused, median | 256 |
+| pages reused, minimum | 256 |
+| pages reused, maximum | 256 |
+| linear memory, median | 16512 KB |
+| linear memory, minimum | 16512 KB |
+| linear memory, maximum | 16512 KB |
+| compressed page bytes, median | 2944 bytes |
+| compressed page bytes, minimum | 2941 bytes |
+| compressed page bytes, maximum | 2944 bytes |
+<!-- /results -->
+
+<!-- results: live_jobs -->
+| Test | Mode | Outcome | Duration | Platform | Recorded | samples | median elapsed (ms) | elapsed range (ms) | median queued (ms) |
+|---|---|---|---|---|---|---|---|---|---|
+| mac | AOT job | passed | 0.1 s | Darwin arm64, Mac13,1, 10 CPUs, RelWithDebInfo build | 2026-10-14 | 4 | 84.5 | 83 to 86 | 0.0 |
+| mac | interpreter job | passed | 0.4 s | Darwin arm64, Mac13,1, 10 CPUs, RelWithDebInfo build | 2026-10-14 | 5 | 438 | 433 to 448 | 0 |
+| pi | AOT job | passed | 0.1 s | Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs, Release build | 2026-10-14 | 4 | 116.0 | 116 to 117 | 0.0 |
+| pi | interpreter job | passed | 1.6 s | Linux aarch64, Raspberry Pi 4 Model B Rev 1.4, 4 CPUs, Release build | 2026-10-14 | 20 | 1558.5 | 1508 to 2929 | 0.0 |
+| uconsole | AOT job | passed | 0.0 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, Release build | 2026-10-14 | 4 | 45.0 | 45 to 45 | 0.0 |
+| uconsole | interpreter job | passed | 0.6 s | Linux aarch64, Raspberry Pi Compute Module 5 Rev 1.0, 4 CPUs, Release build | 2026-10-14 | 17 | 635 | 588 to 646 | 0 |
+<!-- /results -->

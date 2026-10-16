@@ -12,6 +12,8 @@
 
 #include "benchmark.schema.gen.hpp"
 
+#include <paglets/compute.hpp>
+
 #include <paglets/patterns/fanout.hpp>
 #include <paglets/patterns/services.hpp>
 #include <paglets/services/compute_slots.gen.hpp>
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -29,6 +32,21 @@ using namespace benchmark_msgs;
 namespace svc = paglets::services;
 namespace pt = paglets::patterns;
 using paglets::Message;
+
+// --8<-- [start:jobs_kernel]
+void integer_job(paglets::compute::JobContext& job) {
+    std::int64_t iterations = 0;
+    if (!job.input(iterations) || iterations < 1) return job.fail(paglets::abi::invalid_argument);
+    std::uint64_t x = 88172645463325252ull;
+    for (std::int64_t i = 0; i < iterations; ++i) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+    }
+    (void)job.output(x);
+}
+PAGLETS_JOB(integer_job)
+// --8<-- [end:jobs_kernel]
 
 constexpr std::size_t mb = 1024 * 1024;
 constexpr std::size_t block = 256 * 1024;  // a message holds at most 1 MB
@@ -44,6 +62,14 @@ double seconds_since(std::int64_t start_ns) {
 class Benchmark : public paglets::Paglet {
 public:
     Benchmark() {
+        router().on<JobBench>("jobs", [](const JobBench& request, Message& m) {
+            if (request.iterations < 1 || request.iterations > 100'000'000 || request.samples < 1 || request.samples > 100) {
+                (void)m.reply(JobComparison{{}, "iterations or samples out of range"});
+                return;
+            }
+            auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
+            compare_jobs(request, reply, std::make_shared<JobComparison>());
+        });
         router().on<Bench>("start", [this](const Bench& b, Message& m) { start(b, m); });
         router().on("ranking", [this](Message& m) { (void)m.reply(ranking_); });
         router().on<svc::compute_slots::Decision>("compute.granted",
@@ -85,6 +111,33 @@ public:
     }
 
 private:
+    // --8<-- [start:jobs_compare]
+    static void compare_jobs(JobBench request, std::shared_ptr<paglets::Capability> reply,
+                             std::shared_ptr<JobComparison> comparison) {
+        auto submitted = paglets::compute::submit("integer_job", request.iterations,
+            [request, reply, comparison](paglets::Result<paglets::compute::Output> result, Message&) {
+                if (!result) {
+                    comparison->error = std::string(paglets::abi::error_name(result.error()));
+                } else {
+                    std::uint64_t check = 0;
+                    if (!result->decode(check)) comparison->error = "malformed job output";
+                    else if (!comparison->samples.empty() && check != comparison->samples.front().check)
+                        comparison->error = "job result changed between execution modes";
+                    else comparison->samples.push_back({result->info.aot, result->info.elapsed_ms,
+                                                        result->info.queued_ms, check});
+                }
+                if (!comparison->error.empty() || comparison->samples.size() >= static_cast<std::size_t>(request.samples)) {
+                    (void)paglets::reply_to(*reply, *comparison);
+                } else {
+                    compare_jobs(request, reply, comparison);
+                }
+            });
+        if (!submitted) {
+            comparison->error = std::string(paglets::abi::error_name(submitted.error()));
+            (void)paglets::reply_to(*reply, *comparison);
+        }
+    }
+    // --8<-- [end:jobs_compare]
     // -- the parent -----------------------------------------------------------------------
 
     void start(const Bench& b, Message& m) {
@@ -201,7 +254,7 @@ private:
     }
 
     void memory() {
-        // Two buffers: together they must fit the paglet's memory (16 MB).
+        // Two buffers: together they must fit the paglet's memory allowance.
         const std::size_t size = static_cast<std::size_t>(std::clamp<std::int64_t>(bench_.memory_mb, 1, 6)) * mb;
         std::vector<std::uint8_t> a(size, 1), b(size, 2);
         const std::int64_t budget = bench_.budget_ms * 1'000'000;
@@ -266,6 +319,13 @@ private:
                                [this, i](paglets::Result<svc::storage::GetReply> r, Message&) {
                                    if (!r) {
                                        result_.error = pt::error_text("storage get", r.error());
+                                       return clean_up(0);
+                                   }
+                                   if (!r->found || r->value.size() != block ||
+                                       r->value.front() != static_cast<std::uint8_t>(i) ||
+                                       !std::ranges::all_of(r->value | std::views::drop(1),
+                                           [](std::uint8_t byte) { return byte == 0x5a; })) {
+                                       result_.error = "storage get: missing or corrupted benchmark block";
                                        return clean_up(0);
                                    }
                                    read_block(i + 1);

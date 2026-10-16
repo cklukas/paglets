@@ -12,6 +12,11 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <cstdlib>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace ipc = paglets::ipc;
 
@@ -45,6 +50,22 @@ std::vector<std::uint8_t> pattern(std::size_t n, std::uint8_t seed) {
 }
 
 }  // namespace
+
+PAGLETS_TEST("ipc rings: a full default paglet image leaves room for its metadata") {
+    auto p = make_pair(1024 * 1024);
+    const auto frame = pattern(256u * 1024 * 1024 + 1024 * 1024, 19);
+    std::expected<std::vector<std::uint8_t>, std::string> received = std::unexpected("not received");
+    std::thread reader([&] {
+        received = p.worker.receive();
+        p.worker.close();  // also unblocks a writer if a frame is refused
+    });
+    const auto sent = p.host.send(frame);
+    if (!sent) p.host.close();
+    reader.join();
+    REQUIRE_OK(sent);
+    REQUIRE_OK(received);
+    CHECK(*received == frame);
+}
 
 PAGLETS_TEST("ipc rings: frames larger than the ring, wrap-around and chunking") {
     auto p = make_pair(4096);
@@ -98,3 +119,42 @@ PAGLETS_TEST("ipc rings: a closed peer is noticed") {
     auto f = p.host.receive();
     CHECK(!f.has_value());
 }
+#ifndef _WIN32
+PAGLETS_TEST("ipc process: workers receive no service secrets, stray descriptors or host stdin") {
+    const char* old = std::getenv("PAGLETS_TEST_SECRET");
+    const bool had = old != nullptr;
+    const std::string previous = old ? old : "";
+    REQUIRE(::setenv("PAGLETS_TEST_SECRET", "should-not-see", 1) == 0);
+    struct Restore {
+        bool had; std::string previous;
+        ~Restore() { if (had) ::setenv("PAGLETS_TEST_SECRET", previous.c_str(), 1); else ::unsetenv("PAGLETS_TEST_SECRET"); }
+    } restore{had, previous};
+    int hidden[2];
+    REQUIRE(::pipe(hidden) == 0);
+    const int leaked = ::fcntl(hidden[0], F_DUPFD, 128);  // deliberately lacks close-on-exec
+    ::close(hidden[0]); ::close(hidden[1]);
+    REQUIRE(leaked >= 128);
+    struct Close { int fd; ~Close() { ::close(fd); } } close{leaked};
+    auto pair = ipc::duplex_pair();
+    REQUIRE_OK(pair);
+    const char* configured = std::getenv("TMPDIR");
+    const std::string temporary = configured ? configured : "";
+    auto child = ipc::Process::spawn("/bin/sh", {"-c",
+        "printf '%s\\n' \"${PAGLETS_TEST_SECRET-not-inherited}\" >&3; "
+        "if [ -e /dev/fd/$1 ]; then printf 'open\\n' >&3; else printf 'closed\\n' >&3; fi; "
+        "if [ \"$TMPDIR\" = \"$2\" ]; then printf 'tmp-ok\\n' >&3; else printf 'tmp-lost\\n' >&3; fi; "
+        "if [ /dev/fd/0 -ef /dev/null ]; then printf 'null-stdin' >&3; else printf 'host-stdin' >&3; fi",
+        "worker-probe", std::to_string(leaked), temporary}, {pair->child.write}, -1, true);
+    ipc::close_ends(pair->child);
+    struct Ends { ipc::Ends value; ~Ends() { ipc::close_ends(value); } } ends{pair->host};
+    REQUIRE_OK(child);
+    std::string output;
+    std::uint8_t c;
+    while (ipc::read_all(pair->host.read, &c, 1)) output += static_cast<char>(c);
+    child->stop(std::chrono::seconds(1));
+    CHECK(output.starts_with("not-inherited\n"));
+    CHECK(output.find("\nclosed\n") != std::string::npos);
+    CHECK(output.find("\ntmp-ok\n") != std::string::npos);
+    CHECK(output.ends_with("null-stdin"));
+}
+#endif

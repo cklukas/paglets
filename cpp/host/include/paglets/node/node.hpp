@@ -130,7 +130,8 @@ public:
     // -- movement (planning/cpp-networking.md, section 6) --
 
     // Asks a paglet here to move; the destination is a transfer ticket:
-    // `<host name | key ID | label:L | any>[?retries=N&arrival=active|inactive]`.
+    // `<host name | key ID (prefix >= 8 hex) | label:L | offer:S[.op] | any>`
+    // followed optionally by `?retries=N&arrival=active|inactive`.
     std::expected<void, std::string> dispatch(const runtime::PagletId& paglet, std::string destination);
     // How long the other side of a move may take for each step (default 30 s).
     void set_move_timeout(std::chrono::milliseconds timeout);
@@ -144,6 +145,15 @@ public:
         std::uint64_t pages_received = 0;  // received
         std::uint64_t pages_reused = 0;    // found here and not transferred
         std::uint64_t bytes_sent = 0;      // compressed page bytes sent
+        std::uint64_t image_pages = 0;     // sum of departing linear-memory page counts
+        std::uint64_t capture_ns = 0;
+        std::uint64_t ready_ns = 0;        // source processing/transfer through destination preparation
+        std::uint64_t prepare_ns = 0;      // destination host record and capability recreation
+        std::uint64_t destination_activation_ns = 0;  // destination's local duration, reported in its receipt
+        std::uint64_t commit_ns = 0;       // destination commit, excluding the guest arrival hook
+        std::uint64_t arrival_acks = 0;
+        std::uint64_t arrival_failures = 0;
+        std::uint64_t arrival_ack_ns = 0;  // capture start through returned arrival-hook receipt
     };
     MoveStats move_stats() const;
 
@@ -244,6 +254,8 @@ public:
         std::chrono::milliseconds gossip{2000};          // and sends its snapshot to the live hosts
         std::chrono::milliseconds ttl{20000};            // snapshots older than this are not fresh
         std::chrono::milliseconds redirect_after{1000};  // a waiter may go to a host with free slots
+        std::chrono::milliseconds lease_base{600000};    // at least 10 min by default; estimates get twice their time
+        std::chrono::milliseconds lease_cap{86400000};   // maximum continuous lease lifetime (24 h hard cap)
     };
     void set_compute_timing(ComputeTiming timing);
     // Compute slots of this host (default: its number of CPUs).

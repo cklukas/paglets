@@ -48,6 +48,10 @@ class Executor {
 public:
     virtual ~Executor() = default;
 
+    // Confirms that a configured worker starts and accepts its protocol.
+    // In-process execution needs no startup probe.
+    virtual std::expected<void, std::string> start() { return {}; }
+
     // Instantiates the module: fresh (running its initializer) or from an
     // image. Host imports of the instance go to `imports`, which must outlive
     // the returned object.

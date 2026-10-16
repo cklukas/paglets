@@ -1,0 +1,38 @@
+# Copyright (c) 2026 by C. Klukas.
+# Licensed under the MIT License. See LICENSE for details.
+
+if(NOT TOOL OR NOT GUESTS OR NOT WORK OR NOT PLATFORM)
+    message(FATAL_ERROR "TOOL, GUESTS, WORK and PLATFORM are required")
+endif()
+file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}")
+set(test "runtime: hello sample")
+file(WRITE "${WORK}/hello.json"
+    "{\"topic\":\"hello\",\"tests\":[{\"test\":\"${test}\",\"mode\":\"in-process\",\"platform\":\"other-platform\",\"outcome\":\"historic\"},{\"test\":\"${test}\",\"mode\":\"in-process\",\"platform\":\"${PLATFORM}\",\"outcome\":\"old\"}]}\n")
+foreach(attempt RANGE 1 2)
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E env --unset=PAGLETS_TEST_WORKER
+        "PAGLETS_RESULTS_DIR=${WORK}" "${TOOL}" "${GUESTS}" "${test}"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err TIMEOUT 30)
+    if(NOT rc EQUAL 0)
+        message(FATAL_ERROR "reporting run failed: ${out}\n${err}")
+    endif()
+    file(READ "${WORK}/hello.json" result)
+    string(JSON count LENGTH "${result}" tests)
+    if(NOT count EQUAL 2)
+        message(FATAL_ERROR "A platform was lost or a repeated result was duplicated: ${result}")
+    endif()
+    set(foreign 0)
+    set(current 0)
+    foreach(i RANGE 0 1)
+        string(JSON platform GET "${result}" tests ${i} platform)
+        string(JSON outcome GET "${result}" tests ${i} outcome)
+        if(platform STREQUAL "other-platform" AND outcome STREQUAL "historic")
+            math(EXPR foreign "${foreign} + 1")
+        elseif(platform STREQUAL PLATFORM AND outcome STREQUAL "passed")
+            math(EXPR current "${current} + 1")
+        endif()
+    endforeach()
+    if(NOT foreign EQUAL 1 OR NOT current EQUAL 1)
+        message(FATAL_ERROR "Each platform must retain its own latest result: ${result}")
+    endif()
+endforeach()

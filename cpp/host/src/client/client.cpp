@@ -7,9 +7,13 @@
 #include <paglets/client/client.hpp>
 
 #include <paglets/mesh/passport.hpp>
+#include "reply_validation.hpp"
+#include "../time_arithmetic.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <span>
 
 #ifdef _WIN32
@@ -154,6 +158,8 @@ std::expected<Session, std::string> Session::open(const std::string& url, const 
     const mesh::LedgerState state = identity.ledger.state();
     auto accept = [host_key, state](const net::Identity& server) -> std::expected<void, std::string> {
         if (server.role != net::PeerRole::host) return std::unexpected(std::string("the server is not a host"));
+        if (state.revoked_keys.contains(server.key))
+            return std::unexpected("host " + mesh::key_id(server.key) + " is revoked in this ledger copy");
         if (host_key ? server.key != *host_key : !state.is_host(server.key)) {
             return std::unexpected("host " + mesh::key_id(server.key) + " is not enrolled in this ledger copy");
         }
@@ -173,13 +179,30 @@ const mesh::PublicKey& Session::host() const {
 }
 
 std::expected<Map, std::string> Session::ask(Map request) {
-    auto answers = impl_->channel.exchange({mesh::encode(Value(std::move(request)))});
+    std::string type, op;
+    Bytes encoded;
+    {
+        // Fields searches a canonical (sorted) map; callers may construct
+        // their request entries in any order.
+        const Value value(std::move(request));
+        const Fields q{*value.as_map()};
+        type = q.str("t").value_or("");
+        op = q.str("op").value_or("");
+        encoded = mesh::encode(value);
+    }
+    auto answers = impl_->channel.exchange({std::move(encoded)});
     if (!answers) return std::unexpected(answers.error());
     if (answers->size() != 1) return std::unexpected(std::string("no answer"));
     auto v = mesh::decode((*answers)[0]);
     if (!v || v->as_map() == nullptr) return std::unexpected(std::string("malformed answer"));
     const Fields f{*v->as_map()};
-    if (!flag(f, "ok")) return std::unexpected(f.str("e").value_or("refused"));
+    const auto* ok = f.get("ok");
+    if (!ok || !ok->as_bool()) return std::unexpected(std::string("malformed answer"));
+    if (!*ok->as_bool()) {
+        if (const auto* e = f.get("e"); e && !e->as_str()) return std::unexpected(std::string("malformed answer"));
+        return std::unexpected(f.str("e").value_or("refused"));
+    }
+    if (!detail::reply_shape(type, op, *v->as_map())) return std::unexpected(std::string("malformed answer"));
     return *v->as_map();
 }
 
@@ -293,19 +316,28 @@ std::expected<std::string, std::string> Session::push_module(Bytes module) {
     return Fields{*a}.str("hash").value_or("");
 }
 
-std::string new_paglet_id() {
+std::string new_paglet_nonce() {
     std::array<std::uint8_t, 16> b{};
     mesh::random_bytes(b);
     return paglets::to_hex(std::span<const std::uint8_t>(b));
 }
 
+std::string new_paglet_id() { return new_paglet_nonce(); }
+
 std::expected<std::string, std::string> Session::launch(const Identity& identity, const paglets::Digest& module,
-                                                        Bytes module_bytes, Bytes args, std::string id,
+                                                        Bytes module_bytes, Bytes args, std::string nonce,
                                                         std::int64_t hours) {
-    if (id.empty()) id = new_paglet_id();
+    constexpr std::int64_t ms_per_hour = 3'600'000;
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    if (hours <= 0 || hours > maximum / ms_per_hour)
+        return std::unexpected(std::string("passport hours must be positive and fit a Unix-millisecond expiration"));
+    const std::int64_t duration = hours * ms_per_hour;
     const std::int64_t now = mesh::unix_ms();
-    auto passport = mesh::Passport::issue(identity.key, identity.ledger.mesh(), module, id, Value(), now - 60'000,
-                                          now + hours * 3'600'000);
+    if (now > maximum - duration)
+        return std::unexpected(std::string("passport hours exceed the Unix-millisecond expiration range"));
+    if (nonce.empty()) nonce = new_paglet_nonce();
+    auto passport = mesh::Passport::issue(identity.key, identity.ledger.mesh(), module, std::move(nonce), Value(),
+                                          time_detail::saturating_add(now, -60'000), now + duration);
     if (!passport) return std::unexpected(passport.error());
     Map request{{"t", Value("launch")}, {"passport", Value(passport->encode())}, {"args", Value(std::move(args))}};
     if (!module_bytes.empty()) request.emplace_back("module", Value(std::move(module_bytes)));
@@ -382,9 +414,12 @@ std::expected<Location, std::string> Session::locate(const std::string& paglet) 
 
 std::expected<Map, std::string> Session::pin(const std::string& paglet, std::int64_t minutes,
                                              const std::string& reason) {
+    // The session's host enforces the 1 s minimum and 24 h maximum. Bound
+    // minutes before conversion so even extreme inputs preserve that limit.
+    const auto duration = std::clamp<std::int64_t>(minutes, 0, 24 * 60) * 60'000;
     return ask(Map{{"t", Value("pin")},
                    {"paglet", Value(paglet)},
-                   {"duration_ms", Value(minutes * 60'000)},
+                   {"duration_ms", Value(duration)},
                    {"reason", Value(reason)}});
 }
 

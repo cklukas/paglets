@@ -303,6 +303,6 @@ The finder searches for `**/*.csv` on every host:
 <!-- results: finder -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts searched | matching files found | bytes in matching files | hosts that refused access (policy) |
 |---|---|---|---|---|---|---|---|---|---|
-| example: Mesh File Finder and Storage Analyzer search every host's root | in-process | passed | 0.2 s | Darwin arm64, Release build | 2026-10-12 | 3 | 3 | 26000 | 1 |
-| example: Mesh File Finder and Storage Analyzer search every host's root | worker processes | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 3 | 3 | 26000 | 1 |
+| example: Mesh File Finder and Storage Analyzer search every host's root | in-process | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 3 | 26000 | 1 |
+| example: Mesh File Finder and Storage Analyzer search every host's root | worker processes | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 3 | 26000 | 1 |
 <!-- /results -->

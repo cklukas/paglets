@@ -50,7 +50,7 @@ execute_process(
     COMMAND "${HOST}" serve --key "${DIR}/a.key" --ledger "${DIR}/ledger-a" --state "${DIR}/state-a"
             --listen 127.0.0.1:${pa} --peer ${b}=https://127.0.0.1:${pb} --stop-file "${DIR}/stop" --in-process
     COMMAND "${HOST}" serve --key "${DIR}/b.key" --ledger "${DIR}/ledger-b" --state "${DIR}/state-b"
-            --listen 127.0.0.1:${pb} --peer ${a}=https://127.0.0.1:${pa} --stop-file "${DIR}/stop" --in-process
+            --listen 127.0.0.1:${pb} --peer ${a}=https://127.0.0.1:${pa} --stop-file "${DIR}/stop" --in-process --memory-mb 32
     COMMAND "${CMAKE_COMMAND}" -DHOST=${HOST} -DDIR=${DIR} -DGUEST=${GUEST} -DA=https://127.0.0.1:${pa}
             -DB=https://127.0.0.1:${pb} -P "${CMAKE_CURRENT_LIST_DIR}/cli_serve_driver.cmake"
     RESULTS_VARIABLE results

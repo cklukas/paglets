@@ -43,7 +43,7 @@ in the planning documents lists the planned examples and which are done.
 | [Mesh Benchmark](mesh-benchmark.md) | `benchmark/` | measures every host in a compute slot of its own: integer and floating-point speed and memory copying in the paglet, and writing and reading through its storage; ranks the hosts | compute slots, the paglet's own storage (its scratch directory) |
 | [Latency Map](latency-map.md) | `latency/` | places a probe on every host; each probe pings the others and reports round-trip times, giving a matrix of host pairs | messaging between paglets across hosts |
 | [Hide and Seek](hide-and-seek.md) | `seek/` | a hider keeps moving between hosts; the seeker finds it, pins it, and releases it again | `locate_and_pin` while a paglet keeps moving |
-| [Pi](pi.md) | `pi/` | computes hex digits of pi in chunks on the hosts of the mesh, and survives the loss of a host | `mesh-info`, `compute-slots`, redirects |
+| [Pi](pi.md) | `pi/` | computes hex digits of pi in chunks on the hosts of the mesh, and survives the loss of a host | compute jobs, artifacts, retries |
 
 ## Fault tolerance
 
@@ -93,7 +93,9 @@ Every example page ends with the results of its tests: the outcome and
 duration of each test, with paglets inside the host process and in
 sandboxed worker processes, and the values the test measured. The tests
 record them themselves: with `PAGLETS_RESULTS_DIR` set, each test writes
-what it reports to `docs/results/<example>.json`. `paglets-docs-sync`
+what it reports to `docs/results/<example>.json`. Each test keeps its
+latest result per execution mode and platform, so a Windows run preserves
+the Mac and Linux records. `paglets-docs-sync`
 then writes the tables, and the code excerpts from the marked sections of
 the sources, into the pages. One script does both:
 

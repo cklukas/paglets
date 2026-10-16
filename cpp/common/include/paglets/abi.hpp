@@ -25,8 +25,9 @@ inline constexpr std::uint32_t version = 1;
 // Compatible additions within v1 (planning/cpp-abi-v1.md, section 13):
 // 1 adds lent capabilities, resource capabilities, `revoked`, the service
 // map of self_info and derive paths; 2 adds the lifecycle operations
-// `checkpoint` and `restart` and the `paglets.recovered` message.
-inline constexpr std::uint32_t minor_version = 2;
+// `checkpoint` and `restart` and the `paglets.recovered` message; 3 adds
+// compute jobs (job_* imports, the paglets_on_job export, `cancelled`).
+inline constexpr std::uint32_t minor_version = 3;
 inline constexpr std::string_view version_marker = "paglets_abi_v1";
 
 // Error codes (section 9). Negative results of imports and handlers.
@@ -49,6 +50,7 @@ enum Error : std::int32_t {
     gone = -15,
     revoked = -16,  // v1.1
     pinned = -17,   // v1.1: dispatch while the paglet is pinned (self_info.pinned_until)
+    cancelled = -18,  // v1.3: a compute job was cancelled
 };
 
 inline constexpr std::string_view error_name(std::int32_t code) {
@@ -71,6 +73,7 @@ inline constexpr std::string_view error_name(std::int32_t code) {
         case gone: return "gone";
         case revoked: return "revoked";
         case pinned: return "pinned";
+        case cancelled: return "cancelled";
         default: return "error";
     }
 }
@@ -113,7 +116,16 @@ inline constexpr std::string_view system_import_module = "paglets_sys";
 inline constexpr std::string_view import_names[] = {
     "log",         "self_info", "send",         "request",   "reply",     "cap_derive", "cap_drop",
     "cap_inspect", "cap_list",  "create_child", "lifecycle", "timer_set", "now",        "random",
+    // v1.3: compute jobs. A paglet submits, cancels and inspects jobs; a job
+    // instance reads its input, appends to its output (both in chunks),
+    // reports progress and checks for cancellation.
+    "job_submit", "job_cancel", "job_status", "job_input", "job_output", "job_progress", "job_cancelled",
 };
+
+// v1.3: the export that runs a job function in a job instance:
+// paglets_on_job(ptr, len) with a JobCall document; 0 when the function
+// returned (its output set with job_output), else an Error.
+inline constexpr std::string_view job_export = "paglets_on_job";
 
 // Exports every ABI v1 module must provide (section 3).
 inline constexpr std::string_view required_exports[] = {
@@ -253,6 +265,56 @@ struct CloneArg {
 struct DispatchArg {
     std::string destination;
 };
+
+// v1.3: a compute job (job_submit). The host runs `function` of `module`
+// (default: the paglet's own) in a fresh instance of its own, with `input`,
+// on this host or on another one; the result is the reply to the returned
+// correlation (JobResult), or an Error (cancelled, timeout, failed, gone,
+// quota, denied).
+struct JobSpec {
+    std::string function;
+    std::vector<std::uint8_t> input;
+    std::optional<std::int32_t> input_artifact;  // an artifact capability with the input (lent)
+    std::optional<std::string> module;           // hex hash
+    std::int64_t cores = 1;
+    std::int64_t max_ms = 0;     // wall time; 0: the host's default
+    std::int64_t memory_mb = 0;  // linear memory; 0: the host's default
+    // Where: empty for this host, "any" for the host with the most free
+    // slots (this one first), else host names or key IDs (one of them).
+    std::vector<std::string> hosts;
+    std::string on_departure = "cancel";  // the paglet moves: cancel, or finish (the result follows it)
+};
+
+// The reply of a finished job. Outputs above the message limit come as an
+// artifact capability (the reply's first capability) instead of `output`.
+struct JobResult {
+    std::vector<std::uint8_t> output;
+    bool artifact = false;
+    std::string host;            // key ID (or name) of the host that ran it
+    std::int64_t elapsed_ms = 0;  // running time
+    std::int64_t queued_ms = 0;   // waiting for a slot
+    bool aot = false;             // ran ahead-of-time compiled
+    std::vector<std::string> marks;  // residency inherited from the input
+};
+
+// job_status: where a job is.
+struct JobStatus {
+    std::string state;  // queued, running, done, failed, cancelled
+    std::string host;
+    std::int64_t done = 0;   // progress, as the job reports it
+    std::int64_t total = 0;
+    std::int64_t elapsed_ms = 0;
+    bool aot = false;
+};
+
+// The argument of paglets_on_job; the job reads its input with job_input.
+struct JobCall {
+    std::string function;
+    std::int64_t input_size = 0;
+};
+
+// Chunks of job input and output through job_input and job_output.
+inline constexpr std::size_t job_chunk = 256 * 1024;
 
 // v1.2: the restart policy. With `restart`, the host stores the paglet's
 // images and brings it back from the last one after a restart (the
@@ -655,6 +717,94 @@ inline bool paglets_decode(msgpack::Reader& r, Recovered& e) {
     return detail::read_map(r, [&](std::string_view k) {
         if (k == "image_ms") return msgpack::read_value(r, e.image_ms);
         if (k == "restarted_ms") return msgpack::read_value(r, e.restarted_ms);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const JobSpec& s) {
+    w.write_map_header(7 + detail::present(s.input_artifact) + detail::present(s.module));
+    detail::put(w, "function", s.function);
+    detail::put(w, "input", s.input);
+    detail::put_opt(w, "input_artifact", s.input_artifact);
+    detail::put_opt(w, "module", s.module);
+    detail::put(w, "cores", s.cores);
+    detail::put(w, "max_ms", s.max_ms);
+    detail::put(w, "memory_mb", s.memory_mb);
+    detail::put(w, "hosts", s.hosts);
+    detail::put(w, "on_departure", s.on_departure);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, JobSpec& s) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "function") return msgpack::read_value(r, s.function);
+        if (k == "input") return msgpack::read_value(r, s.input);
+        if (k == "input_artifact") return msgpack::read_value(r, s.input_artifact);
+        if (k == "module") return msgpack::read_value(r, s.module);
+        if (k == "cores") return msgpack::read_value(r, s.cores);
+        if (k == "max_ms") return msgpack::read_value(r, s.max_ms);
+        if (k == "memory_mb") return msgpack::read_value(r, s.memory_mb);
+        if (k == "hosts") return msgpack::read_value(r, s.hosts);
+        if (k == "on_departure") return msgpack::read_value(r, s.on_departure);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const JobResult& v) {
+    w.write_map_header(7);
+    detail::put(w, "marks", v.marks);
+    detail::put(w, "output", v.output);
+    detail::put(w, "artifact", v.artifact);
+    detail::put(w, "host", v.host);
+    detail::put(w, "elapsed_ms", v.elapsed_ms);
+    detail::put(w, "queued_ms", v.queued_ms);
+    detail::put(w, "aot", v.aot);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, JobResult& v) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "marks") return msgpack::read_value(r, v.marks);
+        if (k == "output") return msgpack::read_value(r, v.output);
+        if (k == "artifact") return msgpack::read_value(r, v.artifact);
+        if (k == "host") return msgpack::read_value(r, v.host);
+        if (k == "elapsed_ms") return msgpack::read_value(r, v.elapsed_ms);
+        if (k == "queued_ms") return msgpack::read_value(r, v.queued_ms);
+        if (k == "aot") return msgpack::read_value(r, v.aot);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const JobStatus& v) {
+    w.write_map_header(6);
+    detail::put(w, "state", v.state);
+    detail::put(w, "host", v.host);
+    detail::put(w, "done", v.done);
+    detail::put(w, "total", v.total);
+    detail::put(w, "elapsed_ms", v.elapsed_ms);
+    detail::put(w, "aot", v.aot);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, JobStatus& v) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "state") return msgpack::read_value(r, v.state);
+        if (k == "host") return msgpack::read_value(r, v.host);
+        if (k == "done") return msgpack::read_value(r, v.done);
+        if (k == "total") return msgpack::read_value(r, v.total);
+        if (k == "elapsed_ms") return msgpack::read_value(r, v.elapsed_ms);
+        if (k == "aot") return msgpack::read_value(r, v.aot);
+        return r.skip();
+    });
+}
+
+inline void paglets_encode(msgpack::Writer& w, const JobCall& v) {
+    w.write_map_header(2);
+    detail::put(w, "function", v.function);
+    detail::put(w, "input_size", v.input_size);
+}
+
+inline bool paglets_decode(msgpack::Reader& r, JobCall& v) {
+    return detail::read_map(r, [&](std::string_view k) {
+        if (k == "function") return msgpack::read_value(r, v.function);
+        if (k == "input_size") return msgpack::read_value(r, v.input_size);
         return r.skip();
     });
 }

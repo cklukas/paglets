@@ -22,7 +22,8 @@ Directory: [`cpp/examples/journey/`](https://github.com/cklukas/paglets/tree/cpp
   [System paglets](../system-paglets.md#services)).
 - **Lifecycle hooks of a move.** `on_arrived` runs on the new host after a
   move, `on_move_failed` on the old host when a move did not happen. The
-  journey continues from both.
+  journey continues from both. A synchronous dispatch refusal, such as a
+  pin that prevents movement, ends the journey with one recorded error.
 - **A deferred reply.** `start` answers only when `mesh-info` has answered,
   with the itinerary.
 
@@ -139,13 +140,11 @@ void go_on() {
     std::string destination = next_ < itinerary_.size() ? itinerary_[next_++] : home_;
     left_ms_ = now_ms();
     if (auto moved = paglets::dispatch(destination); !moved) {
-        if (destination == home_) {
-            journal_.state = "failed";
-            journal_.skipped.push_back("home: " + pt::error_text("dispatch", moved.error()));
-            return;
-        }
+        // This is an admission error (for example pinned or denied),
+        // before any destination was tried. Later host-specific failures
+        // arrive through on_move_failed and may try the next host.
+        journal_.state = "failed";
         journal_.skipped.push_back(destination + ": " + pt::error_text("dispatch", moved.error()));
-        go_on();
     }
 }
 ```
@@ -246,7 +245,10 @@ $H remote call $R $ID journal
 ```
 
 `start` answers with `accepted` and the itinerary, as key IDs. Call
-`journal` again until its `state` is `home`. To visit only some hosts,
+`journal` again until its `state` is `home`. Calls reach only the connected
+host: while the journey is away, `journal` fails because the paglet is no
+longer there; once it returns home it answers again. `remote locate` finds
+its current host. To visit only some hosts,
 name them, or give a label:
 
 ```bash
@@ -273,6 +275,8 @@ journal` in `cpp/tests/test_examples.cpp` runs a mesh of four hosts
 <!-- results: journey -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts in the mesh | hosts visited | stops in the journal (with home twice) | journey time, start to home (ms) | unknown hosts skipped with a reason |
 |---|---|---|---|---|---|---|---|---|---|---|
-| example: Mesh Journey visits every host and comes home with its journal | in-process | passed | 0.4 s | Darwin arm64, Release build | 2026-10-12 | 4 | 3 | 5 | 51 | 1 |
-| example: Mesh Journey visits every host and comes home with its journal | worker processes | passed | 0.6 s | Darwin arm64, Release build | 2026-10-12 | 4 | 3 | 5 | 225 | 1 |
+| example: Mesh Journey visits every host and comes home with its journal | in-process | passed | 0.7 s | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 4 | 3 | 5 | 59 | 1 |
+| example: Mesh Journey visits every host and comes home with its journal | in-process | passed | 0.2 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 3 | 5 | 42 | 1 |
+| example: Mesh Journey visits every host and comes home with its journal | worker processes | passed | 0.9 s | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 4 | 3 | 5 | 70 | 1 |
+| example: Mesh Journey visits every host and comes home with its journal | worker processes | passed | 0.4 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 3 | 5 | 51 | 1 |
 <!-- /results -->

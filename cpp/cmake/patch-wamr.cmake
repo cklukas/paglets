@@ -58,3 +58,75 @@ if(_at GREATER_EQUAL 0 AND NOT _text MATCHES "paglets: MinGW-w64 GCC ignores")
 elseif(NOT _text MATCHES "paglets: MinGW-w64 GCC ignores")
     message(FATAL_ERROR "patch-wamr: windows/platform_internal.h has changed; review the patch")
 endif()
+
+# wamrc (the AOT compiler, built by PagletsWamrc.cmake against the system's
+# LLVM) follows LLVM 18/19. LLVM 21 changed a few interfaces it uses: the
+# ORC thread-safe context no longer hands out its LLVMContext, the target
+# machine returns its subtarget by reference, PGOOptions lost its file-system
+# argument, the stack-usage option was renamed and createTargetMachine takes
+# a Triple. The replacements are guarded by LLVM_VERSION_MAJOR, so older
+# LLVMs build the code as before.
+function(paglets_patch_once file old new marker what)
+    file(READ "${file}" _text)
+    if(_text MATCHES "${marker}")
+        return()
+    endif()
+    string(FIND "${_text}" "${old}" _at)
+    if(_at LESS 0)
+        message(FATAL_ERROR "patch-wamr: ${file} has changed (${what}); review the patch")
+    endif()
+    string(REPLACE "${old}" "${new}" _patched "${_text}")
+    file(WRITE "${file}" "${_patched}")
+    message(STATUS "patch-wamr: ${what}")
+endfunction()
+
+# WAMR's POSIX cache flush handles macOS but is empty on Linux. AOT code
+# is relocated on a compiler thread and first runs on another core: ARM
+# must publish those instruction bytes after the relocations, otherwise a
+# stale ADRP may load instructions as a function's stack-size metadata.
+paglets_patch_once(
+    "${CMAKE_CURRENT_SOURCE_DIR}/core/shared/platform/common/posix/posix_memmap.c"
+    "    sys_icache_invalidate(start, len);\n#else\n    (void)start;\n    (void)len;\n#endif\n}"
+    "    sys_icache_invalidate(start, len);\n#elif defined(__GNUC__) || defined(__clang__)\n    /* paglets: publish relocated code on all POSIX CPU architectures */\n    __builtin___clear_cache((char *)start, (char *)start + len);\n#else\n    (void)start;\n    (void)len;\n#endif\n}"
+    "paglets: publish relocated code"
+    "synchronize the instruction cache after AOT relocation")
+
+# Job instances have private linear memory, but the host must interrupt
+# them. WAMR otherwise emits termination polls only for shared memories,
+# even with --enable-multi-thread; an AOT job's endless loop cannot stop.
+paglets_patch_once(
+    "${CMAKE_CURRENT_SOURCE_DIR}/core/iwasm/compilation/aot_emit_control.c"
+    "    if (!is_shared_memory) {\n        return true;\n    }"
+    "    /* paglets: poll host cancellation for private-memory jobs too */\n    if (!is_shared_memory && !comp_ctx->enable_thread_mgr) {\n        return true;\n    }"
+    "paglets: poll host cancellation"
+    "AOT cancellation for private-memory jobs")
+
+set(_dir "${CMAKE_CURRENT_SOURCE_DIR}/core/iwasm/compilation")
+paglets_patch_once("${_dir}/aot_llvm.c"
+    "    comp_ctx->orc_thread_safe_context = LLVMOrcCreateNewThreadSafeContext();\n"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 thread-safe context */\n    comp_ctx->context = LLVMContextCreate();\n    comp_ctx->orc_thread_safe_context =\n        LLVMOrcCreateNewThreadSafeContextFromLLVMContext(comp_ctx->context);\n#else\n    comp_ctx->orc_thread_safe_context = LLVMOrcCreateNewThreadSafeContext();\n#endif\n"
+    "paglets: LLVM 21 thread-safe context" "wamrc: LLVM 21 thread-safe context")
+paglets_patch_once("${_dir}/aot_llvm.c"
+    "    if (!(comp_ctx->context = LLVMOrcThreadSafeContextGetContext(\n              comp_ctx->orc_thread_safe_context))) {"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 context getter */\n    if (!comp_ctx->context) {\n#else\n    if (!(comp_ctx->context = LLVMOrcThreadSafeContextGetContext(\n              comp_ctx->orc_thread_safe_context))) {\n#endif"
+    "paglets: LLVM 21 context getter" "wamrc: LLVM 21 context getter")
+paglets_patch_once("${_dir}/aot_llvm_extra.cpp"
+    "    const llvm::MCSubtargetInfo *subTargetInfo =\n        targetMachine->getMCSubtargetInfo();"
+    "    const llvm::MCSubtargetInfo *subTargetInfo =\n#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 subtarget */\n        &targetMachine->getMCSubtargetInfo();\n#else\n        targetMachine->getMCSubtargetInfo();\n#endif"
+    "paglets: LLVM 21 subtarget" "wamrc: LLVM 21 subtarget info")
+paglets_patch_once("${_dir}/aot_llvm_extra.cpp"
+    "        PGO = PGOOptions(\"\", \"\", \"\", \"\", FS, PGOOptions::IRInstr);"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 PGOOptions */\n        (void)FS;\n        PGO = PGOOptions(\"\", \"\", \"\", \"\", PGOOptions::IRInstr);\n#else\n        PGO = PGOOptions(\"\", \"\", \"\", \"\", FS, PGOOptions::IRInstr);\n#endif"
+    "paglets: LLVM 21 PGOOptions" "wamrc: LLVM 21 PGOOptions (instrumentation)")
+paglets_patch_once("${_dir}/aot_llvm_extra.cpp"
+    "        PGO = PGOOptions(comp_ctx->use_prof_file, \"\", \"\", \"\", FS,\n                         PGOOptions::IRUse);"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 PGOOptions use */\n        (void)FS;\n        PGO = PGOOptions(comp_ctx->use_prof_file, \"\", \"\", \"\", PGOOptions::IRUse);\n#else\n        PGO = PGOOptions(comp_ctx->use_prof_file, \"\", \"\", \"\", FS,\n                         PGOOptions::IRUse);\n#endif"
+    "paglets: LLVM 21 PGOOptions use" "wamrc: LLVM 21 PGOOptions (profile use)")
+paglets_patch_once("${_dir}/aot_llvm_extra2.cpp"
+    "        opts.StackUsageOutput = StackUsageOutput;"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 stack usage */\n        opts.StackUsageFile = StackUsageOutput;\n#else\n        opts.StackUsageOutput = StackUsageOutput;\n#endif"
+    "paglets: LLVM 21 stack usage" "wamrc: LLVM 21 stack-usage option")
+paglets_patch_once("${_dir}/aot_llvm_extra2.cpp"
+    "    auto targetmachine = target->createTargetMachine(triple, cpu, features,"
+    "#if LLVM_VERSION_MAJOR >= 21 /* paglets: LLVM 21 triple */\n    auto targetmachine = target->createTargetMachine(llvm::Triple(triple), cpu, features,\n#else\n    auto targetmachine = target->createTargetMachine(triple, cpu, features,\n#endif"
+    "paglets: LLVM 21 triple" "wamrc: LLVM 21 createTargetMachine")

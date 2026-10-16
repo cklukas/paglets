@@ -60,13 +60,12 @@ std::expected<void, std::string> write_atomically(const fs::path& path, std::spa
 }
 
 // Structure and ABI checks of a module from any source: valid Wasm, the
-// paglet ABI with the widest import set (the trust class is checked when a
-// paglet is created).
+// paglet ABI. System paglets are native C++ objects: the engine does not
+// implement paglets_sys imports for stored Wasm modules.
 std::expected<wasm::ModuleInfo, std::string> check(std::span<const std::uint8_t> bytes) {
     auto info = wasm::parse_module(bytes);
     if (!info) return std::unexpected("invalid module: " + info.error());
-    if (auto ok = check_paglet_module(*info, TrustClass::system); !ok) return std::unexpected(ok.error());
-    if (auto ok = wasm::ImportPolicy::system().check(*info); !ok) return std::unexpected(ok.error());
+    if (auto ok = check_paglet_module(*info, TrustClass::resident); !ok) return std::unexpected(ok.error());
     return std::move(*info);
 }
 

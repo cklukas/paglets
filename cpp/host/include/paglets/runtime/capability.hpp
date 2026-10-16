@@ -34,14 +34,14 @@ struct Cap {
 
     // Resources: `dir`, `file`, `artifact`, `topic`; `resource` is defined
     // by the providing system paglet (for `dir`: a named root and a relative
-    // path, `root:dir/sub`).
+    // path, `root/dir/sub`).
     std::string resource_type;
     std::string resource;
 
     // Revocation tree: every endpoint and resource capability has an ID;
     // derived capabilities list the IDs they descend from (root first) and
     // keep the grant their root came from. Revoking an ID or a grant
-    // invalidates the whole subtree, wherever the copies went.
+    // invalidates the subtree once the relevant runtime knows the revocation.
     std::string id;
     std::vector<std::string> lineage;
     std::optional<std::string> grant;

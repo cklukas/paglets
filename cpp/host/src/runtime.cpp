@@ -6,6 +6,7 @@
 #include <paglets/runtime/runtime.hpp>
 
 #include "runtime_exec.hpp"
+#include "runtime_jobs.hpp"
 #include "runtime_store.hpp"
 
 #include <paglets/abi.hpp>
@@ -17,9 +18,11 @@
 #include <condition_variable>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <thread>
 
 namespace paglets::runtime {
@@ -31,6 +34,26 @@ using SteadyClock = std::chrono::steady_clock;
 std::int64_t wall_ms() {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+std::chrono::milliseconds bounded_delay(std::int64_t ms) {
+    const auto limit = std::chrono::duration_cast<std::chrono::milliseconds>(SteadyClock::duration::max() / 4);
+    return std::chrono::milliseconds(std::clamp<std::int64_t>(ms, 0, limit.count()));
+}
+
+std::chrono::milliseconds delay_until(std::int64_t deadline) {
+    const auto now = wall_ms();
+    if (deadline <= now) return std::chrono::milliseconds(0);
+    // Unsigned subtraction also handles extreme persisted values without
+    // signed overflow, before narrowing to the scheduler's clock horizon.
+    const auto remaining = static_cast<std::uint64_t>(deadline) - static_cast<std::uint64_t>(now);
+    const auto limit = bounded_delay(std::numeric_limits<std::int64_t>::max()).count();
+    return std::chrono::milliseconds(std::min(remaining, static_cast<std::uint64_t>(limit)));
+}
+
+std::int64_t wall_deadline(std::int64_t ms) {
+    const auto now = wall_ms();
+    return now + bounded_delay(ms).count();
 }
 
 PagletId new_paglet_id() {
@@ -68,6 +91,7 @@ std::optional<std::string> normalize_relative(std::string_view path) {
 // Priority of lifecycle deliveries: above every message priority, so they
 // run before messages that were queued earlier.
 constexpr std::int32_t control_priority = abi::max_priority + 1;
+constexpr std::int32_t max_forwards = 4;
 
 bool op_allowed(const std::vector<std::string>& ops, std::string_view name) {
     return std::ranges::any_of(ops, [&](const std::string& op) { return op == "*" || op == name; });
@@ -101,8 +125,10 @@ std::expected<void, std::string> check_paglet_module(const wasm::ModuleInfo& inf
                                          : "module is not a paglet: export paglets_abi_v1 missing");
     }
     for (const auto name : abi::required_exports) {
-        if (info.find_export(name) == nullptr) {
-            return std::unexpected("paglet module lacks the required export " + std::string(name));
+        const auto* e = info.find_export(name);
+        const auto expected = name == "memory" ? wasm::ExternKind::memory : wasm::ExternKind::function;
+        if (e == nullptr || e->kind != expected) {
+            return std::unexpected("paglet module lacks the required export or has the wrong kind: " + std::string(name));
         }
     }
     const auto policy = trust == TrustClass::system ? wasm::ImportPolicy::system() : wasm::ImportPolicy::standard();
@@ -125,7 +151,12 @@ struct Envelope {
     std::optional<std::string> original;             // start (clones)
     abi::Delivered delivered;                        // message; caps are installed on delivery
     std::vector<Cap> caps;                           // transferred capabilities
+    std::vector<std::string> residency_marks;        // host-controlled result provenance
+    std::optional<RemoteMessage::FailureRoute> failure;  // asynchronous sends held during a move
     std::optional<Cap> reply_cap;                    // requests
+    std::int64_t deadline_ms = 0;
+    std::optional<SteadyClock::time_point> expires_at;
+    std::int64_t wake_at_ms = 0;  // fences a queued wake against a later sleep
     std::vector<Cap> lent;                           // system paglets: capabilities lent for this message
     PagletId ended_id;                               // ended
     std::optional<abi::ArrivedEvent> arrived;        // start (arrivals)
@@ -165,12 +196,24 @@ struct PagletRec {
     int lane_hint = -1;  // lane of a paglet it talks to (its creator, or a recent sender)
 
     std::set<std::uint64_t> pending_requests;
+    // Compute jobs it waits for, by the correlation of their result: the
+    // job on this host's pool, or a remote one (job_status answers from
+    // `status`, which the mesh updates).
+    struct PendingJob {
+        std::uint64_t id = 0;  // in the job pool; 0 for a remote job
+        bool remote = false;
+        bool finish = false;  // on departure: finish (the result follows it), else cancel
+        abi::JobStatus status;
+    };
+    std::map<std::uint64_t, PendingJob> jobs;
     std::uint64_t next_correlation = 1;
     std::uint64_t next_timer = 1;
 
     // Lifecycle operations requested during the current handler call.
     std::optional<abi::LifecycleOp> pending_end;
+    bool in_end_hook = false;  // no nested lifecycle operations or spawns
     std::optional<std::int64_t> wake_after_ms;
+    std::int64_t wake_at_ms = 0;
     std::vector<PendingClone> clones;
     std::size_t spawned_this_call = 0;
 
@@ -181,15 +224,19 @@ struct PagletRec {
     SteadyClock::time_point last_checkpoint{};
     std::optional<std::chrono::milliseconds> checkpoint_interval;  // per paglet; default from the config
     bool checkpoint_due = false;                                   // no stored image yet
+    bool checkpoint_requested = false;  // explicit request in the current handler
     std::unique_ptr<wasm::HostImports> imports;
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints
 
     // Movement (mobility.hpp).
     std::optional<std::string> dispatch_to;  // destination of a pending dispatch
     bool moving = false;                     // departed, outcome pending: messages are held
+    bool dispatch_pending = false;           // accepted, including a queued host request and its hook
     bool arriving = false;                   // prepared here, not yet committed
     bool dormant = false;                    // arrived inactive: runs when a message comes
     std::optional<Envelope> arrival_start;   // its first delivery, on commit
+    std::optional<std::pair<std::string, std::uint64_t>> arrival_receipt;
+    std::uint64_t arrival_activation_ns = 0;
     // Pins (the mesh's locator): pin ID -> end (Unix milliseconds). While
     // one has not ended the paglet stays on this host.
     std::map<std::string, std::int64_t> pins;
@@ -249,6 +296,8 @@ struct Runtime::Impl {
         PagletId paglet;  // the departing paglet, or the original of a clone
         PagletId clone;   // clones only
         std::string destination;
+
+        std::set<std::uint64_t> captured_ready;
     };
     std::map<std::uint64_t, Moving> departures;
     std::uint64_t next_move = 1;
@@ -289,6 +338,27 @@ struct Runtime::Impl {
     std::set<std::string, std::less<>> revoked_grants;
 
     std::optional<Store> store;
+
+    // Compute jobs (runtime_jobs.hpp).
+    std::unique_ptr<JobPool> job_pool;
+    JobHooks job_hooks;
+    JobArtifacts job_artifacts;
+    // Calls that must not run under `mu` (hooks into the mesh and the
+    // services), made in order on a thread of their own.
+    std::deque<std::function<void()>> deferred;
+    std::condition_variable deferred_cv;
+    std::thread deferred_thread;
+    bool deferred_stop = false;
+    bool deferred_running = false;
+    void defer(std::function<void()> f) {  // mu held
+        deferred.push_back(std::move(f));
+        deferred_cv.notify_all();
+    }
+    void run_deferred();
+    void job_done(JobOutcome outcome);
+    void cancel_jobs(PagletRec& rec, std::int32_t status, bool departing);
+    std::expected<std::uint64_t, std::int32_t> start_job(IncomingJob job);
+    void start_job_from_artifact(IncomingJob job);
     std::filesystem::path storage_root;  // empty without a state directory
     std::filesystem::path work_root;
     bool own_work_root = false;  // a temporary root, removed at shutdown
@@ -316,7 +386,10 @@ struct Runtime::Impl {
         return it == paglets.end() ? nullptr : it->second.get();
     }
 
-    abi::SenderRecord host_sender() const { return {"host", "local", "system", "", config.host_name}; }
+    const std::string& identity_host() const { return mobility.host_id.empty() ? config.host_name : mobility.host_id; }
+    abi::SenderRecord host_sender(std::string_view owner) const {
+        return {"host", std::string(owner), "host", "", identity_host()};
+    }
 
     bool is_system(const PagletId& id) const {
         auto it = paglets.find(id);
@@ -354,18 +427,21 @@ struct Runtime::Impl {
 
     // Capabilities a message to another host may carry: endpoints to
     // paglets, and artifacts that name the host holding their content.
+    bool portable_cap(const Cap& cap) const {
+        return (cap.kind == Cap::Kind::endpoint && !cap.target.starts_with("system.")) || mesh_artifact(cap);
+    }
+
     bool portable_handles(const PagletRec& rec, const std::vector<std::int32_t>& handles) const {
         return std::ranges::all_of(handles, [&](std::int32_t h) {
             auto it = rec.caps.find(h);
-            return it == rec.caps.end() || (it->second.kind == Cap::Kind::endpoint && !is_system(it->second.target)) ||
-                   mesh_artifact(it->second);
+            return it == rec.caps.end() || portable_cap(it->second);
         });
     }
 
     std::vector<Cap> portable_caps(std::vector<Cap> caps) {
         std::vector<Cap> out;
         for (auto& c : caps) {
-            if ((c.kind == Cap::Kind::endpoint && !is_system(c.target)) || mesh_artifact(c)) {
+            if (portable_cap(c)) {
                 out.push_back(portable(std::move(c)));
             } else {
                 drop_cap(std::move(c), abi::gone);
@@ -375,6 +451,8 @@ struct Runtime::Impl {
     }
 
     void send_remote(RemoteMessage m) {
+        if (m.kind == RemoteMessage::Kind::request && m.timeout_ms > 0 && !m.expires_at)
+            m.expires_at = SteadyClock::now() + bounded_delay(m.timeout_ms);
         if (mobility.deliver) mobility.deliver(std::move(m));
     }
 
@@ -390,6 +468,42 @@ struct Runtime::Impl {
     }
 
     // The travelling state of a paglet (mu held).
+    struct ReadyCapture {
+        std::vector<ReadyMessage> messages;
+        std::set<std::uint64_t> sequences;
+    };
+    static bool host_report(std::string_view name) {
+        return name == abi::undelivered_message || name == abi::recovered_message || name == abi::move_failed_message;
+    }
+    std::expected<ReadyCapture, std::string> capture_ready(const PagletRec& rec) {
+        ReadyCapture captured;
+        std::size_t bytes = 0;
+        for (const auto& [key, env] : rec.mailbox) {
+            if (env.type != Envelope::Type::message) continue;
+            const auto kind = env.delivered.kind;
+            if (kind != abi::MessageKind::reply && kind != abi::MessageKind::timer &&
+                !(kind == abi::MessageKind::message && host_report(env.delivered.name))) continue;
+            if (env.delivered.payload.size() > config.move_ready_bytes - bytes)
+                return std::unexpected("ready notifications exceed the move byte budget");
+            ReadyMessage message{env.delivered, {}, env.residency_marks};
+            message.delivered.caps.clear();
+            message.delivered.reply = 0;
+            if (std::ranges::all_of(env.caps, [&](const Cap& c) { return portable_cap(c); })) {
+                for (const auto& cap : env.caps) message.caps.push_back(portable(cap));
+            } else {
+                message.delivered.payload.clear();
+                message.delivered.status = abi::unsupported;
+            }
+            const auto size = encode_ready(message).size() + 5;  // outer binary header
+            if (size > config.move_ready_bytes - bytes)
+                return std::unexpected("ready notifications exceed the move byte budget");
+            bytes += size;
+            captured.sequences.insert(key.second);
+            captured.messages.push_back(std::move(message));
+        }
+        return captured;
+    }
+
     TravelState state_of(const PagletRec& rec) {
         TravelState st;
         st.id = rec.id;
@@ -404,16 +518,19 @@ struct Runtime::Impl {
         st.marks.assign(rec.marks.begin(), rec.marks.end());
         st.restart = rec.restart;
         st.notify_recovered = rec.notify_recovered;
+        st.wake_at_ms = rec.wake_at_ms;
         for (const auto& [h, c] : rec.caps) st.caps.emplace_back(h, portable(c));
         const auto now = SteadyClock::now();
+        const auto captured_ms = wall_ms();
         for (const auto& [at, d] : deadlines) {
             if (d.type == Deadline::Type::request_timeout && d.paglet == rec.id &&
                 rec.pending_requests.contains(d.id)) {
                 st.pending.emplace_back(
                     d.id,
-                    std::max<std::int64_t>(1, std::chrono::duration_cast<std::chrono::milliseconds>(at - now).count()));
+                    std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(at - now).count()));
             }
         }
+        if (!st.pending.empty()) st.pending_captured_ms = captured_ms;
         return st;
     }
 
@@ -434,6 +551,13 @@ struct Runtime::Impl {
         const bool earliest = deadlines.empty() || at < deadlines.begin()->first;
         deadlines.emplace(at, std::move(d));
         if (earliest) clock_cv.notify_all();
+    }
+
+    void schedule_wake(PagletRec& rec) {
+        if (rec.wake_at_ms <= 0) return;
+        const auto delay = delay_until(rec.wake_at_ms);
+        schedule(SteadyClock::now() + delay,
+                 Deadline{Deadline::Type::wake, rec.id, static_cast<std::uint64_t>(rec.wake_at_ms)});
     }
 
     void make_ready(PagletRec& rec) {
@@ -509,13 +633,16 @@ struct Runtime::Impl {
     // Delivers the one reply of a request. Late replies are discarded.
     // `host`: where the requester is, if it is not here.
     void deliver_reply(const PagletId& requester, std::uint64_t correlation, std::int32_t status, Bytes payload,
-                       std::vector<Cap> caps, const std::string& host = {}) {
+                       std::vector<Cap> caps, const std::string& host = {},
+                       std::vector<std::string> residency_marks = {}) {
         const bool here = requester.empty() ? (host.empty() || host == mobility.host_id) : paglets.contains(requester);
         if (!here) {
             const std::string where = requester.empty() ? host : remote_host(requester, host);
-            if (where.empty() || !mobility.deliver) {
+            if (!std::ranges::all_of(caps, [&](const Cap& c) { return portable_cap(c); })) {
                 for (auto& c : caps) drop_cap(std::move(c), abi::gone);
-                return;
+                caps.clear();
+                payload.clear();
+                status = abi::unsupported;
             }
             RemoteMessage m;
             m.kind = RemoteMessage::Kind::reply;
@@ -526,8 +653,15 @@ struct Runtime::Impl {
             m.priority = abi::max_priority;
             m.correlation = correlation;
             m.status = status;
+            m.residency_marks = std::move(residency_marks);
             m.caps = portable_caps(std::move(caps));
-            send_remote(std::move(m));
+            if (where.empty() && !requester.empty() && mobility.unresolved) {
+                mobility.unresolved(std::move(m));
+            } else if (!where.empty() && mobility.deliver) {
+                send_remote(std::move(m));
+            } else {
+                for (auto& c : m.caps) drop_cap(std::move(c), abi::gone);
+            }
             return;
         }
         if (requester.empty()) {
@@ -543,6 +677,9 @@ struct Runtime::Impl {
             for (auto& c : caps) drop_cap(std::move(c), abi::gone);
             return;
         }
+        // Provenance is host metadata, not a document supplied by a guest.
+        rec->marks.insert(residency_marks.begin(), residency_marks.end());
+        rec->jobs.erase(correlation);
         Envelope env;
         env.type = Envelope::Type::message;
         env.delivered.kind = abi::MessageKind::reply;
@@ -552,7 +689,49 @@ struct Runtime::Impl {
         env.delivered.correlation = correlation;
         env.delivered.status = status;
         env.caps = std::move(caps);
+        env.residency_marks = std::move(residency_marks);
         enqueue(*rec, std::move(env), abi::max_priority);
+    }
+
+    // Reports are host notifications, not ordinary remotely supplied reserved
+    // messages. They carry no authority and never cause another failure report.
+    std::int32_t deliver_undelivered(RemoteMessage m) {
+        abi::Undelivered report;
+        msgpack::Reader reader(m.payload);
+        unsigned fields = 0;
+        const bool valid = abi::detail::read_map(reader, [&](std::string_view field) {
+            unsigned bit = field == "name" ? 1 : field == "handle" ? 2 : field == "status" ? 4 : 0;
+            if (!bit) return reader.skip();
+            if (fields & bit) return false;
+            fields |= bit;
+            if (bit == 1) return msgpack::read_value(reader, report.name);
+            if (bit == 2) return msgpack::read_value(reader, report.handle);
+            return msgpack::read_value(reader, report.status);
+        }) && reader.at_end() && fields == 7;
+        // The original name/handle may themselves have caused a local send
+        // validation failure. They are data, not capability authority.
+        if (m.target.empty() || m.name != abi::undelivered_message || !valid || report.status >= 0 ||
+            !m.caps.empty() || m.sender || m.badge || m.failure || !m.residency_marks.empty()) return abi::invalid_argument;
+        if (auto* rec = find(m.target)) {
+            if (rec->native) return abi::denied;
+            Envelope env;
+            env.delivered.kind = abi::MessageKind::message;
+            env.delivered.name = std::string(abi::undelivered_message);
+            env.delivered.payload = std::move(m.payload);
+            env.delivered.priority = abi::max_priority;
+            enqueue(*rec, std::move(env), abi::max_priority);
+            return abi::ok;
+        }
+        if (m.hops < 0 || m.hops >= max_forwards) return abi::not_found;
+        const auto where = remote_host(m.target, m.host);
+        if (!where.empty() && where != mobility.host_id) {
+            m.host = where;
+            ++m.hops;
+            send_remote(std::move(m));
+        } else if (mobility.unresolved) {
+            mobility.unresolved(std::move(m));
+        }
+        return abi::ok;
     }
 
     // Releases a capability that leaves every table: an unused reply
@@ -702,10 +881,18 @@ struct Runtime::Impl {
         enqueue(rec, std::move(env), control_priority);
     }
 
+    void notify_arrival(PagletRec& rec, bool succeeded) {
+        auto receipt = std::exchange(rec.arrival_receipt, std::nullopt);
+        if (receipt && mobility.arrived)
+            mobility.arrived(receipt->first, receipt->second, succeeded, rec.arrival_activation_ns);
+    }
+
     // Ends a paglet (mu held, the paglet is not running): answers queued
     // requests and held reply capabilities, removes it and its stored state.
     void end_paglet(PagletRec& rec, bool failed, std::string reason) {
+        notify_arrival(rec, false);
         const std::int32_t status = failed ? abi::failed : abi::gone;
+        cancel_jobs(rec, abi::gone, false);
         for (auto& [key, env] : rec.mailbox) {
             if (env.reply_cap) drop_cap(std::move(*env.reply_cap), status);
             for (auto& c : env.caps) drop_cap(std::move(c), status);
@@ -728,13 +915,13 @@ struct Runtime::Impl {
         erase_paglet(rec.id);  // rec is destroyed here
     }
 
-    void persist(PagletRec& rec, const wasm::Snapshot& snap) {
-        if (!store) return;
+    bool persist(PagletRec& rec, const wasm::Snapshot& snap) {
+        if (!store) return false;
         if (!rec.restart) {
             // Not to come back: nothing stored (an older record goes).
             if (rec.image_on_disk) store->remove_paglet(rec.id);
             rec.image_on_disk = false;
-            return;
+            return true;
         }
         PagletRecord r;
         r.id = rec.id;
@@ -745,8 +932,14 @@ struct Runtime::Impl {
         r.next_handle = rec.next_handle;
         r.next_correlation = rec.next_correlation;
         r.next_timer = rec.next_timer;
+        r.wake_at_ms = rec.wake_at_ms;
         r.caps.assign(rec.caps.begin(), rec.caps.end());
-        r.pending_requests.assign(rec.pending_requests.begin(), rec.pending_requests.end());
+        auto outstanding = rec.pending_requests;
+        for (const auto& [key, env] : rec.mailbox)
+            if (env.type == Envelope::Type::message && env.delivered.kind == abi::MessageKind::reply)
+                outstanding.insert(env.delivered.correlation);
+        r.pending_requests.assign(outstanding.begin(), outstanding.end());
+        for (const auto& [correlation, job] : rec.jobs) r.pending_jobs.push_back(correlation);
         r.checkpoint_ms = rec.checkpoint_interval ? rec.checkpoint_interval->count() : -1;
         r.services = rec.services;
         r.marks.assign(rec.marks.begin(), rec.marks.end());
@@ -755,10 +948,12 @@ struct Runtime::Impl {
         r.image_ms = wall_ms();
         if (auto ok = store->save_paglet(r, snap); !ok) {
             log(3, rec.id, "persisting the paglet failed: " + ok.error());
+            return false;
         } else {
             rec.image_on_disk = true;
             rec.image_ms = r.image_ms;
         }
+        return true;
     }
 
     // -- guest calls (mu not held; rec.running) -----------------------------
@@ -768,6 +963,7 @@ struct Runtime::Impl {
     std::expected<std::int32_t, std::string> guest_call(PagletRec& rec, F&& call) {
         {
             std::lock_guard lock(mu);
+            if (rec.kill_reason) return std::unexpected(*rec.kill_reason);
             rec.budget_exceeded = false;
             rec.call_deadline = SteadyClock::now() + config.handler_budget;
             in_call.insert(&rec);
@@ -802,6 +998,16 @@ struct Runtime::Impl {
     }
 
     std::expected<void, std::string> activate(PagletRec& rec, bool deliver_activated);
+    bool expired(Envelope& env) {
+        if (!env.expires_at || SteadyClock::now() < *env.expires_at) return false;
+        std::lock_guard lock(mu);
+        if (env.reply_cap) drop_cap(std::move(*env.reply_cap), abi::timeout);
+        env.reply_cap.reset();
+        for (auto& cap : env.caps) drop_cap(std::move(cap), abi::gone);
+        env.caps.clear();
+        return true;
+    }
+
     void process_native(PagletRec& rec, Envelope env);
     std::expected<wasm::Snapshot, std::string> snapshot(PagletRec& rec) { return rec.instance->capture(); }
     void process(PagletRec& rec, Envelope env, bool& remove);
@@ -839,7 +1045,7 @@ public:
     Document self_info() override {
         std::lock_guard lock(rt_.mu);
         abi::SelfInfo info{
-            rec_.id,      rec_.module_hash(), rec_.owner,   std::string(to_string(rec_.trust)), rt_.config.host_name,
+            rec_.id,      rec_.module_hash(), rec_.owner,   std::string(to_string(rec_.trust)), rt_.identity_host(),
             abi::version, abi::minor_version, rec_.services};
         info.pinned_until = rec_.pinned_until();
         info.restart = rec_.restart;
@@ -869,39 +1075,41 @@ public:
         std::string remote;
         auto cap = checked_endpoint(endpoint, m.name, target, remote);
         if (!cap) return cap.error();
+        const auto badge = (*cap)->badge;
         if (target == nullptr) {
             // A paglet on another host: only endpoints travel with the message.
             if (!m.lend.empty()) return abi::invalid_argument;
             if (!rt_.portable_handles(rec_, m.caps)) return abi::unsupported;
-            auto caps = rt_.take_caps(rec_, m.caps);
+            auto target_id = (*cap)->target;
+            auto caps = take_endpoint_caps(endpoint, m.caps);
             if (!caps) return caps.error();
-            if ((*cap)->uses_left) --*(*cap)->uses_left;
             RemoteMessage out;
             out.kind = RemoteMessage::Kind::message;
-            out.target = (*cap)->target;
+            if (m.async) out.failure = RemoteMessage::FailureRoute{rec_.id, rt_.identity_host(), endpoint};
+            out.target = std::move(target_id);
             out.host = remote;
             out.name = std::move(m.name);
             out.payload = std::move(m.payload);
             out.priority = m.priority;
-            out.sender = rec_.sender(rt_.config.host_name);
-            out.badge = (*cap)->badge;
+            out.sender = rec_.sender(rt_.identity_host());
+            out.badge = badge;
             out.caps = rt_.portable_caps(std::move(*caps));
             rt_.send_remote(std::move(out));
             return abi::ok;
         }
         auto lent = rt_.lend_caps(rec_, m.lend, *target);
         if (!lent) return lent.error();
-        auto caps = rt_.take_caps(rec_, m.caps);
+        auto caps = take_endpoint_caps(endpoint, m.caps);
         if (!caps) return caps.error();
-        if ((*cap)->uses_left) --*(*cap)->uses_left;
         Envelope env;
         env.lent = std::move(*lent);
+        if (m.async) env.failure = RemoteMessage::FailureRoute{rec_.id, rt_.identity_host(), endpoint};
         env.delivered.kind = abi::MessageKind::message;
         env.delivered.name = std::move(m.name);
         env.delivered.payload = std::move(m.payload);
         env.delivered.priority = m.priority;
-        env.delivered.sender = rec_.sender(rt_.config.host_name);
-        env.delivered.badge = (*cap)->badge;
+        env.delivered.sender = rec_.sender(rt_.identity_host());
+        env.delivered.badge = badge;
         env.caps = std::move(*caps);
         if (target->lane < 0) target->lane_hint = rec_.lane;
         rt_.enqueue(*target, std::move(env), m.priority);
@@ -918,38 +1126,39 @@ public:
         std::string remote;
         auto cap = checked_endpoint(endpoint, m.name, target, remote);
         if (!cap) return cap.error();
+        const auto badge = (*cap)->badge;
         if (target == nullptr) {
             if (!m.lend.empty()) return abi::invalid_argument;
             if (!rt_.portable_handles(rec_, m.caps)) return abi::unsupported;
-            auto caps = rt_.take_caps(rec_, m.caps);
+            auto target_id = (*cap)->target;
+            auto caps = take_endpoint_caps(endpoint, m.caps);
             if (!caps) return caps.error();
-            if ((*cap)->uses_left) --*(*cap)->uses_left;
             const std::uint64_t correlation = rec_.next_correlation++;
             rec_.pending_requests.insert(correlation);
             RemoteMessage out;
             out.kind = RemoteMessage::Kind::request;
-            out.target = (*cap)->target;
+            out.target = std::move(target_id);
             out.host = remote;
             out.name = std::move(m.name);
             out.payload = std::move(m.payload);
             out.priority = m.priority;
-            out.sender = rec_.sender(rt_.config.host_name);
-            out.badge = (*cap)->badge;
+            out.sender = rec_.sender(rt_.identity_host());
+            out.badge = badge;
             out.caps = rt_.portable_caps(std::move(*caps));
             out.requester = rec_.id;
             out.requester_host = rt_.mobility.host_id;
             out.correlation = correlation;
-            out.timeout_ms = m.timeout_ms;
+            out.timeout_ms = bounded_delay(m.timeout_ms).count();
+            out.deadline_ms = wall_deadline(m.timeout_ms);
             rt_.send_remote(std::move(out));
-            rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(m.timeout_ms),
+            rt_.schedule(SteadyClock::now() + bounded_delay(m.timeout_ms),
                          Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
             return static_cast<std::int64_t>(correlation);
         }
         auto lent = rt_.lend_caps(rec_, m.lend, *target);
         if (!lent) return lent.error();
-        auto caps = rt_.take_caps(rec_, m.caps);
+        auto caps = take_endpoint_caps(endpoint, m.caps);
         if (!caps) return caps.error();
-        if ((*cap)->uses_left) --*(*cap)->uses_left;
         const std::uint64_t correlation = rec_.next_correlation++;
         rec_.pending_requests.insert(correlation);
         Cap reply;
@@ -962,14 +1171,16 @@ public:
         env.delivered.name = std::move(m.name);
         env.delivered.payload = std::move(m.payload);
         env.delivered.priority = m.priority;
-        env.delivered.sender = rec_.sender(rt_.config.host_name);
-        env.delivered.badge = (*cap)->badge;
+        env.delivered.sender = rec_.sender(rt_.identity_host());
+        env.delivered.badge = badge;
         env.caps = std::move(*caps);
         env.lent = std::move(*lent);
         env.reply_cap = std::move(reply);
+        env.deadline_ms = wall_deadline(m.timeout_ms);
+        env.expires_at = SteadyClock::now() + bounded_delay(m.timeout_ms);
         if (target->lane < 0) target->lane_hint = rec_.lane;
         rt_.enqueue(*target, std::move(env), m.priority);
-        rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(m.timeout_ms),
+        rt_.schedule(SteadyClock::now() + bounded_delay(m.timeout_ms),
                      Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
         return static_cast<std::int64_t>(correlation);
     }
@@ -987,10 +1198,11 @@ public:
     }
 
     std::int32_t reply_message(std::int32_t handle, abi::OutMessage m) {
+        if (auto v = Runtime::Impl::validate(m); v != abi::ok) return v;
         std::lock_guard lock(rt_.mu);
         auto it = rec_.caps.find(handle);
         if (it == rec_.caps.end() || it->second.kind != Cap::Kind::reply) return abi::bad_handle;
-        if (!m.lend.empty()) return abi::invalid_argument;
+        if (!m.lend.empty() || std::ranges::find(m.caps, handle) != m.caps.end()) return abi::invalid_argument;
         const Cap& r = it->second;
         const bool here =
             r.target.empty() ? (r.host.empty() || r.host == rt_.mobility.host_id) : rt_.paglets.contains(r.target);
@@ -1116,6 +1328,7 @@ public:
         abi::ChildSpec spec;
         if (!abi::decode(doc, spec)) return abi::malformed;
         std::lock_guard lock(rt_.mu);
+        if (rec_.in_end_hook) return abi::bad_state;
         std::string module = rec_.module;
         if (spec.module) {
             auto info = rt_.modules->info(*spec.module);
@@ -1152,16 +1365,19 @@ public:
 
     std::int32_t lifecycle(std::int32_t op, std::span<const std::uint8_t> doc) override {
         std::lock_guard lock(rt_.mu);
+        const auto operation = static_cast<abi::LifecycleOp>(op);
+        if (rec_.in_end_hook && operation != abi::LifecycleOp::restart)
+            return abi::bad_state;
         switch (static_cast<abi::LifecycleOp>(op)) {
             case abi::LifecycleOp::dispose:
-                if (rec_.pending_end) return abi::bad_state;
+                if (rec_.pending_end || rec_.dispatch_pending) return abi::bad_state;
                 rec_.pending_end = abi::LifecycleOp::dispose;
                 return abi::ok;
             case abi::LifecycleOp::deactivate: {
                 abi::DeactivateArg arg;
                 if (!doc.empty() && !abi::decode(doc, arg)) return abi::malformed;
                 if (arg.wake_after_ms && *arg.wake_after_ms < 0) return abi::invalid_argument;
-                if (rec_.pending_end) return abi::bad_state;
+                if (rec_.pending_end || rec_.dispatch_pending) return abi::bad_state;
                 rec_.pending_end = abi::LifecycleOp::deactivate;
                 rec_.wake_after_ms = arg.wake_after_ms;
                 return abi::ok;
@@ -1176,7 +1392,7 @@ public:
                 if (arg.destination) {
                     // A clone made on another host: it exists here only as an
                     // image until the mesh delivered it.
-                    if (arg.destination->empty()) return abi::invalid_argument;
+                    if (!parse_transfer_ticket(*arg.destination)) return abi::invalid_argument;
                     if (!rt_.mobility.depart) return abi::unsupported;
                     if (rec_.trust != TrustClass::roaming) return abi::denied;
                     if (!rt_.portable_handles(rec_, arg.caps)) return abi::invalid_argument;
@@ -1216,19 +1432,23 @@ public:
             }
             case abi::LifecycleOp::dispatch: {
                 abi::DispatchArg arg;
-                if (!abi::decode(doc, arg) || arg.destination.empty()) return abi::invalid_argument;
+                if (!abi::decode(doc, arg) || !parse_transfer_ticket(arg.destination)) return abi::invalid_argument;
                 if (!rt_.mobility.depart) return abi::unsupported;
                 // System and resident paglets stay where they are.
                 if (rec_.trust != TrustClass::roaming) return abi::denied;
-                if (rec_.pending_end) return abi::bad_state;
+                if (rec_.pending_end || rec_.dispatch_pending) return abi::bad_state;
                 if (rec_.pinned_until() != 0) return abi::pinned;
                 rec_.pending_end = abi::LifecycleOp::dispatch;
+                rec_.dispatch_pending = true;
                 rec_.dispatch_to = std::move(arg.destination);
                 return abi::ok;
             }
             case abi::LifecycleOp::checkpoint:
-                // Stored right after this handler (with a state directory).
+                if (!rt_.store) return abi::unsupported;
+                if (!rec_.restart || rec_.in_end_hook || rec_.pending_end) return abi::bad_state;
+                // Scheduled for after this handler, not a synchronous barrier.
                 rec_.checkpoint_due = true;
+                rec_.checkpoint_requested = true;
                 return abi::ok;
             case abi::LifecycleOp::restart: {
                 abi::RestartArg arg;
@@ -1259,16 +1479,145 @@ public:
         t.target = rec_.id;
         t.transferable = false;
         t.timer_id = rec_.next_timer++;
-        t.fire_at = wall_ms() + delay_ms;
+        const auto delay = bounded_delay(delay_ms);
+        t.fire_at = wall_deadline(delay.count());
         t.message.name = std::move(m.name);
         t.message.payload = std::move(m.payload);
         t.message.priority = m.priority;
-        rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(delay_ms),
+        rt_.schedule(SteadyClock::now() + delay,
                      Deadline{Deadline::Type::timer, rec_.id, t.timer_id});
         return rt_.add_cap(rec_, std::move(t));
     }
 
+    // -- compute jobs (ABI v1.3) --
+
+    // --8<-- [start:job_submit]
+    std::int64_t job_submit(std::span<const std::uint8_t> doc) override {
+        if (doc.size() > abi::max_document_size) return abi::too_large;
+        abi::JobSpec spec;
+        if (!abi::decode(doc, spec)) return abi::malformed;
+        if (spec.function.empty() || spec.function.size() > abi::max_name_length) return abi::invalid_argument;
+        if (spec.cores < 1 || spec.max_ms < 0 || spec.memory_mb < 0) return abi::invalid_argument;
+        if (spec.on_departure != "cancel" && spec.on_departure != "finish") return abi::invalid_argument;
+        std::lock_guard lock(rt_.mu);
+        if (rec_.in_end_hook) return abi::bad_state;
+        if (rt_.stopping || !rt_.job_pool) return abi::unsupported;
+        const std::string module = spec.module.value_or(rec_.module_hash());
+        if (module.size() != 64) return abi::invalid_argument;
+        // The mesh policy decides, and may cap the wall time.
+        if (rt_.job_hooks.admit) {
+            auto cap_ms = rt_.job_hooks.admit(rec_.sender(rt_.identity_host()), spec);
+            if (!cap_ms) return cap_ms.error();
+            if (*cap_ms > 0 && (spec.max_ms == 0 || spec.max_ms > *cap_ms)) spec.max_ms = *cap_ms;
+        }
+        std::optional<Cap> artifact;
+        if (spec.input_artifact) {
+            auto it = rec_.caps.find(*spec.input_artifact);
+            if (it == rec_.caps.end() || it->second.kind != Cap::Kind::resource || it->second.resource_type != "artifact") {
+                return abi::bad_handle;
+            }
+            if (auto u = rt_.usable(it->second); u != abi::ok) return u;
+            if (!rt_.job_artifacts.load) return abi::unsupported;
+            artifact = it->second;
+        }
+        const bool remote = !spec.hosts.empty();
+        if (remote && !rt_.job_hooks.submit_remote) return abi::unsupported;
+        const std::uint64_t correlation = rec_.next_correlation++;
+        rec_.pending_requests.insert(correlation);
+        auto& pending = rec_.jobs[correlation];
+        pending.remote = remote;
+        pending.finish = spec.on_departure == "finish";
+        pending.status.state = "queued";
+        // If no result comes, the paglet hears `timeout` a minute after the
+        // job's limit. The deadline also carries the correlation along when
+        // the paglet moves, so a result can follow it.
+        const std::int64_t limit = std::min(spec.max_ms > 0 ? spec.max_ms : rt_.config.job_default_time.count(),
+                                          rt_.config.job_max_time.count());
+        rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(limit + 60'000),
+                     Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
+        IncomingJob job{rec_.id, {}, correlation, rec_.owner, module, spec.function, std::move(spec.input),
+                        spec.cores, spec.max_ms, spec.memory_mb, {rec_.marks.begin(), rec_.marks.end()}, artifact};
+        if (remote) {
+            // The mesh picks the host (without the runtime's lock).
+            spec.input = std::move(job.input);
+            spec.input_artifact.reset();  // a handle of this paglet; the capability travels instead
+            RemoteJob rj{rec_.id, rt_.mobility.host_id, correlation, rec_.sender(rt_.identity_host()), module,
+                         std::move(spec), artifact ? std::optional<Cap>(rt_.portable(*artifact)) : std::nullopt,
+                         std::move(job.marks)};
+            rt_.defer([submit = rt_.job_hooks.submit_remote, rj = std::move(rj)]() mutable { submit(std::move(rj)); });
+            return static_cast<std::int64_t>(correlation);
+        }
+        if (artifact) {
+            rt_.start_job_from_artifact(std::move(job));
+            return static_cast<std::int64_t>(correlation);
+        }
+        auto id = rt_.start_job(std::move(job));
+        if (!id) {
+            rec_.pending_requests.erase(correlation);
+            rec_.jobs.erase(correlation);
+            return id.error();
+        }
+        pending.id = *id;
+        return static_cast<std::int64_t>(correlation);
+    }
+    // --8<-- [end:job_submit]
+
+    std::int32_t job_cancel(std::int64_t correlation) override {
+        std::lock_guard lock(rt_.mu);
+        auto it = rec_.jobs.find(static_cast<std::uint64_t>(correlation));
+        if (it == rec_.jobs.end()) return abi::not_found;
+        if (!it->second.remote) {
+            if (it->second.id != 0) {
+                rt_.job_pool->cancel(it->second.id, abi::cancelled);
+            } else {
+                rt_.deliver_reply(rec_.id, static_cast<std::uint64_t>(correlation), abi::cancelled, {}, {});
+            }
+        } else if (rt_.job_hooks.cancel_remote) {
+            auto cancel = rt_.job_hooks.cancel_remote;
+            rt_.defer([cancel, paglet = rec_.id, correlation] { cancel(paglet, static_cast<std::uint64_t>(correlation)); });
+        }
+        return abi::ok;
+    }
+
+    Document job_status(std::int64_t correlation) override {
+        std::lock_guard lock(rt_.mu);
+        auto it = rec_.jobs.find(static_cast<std::uint64_t>(correlation));
+        if (it == rec_.jobs.end()) return std::unexpected(abi::not_found);
+        abi::JobStatus st = it->second.status;
+        if (!it->second.remote) {
+            st.host = rt_.mobility.host_id.empty() ? rt_.config.host_name : rt_.mobility.host_id;
+            if (auto info = rt_.job_pool->info(it->second.id)) {
+                st.state = info->state;
+                st.done = info->done;
+                st.total = info->total;
+                st.elapsed_ms = info->elapsed_ms;
+                st.aot = info->aot;
+            } else if (it->second.id != 0) {
+                st.state = "done";  // the result is on its way
+            }
+        }
+        return abi::encode(st);
+    }
+
 private:
+    // Transfer validation must finish before consuming a use. If the endpoint
+    // itself travels, update the moved capability, never its erased map entry.
+    std::expected<std::vector<Cap>, std::int32_t> take_endpoint_caps(
+        std::int32_t endpoint, const std::vector<std::int32_t>& handles) {
+        auto caps = rt_.take_caps(rec_, handles);
+        if (!caps) return std::unexpected(caps.error());
+        Cap* used = nullptr;
+        if (auto it = rec_.caps.find(endpoint); it != rec_.caps.end()) {
+            used = &it->second;
+        } else {
+            const auto at = std::ranges::find(handles, endpoint);
+            // checked_endpoint succeeded, so removal means it is in this batch.
+            used = &(*caps)[static_cast<std::size_t>(at - handles.begin())];
+        }
+        if (used->uses_left) --*used->uses_left;
+        return caps;
+    }
+
     // Reports a failed asynchronous send or reply to the paglet itself. The
     // guest considers the message sent, so what it gave up is released here:
     // the capabilities it transferred and, for a reply, the reply capability
@@ -1366,7 +1715,7 @@ public:
     std::expected<void, std::int32_t> send(const PagletId& to, std::string_view name, Bytes payload,
                                            std::vector<Cap> caps, std::int32_t priority,
                                            std::optional<std::string> badge) override {
-        if (!abi::valid_message_name(name) || priority < 0 || priority > abi::max_priority) {
+        if (!abi::valid_message_name(name) || abi::reserved_message_name(name) || priority < 0 || priority > abi::max_priority) {
             return std::unexpected(abi::invalid_argument);
         }
         std::lock_guard lock(rt_.mu);
@@ -1379,7 +1728,7 @@ public:
         env.delivered.name = std::string(name);
         env.delivered.payload = std::move(payload);
         env.delivered.priority = priority;
-        env.delivered.sender = self->sender(rt_.config.host_name);
+        env.delivered.sender = self->sender(rt_.identity_host());
         env.delivered.badge = std::move(badge);
         env.caps = std::move(caps);
         rt_.enqueue(*target, std::move(env), priority);
@@ -1478,6 +1827,7 @@ void Runtime::Impl::process_native(PagletRec& rec, Envelope env) {
 // Delivery
 
 std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool deliver_activated) {
+    const auto activation_started = SteadyClock::now();
     std::optional<wasm::Snapshot> image;
     Executor* executor = nullptr;
     {
@@ -1511,6 +1861,9 @@ std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool de
         std::lock_guard lock(mu);  // info() and the watchdog read it under the lock
         rec.instance = std::move(*placed);
         rec.loaded = std::move(*module);
+        if (rec.arrival_receipt)
+            rec.arrival_activation_ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                SteadyClock::now() - activation_started).count());
     }
     // A paglet without a stored image is checkpointed after its first handler.
     rec.last_checkpoint = SteadyClock::now();
@@ -1523,6 +1876,12 @@ std::expected<void, std::string> Runtime::Impl::activate(PagletRec& rec, bool de
 }
 
 void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
+    if (expired(env)) return;
+    if (env.type == Envelope::Type::wake) {
+        std::lock_guard lock(mu);
+        if (env.wake_at_ms != rec.wake_at_ms) return;
+        rec.wake_at_ms = 0;
+    }
     if (rec.native) {
         process_native(rec, std::move(env));
         return;
@@ -1553,6 +1912,21 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
         }
     }
 
+    if (env.type == Envelope::Type::message) {
+        std::lock_guard lock(mu);
+        if (rec.wake_at_ms != 0) {
+            rec.wake_at_ms = 0;
+            rec.checkpoint_due = true;
+        }
+    }
+    if (env.type == Envelope::Type::wake) {
+        // activate() resets checkpoint_due. Persist consumption of the wake
+        // after activation so a later restart cannot replay the old alarm.
+        std::lock_guard lock(mu);
+        rec.checkpoint_due = true;
+    }
+
+    if (expired(env)) return;
     std::expected<std::int32_t, std::string> result = abi::handled;
     std::optional<std::pair<std::int32_t, std::uint64_t>> reply_slot;  // handle, correlation
 
@@ -1606,6 +1980,7 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
         case Envelope::Type::move: {
             std::lock_guard lock(mu);
             if (const std::int64_t until = rec.pinned_until(); until != 0) {
+                rec.dispatch_pending = false;
                 move_failed(rec, env.destination, "pinned until " + std::to_string(until), {});
             } else if (!rec.pending_end) {
                 rec.pending_end = abi::LifecycleOp::dispatch;
@@ -1618,12 +1993,14 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
     std::lock_guard lock(mu);
     ++rec.handled;
     if (!result) {
+        if (env.type == Envelope::Type::start) notify_arrival(rec, false);
         retire(rec);
         end_paglet(rec, true, result.error());
         remove = true;
         return;
     }
     // Requests the handler did not handle are answered by the host.
+    if (env.type == Envelope::Type::start) notify_arrival(rec, true);
     if (reply_slot && (*result == abi::not_handled || *result < 0)) {
         auto it = rec.caps.find(reply_slot->first);
         if (it != rec.caps.end() && it->second.kind == Cap::Kind::reply &&
@@ -1634,6 +2011,12 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
                           {});
         }
     }
+    if (*result == abi::not_handled && !reply_slot && env.type == Envelope::Type::message &&
+        (env.delivered.kind == abi::MessageKind::message || env.delivered.kind == abi::MessageKind::timer)) {
+        const auto kind = env.delivered.kind == abi::MessageKind::timer ? "timer " : "message ";
+        log(static_cast<std::int32_t>(abi::LogLevel::debug), rec.id,
+            std::string("handler returned not_handled for ") + kind + env.delivered.name);
+    }
     if (*result < 0 && !reply_slot && env.type == Envelope::Type::message) {
         log(2, rec.id, "handler returned " + std::string(abi::error_name(*result)));
     }
@@ -1643,14 +2026,47 @@ void Runtime::Impl::process(PagletRec& rec, Envelope env, bool& remove) {
 // on entry and exit; released around guest calls).
 void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<std::mutex>& lock) {
     rec.spawned_this_call = 0;
+    const bool checkpoint_requested = std::exchange(rec.checkpoint_requested, false);
 
     std::vector<Departure> departing;  // handed to the mesh after the lock is released
+    auto publish = [&] {
+        for (auto& d : departing) outgoing.push_back(std::move(d));
+        departing.clear();
+    };
+    auto fail = [&](std::string reason) {
+        // Clones already completed before the end hook are independent
+        // paglets. The original's own departure is staged only after all
+        // unlocked work has been checked for termination.
+        publish();
+        end_paglet(rec, true, std::move(reason));
+        remove = true;
+    };
+    auto killed = [&] {
+        if (!rec.kill_reason) return false;
+        fail(*rec.kill_reason);
+        return true;
+    };
+    auto end_hook = [&](abi::EventKind kind, const Bytes& doc) {
+        rec.in_end_hook = true;
+        lock.unlock();
+        auto r = call_event(rec, kind, doc);
+        lock.lock();
+        rec.in_end_hook = false;
+        return r;
+    };
     auto clones = std::move(rec.clones);
     rec.clones.clear();
     if (!clones.empty() && rec.instance) {
         lock.unlock();
+        const auto capture_started = SteadyClock::now();
         auto snap = snapshot(rec);
+        const auto capture_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - capture_started).count();
         lock.lock();
+        if (rec.kill_reason) {
+            rec.clones = std::move(clones);  // end_paglet cleans unpublished clones and their capabilities
+            (void)killed();
+            return;
+        }
         for (auto& pc : clones) {
             if (pc.destination) {
                 if (!snap) {
@@ -1669,7 +2085,11 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
                            (!service && (e.second.kind != Cap::Kind::endpoint || !e.second.transferable));
                 });
                 st.pending.clear();
+                st.pending_captured_ms = 0;
+                st.wake_at_ms = 0;
                 Departure d;
+                d.capture_started = capture_started;
+                d.capture_ns = static_cast<std::uint64_t>(capture_ns);
                 d.move = next_move++;
                 d.state = std::move(st);
                 d.image = *snap;
@@ -1719,10 +2139,12 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
     rec.pending_end.reset();
     if (end == abi::LifecycleOp::dispose) {
         if (rec.instance) {
-            lock.unlock();
-            auto r = call_event(rec, abi::EventKind::disposing, {});
-            lock.lock();
-            if (!r) log(2, rec.id, "disposing handler failed: " + r.error());
+            auto r = end_hook(abi::EventKind::disposing, {});
+            if (killed()) return;
+            if (!r) {
+                fail("disposing: " + r.error());
+                return;
+            }
         }
         retire(rec);
         end_paglet(rec, false, "disposed");
@@ -1730,71 +2152,98 @@ void Runtime::Impl::finish_call(PagletRec& rec, bool& remove, std::unique_lock<s
     } else if (end == abi::LifecycleOp::dispatch && rec.instance) {
         const std::string destination = rec.dispatch_to.value_or("");
         rec.dispatch_to.reset();
+        auto r = end_hook(abi::EventKind::dispatching, abi::encode(abi::DispatchingEvent{destination}));
+        if (killed()) return;
+        if (!r) {
+            fail("dispatching: " + r.error());
+            return;
+        }
         lock.unlock();
-        auto r = call_event(rec, abi::EventKind::dispatching, abi::encode(abi::DispatchingEvent{destination}));
-        std::expected<wasm::Snapshot, std::string> snap = std::unexpected(r ? std::string() : r.error());
-        if (r) snap = snapshot(rec);
+        const auto capture_started = SteadyClock::now();
+        auto snap = snapshot(rec);
+        const auto capture_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(SteadyClock::now() - capture_started).count();
         lock.lock();
+        if (killed()) return;
         if (!snap) {
             // The paglet stays; it hears why.
+            rec.dispatch_pending = false;
             move_failed(rec, destination, "no image: " + snap.error(), {});
         } else if (const std::int64_t until = rec.pinned_until(); until != 0) {
             // Pinned while it prepared to leave: the pin wins.
+            rec.dispatch_pending = false;
             move_failed(rec, destination, "pinned until " + std::to_string(until), {});
         } else {
-            Departure d;
-            d.move = next_move++;
-            d.state = state_of(rec);
-            d.image = *snap;
-            d.destination = destination;
-            departures[d.move] = Moving{rec.id, {}, destination};
-            // Until the mesh reports the outcome the paglet waits here,
-            // inactive, holding the messages that arrive.
-            rec.moving = true;
-            rec.image = std::move(*snap);
-            retire(rec);
-            rec.imports.reset();
-            departing.push_back(std::move(d));
+            auto captured = capture_ready(rec);
+            if (!captured) {
+                rec.dispatch_pending = false;
+                move_failed(rec, destination, captured.error(), {});
+            } else {
+                Departure d;
+                d.capture_started = capture_started;
+                d.capture_ns = static_cast<std::uint64_t>(capture_ns);
+                d.move = next_move++;
+                d.state = state_of(rec);
+                d.state.ready = std::move(captured->messages);
+                d.image = *snap;
+                d.destination = destination;
+                departures[d.move] = Moving{rec.id, {}, destination, std::move(captured->sequences)};
+                // Until the mesh reports the outcome the paglet waits here,
+                // inactive, holding the messages that arrive.
+                rec.moving = true;
+                rec.image = std::move(*snap);
+                retire(rec);
+                rec.imports.reset();
+                departing.push_back(std::move(d));
+            }
         }
     } else if (end == abi::LifecycleOp::deactivate && rec.instance) {
         const auto wake = rec.wake_after_ms;
         rec.wake_after_ms.reset();
-        lock.unlock();
-        auto r = call_event(rec, abi::EventKind::deactivating, {});
-        std::expected<wasm::Snapshot, std::string> snap = std::unexpected(std::string("deactivating failed"));
-        if (r) snap = snapshot(rec);
-        lock.lock();
-        if (!snap) {
-            retire(rec);
-            end_paglet(rec, true, r ? snap.error() : r.error());
-            remove = true;
+        auto r = end_hook(abi::EventKind::deactivating, {});
+        if (killed()) return;
+        if (!r) {
+            fail("deactivating: " + r.error());
             return;
         }
+        lock.unlock();
+        auto snap = snapshot(rec);
+        lock.lock();
+        if (killed()) return;
+        if (!snap) {
+            fail(snap.error());
+            return;
+        }
+        const auto now = wall_ms();
+        rec.wake_at_ms = wake ? now + std::min(*wake, std::numeric_limits<std::int64_t>::max() - now) : 0;
         if (store) {
-            persist(rec, *snap);
+            if (!persist(rec, *snap) && rec.restart) {
+                fail("deactivating: the image could not be stored");
+                return;
+            }
         } else {
             rec.image = std::move(*snap);
         }
         if (store && !rec.image_on_disk) rec.image = std::move(*snap);
         retire(rec);
         rec.imports.reset();
-        if (wake) {
-            schedule(SteadyClock::now() + std::chrono::milliseconds(*wake), Deadline{Deadline::Type::wake, rec.id, 0});
-        }
+        schedule_wake(rec);
     } else if (store && rec.instance && (rec.restart || rec.image_on_disk) &&
                (rec.checkpoint_due || SteadyClock::now() - rec.last_checkpoint >=
                                           rec.checkpoint_interval.value_or(config.checkpoint_interval))) {
         lock.unlock();
         auto snap = snapshot(rec);
         lock.lock();
-        if (snap) {
-            persist(rec, *snap);
+        if (killed()) return;
+        if (snap && persist(rec, *snap)) {
             rec.last_checkpoint = SteadyClock::now();
             rec.checkpoint_due = false;
+        } else if (checkpoint_requested) {
+            fail(snap ? "checkpoint: the image could not be stored" : "checkpoint: " + snap.error());
+            return;
         }
     }
     // The mesh gets them once the lane released the paglet (lane_loop).
-    for (auto& d : departing) outgoing.push_back(std::move(d));
+    publish();
 }
 
 void Runtime::Impl::lane_loop(std::size_t index) {
@@ -1828,6 +2277,10 @@ void Runtime::Impl::lane_loop(std::size_t index) {
         }
         if (!remove) {
             finish_call(*rec, remove, lock);
+        }
+        if (!remove && rec->kill_reason) {
+            end_paglet(*rec, true, *rec->kill_reason);
+            remove = true;
         }
         if (!remove) {
             rec->running = false;
@@ -1900,14 +2353,32 @@ void Runtime::Impl::clock_loop() {
 
 void Runtime::Impl::fire(Deadline d) {
     switch (d.type) {
-        case Deadline::Type::request_timeout:
+        case Deadline::Type::request_timeout: {
+            if (PagletRec* rec = find(d.paglet)) {
+                if (auto job = rec->jobs.find(d.id); job != rec->jobs.end()) {
+                    if (!job->second.remote) {
+                        if (job_pool && job->second.id) job_pool->cancel(job->second.id, abi::timeout);
+                    } else if (job_hooks.cancel_remote) {
+                        defer([cancel = job_hooks.cancel_remote, paglet = rec->id, correlation = d.id] {
+                            cancel(paglet, correlation);
+                        });
+                    }
+                }
+            }
             // Requests of a paglet that left time out where it went.
             if (d.paglet.empty() || paglets.contains(d.paglet)) deliver_reply(d.paglet, d.id, abi::timeout, {}, {});
             break;
+        }
         case Deadline::Type::wake: {
-            if (PagletRec* rec = find(d.paglet)) {
+            if (PagletRec* rec = find(d.paglet); rec && rec->wake_at_ms == static_cast<std::int64_t>(d.id)) {
+                if (rec->moving || rec->arriving || rec->dispatch_pending) {
+                    schedule(SteadyClock::now() + std::chrono::milliseconds(10), d);
+                    break;
+                }
+                if (wall_ms() < rec->wake_at_ms) { schedule_wake(*rec); break; }
                 Envelope env;
                 env.type = Envelope::Type::wake;
+                env.wake_at_ms = rec->wake_at_ms;
                 enqueue(*rec, std::move(env), 0);
             }
             break;
@@ -1919,6 +2390,10 @@ void Runtime::Impl::fire(Deadline d) {
                 return e.second.kind == Cap::Kind::timer && e.second.timer_id == d.id;
             });
             if (it == rec->caps.end()) break;  // cancelled
+            if (rec->moving || rec->arriving || rec->dispatch_pending) {
+                schedule(SteadyClock::now() + std::chrono::milliseconds(10), d);
+                break;
+            }
             Cap t = std::move(it->second);
             rec->caps.erase(it);
             Envelope env;
@@ -1959,21 +2434,18 @@ void Runtime::Impl::recover() {
         rec.restart = r.restart;
         rec.notify_recovered = r.notify_recovered;
         rec.image_ms = r.image_ms;
+        rec.wake_at_ms = r.wake_at_ms;
+        schedule_wake(rec);
         rec.caps.clear();
         for (auto& [h, cap] : r.caps) {
             if (cap.kind == Cap::Kind::timer) {
-                const auto delay = std::max<std::int64_t>(0, cap.fire_at - wall_ms());
-                schedule(SteadyClock::now() + std::chrono::milliseconds(delay),
+                const auto delay = delay_until(cap.fire_at);
+                schedule(SteadyClock::now() + delay,
                          Deadline{Deadline::Type::timer, rec.id, cap.timer_id});
             }
             rec.caps.emplace(h, std::move(cap));
         }
         rec.image_on_disk = true;
-        // Requests in flight at the crash are answered `timeout`.
-        for (auto correlation : r.pending_requests) {
-            rec.pending_requests.insert(correlation);
-            deliver_reply(rec.id, correlation, abi::timeout, {}, {});
-        }
         log(1, rec.id, "recovered from its last image");
         if (rec.notify_recovered) {
             // Its first message: when the image was stored and when the
@@ -1985,7 +2457,158 @@ void Runtime::Impl::recover() {
             env.delivered.priority = abi::max_priority;
             enqueue(rec, std::move(env), abi::max_priority);
         }
+        // Compute jobs ended with the host: `gone`, so the paglet submits
+        // them again. Requests in flight at the crash are answered `timeout`.
+        for (auto correlation : r.pending_jobs) {
+            rec.pending_requests.insert(correlation);
+            deliver_reply(rec.id, correlation, abi::gone, {}, {});
+        }
+        for (auto correlation : r.pending_requests) {
+            if (std::ranges::find(r.pending_jobs, correlation) != r.pending_jobs.end()) continue;
+            rec.pending_requests.insert(correlation);
+            deliver_reply(rec.id, correlation, abi::timeout, {}, {});
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Compute jobs (ABI v1.3)
+
+// Calls that must not run under the runtime's lock (hooks into the mesh,
+// artifact stores), in order, on a thread of their own.
+void Runtime::Impl::run_deferred() {
+    std::unique_lock lock(mu);
+    for (;;) {
+        deferred_cv.wait(lock, [&] { return deferred_stop || !deferred.empty(); });
+        if (deferred.empty()) return;
+        auto f = std::move(deferred.front());
+        deferred.pop_front();
+        deferred_running = true;
+        lock.unlock();
+        f();
+        lock.lock();
+        deferred_running = false;
+        deferred_cv.notify_all();
+    }
+}
+
+// mu held.
+std::expected<std::uint64_t, std::int32_t> Runtime::Impl::start_job(IncomingJob job) {
+    if (!job_pool || stopping) return std::unexpected(abi::unsupported);
+    if (!modules->info(job.module)) return std::unexpected(abi::not_found);
+    if (!modules->add_user(job.module)) return std::unexpected(abi::not_found);
+    std::uint32_t pages = 0;
+    if (job.memory_mb > 0) {
+        const auto mb = std::min<std::int64_t>(job.memory_mb, config.job_max_memory_mb);
+        pages = static_cast<std::uint32_t>(mb * 1024 * 1024 / wasm::page_size);
+    }
+    JobRequest r{std::move(job.paglet), std::move(job.requester_host), job.correlation, std::move(job.owner),
+                 job.module, std::move(job.function), std::move(job.input), job.cores, job.max_ms, pages,
+                 std::move(job.marks)};
+    auto id = job_pool->submit(std::move(r));
+    if (!id) modules->remove_user(job.module);
+    return id;
+}
+
+// mu held: the job's input comes from its artifact first (loaded on the
+// deferred thread); a failure answers the paglet, wherever it is.
+void Runtime::Impl::start_job_from_artifact(IncomingJob job) {
+    if (!job_artifacts.load) {
+        deliver_reply(job.paglet, job.correlation, abi::unsupported, {}, {}, job.requester_host);
+        return;
+    }
+    const std::uint64_t max = std::uint64_t{config.job_max_memory_mb} * 1024 * 1024;
+    Cap artifact = std::move(*job.input_artifact);
+    job.input_artifact.reset();
+    defer([this, load = job_artifacts.load, artifact = std::move(artifact), max, job = std::move(job)]() mutable {
+        load(std::move(artifact), max,
+             [this, job = std::move(job)](std::expected<JobArtifactInput, std::int32_t> input) mutable {
+                 std::lock_guard lock(mu);
+                 PagletRec* rec = job.requester_host.empty() ? find(job.paglet) : nullptr;
+                 // A local paglet that cancelled meanwhile, or ended, waits no more.
+                 if (job.requester_host.empty() && (rec == nullptr || !rec->jobs.contains(job.correlation))) return;
+                 const auto correlation = job.correlation;
+                 const PagletId paglet = job.paglet;
+                 const std::string host = job.requester_host;
+                 if (!input) {
+                     deliver_reply(paglet, correlation, input.error(), {}, {}, host);
+                     return;
+                 }
+                 for (auto& mark : input->marks) {
+                     if (std::ranges::find(job.marks, mark) == job.marks.end()) job.marks.push_back(std::move(mark));
+                 }
+                 job.input = std::move(input->data);
+                 auto id = start_job(std::move(job));
+                 if (!id) {
+                     deliver_reply(paglet, correlation, id.error(), {}, {}, host);
+                 } else if (rec != nullptr) {
+                     rec->jobs[correlation].id = *id;
+                 }
+             });
+    });
+}
+
+// From the job pool, without the runtime's lock: the result goes to the
+// paglet as the reply of its job, wherever it is now. An output too large
+// for a message becomes an artifact.
+void Runtime::Impl::job_done(JobOutcome o) {
+    std::int32_t status = o.status;
+    Bytes payload;
+    std::vector<Cap> caps;
+    std::string host;
+    {
+        std::lock_guard lock(mu);
+        modules->remove_user(o.module);
+        // A host that stops keeps the paglet's pending job: after a restart
+        // the paglet hears `gone` and submits it again.
+        if (stopping) return;
+        host = mobility.host_id.empty() ? config.host_name : mobility.host_id;
+    }
+    if (status == abi::ok) {
+        abi::JobResult r;
+        r.marks = o.marks;
+        r.host = host;
+        r.elapsed_ms = o.elapsed_ms;
+        r.queued_ms = o.queued_ms;
+        r.aot = o.aot;
+        if (o.output.size() > abi::max_document_size - 4096) {
+            auto cap = job_artifacts.store ? job_artifacts.store(o.output, o.marks)
+                                           : std::expected<Cap, std::int32_t>(std::unexpected(abi::too_large));
+            if (cap) {
+                r.artifact = true;
+                caps.push_back(std::move(*cap));
+            } else {
+                status = cap.error();
+            }
+        } else {
+            r.output = std::move(o.output);
+        }
+        if (status == abi::ok) payload = abi::encode(r);
+    }
+    if (status != abi::ok) payload.assign(o.error.begin(), o.error.end());
+    std::lock_guard lock(mu);
+    if (stopping) return;
+    deliver_reply(o.paglet, o.correlation, status, std::move(payload), std::move(caps), o.requester_host,
+                  std::move(o.marks));
+}
+
+// mu held: stops the paglet's jobs; their outcomes (`status`) arrive later.
+// A departing paglet keeps the jobs that are to finish.
+void Runtime::Impl::cancel_jobs(PagletRec& rec, std::int32_t status, bool departing) {
+    std::vector<std::uint64_t> loading;  // local jobs still waiting for their input
+    for (auto& [correlation, job] : rec.jobs) {
+        if (departing && job.finish) continue;
+        if (!job.remote) {
+            if (job.id == 0) {
+                loading.push_back(correlation);
+            } else if (job_pool) {
+                job_pool->cancel(job.id, status);
+            }
+        } else if (job_hooks.cancel_remote) {
+            defer([cancel = job_hooks.cancel_remote, paglet = rec.id, correlation] { cancel(paglet, correlation); });
+        }
+    }
+    for (auto correlation : loading) deliver_reply(rec.id, correlation, status, {}, {});
 }
 
 // ---------------------------------------------------------------------------
@@ -1993,6 +2616,26 @@ void Runtime::Impl::recover() {
 
 Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config))) {
     wasm::ensure_runtime();
+    const unsigned n = std::max(1u, impl_->config.threads);
+    for (unsigned i = 0; i < n; ++i) {
+        auto lane = std::make_unique<Impl::Lane>();
+        if (!impl_->config.worker_executable.empty()) {
+            auto worker = make_worker_executor(impl_->config.worker_executable, impl_->config.sandbox_workers,
+                                               [this](const std::string& text) {
+                                                   std::lock_guard lock(impl_->mu);
+                                                   impl_->log(2, "", text);
+                                               });
+            if (!worker) throw std::runtime_error(worker.error());
+            if (i == 0) {
+                if (auto ready = (*worker)->start(); !ready) throw std::runtime_error(ready.error());
+            }
+            lane->executor = std::move(*worker);
+            impl_->uses_workers = true;
+        }
+        if (!lane->executor) lane->executor = make_in_process_executor();
+        impl_->lanes.push_back(std::move(lane));
+    }
+    impl_->log(1, "", impl_->uses_workers ? "execution mode: worker processes" : "execution mode: in-process");
     // Scratch space starts empty: with a state directory under it, else in a
     // temporary directory of this runtime.
     std::error_code ec;
@@ -2022,29 +2665,37 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
         std::lock_guard lock(impl_->mu);
         impl_->recover();
     }
-    const unsigned n = std::max(1u, impl_->config.threads);
-    for (unsigned i = 0; i < n; ++i) {
-        auto lane = std::make_unique<Impl::Lane>();
-        if (!impl_->config.worker_executable.empty()) {
-            auto worker = make_worker_executor(impl_->config.worker_executable, impl_->config.sandbox_workers,
-                                               [this](const std::string& text) {
-                                                   std::lock_guard lock(impl_->mu);
-                                                   impl_->log(2, "", text);
-                                               });
-            if (worker) {
-                lane->executor = std::move(*worker);
-                impl_->uses_workers = true;
-            } else if (i == 0) {
-                impl_->log(2, "", worker.error() + "; paglets run in the host process");
-            }
-        }
-        if (!lane->executor) lane->executor = make_in_process_executor();
-        impl_->lanes.push_back(std::move(lane));
-    }
     {
         // Messages queued during recovery (replies `timeout`, `recovered`).
         std::lock_guard lock(impl_->mu);
         for (auto& [id, rec] : impl_->paglets) impl_->make_ready(*rec);
+    }
+    {
+        // Compute jobs: a pool of their own, away from the lanes.
+        const Config& c = impl_->config;
+        JobPool::Settings js;
+        js.slots = c.job_slots;
+        js.worker = c.worker_executable;
+        js.sandbox = c.sandbox_workers;
+        js.default_max_ms = c.job_default_time.count();
+        js.cap_max_ms = c.job_max_time.count();
+        js.default_pages = static_cast<std::uint32_t>(std::uint64_t{c.job_memory_mb} * 1024 * 1024 / wasm::page_size);
+        js.max_pages = static_cast<std::uint32_t>(std::uint64_t{c.job_max_memory_mb} * 1024 * 1024 / wasm::page_size);
+        js.owner_limit = c.job_owner_limit;
+        js.aot_compiler = c.aot_compiler;
+        js.aot_cache = c.aot_cache;
+        if (js.aot_cache.empty() && !c.state_dir.empty()) js.aot_cache = c.state_dir / "aot";
+        js.hw_bound_check = PAGLETS_WAMR_HW_BOUND_CHECK != 0;
+        js.host_name = c.host_name;
+        Impl* impl = impl_.get();
+        js.acquire = [impl](const std::string& hash) { return impl->modules->acquire(hash); };
+        impl_->job_pool = std::make_unique<JobPool>(
+            std::move(js), [impl](JobOutcome o) { impl->job_done(std::move(o)); },
+            [impl](std::int32_t level, const std::string& text) {
+                std::lock_guard lock(impl->mu);
+                impl->log(level, "", text);
+            });
+        impl_->deferred_thread = std::thread([impl] { impl->run_deferred(); });
     }
     for (unsigned i = 0; i < n; ++i) {
         impl_->lanes[i]->thread = std::thread([this, i] { impl_->lane_loop(i); });
@@ -2066,6 +2717,15 @@ void Runtime::shutdown(bool save_state) {
     impl_->clock_cv.notify_all();
     for (auto& lane : impl_->lanes) lane->thread.join();
     if (impl_->clock.joinable()) impl_->clock.join();
+    // Running jobs end; their paglets keep them as pending (`gone` after a
+    // restart). Deferred calls still run, then their thread ends.
+    if (impl_->job_pool) impl_->job_pool->shutdown();
+    {
+        std::lock_guard lock(impl_->mu);
+        impl_->deferred_stop = true;
+        impl_->deferred_cv.notify_all();
+    }
+    if (impl_->deferred_thread.joinable()) impl_->deferred_thread.join();
     // System paglets end the work they do on threads of their own.
     std::vector<std::shared_ptr<SystemPaglet>> natives;
     {
@@ -2168,7 +2828,7 @@ std::expected<PagletId, std::string> Runtime::create(std::string_view module, Cr
 }
 
 std::expected<void, std::int32_t> Runtime::send(const PagletId& to, std::string_view name, Bytes payload,
-                                                std::int32_t priority) {
+                                                std::int32_t priority, std::string_view sender_owner) {
     abi::OutMessage m{std::string(name), std::move(payload), {}, priority, abi::default_timeout_ms};
     if (auto v = Impl::validate(m); v != abi::ok) return std::unexpected(v);
     std::lock_guard lock(impl_->mu);
@@ -2180,13 +2840,13 @@ std::expected<void, std::int32_t> Runtime::send(const PagletId& to, std::string_
     env.delivered.name = std::move(m.name);
     env.delivered.payload = std::move(m.payload);
     env.delivered.priority = priority;
-    env.delivered.sender = impl_->host_sender();
+    env.delivered.sender = impl_->host_sender(sender_owner);
     impl_->enqueue(*rec, std::move(env), priority);
     return {};
 }
 
 std::future<Reply> Runtime::request(const PagletId& to, std::string_view name, Bytes payload,
-                                    std::chrono::milliseconds timeout) {
+                                    std::chrono::milliseconds timeout, std::string_view sender_owner) {
     std::promise<Reply> promise;
     auto future = promise.get_future();
     abi::OutMessage m{std::string(name), std::move(payload), {}, abi::default_priority, timeout.count()};
@@ -2215,15 +2875,18 @@ std::future<Reply> Runtime::request(const PagletId& to, std::string_view name, B
     env.delivered.name = std::move(m.name);
     env.delivered.payload = std::move(m.payload);
     env.delivered.priority = abi::default_priority;
-    env.delivered.sender = impl_->host_sender();
+    env.delivered.sender = impl_->host_sender(sender_owner);
     env.reply_cap = std::move(reply);
+    env.deadline_ms = wall_deadline(timeout.count());
+    env.expires_at = SteadyClock::now() + bounded_delay(timeout.count());
     impl_->enqueue(*rec, std::move(env), abi::default_priority);
-    impl_->schedule(SteadyClock::now() + timeout, Deadline{Deadline::Type::request_timeout, "", correlation});
+    impl_->schedule(SteadyClock::now() + bounded_delay(timeout.count()), Deadline{Deadline::Type::request_timeout, "", correlation});
     return future;
 }
 
-Reply Runtime::call(const PagletId& to, std::string_view name, Bytes payload, std::chrono::milliseconds timeout) {
-    return request(to, name, std::move(payload), timeout).get();
+Reply Runtime::call(const PagletId& to, std::string_view name, Bytes payload, std::chrono::milliseconds timeout,
+                    std::string_view sender_owner) {
+    return request(to, name, std::move(payload), timeout, sender_owner).get();
 }
 
 std::expected<void, std::int32_t> Runtime::deactivate(const PagletId& id) {
@@ -2231,6 +2894,8 @@ std::expected<void, std::int32_t> Runtime::deactivate(const PagletId& id) {
     PagletRec* rec = impl_->find(id);
     if (rec == nullptr) return std::unexpected(abi::not_found);
     if (rec->native) return std::unexpected(abi::denied);
+    if (rec->moving || rec->arriving || rec->dispatch_pending || rec->in_end_hook)
+        return std::unexpected(abi::bad_state);
     Envelope env;
     env.type = Envelope::Type::deactivate;
     impl_->enqueue(*rec, std::move(env), control_priority);
@@ -2242,6 +2907,8 @@ std::expected<void, std::int32_t> Runtime::dispose(const PagletId& id) {
     PagletRec* rec = impl_->find(id);
     if (rec == nullptr) return std::unexpected(abi::not_found);
     if (rec->native) return std::unexpected(abi::denied);
+    if (rec->moving || rec->arriving || rec->dispatch_pending || rec->in_end_hook)
+        return std::unexpected(abi::bad_state);
     Envelope env;
     env.type = Envelope::Type::dispose;
     impl_->enqueue(*rec, std::move(env), control_priority);
@@ -2272,11 +2939,137 @@ void Runtime::set_module_admission(ModuleAdmission admission) {
 }
 
 // ---------------------------------------------------------------------------
+// Compute jobs
+
+std::vector<JobInfo> Runtime::jobs() const {
+    return impl_->job_pool ? impl_->job_pool->list() : std::vector<JobInfo>{};
+}
+
+bool Runtime::cancel_job(std::uint64_t id) {
+    return impl_->job_pool && impl_->job_pool->cancel(id, abi::cancelled);
+}
+
+void Runtime::set_job_slots(unsigned slots) {
+    if (impl_->job_pool) impl_->job_pool->set_slots(slots);
+}
+
+bool Runtime::reserve_compute_slots(std::int64_t cores) {
+    return reserve_compute_slots_for(cores, std::chrono::steady_clock::now());
+}
+
+bool Runtime::reserve_compute_slots_for(std::int64_t cores, std::chrono::steady_clock::time_point queued_at) {
+    return impl_->job_pool && impl_->job_pool->reserve_slots(cores, queued_at);
+}
+
+void Runtime::set_compute_waiter(std::int64_t cores, std::chrono::steady_clock::time_point queued_at) {
+    if (impl_->job_pool) impl_->job_pool->set_waiter(cores, queued_at);
+}
+
+void Runtime::release_compute_slots(std::int64_t cores) {
+    if (impl_->job_pool) impl_->job_pool->release_slots(cores);
+}
+
+unsigned Runtime::job_slots() const {
+    return impl_->job_pool ? impl_->job_pool->slots() : 0;
+}
+
+std::int64_t Runtime::job_cores_running() const {
+    return impl_->job_pool ? impl_->job_pool->cores_running() : 0;
+}
+
+std::size_t Runtime::jobs_queued() const {
+    return impl_->job_pool ? impl_->job_pool->queued() : 0;
+}
+
+bool Runtime::job_aot() const {
+    return impl_->job_pool && impl_->job_pool->aot_available();
+}
+
+bool Runtime::compile_job_module(const std::string& module, std::chrono::milliseconds timeout) {
+    if (!impl_->job_pool) return false;
+    auto m = impl_->modules->acquire(module);
+    return m && impl_->job_pool->compile_now(*m, timeout);
+}
+
+bool Runtime::wait_jobs_idle(std::chrono::milliseconds timeout) {
+    if (!impl_->job_pool) return true;
+    const auto until = SteadyClock::now() + timeout;
+    if (!impl_->job_pool->wait_idle(timeout)) return false;
+    // The last outcome may still be on its way to its paglet.
+    std::unique_lock lock(impl_->mu);
+    while ((!impl_->deferred.empty() || impl_->deferred_running) && SteadyClock::now() < until) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        lock.lock();
+    }
+    return impl_->deferred.empty() && !impl_->deferred_running;
+}
+
+// Calls already queued with the old hooks run first (the node clears its
+// hooks before it goes).
+void Runtime::set_job_hooks(JobHooks hooks) {
+    std::unique_lock lock(impl_->mu);
+    impl_->job_hooks = std::move(hooks);
+    if (impl_->deferred_thread.get_id() == std::this_thread::get_id()) return;
+    impl_->deferred_cv.wait(lock, [&] {
+        return impl_->deferred_stop || (impl_->deferred.empty() && !impl_->deferred_running);
+    });
+}
+
+void Runtime::set_job_artifacts(JobArtifacts artifacts) {
+    std::lock_guard lock(impl_->mu);
+    impl_->job_artifacts = std::move(artifacts);
+}
+
+std::expected<std::uint64_t, std::int32_t> Runtime::submit_job(IncomingJob job) {
+    std::lock_guard lock(impl_->mu);
+    if (impl_->stopping || !impl_->job_pool) return std::unexpected(abi::unsupported);
+    if (job.input_artifact) {
+        impl_->start_job_from_artifact(std::move(job));
+        return 0;  // started once the input is loaded
+    }
+    return impl_->start_job(std::move(job));
+}
+
+bool Runtime::cancel_job_of(const PagletId& paglet, std::uint64_t correlation, const std::string& requester_host) {
+    if (!impl_->job_pool) return false;
+    for (const auto& j : impl_->job_pool->list()) {
+        if (j.paglet == paglet && j.correlation == correlation && j.requester_host == requester_host) {
+            return impl_->job_pool->cancel(j.id, abi::cancelled);
+        }
+    }
+    return false;
+}
+
+void Runtime::note_job(const PagletId& paglet, std::uint64_t correlation, abi::JobStatus status) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(paglet);
+    if (rec == nullptr) return;
+    if (auto it = rec->jobs.find(correlation); it != rec->jobs.end()) it->second.status = std::move(status);
+}
+
+void Runtime::fail_job(const PagletId& paglet, std::uint64_t correlation, std::int32_t status) {
+    std::lock_guard lock(impl_->mu);
+    PagletRec* rec = impl_->find(paglet);
+    if (rec == nullptr || !rec->jobs.contains(correlation)) return;
+    impl_->deliver_reply(paglet, correlation, status, {}, {});
+}
+
+std::vector<std::pair<PagletId, std::uint64_t>> Runtime::remote_jobs() const {
+    std::lock_guard lock(impl_->mu);
+    std::vector<std::pair<PagletId, std::uint64_t>> out;
+    for (const auto& [id, rec] : impl_->paglets) {
+        for (const auto& [correlation, job] : rec->jobs) {
+            if (job.remote) out.emplace_back(id, correlation);
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Movement between hosts
 
 namespace {
-
-constexpr std::int32_t max_forwards = 4;
 
 std::string describe_cap(std::int32_t handle, const Cap& c) {
     std::string what;
@@ -2299,6 +3092,8 @@ void Runtime::set_mobility(MobilityHooks hooks) {
 std::int32_t Runtime::deliver_remote(RemoteMessage m) {
     Impl& rt = *impl_;
     std::lock_guard lock(rt.mu);
+    if (m.hops < 0 || (m.failure && (m.kind != RemoteMessage::Kind::message ||
+        m.failure->paglet.empty() || m.failure->host.empty() || m.failure->handle <= 0))) return abi::invalid_argument;
     // Forwards a message for a paglet that left (a bounded number of times).
     auto forward = [&](RemoteMessage& fwd) -> bool {
         const std::string where = rt.remote_host(fwd.target, {});
@@ -2308,23 +3103,39 @@ std::int32_t Runtime::deliver_remote(RemoteMessage m) {
         rt.send_remote(std::move(fwd));
         return true;
     };
-    // A request that cannot be delivered is answered.
+    if (m.kind == RemoteMessage::Kind::undelivered) return rt.deliver_undelivered(std::move(m));
+    // Requests receive replies; asynchronous one-way sends receive diagnostics.
     auto refuse = [&](RemoteMessage& req, std::int32_t status) {
         if (req.kind == RemoteMessage::Kind::request) {
             rt.deliver_reply(req.requester, req.correlation, status, {}, {}, req.requester_host);
+        } else if (req.kind == RemoteMessage::Kind::message) {
+            const auto name = abi::valid_message_name(req.name) ? req.name : "<invalid name>";
+            rt.log(static_cast<std::int32_t>(abi::LogLevel::warning), req.target,
+                   "remote one-way message refused: " + name + " (" + std::string(abi::error_name(status)) + ")");
+            if (auto report = undelivered_report(req, status)) rt.deliver_undelivered(std::move(*report));
         }
         return status;
     };
     if (m.kind == RemoteMessage::Kind::reply) {
         if (!m.target.empty() && !rt.paglets.contains(m.target)) {
             if (!forward(m)) {
-                for (auto& c : m.caps) rt.drop_cap(std::move(c), abi::gone);
+                if (rt.mobility.unresolved && m.hops < max_forwards) {
+                    rt.mobility.unresolved(std::move(m));
+                } else {
+                    for (auto& c : m.caps) rt.drop_cap(std::move(c), abi::gone);
+                }
             }
             return abi::ok;
         }
-        rt.deliver_reply(m.target, m.correlation, m.status, std::move(m.payload), std::move(m.caps));
+        rt.deliver_reply(m.target, m.correlation, m.status, std::move(m.payload), std::move(m.caps), {},
+                         std::move(m.residency_marks));
         return abi::ok;
     }
+    if (m.kind == RemoteMessage::Kind::request &&
+        (m.deadline_ms < 0 || m.timeout_ms < 0)) return refuse(m, abi::invalid_argument);
+    if (m.kind == RemoteMessage::Kind::request &&
+        ((m.deadline_ms != 0 && wall_ms() >= m.deadline_ms) ||
+         (m.expires_at && SteadyClock::now() >= *m.expires_at))) return refuse(m, abi::timeout);
     if (!abi::valid_message_name(m.name) || abi::reserved_message_name(m.name)) {
         return refuse(m, abi::invalid_argument);
     }
@@ -2347,6 +3158,7 @@ std::int32_t Runtime::deliver_remote(RemoteMessage m) {
     env.delivered.priority = std::clamp(m.priority, 0, abi::max_priority);
     env.delivered.sender = std::move(m.sender);
     env.delivered.badge = std::move(m.badge);
+    env.failure = std::move(m.failure);
     for (auto& c : m.caps) {
         // Endpoints to paglets and artifacts that name their host; a host's
         // other system paglets are its own.
@@ -2358,6 +3170,14 @@ std::int32_t Runtime::deliver_remote(RemoteMessage m) {
         }
     }
     if (m.kind == RemoteMessage::Kind::request) {
+        env.deadline_ms = m.deadline_ms;
+        if (m.deadline_ms != 0 || m.timeout_ms > 0) {
+            auto remaining = m.deadline_ms != 0 ? m.deadline_ms - wall_ms() : m.timeout_ms;
+            if (m.timeout_ms > 0) remaining = std::min(remaining, m.timeout_ms);
+            env.expires_at = SteadyClock::now() + bounded_delay(remaining);
+            if (m.expires_at) env.expires_at = std::min(*env.expires_at, *m.expires_at);
+            if (env.deadline_ms == 0) env.deadline_ms = wall_deadline(remaining);
+        }
         Cap reply;
         reply.kind = Cap::Kind::reply;
         reply.target = std::move(m.requester);
@@ -2397,6 +3217,7 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
     if (rec == nullptr || !rec->moving) return;
     if (!host) {
         rec->moving = false;
+        rec->dispatch_pending = false;
         rt.log(2, rec->id, "dispatch to " + mv.destination + " failed: " + reason);
         rt.move_failed(*rec, mv.destination, std::move(reason), {});
         rt.make_ready(*rec);
@@ -2404,12 +3225,53 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
     }
     // The paglet is on `host` now: messages that waited here follow it.
     rt.tombstones[rec->id] = Impl::Tombstone{*host, ttl};
+    // Its jobs stop, unless they are to finish: then their results follow
+    // it like any reply. Either way the reply reaches it there.
+    rt.cancel_jobs(*rec, abi::cancelled, true);
+    // Failures may target this very paglet. Deliver them after removing the
+    // source record so they use its tombstone, rather than being inserted
+    // into the mailbox that is currently being drained and then cleared.
+    std::vector<std::pair<Cap, std::int32_t>> failed_caps;
+    std::vector<RemoteMessage> failed_sends;
+    auto defer_drop = [&](Cap cap, std::int32_t status) { failed_caps.emplace_back(std::move(cap), status); };
     for (auto& [key, env] : rec->mailbox) {
-        if (env.type != Envelope::Type::message) {
-            if (env.reply_cap) rt.drop_cap(std::move(*env.reply_cap), abi::gone);
+        if (mv.captured_ready.contains(key.second)) {
+            // Portable authority is already staged with the image. Release only
+            // nonportable capabilities represented by an unsupported response.
+            for (auto& cap : env.caps) if (!rt.portable_cap(cap)) defer_drop(std::move(cap), abi::gone);
             continue;
         }
+        if (env.type != Envelope::Type::message) {
+            if (env.reply_cap) defer_drop(std::move(*env.reply_cap), abi::gone);
+            continue;
+        }
+        if (env.expires_at && SteadyClock::now() >= *env.expires_at) {
+            if (env.reply_cap) defer_drop(std::move(*env.reply_cap), abi::timeout);
+            for (auto& cap : env.caps) defer_drop(std::move(cap), abi::gone);
+            continue;
+        }
+        if (!env.lent.empty() || !std::ranges::all_of(env.caps, [&](const Cap& c) { return rt.portable_cap(c); })) {
+            // A locally accepted request cannot silently lose its authority
+            // merely because the receiver moved before handling it.
+            if (env.reply_cap) defer_drop(std::move(*env.reply_cap), env.lent.empty() ? abi::unsupported : abi::invalid_argument);
+            for (auto& cap : env.caps) defer_drop(std::move(cap), abi::gone);
+            if (env.failure) {
+                RemoteMessage failed;
+                failed.name = env.delivered.name;
+                failed.failure = std::move(env.failure);
+                if (auto report = undelivered_report(failed, env.lent.empty() ? abi::unsupported : abi::invalid_argument))
+                    failed_sends.push_back(std::move(*report));
+            }
+            if (env.delivered.kind != abi::MessageKind::reply) continue;
+            env.caps.clear();
+            env.delivered.payload.clear();
+            env.delivered.status = abi::unsupported;
+        }
         RemoteMessage m;
+        m.deadline_ms = env.deadline_ms;
+        m.expires_at = env.expires_at;
+        if (env.expires_at) m.timeout_ms = std::max<std::int64_t>(1,
+            std::chrono::ceil<std::chrono::milliseconds>(*env.expires_at - SteadyClock::now()).count());
         m.target = rec->id;
         m.host = *host;
         m.name = std::move(env.delivered.name);
@@ -2418,6 +3280,8 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
         m.sender = std::move(env.delivered.sender);
         m.badge = std::move(env.delivered.badge);
         m.caps = rt.portable_caps(std::move(env.caps));
+        m.residency_marks = std::move(env.residency_marks);
+        m.failure = std::move(env.failure);
         switch (env.delivered.kind) {
             case abi::MessageKind::reply:
                 m.kind = RemoteMessage::Kind::reply;
@@ -2432,7 +3296,9 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
                 m.correlation = reply.correlation;
                 break;
             }
-            default: m.kind = RemoteMessage::Kind::message; break;
+            default:
+                m.kind = m.name == abi::undelivered_message ? RemoteMessage::Kind::undelivered : RemoteMessage::Kind::message;
+                break;
         }
         rt.send_remote(std::move(m));
     }
@@ -2444,6 +3310,8 @@ void Runtime::finish_departure(std::uint64_t move, std::optional<std::string> ho
     rt.log(1, rec->id, "moved to host " + host->substr(0, 16));
     if (rt.mobility.moved) rt.mobility.moved(rec->id, host, {});
     rt.erase_paglet(rec->id);
+    for (auto& [cap, status] : failed_caps) rt.drop_cap(std::move(cap), status);
+    for (auto& report : failed_sends) rt.deliver_undelivered(std::move(report));
     rt.idle_cv.notify_all();
 }
 
@@ -2451,6 +3319,29 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     Impl& rt = *impl_;
     std::lock_guard lock(rt.mu);
     const TravelState& st = a.state;
+    if (st.pending_captured_ms < 0) return std::unexpected("invalid pending request capture time");
+    std::set<std::uint64_t> completed;
+    std::size_t ready_bytes = 0;
+    for (const auto& message : st.ready) {
+        const auto& d = message.delivered;
+        const auto size = encode_ready(message).size() + 5;
+        if (size > rt.config.move_ready_bytes - ready_bytes) return std::unexpected("arrival ready notifications exceed the move byte budget");
+        ready_bytes += size;
+        if (a.clone || d.sender || d.badge || d.reply != 0 || !d.caps.empty() || d.priority < 0 || d.priority > abi::max_priority)
+            return std::unexpected("invalid arrival ready notification authority");
+        if (d.kind == abi::MessageKind::reply) {
+            if (d.name != "reply" || d.correlation == 0 || d.correlation >= st.next_correlation ||
+                !completed.insert(d.correlation).second || std::ranges::any_of(st.pending, [&](const auto& p) { return p.first == d.correlation; }) ||
+                !std::ranges::all_of(message.caps, [&](const Cap& c) { return rt.portable_cap(c); }))
+                return std::unexpected("invalid arrival ready reply");
+        } else if (d.kind == abi::MessageKind::timer) {
+            if (!abi::valid_message_name(d.name) || abi::reserved_message_name(d.name) || d.correlation || d.status || !message.caps.empty() || !message.residency_marks.empty())
+                return std::unexpected("invalid arrival ready timer");
+        } else if (d.kind == abi::MessageKind::message) {
+            if (!Impl::host_report(d.name) || d.correlation || d.status || d.priority != abi::max_priority || !message.caps.empty() || !message.residency_marks.empty())
+                return std::unexpected("invalid arrival ready host report");
+        } else return std::unexpected("invalid arrival ready notification kind");
+    }
     const bool hex = st.id.size() == 32 && st.id.find_first_not_of("0123456789abcdef") == std::string::npos;
     if (!hex) return std::unexpected(std::string("invalid paglet ID"));
     if (rt.paglets.contains(st.id) || rt.endings.contains(st.id)) {
@@ -2501,8 +3392,8 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
             case Cap::Kind::timer: {
                 here = c;
                 here->target = st.id;
-                const auto delay = std::max<std::int64_t>(0, c.fire_at - wall_ms());
-                rt.schedule(SteadyClock::now() + std::chrono::milliseconds(delay),
+                const auto delay = delay_until(c.fire_at);
+                rt.schedule(SteadyClock::now() + delay,
                             Deadline{Deadline::Type::timer, st.id, c.timer_id});
                 break;
             }
@@ -2526,15 +3417,34 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     rec.marks.insert(st.marks.begin(), st.marks.end());
     rec.restart = st.restart;
     rec.notify_recovered = st.notify_recovered;
+    rec.wake_at_ms = st.wake_at_ms;
+    // Wall time crosses hosts, as for timers. Once prepared, the remaining
+    // budget runs on this host's monotonic clock, including the commit wait.
+    const auto timeout_now = SteadyClock::now();
+    const auto arrival_ms = wall_ms();
+    const auto elapsed_ms = st.pending_captured_ms > 0 && arrival_ms > st.pending_captured_ms
+        ? arrival_ms - st.pending_captured_ms : std::int64_t{0};
     for (const auto& [correlation, ms] : st.pending) {
+        const auto remaining_ms = ms > elapsed_ms ? ms - elapsed_ms : std::int64_t{0};
         rec.pending_requests.insert(correlation);
-        rt.schedule(SteadyClock::now() + std::chrono::milliseconds(ms),
+        rt.schedule(timeout_now + bounded_delay(remaining_ms),
                     Deadline{Deadline::Type::request_timeout, st.id, correlation});
     }
     rec.image = std::move(a.image);
     rec.started = true;
     rec.checkpoint_due = true;
     rec.arriving = true;
+    for (auto& message : a.state.ready) {
+        Envelope env;
+        env.delivered = std::move(message.delivered);
+        env.caps = std::move(message.caps);
+        env.residency_marks = std::move(message.residency_marks);
+        for (auto& cap : env.caps) if (cap.host == rt.mobility.host_id) cap.host.clear();
+        rec.marks.insert(env.residency_marks.begin(), env.residency_marks.end());
+        const auto priority = env.delivered.priority;
+        rt.enqueue(rec, std::move(env), priority);
+    }
+    if (a.request != 0) rec.arrival_receipt = std::pair{a.from, a.request};
     Envelope start;
     start.type = Envelope::Type::start;
     if (a.clone) {
@@ -2561,10 +3471,14 @@ std::expected<void, std::string> Runtime::commit_arrival(const PagletId& id, boo
     rec->arriving = false;
     rec->dormant = !activate;
     // Stored at once: after a crash the paglet is here, not lost.
-    if (rt.store && rec->image) rt.persist(*rec, *rec->image);
+    if (rt.store && rec->image && !rt.persist(*rec, *rec->image) && rec->restart) {
+        rt.end_paglet(*rec, true, "committing arrival: the image could not be stored");
+        return std::unexpected(std::string("the arrival image could not be stored"));
+    }
     Envelope start = std::move(*rec->arrival_start);
     rec->arrival_start.reset();
     rt.enqueue(*rec, std::move(start), control_priority);
+    rt.schedule_wake(*rec);
     rt.make_ready(*rec);
     return {};
 }
@@ -2588,12 +3502,14 @@ std::expected<void, std::int32_t> Runtime::dispatch(const PagletId& id, std::str
     if (rec == nullptr) return std::unexpected(abi::not_found);
     if (rec->native || rec->trust != TrustClass::roaming) return std::unexpected(abi::denied);
     if (!rt.mobility.depart) return std::unexpected(abi::unsupported);
-    if (destination.empty()) return std::unexpected(abi::invalid_argument);
-    if (rec->moving || rec->arriving) return std::unexpected(abi::bad_state);
+    if (!parse_transfer_ticket(destination)) return std::unexpected(abi::invalid_argument);
+    if (rec->moving || rec->arriving || rec->dispatch_pending || rec->in_end_hook || rec->pending_end)
+        return std::unexpected(abi::bad_state);
     if (rec->pinned_until() != 0) return std::unexpected(abi::pinned);
     Envelope env;
     env.type = Envelope::Type::move;
     env.destination = std::move(destination);
+    rec->dispatch_pending = true;
     rt.enqueue(*rec, std::move(env), control_priority);
     return {};
 }
@@ -2605,7 +3521,7 @@ std::expected<void, std::int32_t> Runtime::pin(const PagletId& id, std::string p
     if (rec == nullptr || rec->arriving) return std::unexpected(abi::not_found);
     if (rec->native) return std::unexpected(abi::denied);
     // About to leave or leaving: the outcome decides where it is.
-    if (rec->moving || rec->pending_end == abi::LifecycleOp::dispatch) return std::unexpected(abi::bad_state);
+    if (rec->moving || rec->dispatch_pending) return std::unexpected(abi::bad_state);
     const std::int64_t now = wall_ms();
     if (until <= now) return std::unexpected(abi::invalid_argument);
     std::erase_if(rec->pins, [now](const auto& p) { return p.second <= now; });  // expired

@@ -33,7 +33,7 @@ Job paglets ask the compute-slots of the host they are on:
 
 | Operation | Request | Reply |
 |---|---|---|
-| `request_slot` | `job`, `cores`, `estimated_ms` | a Decision: `run_now` with a lease, `queued` with the position, `redirect` with a host, or `rejected` |
+| `request_slot` | `job`, `cores`, `estimated_ms` | a Decision: `run_now` with a lease and `expires_ms`, `queued` with the position, `redirect` with a host, or `rejected` |
 | `release_slot` | `lease` | `released` |
 | `status` | | this host's slots, leases, queue, and the peers' slots as mesh-info last heard |
 | `candidates` | `cores`, `limit`, `include_self` | hosts with the most free slots |
@@ -42,17 +42,49 @@ Job paglets ask the compute-slots of the host they are on:
   once. Otherwise, a host with free slots now (fresh snapshot, no queue)
   gets it (`redirect`); otherwise it is queued. More cores than the host has
   are `rejected` (or redirected to a host that has them). A paglet that
-  asks again keeps its lease.
-- **Grants**: the queue is oldest-fit; a grant reaches the waiting paglet as
+  asks again with the same job and core count keeps its lease and receives
+  the actual reserved core count. Changing either is `rejected` with no new
+  allocation; the original lease remains valid. Release it before asking
+  for different work or a different core count.
+- **Grants**: the lease queue is FIFO. Its head and the native job queue's
+  head share priority by monotonic arrival time (native jobs win a tie).
+  Later native jobs or direct reservations can use only the surplus beyond
+  an older head's required cores. Running work is not preempted; progress
+  depends on existing allocations ending. Repeating an unchanged queued
+  request retains its position and original arrival time. A grant reaches the waiting paglet as
   the message `compute.granted` (a Decision with the lease), which activates
   it if it deactivated. If the message cannot be delivered (the paglet is
   gone), the lease is taken back.
+- **Capacity changes**: lowering the total rejects queued leases that can
+  no longer fit with `compute.rejected` (a Decision) and queued native jobs
+  with `quota`. Existing allocations continue; new work waits until enough
+  capacity is free. Departed waiters and cancelled native jobs lose their
+  admission priority immediately when removed.
 - **Spillover**: waiters behind the first (the first stays: it is next here)
   are offered to hosts with free slots, at most 4 per round and half the
   queue, with shadow reservations so one host is not flooded:
   `compute.redirect` (a Decision with the host). The scheduler never moves
   paglets; the paglet dispatches itself and asks there.
-- **Leases end** when released, or when the paglet ends or leaves the host.
+- **Expiry and renewal**: lifetime is the greater of `lease_base` (10 min
+  by default) and twice a positive `estimated_ms`, within `lease_cap` (24 h
+  by default and as a hard maximum). Nonpositive estimates use the base;
+  multiplication saturates before overflow. The host normalizes timing
+  settings to 1 ms through 24 h, with cap at least base. An unchanged queued
+  repeat may update the estimate while retaining its position and age.
+  Lifetime begins on grant, not enqueue. An unchanged allocated request
+  renews without shortening its lifetime, but never past the continuous
+  deadline fixed on the original grant. Timing changes apply to new grants
+  and extension durations, leaving that original deadline fixed.
+- **Leases end** on expiry, release, or when the paglet ends or leaves.
+  Expiry frees accounting once and sends `compute.expired` (a rejected
+  Decision with the old lease ID, cores and expiry). A late release returns
+  false; a fresh request rejoins admission behind older waiting work.
+  `Decision.expires_ms` and status `Lease.expires_ms` are Unix milliseconds
+  for diagnostics; internal deadlines use a monotonic clock. Status retains
+  the original `granted_ms`; `remote slots` prints both timestamps.
+- **Scope**: leases are cooperative accounting, not CPU preemption. Native
+  jobs retain their enforced wall-time limit. Leases and queues are not
+  persisted: paglets request anew after restart or arrival elsewhere.
 
 Every paglet gets an endpoint to `compute-slots`.
 

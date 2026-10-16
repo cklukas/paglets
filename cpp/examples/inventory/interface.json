@@ -4,7 +4,7 @@
   "summary": "Collects system facts from hosts of the mesh with clones (fan-out)",
   "launch": {"type": "none"},
   "messages": [
-    {"name": "start", "kind": "call", "summary": "Sends a clone to each host; replies when all reported or timed out",
+    {"name": "start", "kind": "call", "summary": "Sends a clone to each host and replies once dispatches are started; read report for completion",
      "request": "Collect", "reply": "Started", "example": {"hosts": ["any"], "top": 5}},
     {"name": "report", "kind": "call", "summary": "The report collected so far", "request": "none", "reply": "Report"}
   ],

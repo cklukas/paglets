@@ -87,9 +87,9 @@ public:
         router.on(std::string(fanout_timeout), [this](Message&) { expire(); });
     }
 
-    // Clones this paglet to every destination (a host name or key ID; ""
-    // for this host) with `args` and this paglet's endpoint. Returns how
-    // many clones went out; the others count as failed at once.
+    // Clones this paglet to every transfer ticket (host name or key ID,
+    // label:L, offer:S, any; "" for this host) with `args` and this paglet's
+    // endpoint. Returns how many clones went out; the others fail at once.
     std::size_t start(const std::vector<std::string>& destinations, const Bytes& args, std::int64_t timeout_ms) {
         children_.clear();
         const std::uint64_t generation = ++generation_;
@@ -124,8 +124,8 @@ public:
         return sent;
     }
 
-    // A move that failed for a clone (Paglet::on_move_failed with a clone ID):
-    // that child is over.
+    // Forward Paglet::on_move_failed here for failed clones. FanOut does not
+    // subscribe to lifecycle hooks automatically; that child is over.
     void clone_failed(const abi::MoveFailed& f) {
         for (auto& c : children_) {
             if (c.done || (c.clone.empty() ? c.destination != f.destination : c.clone != f.clone)) continue;

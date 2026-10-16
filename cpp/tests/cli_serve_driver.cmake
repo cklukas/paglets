@@ -43,22 +43,54 @@ until(TRIES 80 ARGS remote status --connect ${A} --key "${DIR}/olga.key" ${P} ${
 until(TRIES 80 ARGS remote status --connect ${B} --key "${DIR}/olga.key" ${P} ${L})
 
 # The owner launches a paglet on a (its module travels with the request).
-until(ARGS remote launch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} "${GUEST}")
+until(ARGS remote moves --connect ${A} --key "${DIR}/alice.key" ${P} ${L})
+string(JSON cap GET "${OUT}" memory_limit_pages)
+if(NOT cap EQUAL 4096)
+    stop_and_fail("serve did not apply the default 256 MB paglet ceiling: ${OUT}")
+endif()
+until(ARGS remote moves --connect ${B} --key "${DIR}/alice.key" ${P} ${L})
+string(JSON cap GET "${OUT}" memory_limit_pages)
+if(NOT cap EQUAL 512)
+    stop_and_fail("serve did not retain the explicit 32 MB override: ${OUT}")
+endif()
+execute_process(COMMAND "${HOST}" remote launch --id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "${GUEST}"
+                RESULT_VARIABLE old_id_rc ERROR_VARIABLE old_id_error)
+if(old_id_rc EQUAL 0 OR NOT old_id_error MATCHES "--id is no longer accepted: use --nonce")
+    stop_and_fail("the obsolete global-ID option was not refused clearly: ${old_id_error}")
+endif()
+until(ARGS remote launch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} "${GUEST}" --nonce cli-upgrade-test)
 set(paglet "${OUT}")
 until(ARGS remote call --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} increment
       "{\"by\": 5, \"note\": \"a\"}" EXPECT "\"value\":5")
+
+# A 16 MB allocation plus SDK state requires the explicitly larger cap.
+until(ARGS remote call --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} bloat
+      "{\"kilobytes\":16384,\"fill\":165}")
+string(JSON pages GET "${OUT}" memory_pages)
+if(pages LESS_EQUAL 256)
+    stop_and_fail("the larger memory cap was not exercised: ${OUT}")
+endif()
+until(ARGS remote moves clear-cache --connect ${A} --key "${DIR}/alice.key" ${P} ${L})
+until(ARGS remote moves clear-cache --connect ${B} --key "${DIR}/alice.key" ${P} ${L})
 
 # It moves to b (b has no application code: it fetches the module from a)
 # and keeps its state.
 # dispatch waits for the move's outcome: a failed move exits with its reason.
 execute_process(COMMAND "${HOST}" remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet}
                         label:nowhere RESULT_VARIABLE rc ERROR_VARIABLE err)
-if(rc EQUAL 0 OR NOT err MATCHES "the move failed, the paglet stays: no host matches label:nowhere")
+if(rc EQUAL 0 OR NOT err MATCHES "the move failed, the paglet stays: no enrolled host matches label:nowhere")
     stop_and_fail("a failed move was not reported: ${err}")
 endif()
 until(ARGS remote dispatch --connect ${A} --key "${DIR}/olga.key" ${P} ${L} ${paglet} b EXPECT "moved to b ")
 until(TRIES 80 ARGS remote call --connect ${B} --key "${DIR}/olga.key" ${P} ${L} ${paglet} increment
       "{\"by\": 2, \"note\": \"b\"}" EXPECT "\"value\":7")
+until(TRIES 80 ARGS remote moves --connect ${A} --key "${DIR}/olga.key" ${P} ${L} EXPECT "\"arrival_acks\":1")
+foreach(field capture_ns ready_ns arrival_ack_ns)
+    string(JSON duration GET "${OUT}" ${field})
+    if(duration LESS_EQUAL 0)
+        stop_and_fail("missing ${field} measurement: ${OUT}")
+    endif()
+endforeach()
 
 # And back to a, sent by the admin.
 until(ARGS remote dispatch --connect ${B} --key "${DIR}/alice.key" ${P} ${L} ${paglet} a)

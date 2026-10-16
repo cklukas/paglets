@@ -12,9 +12,9 @@ the concrete design.
   in `sodium_malloc` memory (locked, guard pages, wiped on release).
 - Key IDs are the lowercase hex form of the 32-byte public key.
 - Key files are canonical MessagePack maps: `format` (`paglets-key-1`),
-  `role` (`admin`, `owner`, `host`), `name`, `public`, `protection`, and for
+  `role` (`admin`, `owner`, `host`, `signer`), `name`, `public`, `protection`, and for
   encrypted keys `salt`, `opslimit`, `memlimit`, `nonce` and `secret`.
-- Admin and owner keys are always encrypted: Argon2id derives the key
+- Admin, owner and signer keys are always encrypted: Argon2id derives the key
   encryption key from a local passphrase (libsodium's "moderate" limits;
   tests use "interactive"), XChaCha20-Poly1305 encrypts the 32-byte seed,
   and the public key and role are associated data, so a key file cannot be
@@ -23,7 +23,7 @@ the concrete design.
 - Host keys may be stored unencrypted; a host must start without a person.
   Every key file is created with owner-only permissions (POSIX mode 0600,
   created exclusively; never overwritten).
-- Loading refuses an unencrypted admin or owner key and checks that the
+- Loading refuses an unencrypted admin, owner or signer key and checks that the
   public key matches the private one.
 
 Open: platform key stores (Keychain, DPAPI/CNG) for host keys, the key
@@ -113,6 +113,12 @@ removed admin can still take part in a conflict at the epoch where it was
 removed (its removals apply, as they could have before). Meshes that must
 survive a stolen admin key use an admin-set quorum of 2 or more.
 
+The CLI's `mesh create` defaults the admin-set quorum to 2 when there are
+three or more initial admins, otherwise 1; the normal quorum defaults to 1.
+Explicit quorum options take precedence. Creation warns on stderr when
+multiple admins share an admin-set quorum of 1. These creation defaults do
+not alter existing ledgers; a signed `admin-set` record changes their quorums.
+
 Then, in order:
 
 - Revocations are collected first and win over everything regardless of
@@ -174,5 +180,7 @@ A host in a mesh creates root paglets from their passports
 paglet gets its ID and owner; the host keeps the passport with the paglet.
 Manifests are evaluated by the policy (planning/cpp-policy.md, section 6).
 
-Open: host-signed links for children and clones as the runtime creates
-them, and checks on arrival (M3, WP11/WP12).
+Children and clones receive host-signed passport links as they are
+created. Arrival verifies the chain, the module and the owner, and
+materializes applicable admin grants. Host-derived grants remain scoped
+to their issuing host.

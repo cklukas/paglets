@@ -27,7 +27,8 @@ struct Start {
 
 struct Started {
     std::string group;
-    std::vector<std::string> hosts;  // where the replicas are
+    bool accepted = false;  // creator admitted; other replicas may still be arriving
+    std::string reason;     // refused: why startup failed
 };
 
 // The state of the work (replicated with every checkpoint).

@@ -39,7 +39,7 @@
 
 namespace paglets::services::zombies {
 
-enum class Ending { none, delivered, cancelled };
+enum class Ending { none, delivered, cancelled, failed };
 
 struct GroupState {
     std::string group;
@@ -111,6 +111,12 @@ struct CancelRequest {
     std::string reason;
 };
 
+// A joined replica reports an unchanged result that cannot be delivered.
+struct FailedRequest {
+    std::string group;
+    std::string reason;
+};
+
 struct RedirectRequest {
     std::string group;
     std::string sink_spec;
@@ -169,6 +175,7 @@ struct Contract {
     JoinReply join(const JoinRequest&);
     Done trace(const TraceRequest&);
     GroupState ended(const EndedRequest&);
+    GroupState failed(const FailedRequest&);
     GroupState state(const StateRequest&);
     GroupState cancel(const CancelRequest&);
     GroupState redirect(const RedirectRequest&);

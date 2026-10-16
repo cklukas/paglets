@@ -28,6 +28,9 @@ set(PAGLETS_INSTALL_DATADIR "${CMAKE_INSTALL_DATADIR}/paglets")
 install(TARGETS paglets-host paglets-worker EXPORT pagletsTargets
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS paglets-web RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(TARGET paglets-wamrc)
+    install(PROGRAMS "${PAGLETS_WAMRC}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
 install(TARGETS paglets_wire EXPORT pagletsTargets
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 install(EXPORT pagletsTargets NAMESPACE paglets:: DESTINATION "${PAGLETS_INSTALL_CMAKEDIR}")

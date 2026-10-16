@@ -445,6 +445,21 @@ void Artifacts::copy_to(const Ref& ref, fs::path into, std::function<void(std::i
               });
 }
 
+void Artifacts::load(const runtime::Cap& cap, std::uint64_t max,
+                     std::function<void(std::expected<runtime::JobArtifactInput, std::int32_t>)> done) {
+    if (!readable(cap)) return done(std::unexpected(abi::bad_handle));
+    const Ref ref = *parse_resource(cap.resource);
+    obtain(ref, [this, hash = ref.hash, max, done = std::move(done)](std::int32_t status) {
+        if (status != abi::ok) return done(std::unexpected(status));
+        auto content = served(hash);
+        if (!content) return done(std::unexpected(abi::not_found));
+        if (content->size > max) return done(std::unexpected(abi::too_large));
+        auto bytes = read_all(content->file);
+        if (!bytes) return done(std::unexpected(abi::internal));
+        done(runtime::JobArtifactInput{std::move(*bytes), std::move(content->marks)});
+    });
+}
+
 // -- operations --------------------------------------------------------------
 
 Result<artifacts::Info> Artifacts::put(const artifacts::PutRequest& q, Operation& op) {

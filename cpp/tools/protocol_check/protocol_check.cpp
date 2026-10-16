@@ -8,24 +8,29 @@
 //
 // Usage: paglets-protocol-check [--protocol zombie] [--suite NAME | world options]
 //                               [--simulate] [--seeds N] [--results FILE] [--quiet]
-//   --suite quick|full     a set of worlds (quick: the ctest, full: the documentation)
+//   --suite quick|full     a set of worlds (quick: unit-test worlds, full: the documentation)
 //   world options          --replicas N --work N --observations N --crashes N --cuts N
 //                          --drops N --duplicates N --sink-downs N --cancels N
 //                          --redirects N --early-timeouts N --late-hosts N --in-flight N --max-states N
+//                          unspecified fault budgets are zero in custom worlds
 //   --simulate             timed random runs (with --suite: after the worlds)
 //   --seeds N              runs of the simulation (default 1000)
 //   --trace SEED           one simulated run, with its role changes and faults
 //   --results FILE         record the outcome (docs/results/TOPIC.json format)
+//   --quiet                omit world-start lines, progress and violation step traces;
+//                          suites still report unreached role changes
 // Exit status: 0 if every property holds, 1 if not, 2 for usage errors.
 
 #include <paglets/protocols/zombie/model.hpp>
 #include <paglets/protocols/zombie/sim.hpp>
 
 #include <chrono>
+#include <charconv>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -42,6 +47,11 @@ struct World {
     std::size_t max_states = 60'000'000;
     std::size_t max_depth = 0;  // bounded: every state within this many steps (safety only)
 };
+
+void none(zombie::ModelConfig& c) {
+    c.crashes = c.cuts = c.drops = c.duplicates = c.early_timeouts = 0;
+    c.sink_downs = c.cancels = c.redirects = 0;
+}
 
 std::string describe(const zombie::ModelConfig& c) {
     std::ostringstream os;
@@ -60,9 +70,6 @@ std::vector<World> suite(const std::string& name) {
         w.name = std::move(n);
         tweak(w.config);
         worlds.push_back(std::move(w));
-    };
-    auto none = [](zombie::ModelConfig& c) {
-        c.crashes = c.cuts = c.drops = c.duplicates = c.early_timeouts = 0;
     };
     if (name == "quick") {
         // Two replicas with one kind of fault each (as the ctest).
@@ -177,7 +184,11 @@ std::string platform() {
 #endif
 }
 
-void write_results(const std::string& file, const std::vector<Recorded>& tests) {
+#ifndef PAGLETS_PROTOCOL_BUILD
+#define PAGLETS_PROTOCOL_BUILD "unknown"
+#endif
+
+bool write_results(const std::string& file, const std::vector<Recorded>& tests) {
     std::ofstream out(file);
     out << "{\"topic\":\"zombie_protocol\",\"tests\":[";
     for (std::size_t i = 0; i < tests.size(); ++i) {
@@ -188,7 +199,7 @@ void write_results(const std::string& file, const std::vector<Recorded>& tests) 
         secs << std::fixed << t.seconds;
         out << "{\"test\":" << json_text(t.test) << ",\"mode\":" << json_text(t.mode)
             << ",\"outcome\":" << json_text(t.passed ? "passed" : "failed") << ",\"seconds\":" << secs.str()
-            << ",\"platform\":" << json_text(platform()) << ",\"build\":\"Release\",\"date\":" << json_text(today())
+            << ",\"platform\":" << json_text(platform()) << ",\"build\":" << json_text(PAGLETS_PROTOCOL_BUILD) << ",\"date\":" << json_text(today())
             << ",\"values\":[";
         for (std::size_t k = 0; k < t.values.size(); ++k) {
             const auto& [name, value, unit] = t.values[k];
@@ -199,11 +210,15 @@ void write_results(const std::string& file, const std::vector<Recorded>& tests) 
         out << "]}";
     }
     out << "]}\n";
+    out.close();
+    return static_cast<bool>(out);
 }
 
 int usage() {
     std::cerr << "usage: paglets-protocol-check [--protocol zombie] [--suite quick|full | world options]\n"
-                 "                              [--simulate] [--seeds N] [--results FILE] [--quiet]\n";
+                 "                              [--simulate] [--seeds N] [--results FILE] [--quiet]\n"
+                 "custom worlds start with zero faults; only explicitly named fault budgets are enabled.\n"
+                 "progress is reported on stderr; --quiet omits it, world-start lines and violation step traces.\n";
     return 2;
 }
 
@@ -212,6 +227,7 @@ int usage() {
 int main(int argc, char** argv) {
     std::optional<std::string> suite_name, results;
     World custom;
+    none(custom.config);
     custom.name = "custom world";
     bool simulate = false, quiet = false;
     std::uint64_t seeds = 1000;
@@ -225,7 +241,12 @@ int main(int argc, char** argv) {
         auto number = [&](auto& target) {
             auto v = value();
             if (!v) return false;
-            target = static_cast<std::remove_reference_t<decltype(target)>>(std::stoull(*v));
+            std::uint64_t parsed = 0;
+            const auto [end, ec] = std::from_chars(v->data(), v->data() + v->size(), parsed);
+            if (ec != std::errc() || end != v->data() + v->size() ||
+                parsed > static_cast<std::uint64_t>(std::numeric_limits<std::remove_reference_t<decltype(target)>>::max()))
+                return false;
+            target = static_cast<std::remove_reference_t<decltype(target)>>(parsed);
             return true;
         };
         auto& c = custom.config;
@@ -244,9 +265,9 @@ int main(int argc, char** argv) {
         } else if (a == "--quiet") {
             quiet = true;
         } else if (a == "--trace") {
-            auto v = value();
-            ok = v.has_value();
-            if (ok) trace_seed = std::stoull(*v);
+            std::uint64_t seed = 0;
+            ok = number(seed);
+            if (ok) trace_seed = seed;
         } else if (a == "--seeds") {
             ok = number(seeds);
         } else if (a == "--replicas") {
@@ -298,10 +319,21 @@ int main(int argc, char** argv) {
         if (worlds.empty()) return usage();
         std::set<std::tuple<zombie::Role, zombie::Cause, zombie::Role>> covered;
         for (const auto& w : worlds) {
+            if (!quiet) std::cout << "checking " << w.name << " (" << describe(w.config) << ")\n" << std::flush;
             zombie::Model model(w.config);
             verify::Limits limits;
             limits.max_states = w.max_states;
             limits.max_depth = w.max_depth;
+            if (!quiet) {
+                limits.progress = [name = w.name, last = std::chrono::steady_clock::now(), first = true]
+                    (std::size_t states, std::size_t frontier) mutable {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (!first && now - last < std::chrono::seconds(2)) return;
+                    std::cerr << name << ": " << states << " states; frontier " << frontier << "\n";
+                    first = false;
+                    last = now;
+                };
+            }
             const auto report = verify::explore(model, limits);
             for (const auto& t : model.transitions_seen()) covered.insert(t);
             // A bounded world is complete when every level up to its bound was explored.
@@ -363,6 +395,9 @@ int main(int argc, char** argv) {
         recorded.push_back(rec);
         all_ok &= rec.passed;
     }
-    if (results) write_results(*results, recorded);
+    if (results && !write_results(*results, recorded)) {
+        std::cerr << "cannot write results: " << *results << "\n";
+        return 1;
+    }
     return all_ok ? 0 : 1;
 }

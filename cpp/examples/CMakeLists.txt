@@ -1,7 +1,9 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 
+# --8<-- [start:hello_build]
 paglets_add_module(hello SOURCES hello/hello.cpp INTERFACE hello/interface.json)
+# --8<-- [end:hello_build]
 paglets_add_module(ping_pong SOURCES ping_pong/ping_pong.cpp INTERFACE ping_pong/interface.json)
 paglets_add_module(counter
     SOURCES counter/counter.cpp

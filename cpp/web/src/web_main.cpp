@@ -36,8 +36,9 @@ int usage() {
            "commands next to every view and action.\n"
            "--port N listens on exactly that port; without it, 8470 is tried, then the rest of\n"
            "--port-range (default 8470-8499), then any free port (--no-port-search: only the first).\n"
-           "--listen defaults to 127.0.0.1; other addresses need --allow-remote (anyone who reaches\n"
-           "the port and has the printed link acts with KEY). --module-dir offers its .wasm files for\n"
+           "--listen defaults to 127.0.0.1; ::1 and localhost are also allowed. Other addresses need\n"
+           "--allow-remote (anyone who reaches the port and has the printed link acts with KEY).\n"
+           "--module-dir offers its .wasm files for\n"
            "launching and pushing. --program names paglets-host in the commands shown.\n";
     return 2;
 }

@@ -20,6 +20,7 @@ nav:
     pages:
       - docs/building.md
       - docs/writing-paglets.md
+      - docs/compute-jobs.md
   - title: Examples
     pages:
       - docs/examples/index.md

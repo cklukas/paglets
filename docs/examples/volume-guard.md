@@ -228,6 +228,6 @@ checks that:
 <!-- results: guard -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | checks | times inactive between checks | alerts (each volume once) |
 |---|---|---|---|---|---|---|---|---|
-| example: Volume Guard sleeps between checks and alerts its owner | in-process | passed | 1.2 s | Darwin arm64, Release build | 2026-10-12 | 3 | 2 | 6 |
-| example: Volume Guard sleeps between checks and alerts its owner | worker processes | passed | 1.2 s | Darwin arm64, Release build | 2026-10-12 | 3 | 2 | 6 |
+| example: Volume Guard sleeps between checks and alerts its owner | in-process | passed | 1.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 2 | 6 |
+| example: Volume Guard sleeps between checks and alerts its owner | worker processes | passed | 1.1 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 3 | 2 | 6 |
 <!-- /results -->

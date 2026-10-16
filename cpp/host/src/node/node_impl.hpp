@@ -10,6 +10,7 @@
 #include <paglets/node/node.hpp>
 
 #include "../platform/platform.hpp"
+#include "../host_address.hpp"
 #include "../services/content_hash.hpp"
 
 #include <paglets/services/compute_slots.hpp>
@@ -73,6 +74,7 @@ public:
         return &it->second.first;
     }
     std::size_t bytes() const { return bytes_; }
+    void clear() { pages_.clear(); lru_.clear(); bytes_ = 0; }
 
 private:
     void trim() {
@@ -210,11 +212,7 @@ struct Node::Impl {
     std::map<std::uint64_t, std::pair<mesh::PublicKey, LaunchStatus>> launches;  // started here: target, status
 
     // Movement (movement.cpp, planning/cpp-networking.md, section 6).
-    struct Ticket {
-        std::string target;  // host name, key ID, label:<label> or any
-        int retries = 3;     // hosts tried at most
-        bool activate = true;
-    };
+    using Ticket = runtime::TransferTicket;
     struct Outgoing {  // a paglet leaving this host
         runtime::Departure departure;
         std::optional<mesh::Passport> passport;
@@ -224,6 +222,7 @@ struct Node::Impl {
         Clock::time_point deadline{};
         std::vector<std::string> failures;
         int attempts = 0;
+        Clock::time_point started{};
         // The paglet's move counter after this move; on move-ready the
         // location records are updated on a majority of the responsible
         // hosts before the move commits (location.cpp).
@@ -239,6 +238,8 @@ struct Node::Impl {
         mesh::PublicKey to{};
         Clock::time_point expires{};
         std::uint64_t moves = 0;  // committed: the paglet's move counter there
+        Clock::time_point capture_started{};  // transient timing, not durable protocol state
+        bool arrival_reported = false;
     };
     std::map<std::uint64_t, Decision> decisions;  // outcomes of offers, for queries
     struct Incoming {                             // a paglet arriving here
@@ -271,7 +272,7 @@ struct Node::Impl {
     std::vector<mesh::PublicKey> candidates(const Ticket& ticket, const mesh::Principal& principal,
                                             const std::optional<std::vector<mesh::Item>>& manifest,
                                             const std::vector<std::string>& marks, std::vector<std::string>& why_not);
-    std::optional<runtime::Cap> recreate(const runtime::PagletId& paglet, const runtime::Cap& cap);
+    std::optional<runtime::Cap> recreate(const mesh::Principal& principal, const runtime::Cap& cap);
     void take_spawns();
     void check_move_deadlines();
     void on_deliver(const mesh::PublicKey& from, const mesh::Fields& f);
@@ -279,6 +280,7 @@ struct Node::Impl {
     void on_move_want(const mesh::PublicKey& from, const mesh::Fields& f);
     void on_move_pages(const mesh::PublicKey& from, const mesh::Fields& f);
     void on_move_ready(const mesh::PublicKey& from, const mesh::Fields& f);
+    void on_move_arrived(const mesh::PublicKey& from, const mesh::Fields& f);
     void on_move_refused(const mesh::PublicKey& from, const mesh::Fields& f);
     void on_move_commit(const mesh::PublicKey& from, const mesh::Fields& f);
     void on_move_abort(const mesh::PublicKey& from, const mesh::Fields& f);
@@ -334,6 +336,7 @@ struct Node::Impl {
         std::optional<LocRecord> best;
         mesh::PublicKey target{};
         int hops = 0;
+        int busy_waits = 0;
         int timeouts = 0;
         Clock::time_point deadline{};
         std::string pin;  // pin: the new pin's ID; force: the pin to end (empty: all)
@@ -488,6 +491,10 @@ struct Node::Impl {
             std::string job;
             std::int64_t cores = 1;
             std::int64_t granted = 0;
+            Clock::time_point until{};
+            Clock::time_point limit{};
+            std::int64_t expires = 0;
+            Clock::time_point began{};
         };
         std::map<std::string, Lease> leases;
         struct Waiter {
@@ -497,6 +504,7 @@ struct Node::Impl {
             std::int64_t since = 0;
             Clock::time_point queued_at{};
             std::string came_from;
+            std::int64_t estimated_ms = 0;
         };
         std::list<Waiter> queue;
         runtime::SystemContext* ctx = nullptr;
@@ -505,8 +513,16 @@ struct Node::Impl {
         std::uint64_t redirects = 0;
         std::map<std::string, services::mesh_info::Offer> offers;  // this host's, by service
         std::map<mesh::PublicKey, std::pair<bool, std::int64_t>> link_since;  // up, since (Unix ms)
+        // Compute jobs of the runtime's pool (refresh_job_load): they take
+        // slots like leases.
+        std::int64_t job_cores = 0;
+        std::int64_t jobs_queued = 0;
         std::int64_t used() const;
     };
+    void refresh_job_load() {
+        compute.job_cores = runtime.job_cores_running();
+        compute.jobs_queued = static_cast<std::int64_t>(runtime.jobs_queued());
+    }
     ComputeState compute;
 
     // Zombie groups (zombies.cpp, docs/zombie-protocol.md).
@@ -545,26 +561,56 @@ struct Node::Impl {
         std::map<std::uint64_t, Delivery> deliveries;
     };
     ZombieState zombies;
+
+    // Compute jobs on other hosts (jobs.cpp, planning/cpp-compute-jobs.md).
+    struct JobsState {
+        struct Sent {  // a job of a paglet here, running on another host
+            mesh::PublicKey host{};
+            Clock::time_point sent{};
+            std::int64_t sent_ms = 0;  // Unix milliseconds
+            std::int64_t cores = 1;
+            Clock::time_point lost{};  // when its host left the view (epoch: in view)
+        };
+        std::map<std::pair<runtime::PagletId, std::uint64_t>, Sent> sent;
+        // Hosts whose jobs run here, by requester host: when they left the view.
+        std::map<mesh::PublicKey, Clock::time_point> requesters_lost;
+        Clock::time_point next_status{};
+    };
+    JobsState jobs;
+    void install_jobs();
+    std::expected<std::int64_t, std::int32_t> admit_job(const abi::SenderRecord& caller, const abi::JobSpec& spec,
+                                                         const mesh::PublicKey& host);
+    std::optional<mesh::PublicKey> pick_job_host(const std::vector<std::string>& hosts, std::int64_t cores);
+    void submit_remote_job(runtime::RemoteJob job);
+    void run_job_here(const std::optional<mesh::PublicKey>& from, runtime::IncomingJob job,
+                      const paglets::Digest& module);
+    void cancel_remote_job(const runtime::PagletId& paglet, std::uint64_t correlation);
+    bool on_jobs_frame(std::string_view type, const mesh::PublicKey& from, const mesh::Fields& f);
+    void jobs_tick();
     void zombie_notify(const std::string& group);
     bool zombie_merge(const services::zombies::GroupState& s);
-    void zombie_end(const std::string& group, services::zombies::Ending ending, std::string reason);
+    bool zombie_end(const std::string& group, services::zombies::Ending ending, std::string reason);
     services::zombies::GroupInfo zombie_info(const ZombieGroup& g) const;
     services::zombies::StoredResult zombie_result(const std::string& group) const;
     void zombies_tick();
     bool on_zombies_frame(std::string_view type, const mesh::PublicKey& from, const mesh::Fields& f);
-    bool zombie_accept(const std::string& group, std::int64_t sink, const std::string& from, std::string name,
+    std::expected<bool, std::int32_t> zombie_accept(const std::string& group, std::int64_t sink, const std::string& from, std::string name,
                        std::vector<std::uint8_t> data);
-    std::optional<mesh::PublicKey> zombie_sink_host(const std::string& spec) const;
+    std::expected<mesh::PublicKey, std::int32_t> zombie_sink_host(const std::string& spec) const;
     void collect_zombie_traces(const std::string& group,
                                std::function<void(std::vector<services::zombies::TraceRecord>)> done);
     void load_zombies();
-    void save_zombies();
+    bool save_zombies();
     void sample_self();
     void compute_tick();
     void on_mesh_info(const mesh::PublicKey& from, const mesh::Fields& f);
     std::vector<services::mesh_info::Snapshot> fresh_snapshots(std::int64_t max_age_ms, bool include_self);
     void end_stale_leases();
-    std::string grant(const runtime::PagletId& paglet, const std::string& job, std::int64_t cores);
+    void sync_compute_waiter();
+    std::chrono::milliseconds lease_duration(std::int64_t estimated_ms) const;
+    bool renew_lease(ComputeState::Lease& lease, std::int64_t estimated_ms);
+    std::string grant(const runtime::PagletId& paglet, const std::string& job, std::int64_t cores,
+                      Clock::time_point queued_at, std::int64_t estimated_ms);
     void grant_queued();
     std::optional<services::mesh_info::Snapshot> peer_with_slots(std::int64_t cores,
                                                                  std::map<std::string, std::int64_t>& shadow,
@@ -600,6 +646,10 @@ struct Node::Impl {
 
     static mesh::Principal principal_of(const abi::SenderRecord& s) {
         return mesh::Principal{s.id, s.owner, s.module, s.trust};
+    }
+
+    static mesh::Principal principal_of(const runtime::PagletInfo& p) {
+        return mesh::Principal{p.id, p.owner, p.module, std::string(runtime::to_string(p.trust))};
     }
 
     std::expected<runtime::Cap, std::string> materialize(const mesh::RecordId& id, const mesh::Grant& grant) {
@@ -790,6 +840,7 @@ struct Node::Impl {
         auto hash = mesh::parse_key_id(module);  // module hashes have the form of key IDs
         if (!hash) return std::unexpected("module " + std::string(module) + " is not a hex SHA-256");
         if (!passport.links().empty()) return std::unexpected(std::string("a root paglet needs a root passport"));
+        if (!passport.root().nonce) return std::unexpected(std::string("new roots need an owner-bound v2 passport"));
         if (auto ok = mesh::verify_passport(passport, ledger.state(), passport.paglet(), *hash, mesh::unix_ms()); !ok) {
             return std::unexpected("passport: " + ok.error());
         }
@@ -821,6 +872,8 @@ struct Node::Impl {
         if (!passport) return done(std::unexpected("passport: " + passport.error()));
         if (!passport->links().empty())
             return done(std::unexpected(std::string("a root paglet needs a root passport")));
+        if (!passport->root().nonce)
+            return done(std::unexpected(std::string("new roots need an owner-bound v2 passport")));
         const paglets::Digest module = passport->module();
         if (auto ok = mesh::verify_passport(*passport, st, passport->paglet(), module, mesh::unix_ms()); !ok) {
             return done(std::unexpected("passport: " + ok.error()));
@@ -898,6 +951,8 @@ struct Node::Impl {
             on_move_pages(from, f);
         } else if (*type == "move-ready") {
             on_move_ready(from, f);
+        } else if (*type == "move-arrived") {
+            on_move_arrived(from, f);
         } else if (*type == "move-refused") {
             on_move_refused(from, f);
         } else if (*type == "move-commit") {
@@ -916,7 +971,8 @@ struct Node::Impl {
             on_content_part(from, f);
         } else if (*type == frame_content_missing) {
             on_content_missing(from, f);
-        } else if (!on_location_frame(*type, from, f) && !on_zombies_frame(*type, from, f)) {
+        } else if (!on_location_frame(*type, from, f) && !on_zombies_frame(*type, from, f) &&
+                   !on_jobs_frame(*type, from, f)) {
             return false;
         }
         return true;
@@ -924,53 +980,58 @@ struct Node::Impl {
 
     void load() {
         if (state_dir.empty()) return;
-        auto bytes = wasm::read_file((state_dir / "node.state").string());
-        if (!bytes) return;
-        auto v = mesh::decode(*bytes);
-        if (!v || v->as_map() == nullptr) return;
-        const mesh::Fields f{*v->as_map()};
-        if (auto m = f.strings("materialized")) materialized.insert(m->begin(), m->end());
-        if (auto a = f.strings("answered")) answered.insert(a->begin(), a->end());
-        // Moves this host committed: destinations may still ask.
-        if (const mesh::Array* committed = f.array("committed")) {
-            const std::int64_t now = mesh::unix_ms();
-            for (const auto& e : *committed) {
-                const mesh::Array* a = e.as_array();
-                if (a == nullptr || a->size() < 3 || !(*a)[0].as_int() || !(*a)[2].as_int()) continue;
-                const mesh::Bytes* to = (*a)[1].as_bin();
-                if (to == nullptr || to->size() != 32 || *(*a)[2].as_int() <= now) continue;
-                Decision d;
-                d.committed = true;
-                std::copy(to->begin(), to->end(), d.to.begin());
-                d.expires = Clock::now() + std::chrono::milliseconds(*(*a)[2].as_int() - now);
-                if (a->size() > 3 && (*a)[3].as_int()) d.moves = static_cast<std::uint64_t>(*(*a)[3].as_int());
-                decisions[static_cast<std::uint64_t>(*(*a)[0].as_int())] = d;
-                next_request = std::max(next_request, static_cast<std::uint64_t>(*(*a)[0].as_int()) + 1);
-            }
-        }
-        // Move counters of the paglets here, and pins (location.cpp).
-        if (const mesh::Array* h = f.array("held")) {
-            for (const auto& e : *h) {
-                const mesh::Array* a = e.as_array();
-                if (a == nullptr || a->size() != 3 || (*a)[0].as_str() == nullptr || !(*a)[1].as_int() ||
-                    !(*a)[2].as_int()) {
-                    continue;
+        // Passports are independently durable, including on older hosts that
+        // saved no node.state until their first grant or outgoing move.
+        const auto load_metadata = [&] {
+            auto bytes = wasm::read_file((state_dir / "node.state").string());
+            if (!bytes) return;
+            auto v = mesh::decode(*bytes);
+            if (!v || v->as_map() == nullptr) return;
+            const mesh::Fields f{*v->as_map()};
+            if (auto m = f.strings("materialized")) materialized.insert(m->begin(), m->end());
+            if (auto a = f.strings("answered")) answered.insert(a->begin(), a->end());
+            // Moves this host committed: destinations may still ask.
+            if (const mesh::Array* committed = f.array("committed")) {
+                const std::int64_t now = mesh::unix_ms();
+                for (const auto& e : *committed) {
+                    const mesh::Array* a = e.as_array();
+                    if (a == nullptr || a->size() < 3 || !(*a)[0].as_int() || !(*a)[2].as_int()) continue;
+                    const mesh::Bytes* to = (*a)[1].as_bin();
+                    if (to == nullptr || to->size() != 32 || *(*a)[2].as_int() <= now) continue;
+                    Decision d;
+                    d.committed = true;
+                    std::copy(to->begin(), to->end(), d.to.begin());
+                    d.expires = Clock::now() + std::chrono::milliseconds(*(*a)[2].as_int() - now);
+                    if (a->size() > 3 && (*a)[3].as_int()) d.moves = static_cast<std::uint64_t>(*(*a)[3].as_int());
+                    decisions[static_cast<std::uint64_t>(*(*a)[0].as_int())] = d;
+                    next_request = std::max(next_request, static_cast<std::uint64_t>(*(*a)[0].as_int()) + 1);
                 }
-                held[*(*a)[0].as_str()] = Held{static_cast<std::uint64_t>(*(*a)[1].as_int()), *(*a)[2].as_int()};
             }
-        }
-        if (const mesh::Array* list = f.array("pins")) {
-            for (const auto& e : *list) {
-                const mesh::Map* m = e.as_map();
-                if (m == nullptr) continue;
-                const mesh::Fields p{*m};
-                auto id = p.str("pin");
-                auto paglet = p.str("p");
-                auto until = p.integer("until");
-                if (!id || !paglet || !until || *until <= mesh::unix_ms()) continue;
-                pins[*id] = PinLease{*paglet, *until, p.str("holder").value_or(""), p.str("reason").value_or("")};
+            // Move counters of the paglets here, and pins (location.cpp).
+            if (const mesh::Array* h = f.array("held")) {
+                for (const auto& e : *h) {
+                    const mesh::Array* a = e.as_array();
+                    if (a == nullptr || a->size() != 3 || (*a)[0].as_str() == nullptr || !(*a)[1].as_int() ||
+                        !(*a)[2].as_int()) {
+                        continue;
+                    }
+                    held[*(*a)[0].as_str()] = Held{static_cast<std::uint64_t>(*(*a)[1].as_int()), *(*a)[2].as_int()};
+                }
             }
-        }
+            if (const mesh::Array* list = f.array("pins")) {
+                for (const auto& e : *list) {
+                    const mesh::Map* m = e.as_map();
+                    if (m == nullptr) continue;
+                    const mesh::Fields p{*m};
+                    auto id = p.str("pin");
+                    auto paglet = p.str("p");
+                    auto until = p.integer("until");
+                    if (!id || !paglet || !until || *until <= mesh::unix_ms()) continue;
+                    pins[*id] = PinLease{*paglet, *until, p.str("holder").value_or(""), p.str("reason").value_or("")};
+                }
+            }
+        };
+        load_metadata();
         std::error_code ec;
         for (const auto& entry : fs::directory_iterator(state_dir / "passports", ec)) {
             auto p = wasm::read_file(entry.path().string());
@@ -1059,7 +1120,8 @@ struct Node::Impl {
         for (const auto& [id, grant] : st.grants) {
             const std::string h = hex(id);
             if (!grant.by_admin || materialized.contains(h) || grant.expires <= now) continue;
-            if (!runtime.info(grant.principal.paglet) || !mesh::selects(st, grant.hosts, key.public_key())) continue;
+            auto info = runtime.info(grant.principal.paglet);
+            if (!info || principal_of(*info) != grant.principal || !mesh::selects(st, grant.hosts, key.public_key())) continue;
             auto cap = materialize(id, grant);
             if (!cap) {
                 grants_ctx->log(abi::LogLevel::warning, "grant " + h.substr(0, 16) + ": " + cap.error());
@@ -1090,7 +1152,9 @@ struct Node::Impl {
             const mesh::Record* req = ledger.find(rid);
             if (req == nullptr || req->type() != "grant-request") continue;
             auto parsed = mesh::parse_grant_request(*req);
-            if (!parsed || !runtime.info(parsed->principal.paglet)) continue;
+            if (!parsed) continue;
+            auto info = runtime.info(parsed->principal.paglet);
+            if (!info || principal_of(*info) != parsed->principal) continue;
             g::Answer a{g::Status::denied,
                         parsed->items.empty() ? g::Item{} : to_contract(parsed->items.front()),
                         std::string(),

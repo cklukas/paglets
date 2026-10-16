@@ -23,6 +23,7 @@
 # user_info); the module can then include <paglets/services/<service>.gen.hpp>
 # with their codecs and typed clients. PATTERNS adds the services the
 # patterns library needs (<paglets/patterns.hpp>, planning/cpp-patterns.md).
+# Selecting zombies also generates user_info for its default failure hook.
 # SHA256 compiles in the SHA-256 implementation of <paglets/sha256.hpp>
 # (paglets::sha256, paglets::to_hex), the same code the host uses.
 #
@@ -200,9 +201,14 @@ function(paglets_add_guest name)
     endif()
     cmake_parse_arguments(G "NO_SDK;PATTERNS;SHA256" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE;INTERFACE" "SOURCES;SERVICES" ${ARGN})
     if(G_PATTERNS)
-        list(APPEND G_SERVICES directory files grants locator mesh_info user_info)
-        list(REMOVE_DUPLICATES G_SERVICES)
+        list(APPEND G_SERVICES directory files grants locator mesh_info user_info zombies)
     endif()
+    # Zombie's default failure hook reports through user-info, including
+    # when callers select its services explicitly without PATTERNS.
+    if("zombies" IN_LIST G_SERVICES)
+        list(APPEND G_SERVICES user_info)
+    endif()
+    list(REMOVE_DUPLICATES G_SERVICES)
     if(NOT G_LANGUAGE)
         set(G_LANGUAGE CXX)
     endif()
@@ -217,7 +223,15 @@ function(paglets_add_guest name)
     if(G_SHA256)
         list(APPEND sources "${PAGLETS_SHA256_SOURCE}")
     endif()
-    set(depends ${sources} "${PAGLETS_COMMON_INCLUDE_DIR}/paglets/msgpack.hpp")
+    # Guests use custom compiler commands rather than native CMake object
+    # targets. Track all shared headers, including nested protocol headers,
+    # so an SDK update cannot silently leave an old module in the build.
+    # CONFIGURE_DEPENDS also notices headers added by an SDK update.
+    file(GLOB_RECURSE common_headers CONFIGURE_DEPENDS
+         "${PAGLETS_COMMON_INCLUDE_DIR}/*.h"
+         "${PAGLETS_COMMON_INCLUDE_DIR}/*.hpp"
+         "${PAGLETS_COMMON_INCLUDE_DIR}/*.inc")
+    set(depends ${sources} ${common_headers})
     set(include_flags "-I${PAGLETS_COMMON_INCLUDE_DIR}" "-I${gen_dir}")
 
     if(G_LANGUAGE STREQUAL "CXX")
@@ -228,11 +242,11 @@ function(paglets_add_guest name)
             if(NOT PAGLETS_SDK_INCLUDE_DIR STREQUAL PAGLETS_COMMON_INCLUDE_DIR)
                 list(APPEND include_flags "-I${PAGLETS_SDK_INCLUDE_DIR}")
             endif()
-            file(GLOB pattern_headers "${PAGLETS_SDK_INCLUDE_DIR}/paglets/patterns/*.hpp")
-            list(APPEND depends "${PAGLETS_SDK_SOURCE}"
-                 "${PAGLETS_SDK_INCLUDE_DIR}/paglets/paglet.hpp"
-                 "${PAGLETS_SDK_INCLUDE_DIR}/paglets/patterns.hpp" ${pattern_headers}
-                 "${PAGLETS_COMMON_INCLUDE_DIR}/paglets/abi.hpp")
+            file(GLOB_RECURSE sdk_headers CONFIGURE_DEPENDS
+                 "${PAGLETS_SDK_INCLUDE_DIR}/*.h"
+                 "${PAGLETS_SDK_INCLUDE_DIR}/*.hpp"
+                 "${PAGLETS_SDK_INCLUDE_DIR}/*.inc")
+            list(APPEND depends "${PAGLETS_SDK_SOURCE}" ${sdk_headers})
         endif()
     else()
         set(compiler "${PAGLETS_WASI_CLANG}")
@@ -300,12 +314,35 @@ function(paglets_add_guest name)
         list(APPEND depends ${tool})
     endif()
 
+    # Compile each translation unit separately so clang can record its
+    # transitive includes. One depfile for a multi-source driver invocation
+    # would be overwritten by the last input and miss guest-local headers.
+    set(compile_flags ${PAGLETS_GUEST_COMMON_FLAGS})
+    list(FILTER compile_flags EXCLUDE REGEX "^(-mexec-model=|-Wl,)")
+    set(objects "")
+    set(source_index 0)
+    foreach(src IN LISTS sources)
+        math(EXPR source_index "${source_index} + 1")
+        set(object "${gen_dir}/objects/${source_index}.o")
+        add_custom_command(
+            OUTPUT "${object}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${gen_dir}/objects"
+            COMMAND "${compiler}" ${compile_flags} ${lang_flags} ${include_flags}
+                    -MD -MF "${object}.d" -MQ "${object}"
+                    -c "${src}" -o "${object}"
+            DEPENDS ${depends}
+            DEPFILE "${object}.d"
+            COMMENT "Compiling guest ${name}: ${src}"
+            VERBATIM)
+        list(APPEND objects "${object}")
+    endforeach()
+
     add_custom_command(
         OUTPUT "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PAGLETS_GUEST_OUTPUT_DIR}"
-        COMMAND "${compiler}" ${PAGLETS_GUEST_COMMON_FLAGS} ${lang_flags} ${include_flags} ${sources} -o "${out}"
+        COMMAND "${compiler}" ${PAGLETS_GUEST_COMMON_FLAGS} ${objects} -o "${out}"
         ${describe_command}
-        DEPENDS ${depends}
+        DEPENDS ${objects} ${depends}
         COMMENT "Building guest paglet ${name}.wasm"
         VERBATIM)
     add_custom_target(${name}_wasm ALL DEPENDS "${out}")

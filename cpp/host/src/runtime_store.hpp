@@ -35,11 +35,13 @@ struct PagletRecord {
     std::uint64_t next_timer = 1;
     std::vector<std::pair<std::int32_t, Cap>> caps;
     std::vector<std::uint64_t> pending_requests;
+    std::vector<std::uint64_t> pending_jobs;  // compute jobs waited for (answered `gone` after a restart)
     std::int64_t checkpoint_ms = -1;                             // per-paglet checkpoint interval; -1: host default
     std::vector<std::pair<std::string, std::int32_t>> services;  // default service endpoints: name, handle
     std::vector<std::string> marks;                              // data residency marks
     bool restart = true;            // restart policy (abi::RestartArg)
     bool notify_recovered = false;
+    std::int64_t wake_at_ms = 0;  // timed deactivation survives restart
     std::int64_t image_ms = 0;      // when the image was stored (Unix milliseconds)
 };
 

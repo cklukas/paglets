@@ -56,9 +56,13 @@ registry at once. `paglets-host serve --no-beacon` turns beacons off,
 
 ## 4. Compatibility gate
 
-- **Mesh protocol** (`net::mesh_protocol`, now 1): both sides announce it in
+- **Mesh protocol** (`net::mesh_protocol`, now 2): both sides announce it in
   the channel handshake (`proto`); a channel between different protocol
   versions is refused on both sides, for hosts and CLI sessions alike.
+  Protocol 2 requires owner-bound v2 passports for new roots. Saved v1
+  paglets retain their IDs and can move between upgraded hosts; protocol 1
+  hosts and CLI clients must upgrade before reconnecting. The ledger and
+  saved runtime state do not need resetting.
 - **Paglet ABI**: hosts announce `abi: [major, minor]` in the handshake and
   in announcements. Channels between hosts of different major versions are
   refused. The registry marks hosts of another protocol or major version

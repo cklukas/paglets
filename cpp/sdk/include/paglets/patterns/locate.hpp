@@ -73,13 +73,18 @@ inline void release(Capability pin_cap, std::function<void(Result<bool>)> next =
 
 // Pins `target`, runs `work` with its location and a `done` callback, and
 // releases the pin when `done` is called (or when pinning failed, `work`
-// gets the error and no pin is held).
+// gets the error and no pin is held). Repeated `done` calls are harmless.
+// If `done` is forgotten, the pin lasts until its granted expiry; request
+// a short duration so expiry remains a useful safety net.
 inline void with_pinned(const Endpoint& target, std::int64_t duration_ms, std::string reason,
                         std::function<void(Result<Location>, std::function<void()> done)> work) {
     pin(target, duration_ms, std::move(reason), [work](Result<Pinned> p) {
         if (!p) return work(std::unexpected(p.error()), [] {});
         auto cap = std::make_shared<Capability>(p->capability);
-        work(p->pin.location, [cap] { release(*cap); });
+        auto released = std::make_shared<bool>(false);
+        work(p->pin.location, [cap, released] {
+            if (!std::exchange(*released, true)) release(*cap);
+        });
     });
 }
 

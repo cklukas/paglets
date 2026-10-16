@@ -34,8 +34,12 @@ The owner launches the chronicle and sends `start` with the sink, the
 lifetime and the interval between samples. The chronicle starts the group:
 a replica on every host with a fresh `mesh-info` snapshot.
 
+Sample count measures replaceable work and increases within a lineage.
+Journal events merge independently when lineages meet.
+
 Each step of the main asks `mesh-info` for the landscape and compares it
-with what the journal says:
+with what the journal says. A takeover note stays pending until the journal
+accepts it, including when an election temporarily freezes observations:
 
 <!-- snippet: cpp/examples/chronicle/chronicle.cpp#step -->
 Source: [`cpp/examples/chronicle/chronicle.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/chronicle/chronicle.cpp)
@@ -103,8 +107,8 @@ journal and delivers it, and the group ends on every host.
 
 The life log has four parts:
 
-- a summary: lifetime, replicas, samples, takeovers, and the time without a
-  working main;
+- a summary: lifetime, replicas, samples, takeovers, the sum of takeover
+  gaps beyond one sampling interval each, and the longest takeover gap;
 - the timeline of every event, from every lineage, in time order;
 - the connections that were lost, with when they were restored and why they
   failed;
@@ -112,6 +116,11 @@ The life log has four parts:
   sides. A side "worked" when a main there recorded something. If both
   sides worked, it was a partition with a main on each side; if one side
   stayed silent, a host was gone.
+
+A takeover gap runs from that lineage's previous sample to the sample
+that records its takeover note. Gaps from different lineages may overlap; summing their
+excess over the nominal sampling interval does not measure exact main
+downtime. Delayed sample callbacks also contribute to a gap.
 
 ## Running it
 
@@ -125,8 +134,15 @@ $H remote call $R $ID start '{"sink": "host:lab-1", "lifetime_ms": 600000, "samp
 $H remote call $R $ID status
 ```
 
-`start` answers with the group ID. `status` shows the replica's role, the
-main it follows, and the samples so far. While it runs:
+`start` waits for the creator's local registry admission. Its reply contains
+the group ID, `accepted` and `reason`: `accepted: false` reports a startup
+refusal and its reason before the paglet ends; `accepted: true` means the
+creator joined. Other replicas form asynchronously. Use the zombie registry
+to see the group's members. `status` shows the replica's role, the
+main it follows, and the samples so far. Calls such as `status` and `finish`
+address a particular replica on the connected host. Use the registry to
+find replicas and connect to the host of the replica you want to call.
+While it runs:
 
 ```bash
 $H remote zombies list $R            # the groups on this host, and their state
@@ -147,11 +163,15 @@ $H remote zombies check GROUP $R
 
 `cpp/tools/chronicle_live.sh --late uconsole` runs the chronicle for 10
 minutes on this Mac and two Linux hosts (a Raspberry Pi 4 and a uConsole,
-both arm64). The uConsole joins the mesh a minute after the start and gets a
+both arm64). The uConsole joins at 10% of the lifetime (a minute of ten) and gets a
 replica. While the chronicle runs, the script freezes the host of the main
 for 90 seconds (cut off, its main keeps working alone), crashes hosts and
 restarts them, and shuts the sink's host down for a while. The life log it delivered is in
 [A life log of three hosts](mesh-chronicle-log.md).
+
+The historical row below used the earlier collector's fixed platform/build
+label; it does not independently establish each executable's configuration.
+New runs retain per-host `--info` metadata and label mixed builds explicitly.
 
 <!-- results: live_chronicle -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica | lifetime (min) | takeovers in the life log | partitions with a main on both sides | protocol steps checked against the specification | replicas left after the end |
@@ -174,6 +194,8 @@ in `cpp/tests/test_zombies.cpp`.
 <!-- results: chronicle -->
 | Test | Mode | Outcome | Duration | Platform | Recorded | hosts with a replica (one joined the mesh during the run) | takeovers recorded by the hosts | protocol steps checked against the specification | results accepted by the sink | size of the life log (bytes) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| example: the Mesh Chronicle outlives a partition and a restart of its main's host | in-process | passed | 21.0 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 4 | 4 | 13 | 1 | 2480 |
-| example: the Mesh Chronicle outlives a partition and a restart of its main's host | worker processes | passed | 21.6 s | Darwin arm64, RelWithDebInfo build | 2026-10-13 | 4 | 4 | 13 | 1 | 2390 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | in-process | passed | 31.6 s | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 4 | 4 | 16 | 1 | 2379 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | in-process | passed | 30.7 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 4 | 16 | 1 | 2379 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | worker processes | passed | 31.0 s | Windows AMD64, RelWithDebInfo build | 2026-10-15 | 4 | 4 | 16 | 1 | 2380 |
+| example: the Mesh Chronicle outlives a partition and a restart of its main's host | worker processes | passed | 30.6 s | Darwin arm64, RelWithDebInfo build | 2026-10-16 | 4 | 4 | 16 | 1 | 2379 |
 <!-- /results -->

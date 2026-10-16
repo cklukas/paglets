@@ -4,34 +4,57 @@ A paglet is a C++ class compiled to WebAssembly with the guest SDK
 (`cpp/sdk/`). Its state is ordinary C++ objects. Memory images move it
 between hosts without any serialization code.
 
+A module must import functions from the host's permitted import set.
+Admission checks both the name and the function kind, including for
+wildcard policies, and names unsupported imports and their kinds in the
+error. Tables, memories, globals and exception tags are not host imports.
+
 ## A first paglet
 
+<!-- snippet: cpp/examples/hello/hello.cpp -->
+Source: [`cpp/examples/hello/hello.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/hello/hello.cpp)
+
 ```cpp
+// Smallest paglet: answers "greet" requests and counts them.
+
 #include <paglets/paglet.hpp>
+
+#include <string>
+
+namespace {
 
 class Hello : public paglets::Paglet {
 public:
     Hello() {
         router().on<std::string>("greet", [this](const std::string& name, paglets::Message& m) {
             ++greetings_;
-            m.reply("hello, " + name);
+            m.reply("hello, " + name + " (greeting " + std::to_string(greetings_) + ")");
         });
+    }
+
+    void on_created(paglets::Started&) override {
+        auto info = paglets::self_info();
+        paglets::log("hello paglet created as " + (info ? info->id : std::string("?")));
     }
 
 private:
     std::uint32_t greetings_ = 0;
 };
 
+}  // namespace
+
 PAGLETS_PAGLET(Hello)
 ```
+<!-- /snippet -->
 
 Build it from CMake with `paglets_add_module`, then run it with the host:
 
 ```cmake
-paglets_add_module(hello SOURCES hello.cpp)
+paglets_add_module(hello SOURCES hello/hello.cpp INTERFACE hello/interface.json)
 ```
 
-Inside the repository, add the call to `cpp/examples/CMakeLists.txt`. In a
+The repository call also embeds `hello/interface.json` for tools that describe
+the module. It belongs in `cpp/examples/CMakeLists.txt`. In a
 project of your own, install paglets/cpp and call
 `find_package(paglets REQUIRED)` first; see
 [Modules outside the repository](building.md#modules-outside-the-repository).
@@ -66,16 +89,67 @@ the description into the module. [`paglets-web`](web-ui.md) then shows
 forms for the messages, and `paglets-host remote describe` prints them
 (see [Interface descriptions](interface-descriptions.md)).
 
+A request whose message has no registered handler answers
+`unknown_message`; handle it through the router or return a suitable
+error from a raw message handler.
+
+## When a paglet moves, and what moves
+
+Moves, clones, deactivation and checkpoints capture the paglet between
+handler calls. Its image holds WebAssembly linear memory and exported
+mutable globals, including the constructed C++ object and its heap. No
+active call stack or instruction position is resumed: the next handler
+starts a new call. Images work across supported CPU architectures and
+operating systems, provided the destination has the same module hash and
+permits the image size.
+
+Tables are not captured. A guest must not mutate its WebAssembly tables
+at runtime. Admission decodes instructions and refuses table mutation
+and passive-segment mutation, which memory images do not capture. The supported guest build also exports
+all mutable globals needed by an image.
+
+The default handler budget is 5 s of elapsed host time. Exceeding it ends
+the paglet as failed. Use [compute jobs](compute-jobs.md) for long CPU work,
+or divide work into short handlers driven by timers or self-messages.
+Capability authority travels according to the
+[capability movement rules](sdk-reference.md#capabilities-across-moves).
+
+There is no retract operation. A paglet returns by dispatching itself to
+the starting host, or its owner or an admin uses
+`paglets-host remote dispatch PAGLET HOST`.
+
+A running paglet remains bound to its module hash. A new code version is a
+new module: start new paglets and hand application state over explicitly
+by messages or shared artifacts. Automatic migration of an old image into
+new code is not implemented.
+
+## Memory and image size
+
+Wasm linear memory grows but does not shrink. Freeing C++ objects does not
+reduce the image's page count and usually leaves nonzero bytes in freed
+heap pages. Capture omits pages that are currently all zero; other pages
+still contribute to an image. Repeated moves reuse pages cached by the
+destination, but a host that has not seen them must fetch them. Keep large
+data in files, artifacts or storage and carry capabilities to it instead
+of copying it into the paglet heap. `paglets-spike image-save --bloat`
+lets you measure this effect.
+
+The module store validates the standard import set supported for stored
+Wasm modules. Creation and arrival also check the requested trust class.
+Native system paglets are host objects; storing a Wasm module does not
+give it access to native system imports. `paglets-host module inspect`
+reports the per-class admission checks.
+
 ## Capabilities
 
-Paglets talk to other paglets only through capabilities:
+Capabilities carry authority: endpoints identify paglets and allowed
+messages; reply capabilities permit one answer; timers permit cancellation;
+resource capabilities name such things as directories, artifacts and pins.
 
-- endpoints of paglets they created or were given;
-- `request` with a reply continuation, and deferred replies;
-- timers;
-- clones;
-- lifecycle operations: deactivate, dispose, and moves with transfer
-  tickets.
+Use endpoints for `send` and `request`, reply capabilities for deferred
+answers, and resource capabilities with the corresponding system services.
+Lifecycle operations such as deactivate, dispose, clone and dispatch are
+host calls, rather than kinds of capability.
 
 Sends and replies can be asynchronous (`SendOptions::async`,
 `Message::reply_async`). They return at once. A message that cannot be
@@ -98,7 +172,7 @@ the contracts in `cpp/common/include/paglets/services/`. Name the services
 a module uses with `SERVICES`:
 
 ```cmake
-paglets_add_module(pi SOURCES pi/pi.cpp SERVICES mesh_info compute_slots)
+paglets_add_module(pi SOURCES pi/pi.cpp SERVICES mesh_info compute_slots artifacts)
 ```
 
 ```cpp
@@ -124,8 +198,8 @@ The patterns library covers the common shapes of paglets. Include
 | `services.hpp` | `endpoint(name, next)`, `lookup`, `lending(cap)`, `here(next)`: services by name, and this host as `mesh-info` sees it |
 | `task.hpp` | `Task<Request, Result>`: a paglet that runs one task, with `start`, `status` and `wait`; `complete(result)` and `fail(why)` end it |
 | `operations.hpp` | `serve<Request, Reply>(router, name, fn)` and `call<Reply>(endpoint, op, request, next)`: typed operations |
-| `fanout.hpp` | `FanOut`: clones of the paglet on a set of hosts, one report each, a deadline, and failed clones |
-| `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(...)`: find a paglet and keep it in place while working with it |
+| `fanout.hpp` | `FanOut`: clones on transfer tickets (host names/key IDs, `label:L`, `offer:S`, `any`, or empty for this host), one report each, a deadline, and failed clones; see [dispatch](sdk-reference.md#lifecycle-children-and-timers) |
+| `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(...)`: find a paglet and keep it in place while working with it; repeated `done()` calls release only once |
 | `notify.hpp` | `notify(level, title, text)`: notifications to the owner through `user-info` |
 | `files.hpp` | `granted_dir`; `hash_file(dir, path)`: a file's SHA-256, computed by the host; `share_file(dir, path)` and `save_file(dir, path, content)`: files of any size between hosts, as artifact capabilities; `read_file`, `write_file`, `pick_up(root, path)`, `put_down(file, root, path)`: small files carried in the paglet's memory |
 
@@ -142,7 +216,12 @@ struct Count : paglets::patterns::Task<CountRequest, CountResult> {
 > capability of a few bytes, and the content goes directly from host to
 > host (see [Moving content between hosts](system-paglets.md#moving-content-between-hosts)).
 > `pick_up` and `read_file` copy the content into the paglet's memory,
-> which holds at most 16 MB in all.
+> whose default total limit is 256 MB. A host can change it with
+> `serve --memory-mb N`; intended move destinations must allow the image
+> too. The read and write helpers use 512 KB
+> chunks, leaving room for message metadata below the 1 MB ABI document
+> limit. A file can span several chunks; the read's `max_bytes` still caps
+> the total content copied into memory.
 
 > [!NOTE]
 > Reading a file marks the paglet with the root it came from. If a

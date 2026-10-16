@@ -77,9 +77,16 @@ handler is answered `unknown_message` by the host.
 
 The module is built with one line in `cpp/examples/CMakeLists.txt`:
 
+<!-- snippet: cpp/examples/CMakeLists.txt#hello_build -->
+Source: [`cpp/examples/CMakeLists.txt`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/CMakeLists.txt)
+
 ```cmake
-paglets_add_module(hello SOURCES hello/hello.cpp)
+paglets_add_module(hello SOURCES hello/hello.cpp INTERFACE hello/interface.json)
 ```
+<!-- /snippet -->
+
+`INTERFACE` embeds the [interface description](../interface-descriptions.md),
+so the CLI and web UI can describe the module and its messages.
 
 See [Writing paglets](../writing-paglets.md#a-first-paglet) for the same
 paglet step by step.
@@ -115,8 +122,8 @@ and `host_run_services` does the same with the system paglets and a named
 root (`--root`).
 
 <!-- results: hello -->
-| Test | Mode | Outcome | Duration | Platform | Recorded | reply to greet "world" |
-|---|---|---|---|---|---|---|
-| runtime: hello sample | in-process | passed |  | Darwin arm64, Release build | 2026-10-12 | hello, world (greeting 1) |
-| runtime: hello sample | worker processes | passed | 0.2 s | Darwin arm64, Release build | 2026-10-12 | hello, world (greeting 1) |
+| Test | Mode | Outcome | Platform | Recorded | reply to greet "world" |
+|---|---|---|---|---|---|
+| runtime: hello sample | in-process | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | hello, world (greeting 1) |
+| runtime: hello sample | worker processes | passed | Darwin arm64, RelWithDebInfo build | 2026-10-16 | hello, world (greeting 1) |
 <!-- /results -->

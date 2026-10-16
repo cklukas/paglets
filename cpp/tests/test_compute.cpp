@@ -11,9 +11,12 @@
 
 #include <bbp.hpp>
 #include <pi_msgs.hpp>
+#include <jobs_msgs.hpp>
 #include <paglets/services/compute_slots.hpp>
 #include <paglets/services/mesh_info.hpp>
 #include <paglets/wire/reflect.hpp>
+
+#include <limits>
 
 using namespace paglets::test;
 namespace mi = paglets::services::mesh_info;
@@ -78,6 +81,391 @@ const mi::Snapshot* snapshot_of(const std::vector<mi::Snapshot>& all, const std:
 }
 
 }  // namespace
+
+namespace {
+
+std::optional<cs::Lease> lease_of(Mesh::Host& host, const rt::PagletId& id) {
+    for (const auto& lease : host.node->compute_status().leases) {
+        if (lease.paglet == id) return lease;
+    }
+    return std::nullopt;
+}
+
+// A two-core head cannot fit until the blocker releases its one core.
+// Later one-core work must leave room for that older head, across both APIs.
+void shared_admission_order(bool native_head, bool native_tail) {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    fast(net);
+    host.node->set_compute_slots(2);
+    const auto module = host.f->module("conformance.wasm");
+    const auto blocker = start(net, host, module, '1');
+    const auto held = ask<cs::Decision>(net, *host.f, blocker, "compute-slots", "request_slot",
+                                        cs::SlotRequest{"blocker", 1, 1000});
+    REQUIRE(held.verdict == cs::Verdict::run_now);
+    const auto head = start(net, host, native_head ? host.f->module("jobs.wasm") : module, '2');
+    std::future<rt::Reply> first;
+    if (native_head) {
+        jobs_test::Run q;
+        q.function = "sum";
+        q.cores = 2;
+        first = host.f->runtime->request(head, "run", enc(q), 10s);
+        REQUIRE(net.settle([&] { return host.f->runtime->jobs_queued() == 1u; }, 1000));
+    } else {
+        REQUIRE(ask<cs::Decision>(net, *host.f, head, "compute-slots", "request_slot",
+                                  cs::SlotRequest{"head", 2, 1000}).verdict == cs::Verdict::queued);
+    }
+    const auto tail = start(net, host, native_tail ? host.f->module("jobs.wasm") : module, '3');
+    std::future<rt::Reply> last;
+    if (native_tail) {
+        jobs_test::Run q;
+        q.function = "sum";
+        last = host.f->runtime->request(tail, "run", enc(q), 10s);
+        REQUIRE(net.settle([&] { return !host.f->runtime->jobs().empty(); }, 1000));
+        CHECK(!net.settle([&] { return last.wait_for(0s) == std::future_status::ready; }, 30));
+        CHECK_EQ(host.f->runtime->job_cores_running(), 0);
+    } else {
+        const auto later = ask<cs::Decision>(net, *host.f, tail, "compute-slots", "request_slot",
+                                            cs::SlotRequest{"tail", 1, 1000});
+        CHECK(later.verdict == cs::Verdict::queued);
+        CHECK(!net.settle([&] { return lease_of(host, tail).has_value(); }, 30));
+        // Repeating the queued request must retain its original position.
+        if (!native_head) {
+            const auto repeated = ask<cs::Decision>(net, *host.f, head, "compute-slots", "request_slot",
+                                                    cs::SlotRequest{"head", 2, 2000});
+            CHECK(repeated.verdict == cs::Verdict::queued);
+            CHECK_EQ(repeated.position, 0);
+        }
+    }
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, blocker, "compute-slots", "release_slot",
+                                 cs::ReleaseRequest{held.lease}).released);
+    if (native_head) {
+        REQUIRE(net.settle([&] { return first.wait_for(0s) == std::future_status::ready; }, 1000));
+        const auto reply = first.get();
+        REQUIRE(reply.status == abi::ok);
+        CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, abi::ok);
+    } else {
+        REQUIRE(net.settle([&] { return lease_of(host, head).has_value(); }, 1000));
+        CHECK(!lease_of(host, tail).has_value());
+        if (native_tail) CHECK(last.wait_for(0s) != std::future_status::ready);
+        const auto lease = lease_of(host, head);
+        REQUIRE(lease.has_value());
+        REQUIRE(ask<cs::ReleaseReply>(net, *host.f, head, "compute-slots", "release_slot",
+                                     cs::ReleaseRequest{lease->lease}).released);
+    }
+    if (native_tail) {
+        REQUIRE(net.settle([&] { return last.wait_for(0s) == std::future_status::ready; }, 1000));
+        const auto reply = last.get();
+        REQUIRE(reply.status == abi::ok);
+        CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, abi::ok);
+    } else {
+        REQUIRE(net.settle([&] { return lease_of(host, tail).has_value(); }, 1000));
+    }
+}
+
+}  // namespace
+
+PAGLETS_TEST("compute-slots: later small leases preserve the older large lease's capacity") {
+    shared_admission_order(false, false);
+}
+
+PAGLETS_TEST("compute-slots: later leases preserve an older native job's capacity") {
+    shared_admission_order(true, false);
+}
+
+PAGLETS_TEST("compute-slots: later native jobs preserve an older lease's capacity") {
+    shared_admission_order(false, true);
+}
+
+PAGLETS_TEST("compute-slots: a departed queue head releases its admission priority") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    fast(net);
+    host.node->set_compute_slots(2);
+    const auto module = host.f->module("conformance.wasm");
+    const auto blocker = start(net, host, module, '1');
+    REQUIRE(ask<cs::Decision>(net, *host.f, blocker, "compute-slots", "request_slot",
+                              cs::SlotRequest{"blocker", 1, 1000}).verdict == cs::Verdict::run_now);
+    const auto head = start(net, host, module, '2');
+    REQUIRE(ask<cs::Decision>(net, *host.f, head, "compute-slots", "request_slot",
+                              cs::SlotRequest{"head", 2, 1000}).verdict == cs::Verdict::queued);
+    const auto tail = start(net, host, host.f->module("jobs.wasm"), '3');
+    jobs_test::Run q;
+    q.function = "sum";
+    auto pending = host.f->runtime->request(tail, "run", enc(q), 10s);
+    REQUIRE(net.settle([&] { return host.f->runtime->jobs_queued() == 1u; }, 1000));
+    REQUIRE_OK(host.f->runtime->terminate(head, "test"));
+    REQUIRE(net.settle([&] { return pending.wait_for(0s) == std::future_status::ready; }, 1000));
+    const auto reply = pending.get();
+    REQUIRE(reply.status == abi::ok);
+    CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, abi::ok);
+    CHECK(host.node->compute_status().queue.empty());
+    CHECK(lease_of(host, blocker).has_value());
+}
+
+PAGLETS_TEST("compute-slots: reducing capacity rejects an impossible queue head") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    fast(net);
+    host.node->set_compute_slots(2);
+    const auto module = host.f->module("conformance.wasm");
+    const auto blocker = start(net, host, module, '1');
+    const auto held = ask<cs::Decision>(net, *host.f, blocker, "compute-slots", "request_slot",
+                                        cs::SlotRequest{"blocker", 1, 1000});
+    REQUIRE(held.verdict == cs::Verdict::run_now);
+    const auto head = start(net, host, module, '2');
+    REQUIRE(ask<cs::Decision>(net, *host.f, head, "compute-slots", "request_slot",
+                              cs::SlotRequest{"head", 2, 1000}).verdict == cs::Verdict::queued);
+    const auto tail = start(net, host, module, '3');
+    REQUIRE(ask<cs::Decision>(net, *host.f, tail, "compute-slots", "request_slot",
+                              cs::SlotRequest{"tail", 1, 1000}).verdict == cs::Verdict::queued);
+    host.node->set_compute_slots(1);
+    REQUIRE(net.settle([&] { return contains(host.f->journal(head), "msg:compute.rejected"); }, 400));
+    const auto status = host.node->compute_status();
+    REQUIRE(status.queue.size() == 1u);
+    CHECK_EQ(status.queue[0].paglet, tail);
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, blocker, "compute-slots", "release_slot",
+                                 cs::ReleaseRequest{held.lease}).released);
+    REQUIRE(net.settle([&] { return lease_of(host, tail).has_value(); }, 400));
+}
+
+PAGLETS_TEST("compute-slots: leases and jobs share admission, not just reported accounting") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    fast(net);
+    host.node->set_compute_slots(1);
+    const auto holder = start(net, host, host.f->module("conformance.wasm"), '1');
+    const auto lease = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                        cs::SlotRequest{"lease", 1, 1000});
+    REQUIRE(lease.verdict == cs::Verdict::run_now);
+    const auto worker = start(net, host, host.f->module("jobs.wasm"), '2');
+    jobs_test::Run request;
+    request.function = "sum";
+    auto pending = host.f->runtime->request(worker, "run", enc(request), 10s);
+    REQUIRE(net.settle([&] { return !host.f->runtime->jobs().empty(); }, 1000));
+    CHECK_EQ(host.f->runtime->job_cores_running(), 0);
+    CHECK_EQ(host.f->runtime->jobs_queued(), 1u);
+    CHECK(pending.wait_for(0s) != std::future_status::ready);
+    const auto released = ask<cs::ReleaseReply>(net, *host.f, holder, "compute-slots", "release_slot",
+                                               cs::ReleaseRequest{lease.lease});
+    REQUIRE(released.released);
+    REQUIRE(net.settle([&] { return pending.wait_for(0s) == std::future_status::ready; }, 1000));
+    auto reply = pending.get();
+    REQUIRE(reply.status == 0);
+    CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, 0);
+}
+
+PAGLETS_TEST("compute-slots: a living holder expires once and admits a queued native job") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    host.node->set_compute_timing({.sample = 1h, .gossip = 1h, .lease_base = 800ms, .lease_cap = 2s});
+    host.node->set_compute_slots(1);
+    const auto holder = start(net, host, host.f->module("conformance.wasm"), '1');
+    const auto worker = start(net, host, host.f->module("jobs.wasm"), '2');
+    const auto held = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                        cs::SlotRequest{"held", 1, 0});
+    REQUIRE(held.verdict == cs::Verdict::run_now);
+    jobs_test::Run q;
+    q.function = "sum";
+    auto pending = host.f->runtime->request(worker, "run", enc(q), 10s);
+    REQUIRE(net.settle([&] { return host.f->runtime->jobs_queued() == 1u; }, 400));
+    REQUIRE(net.settle([&] { return !lease_of(host, holder).has_value(); }, 1500));
+    REQUIRE(host.f->runtime->info(holder).has_value());
+    REQUIRE(net.settle([&] { return contains(host.f->journal(holder), "msg:compute.expired"); }, 400));
+    REQUIRE(net.settle([&] { return pending.wait_for(0s) == std::future_status::ready; }, 400));
+    const auto reply = pending.get();
+    REQUIRE(reply.status == abi::ok);
+    CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, abi::ok);
+    CHECK(!ask<cs::ReleaseReply>(net, *host.f, holder, "compute-slots", "release_slot",
+                                 cs::ReleaseRequest{held.lease}).released);
+    (void)net.settle([] { return false; }, 20);
+    const auto journal = host.f->journal(holder);
+    CHECK_EQ(std::ranges::count(journal, std::string("msg:compute.expired")), 1);
+    REQUIRE(host.f->runtime->reserve_compute_slots(1));
+    CHECK(!host.f->runtime->reserve_compute_slots(1));
+    host.f->runtime->release_compute_slots(1);
+}
+
+PAGLETS_TEST("compute-slots: renewal extends expiry but cannot pass the continuous lifetime cap") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    host.node->set_compute_timing({.sample = 1h, .gossip = 1h, .lease_base = 600ms, .lease_cap = 1800ms});
+    host.node->set_compute_slots(1);
+    const auto module = host.f->module("conformance.wasm");
+    const auto holder = start(net, host, module, '1');
+    const auto waiter = start(net, host, module, '2');
+    const auto first = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                         cs::SlotRequest{"held", 1, 0});
+    REQUIRE(first.verdict == cs::Verdict::run_now);
+    const auto original = lease_of(host, holder);
+    REQUIRE(original.has_value());
+    REQUIRE(original->expires_ms > original->granted_ms);
+    (void)net.settle([] { return false; }, 75);
+    const auto renewed = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                           cs::SlotRequest{"held", 1, 0});
+    CHECK_EQ(renewed.lease, first.lease);
+    CHECK(renewed.expires_ms > first.expires_ms);
+    REQUIRE(ask<cs::Decision>(net, *host.f, waiter, "compute-slots", "request_slot",
+                              cs::SlotRequest{"waiting", 1, 0}).verdict == cs::Verdict::queued);
+    for (int i = 0; i < 3; ++i) {
+        const auto extension = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                                 cs::SlotRequest{"held", 1, std::numeric_limits<std::int64_t>::max()});
+        REQUIRE(extension.verdict == cs::Verdict::run_now);
+        CHECK_EQ(extension.lease, first.lease);
+        CHECK(extension.expires_ms <= original->granted_ms + 1800);
+        const auto status = lease_of(host, holder);
+        REQUIRE(status.has_value());
+        CHECK_EQ(status->granted_ms, original->granted_ms);
+        CHECK_EQ(status->expires_ms, extension.expires_ms);
+        (void)net.settle([] { return false; }, 75);
+    }
+    REQUIRE(net.settle([&] { return lease_of(host, waiter).has_value(); }, 1500));
+    CHECK(!lease_of(host, holder).has_value());
+    const auto rejoin = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                          cs::SlotRequest{"held", 1, 0});
+    CHECK(rejoin.verdict == cs::Verdict::queued);
+    CHECK(rejoin.lease.empty());
+    CHECK(!ask<cs::ReleaseReply>(net, *host.f, holder, "compute-slots", "release_slot",
+                                 cs::ReleaseRequest{first.lease}).released);
+    const auto granted = lease_of(host, waiter);
+    REQUIRE(granted.has_value());
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, waiter, "compute-slots", "release_slot",
+                                  cs::ReleaseRequest{granted->lease}).released);
+    REQUIRE(net.settle([&] { return lease_of(host, holder).has_value(); }, 400));
+    CHECK(lease_of(host, holder)->lease != first.lease);
+}
+
+PAGLETS_TEST("compute-slots: queued estimates can change without spending lifetime or priority") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    host.node->set_compute_timing({.sample = 1h, .gossip = 1h, .lease_base = 400ms, .lease_cap = 3s});
+    host.node->set_compute_slots(1);
+    const auto module = host.f->module("conformance.wasm");
+    const auto holder = start(net, host, module, '1');
+    const auto waiter = start(net, host, module, '2');
+    const auto held = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                        cs::SlotRequest{"held", 1, 2000});
+    REQUIRE(held.verdict == cs::Verdict::run_now);
+    REQUIRE(ask<cs::Decision>(net, *host.f, waiter, "compute-slots", "request_slot",
+                              cs::SlotRequest{"waiting", 1, 0}).verdict == cs::Verdict::queued);
+    const auto before = host.node->compute_status();
+    REQUIRE(before.queue.size() == 1u);
+    (void)net.settle([] { return false; }, 250);
+    const auto repeated = ask<cs::Decision>(net, *host.f, waiter, "compute-slots", "request_slot",
+                                            cs::SlotRequest{"waiting", 1, 1000});
+    CHECK(repeated.verdict == cs::Verdict::queued);
+    CHECK_EQ(repeated.position, 0);
+    const auto after = host.node->compute_status();
+    REQUIRE(after.queue.size() == 1u);
+    CHECK_EQ(after.queue[0].since_ms, before.queue[0].since_ms);
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, holder, "compute-slots", "release_slot",
+                                 cs::ReleaseRequest{held.lease}).released);
+    REQUIRE(net.settle([&] { return lease_of(host, waiter).has_value(); }, 400));
+    const auto granted = lease_of(host, waiter);
+    REQUIRE(granted.has_value());
+    CHECK_EQ(granted->expires_ms - granted->granted_ms, 2000);
+    CHECK(granted->granted_ms >= before.queue[0].since_ms + 400);
+}
+
+PAGLETS_TEST("compute-slots: default and extreme estimated durations have bounded expiries") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    host.node->set_compute_slots(1);
+    const auto holder = start(net, host, host.f->module("conformance.wasm"), '1');
+    for (auto [estimate, expected] : {std::pair<std::int64_t, std::int64_t>{std::numeric_limits<std::int64_t>::min(), 600000},
+                                     {std::numeric_limits<std::int64_t>::max(), 86400000}}) {
+        const auto d = ask<cs::Decision>(net, *host.f, holder, "compute-slots", "request_slot",
+                                         cs::SlotRequest{"held", 1, estimate});
+        REQUIRE(d.verdict == cs::Verdict::run_now);
+        const auto status = lease_of(host, holder);
+        REQUIRE(status.has_value());
+        CHECK_EQ(status->expires_ms - status->granted_ms, expected);
+        CHECK_EQ(d.expires_ms, status->expires_ms);
+        REQUIRE(ask<cs::ReleaseReply>(net, *host.f, holder, "compute-slots", "release_slot",
+                                     cs::ReleaseRequest{d.lease}).released);
+    }
+}
+
+PAGLETS_TEST("compute-slots: status refreshes native occupancy without waiting for gossip") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    host.node->set_compute_timing({.sample = 1h, .gossip = 1h});
+    host.node->set_compute_slots(2);
+    REQUIRE(net.settle([] { return true; }));  // publish the initial idle sample
+    const auto worker = start(net, host, host.f->module("jobs.wasm"), '1');
+    jobs_test::Run q;
+    q.function = "spin";
+    q.input = enc(std::int64_t{60000});
+    q.cores = 2;
+    auto pending = host.f->runtime->request(worker, "run", enc(q), 10s);
+    const auto until = std::chrono::steady_clock::now() + 5s;
+    // Deliberately do not tick/sample the node while the job starts.
+    while (host.f->runtime->job_cores_running() != 2 && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(host.f->runtime->job_cores_running() == 2);
+    CHECK_EQ(host.node->compute_status().self.free, 0);
+    const auto jobs = host.f->runtime->jobs();
+    REQUIRE(jobs.size() == 1u);
+    REQUIRE(host.f->runtime->cancel_job(jobs.front().id));
+    REQUIRE(pending.wait_for(5s) == std::future_status::ready);
+    const auto reply = pending.get();
+    REQUIRE(reply.status == abi::ok);
+    CHECK_EQ(dec<jobs_test::Outcome>(reply.payload).status, abi::cancelled);
+    CHECK_EQ(host.node->compute_status().self.free, 2);
+}
+
+
+PAGLETS_TEST("compute-slots: renewal keeps its allocation and rejects a changed job or core count") {
+    Mesh net;
+    auto& host = net.add_host("a");
+    net.enroll_all();
+    fast(net);
+    host.node->set_compute_slots(2);
+    const auto id = start(net, host, host.f->module("conformance.wasm"), '1');
+    const auto first = ask<cs::Decision>(net, *host.f, id, "compute-slots", "request_slot", cs::SlotRequest{"job", 1, 1000});
+    REQUIRE(first.verdict == cs::Verdict::run_now);
+    REQUIRE(!first.lease.empty());
+    const auto repeated = ask<cs::Decision>(net, *host.f, id, "compute-slots", "request_slot", cs::SlotRequest{"job", 1, 2000});
+    CHECK(repeated.verdict == cs::Verdict::run_now);
+    CHECK_EQ(repeated.lease, first.lease);
+    CHECK_EQ(repeated.cores, 1);
+    for (const auto& changed : {cs::SlotRequest{"job", 2, 1000}, cs::SlotRequest{"other", 1, 1000},
+                               cs::SlotRequest{"job", std::numeric_limits<std::int64_t>::max(), 1000}}) {
+        const auto refused = ask<cs::Decision>(net, *host.f, id, "compute-slots", "request_slot", changed);
+        CHECK(refused.verdict == cs::Verdict::rejected);
+        CHECK(refused.lease.empty());
+        CHECK_EQ(refused.cores, 0);
+        CHECK(refused.reason.find("release") != std::string::npos);
+        const auto status = host.node->compute_status();
+        REQUIRE(status.leases.size() == 1u);
+        CHECK_EQ(status.leases[0].lease, first.lease);
+        CHECK_EQ(status.leases[0].cores, 1);
+        CHECK_EQ(status.leases[0].job, std::string("job"));
+        CHECK_EQ(status.self.free, 1);
+    }
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, id, "compute-slots", "release_slot", cs::ReleaseRequest{first.lease}).released);
+    const auto replacement = ask<cs::Decision>(net, *host.f, id, "compute-slots", "request_slot", cs::SlotRequest{"other", 2, 1000});
+    REQUIRE(replacement.verdict == cs::Verdict::run_now);
+    CHECK(replacement.lease != first.lease);
+    CHECK_EQ(replacement.cores, 2);
+    const auto status = host.node->compute_status();
+    REQUIRE(status.leases.size() == 1u);
+    CHECK_EQ(status.leases[0].job, std::string("other"));
+    CHECK_EQ(status.leases[0].cores, 2);
+    CHECK_EQ(status.self.free, 0);
+    CHECK(!host.f->runtime->reserve_compute_slots(1));
+    REQUIRE(ask<cs::ReleaseReply>(net, *host.f, id, "compute-slots", "release_slot", cs::ReleaseRequest{replacement.lease}).released);
+}
 
 PAGLETS_TEST("mesh-info: every host knows every host's snapshot; select prefers free slots and low load") {
     Mesh net;
@@ -269,7 +657,7 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
         REQUIRE(wire::from_msgpack(r.payload, s));
         return s;
     };
-    pi_msgs::Start start{.digits = 1200, .chunk = 30, .max_in_flight = 6, .chunk_timeout_ms = 3000, .work_ms = 250};
+    pi_msgs::Start start{.digits = 1200, .chunk = 30, .max_in_flight = 6, .chunk_timeout_ms = 0, .work_ms = 250};
     auto started = a.f->call(*job, "start", wire::to_msgpack(start));
     REQUIRE(started.status == 0);
     pi_msgs::Started ack;
@@ -281,9 +669,9 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     const auto before = status();
     CHECK(!before.finished);
 
-    // c goes away mid-run, with chunks of its own in flight (a worker holds
-    // one of its slots: each chunk takes at least 250 ms).
-    REQUIRE(eventually([&] { return !hosts[2]->node->compute_status().leases.empty(); }));
+    // c goes away mid-run, with chunks of its own in flight (jobs: each
+    // takes at least 250 ms).
+    REQUIRE(eventually([&] { return !hosts[2]->f->runtime->jobs().empty(); }));
     hosts[2]->f->runtime->shutdown(false);
     hosts[2]->transport->stop();
     hosts.pop_back();
@@ -291,7 +679,7 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     const auto done = status();
     CHECK_EQ(done.done, 1200);
     CHECK_EQ(done.chunks_done, 40);
-    CHECK(done.resent > 0);  // c's chunks went out again
+    CHECK(done.resent > 0);  // c's chunks failed with `gone` and went out again
     // The digits are pi's.
     CHECK(done.hex.starts_with("3.243F6A8885A308D313198A2E03707344A4093822299F31D0082EFA98EC4E6C89"));
     CHECK(done.hex == "3." + pi_bbp::hex_digits(0, 1200));

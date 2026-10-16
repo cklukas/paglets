@@ -1,7 +1,8 @@
 # Zombie paglets
 
-A zombie paglet cannot die while one host of its mesh is alive. It has a
-replica on every host. One replica, the main, works; the others sleep with
+A zombie paglet survives host failures by keeping replicas on eligible
+hosts of its mesh: hosts with a fresh snapshot that offer `zombies`. One
+replica, the main, works; the others sleep with
 its latest checkpoint and take over when it disappears. After a partition,
 the replicas agree on the one that got furthest, and what both sides
 observed is merged. After the whole mesh was down, the most advanced
@@ -25,7 +26,7 @@ struct Chronicle : paglets::patterns::Zombie<Work> {
     std::int64_t progress(const Work& work) const override;
     // The result for the sink, from the final work and the merged journal.
     paglets::Bytes result(const Work& work, const std::vector<paglets::protocols::zombie::Entry>& journal) override;
-    std::string result_name() const override;  // a file name for it at the sink
+    std::string result_name() const override;  // optional label; default "result.bin"
 };
 ```
 
@@ -43,9 +44,33 @@ Source: [`cpp/sdk/include/paglets/patterns/zombie.hpp`](https://github.com/ckluk
 
 ```cpp
 void run_step(std::uint64_t gen) {
-    step(work_, [this, gen](bool done) {
-        if (gen != work_gen_ || !acting()) return;  // stopped meanwhile: the result is void
-        run(zp::Worked{progress(work_), done, encode(work_)});
+    // The completion owns the step's storage, including while an async
+    // callback holds Work&. A stale step never aliases the next lineage.
+    if (!failure_reason_.empty()) return;
+    // A C++ copy could retain shared mutable members. The Work codec
+    // defines the independent state that is also used by other replicas.
+    auto local = std::make_shared<Work>();
+    if (!decode(encode(work_), *local)) {
+        failure_reason_ = "cannot copy step work";
+        ++work_gen_;
+        record_failure();
+        return;
+    }
+    auto completed = std::make_shared<bool>(false);
+    step(*local, [this, gen, local, completed](bool done) {
+        if (std::exchange(*completed, true) || gen != work_gen_ || !acting()) return;
+        auto bytes = encode(*local);
+        Work committed{};
+        if (!decode(bytes, committed)) {
+            failure_reason_ = "cannot commit step work";
+            ++work_gen_;
+            record_failure();
+            return;
+        }
+        // Keep the callback's storage independent and usable even after
+        // completion: a repeated late callback cannot mutate work_.
+        work_ = std::move(committed);
+        run(zp::Worked{progress(work_), done, std::move(bytes)});
         if (!done && gen == work_gen_ && acting()) schedule_step();
     });
 }
@@ -61,6 +86,14 @@ from a request handler:
 start_group("host:mac", initial_work, timing);
 ```
 
+- **Startup outcome.** `start_group` returns while the landscape request
+  and registry join are still pending. The creator's `on_zombie_started()`
+  hook runs after its local registry accepts the join; other replicas may
+  still be arriving. Clones and recovered replicas do not get this hook.
+  Defer a startup request's reply until this hook, and answer refusals from
+  `on_zombie_failed(reason)`. Its default implementation logs the reason and
+  makes a best-effort error notification through the local `user-info`
+  service. Overrides can call the base implementation to retain that behavior.
 - **Placement.** The group gets a replica on every host with a fresh
   `mesh-info` snapshot. Every one of them must offer `zombies` (every host
   of this version does); otherwise the group does not start, and
@@ -77,35 +110,70 @@ start_group("host:mac", initial_work, timing);
   of a partition both make a replica on the same new host, that host's
   registry refuses the second one, which ends. A replica is named by its
   host's key ID, so replicas made by different mains never get the same
-  name.
-- **The sink** is `host:NAME`, a host of the mesh by its ledger name or key
-  ID. That host's `zombies` system paglet accepts the first result per
+  name. Replica IDs use the first 16 hex digits of the host key ID. If two
+  hosts collide in those 64 bits, expansion logs a warning and skips the
+  additional replica; use hosts with distinct replica IDs.
+- **The sink** is `host:NAME`, a host of the mesh by its ledger name, full key
+  ID or an unambiguous prefix of at least 8 hex digits. Full key IDs take
+  precedence over names; an unknown full ID does not resolve as a name.
+  Ambiguous names or name/prefix collisions return `invalid_argument`,
+  a permanent refusal. An unknown host remains retryable (`not_found`).
+  That host's `zombies` system paglet accepts the first result per
   group and stores it. `paglets-host remote zombies result GROUP` fetches
-  it. The owner can redirect a group to another sink.
+  it when connected to the sink host. The owner can redirect a group to
+  another sink. Results live in the host's zombie registry, keyed by group
+  and sink number. `result_name()` is an optional label, not a filesystem
+  path or deduplication key; two groups may use the same label. The CLI
+  prints the bytes to stdout and the label to stderr.
+- **Result refusal.** `too_large`, `quota`, `denied`, `invalid_argument`,
+  `malformed` and `unsupported` end the group as failed. Each running replica
+  calls `on_zombie_failed(reason)` once before disposal. The failure ending
+  is stored before notification; a storage failure delays ending and retries.
+  Make application effects in this hook idempotent across recovery.
+  `timeout`, `gone` and `not_found` remain retryable. A missing sink produces
+  a warning; the owner can redirect or cancel the group.
+  An immediate `quota` from a full service mailbox is retryable; a quota
+  refusal returned by the sink operation is permanent.
+  The encoded delivery request must fit the SDK's 1 MB document limit,
+  including its group and filename. The host's result registry has a
+  separate 4 MB limit for mesh frames. Work and journal entries exchanged
+  between replicas must also fit the document limit.
 - **Timing** (`ZombieTiming`): beats every 2 s, a checkpoint at most every
   10 s, a takeover after 10 s without a beat (plus up to 5 s of random
   jitter), election rounds of 4 s, and a pause of 1 s between two steps.
-  The simulator measures takeovers within 20 s with these values. The main
-  looks for new hosts every 30 s (`expand_ms`).
+  With the simulator's default latency bound, `takeover_bound()` checks a
+  25.2 s upper bound after a main crashes. The recorded 10 000-run campaign
+  in [the protocol results](zombie-protocol.md#how-it-is-checked) observed
+  a longest takeover of 18.9 s; that is a sampled measurement, not the
+  bound. The main looks for new hosts every 30 s (`expand_ms`).
 
 ## Observations
 
 `observe(bytes)` (or `observe_value(value)`) adds an entry to the journal,
-on the acting main only. Journals are merged across replicas and across
+on the acting main only. It returns `false` while the replica is sleeping,
+frozen for an election, delivering, or otherwise not the acting main. Keep
+a pending observation until a later call returns `true`. Journals are merged across replicas and across
 partitions: when two mains meet, the one behind forgets its work but hands
 over its journal. So a result can describe what happened on every side,
 which is what the Mesh Chronicle does with lost connections.
 
 Keep the work small and the journal for what must not be lost: the work is
 replaced by the winner's after a partition, the journal is not.
+An observation held only by a crashed host reaches the result only if that
+host returns and shares it before the group ends. Persistence on one host
+does not guarantee inclusion in a result produced while that host is down.
 
 ## Restarts and durability
 
 A replica survives a restart of its host from its memory image (ABI v1.2).
 The base class asks for `on_recovered` and comes back as `recovering`:
-it listens for beats first and does not resume as main on its own.
+it listens for beats first and does not resume as main on its own. The
+[SDK restart rules](sdk-reference.md#lifecycle-children-and-timers) explain
+which capability/timer/request state survives and why the ordinary mailbox
+is not replayed.
 
-The rule "durable before visible" is kept by the base class: when the
+On a host with a state directory and restart enabled, the rule "durable
+before visible" is kept by the base class: when the
 protocol makes a checkpoint (a `Persist` output), it calls
 `paglets::checkpoint()` and sends that step's messages only from its next
 handler, after the host stored the image:
@@ -202,19 +270,23 @@ void carry_out(const zp::Outputs& outs, std::size_t i) {
   tombstone. Every host passes it on, so replicas end on every host, also on
   hosts that were offline and come back later. The owner can end a group at
   any time: `paglets-host remote zombies cancel GROUP`.
+  A permanent result refusal also spreads an ending, with its failure reason.
+  A replica waits for the registry acknowledgement before disposing. Hosts
+  with a state directory write the result before acknowledging acceptance;
+  hosts embedded without one retain results and endings only in memory.
 - **Checking a run.** `paglets-host remote zombies check GROUP` collects the
   protocol steps that every host recorded and checks them against the
   specification.
 
 ## Building
 
-A module with a zombie paglet lists the services it uses:
+A module with a zombie paglet can use `PATTERNS`, which includes the
+`zombies`, `mesh_info` and `user_info` clients:
 
 ```cmake
 paglets_add_module(chronicle
     SOURCES chronicle/chronicle.cpp
     SCHEMA_HEADER chronicle/chronicle_msgs.hpp
     SCHEMA_NAMESPACE chronicle_msgs
-    SERVICES zombies mesh_info user_info
     PATTERNS)
 ```

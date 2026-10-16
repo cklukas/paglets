@@ -22,12 +22,14 @@
 #include <latency_msgs.hpp>
 #include <seek_msgs.hpp>
 #include <paglets/sha256.hpp>
+#include <paglets/services/storage.hpp>
 #include <paglets/wire/reflect.hpp>
 
 #include <chrono>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <random>
 #include <set>
 
@@ -134,6 +136,84 @@ PAGLETS_TEST("example: Mesh Journey visits every host and comes home with its jo
     REQUIRE(journal.skipped.size() == 1u);
     CHECK(journal.skipped[0].starts_with("atlantis"));
     report("journey", "unknown hosts skipped with a reason", journal.skipped.size());
+}
+
+PAGLETS_TEST("example: Mesh Journey stops after a host-independent dispatch refusal") {
+    Mesh net;
+    auto& home = net.add_host("home");
+    net.add_host("north");
+    net.add_host("south");
+    net.enroll_all();
+    fast(net);
+    REQUIRE(net.settle([&] { return home.node->landscape().size() == 3u; }));
+    const auto module = home.f->module("journey.wasm");
+    auto created = home.node->create(module, net.passport(module, paglet_id('4')));
+    REQUIRE_OK(created);
+    home.f->runtime->wait_idle();
+    REQUIRE_OK(home.f->runtime->pin(*created, "test-pin", unix_ms() + 60'000));
+    auto r = home.f->runtime->call(*created, "start", wire::to_msgpack(journey_msgs::Start{{}, ""}), 10s);
+    REQUIRE(r.status == 0);
+    journey_msgs::Journal journal;
+    REQUIRE(net.settle([&] {
+        auto reply = home.f->runtime->call(*created, "journal", {}, 10s);
+        return reply.status == 0 && wire::from_msgpack(reply.payload, journal) && journal.state == "failed";
+    }));
+    REQUIRE(journal.skipped.size() == 1u);
+    CHECK(journal.skipped.front().find("pinned") != std::string::npos);
+    CHECK_EQ(journal.stops.size(), 1u);
+    CHECK(holder(net, *created) == &home);
+}
+
+PAGLETS_TEST("example: Ping Pong cleans up its child after a remote ping fails") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    auto& b = net.add_host("b");
+    net.enroll_all();
+    const auto module = a.f->module("ping_pong.wasm");
+    auto created = a.node->create(module, net.passport(module, paglet_id('5')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    a.f->runtime->wait_idle();
+    const auto caps = a.f->runtime->capabilities(id).size();
+    auto running = std::async(std::launch::async, [&] {
+        return a.f->runtime->call(id, "run", enc(std::uint32_t{0xffffffff}), 20s);
+    });
+    rt::PagletId child;
+    REQUIRE(net.settle([&] {
+        for (const auto& p : a.f->runtime->list()) {
+            if (p.id != id && p.module == module) child = p.id;
+        }
+        return !child.empty();
+    }));
+    unsigned refused = 0;
+    net.filter = [&](const PublicKey&, const PublicKey& to, Bytes& frame) {
+        if (to != b.key || frame_type(frame) != "deliver") return true;
+        auto v = decode(frame);
+        auto bytes = Fields{*v->as_map()}.bin("m");
+        if (!bytes) return true;
+        auto m = rt::decode_remote(*bytes);
+        if (m && m->target == child && m->kind == rt::RemoteMessage::Kind::request && m->name == "ping") {
+            // A valid transport delivery whose receiver rejects the operation.
+            // Leave the child alive so only the parent's cleanup can stop it.
+            m->name = "unknown-ping";
+            frame = encode(Value(Map{{"t", Value("deliver")}, {"m", Value(rt::encode_remote(*m))}}));
+            ++refused;
+        }
+        return true;
+    };
+    REQUIRE_OK(a.node->dispatch(child, "b"));
+    REQUIRE(net.settle([&] { return running.wait_for(0ms) == std::future_status::ready; }, 6000));
+    CHECK_EQ(running.get().status, static_cast<std::int32_t>(abi::gone));
+    CHECK(refused > 0);
+    REQUIRE(net.settle([&] { return holder(net, child) == nullptr; }));
+    a.f->runtime->wait_idle();
+    CHECK_EQ(a.f->runtime->capabilities(id).size(), caps);
+    // The same parent remains usable after the failed run.
+    const auto again = a.f->runtime->call(id, "run", enc(std::uint32_t{3}), 10s);
+    CHECK_EQ(again.status, 0);
+    CHECK_EQ(dec<std::uint32_t>(again.payload), 3u);
+    a.f->runtime->wait_idle();
+    CHECK_EQ(a.f->runtime->capabilities(id).size(), caps);
 }
 
 PAGLETS_TEST("example: Mesh File Finder and Storage Analyzer search every host's root") {
@@ -302,6 +382,12 @@ PAGLETS_TEST("example: Inventory Collector and Process Finder ask server-info on
                 return x.status == 0 && wire::from_msgpack(x.payload, report) && report.finished;
             },
             2000));
+        REQUIRE(net.settle([&] {
+            for (const auto& host : net.hosts)
+                for (const auto& paglet : host->f->runtime->list())
+                    if (paglet.module == module && paglet.id != id) return false;
+            return true;
+        }, 400));
         return report;
     };
     auto report = collect({});
@@ -329,6 +415,34 @@ PAGLETS_TEST("example: Inventory Collector and Process Finder ask server-info on
         CHECK(h.processes[0].name.find("paglets_tests") != std::string::npos);
     }
     ::paglets::test::report("inventory", "hosts where the process finder found the test process", report.hosts.size());
+}
+
+PAGLETS_TEST("example: Inventory Collector disposes clones after denied reports") {
+    Mesh net;
+    auto& a = net.add_host("a");
+    net.add_host("b");
+    net.enroll_all();
+    fast(net);
+    REQUIRE(net.settle([&] { return a.node->landscape().size() == 2u; }));
+    const auto module = a.f->module("inventory.wasm");
+    const auto created = a.node->create(module, net.passport(module, paglet_id('4')));
+    REQUIRE_OK(created);
+    const auto id = *created;
+    CHECK(a.f->call(id, "start", wire::to_msgpack(inventory_msgs::Collect{})).status == 0);
+    inventory_msgs::Report report;
+    REQUIRE(net.settle([&] {
+        const auto reply = a.f->call(id, "report");
+        return reply.status == 0 && wire::from_msgpack(reply.payload, report) && report.finished;
+    }, 2000));
+    REQUIRE(report.hosts.size() == 2u);
+    for (const auto& host : report.hosts) CHECK(!host.error.empty());
+    REQUIRE(net.settle([&] {
+        for (const auto& host : net.hosts)
+            for (const auto& paglet : host->f->runtime->list())
+                if (paglet.module == module && paglet.id != id) return false;
+        return true;
+    }, 400));
+    CHECK(a.f->runtime->info(id).has_value());
 }
 
 PAGLETS_TEST("example: Hide and Seek finds and pins a paglet that keeps moving") {
@@ -482,8 +596,7 @@ PAGLETS_TEST("example: File Courier carries files of any size between hosts with
     for (int i = 0; i < 400; ++i) table += std::to_string(i) + "," + std::to_string(i * i) + "\n";
     write_text(data / "results" / "squares.csv", table);
     write_text(data / "results" / "run-2" / "log.txt", "converged after 12 steps");
-    // Larger than a paglet's whole memory (16 MB): the content goes from
-    // host to host, the courier carries a capability.
+    // The content goes from host to host; the courier carries a capability.
     std::string big(24u * 1024 * 1024 + 123, '\0');
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>((i * 2654435761u) >> 13);
     write_text(data / "results" / "run-2" / "field.bin", big);
@@ -563,7 +676,7 @@ PAGLETS_TEST("example: File Courier carries files of any size between hosts with
     }
     report("file_courier", "files carried", done.files.size());
     report("file_courier", "bytes carried", done.bytes);
-    report("file_courier", "largest file (a paglet's memory holds 16 MB)", big.size() / (1024.0 * 1024.0), "MB");
+    report("file_courier", "largest file transferred as an artifact", big.size() / (1024.0 * 1024.0), "MB");
     report("file_courier", "sharing (hashing) on the source host", done.share_ms, "ms");
     report("file_courier", "saving (transfer and check) on the destination", done.save_ms, "ms");
     if (done.save_ms > 0) {
@@ -904,6 +1017,87 @@ PAGLETS_TEST("example: Mesh Benchmark measures every host in a compute slot and 
     }, 3000));
 }
 
+PAGLETS_TEST("example: Mesh Benchmark rejects missing and corrupt storage blocks") {
+    class BrokenStorage final : public rt::SystemPaglet {
+    public:
+        explicit BrokenStorage(int mode) : mode_(mode) {}
+        std::string_view name() const override { return "storage"; }
+        std::vector<std::string> default_ops() const override { return {"put", "get", "delete"}; }
+        void handle(rt::SystemContext&, rt::ServiceCall& call) override {
+            namespace storage = paglets::services::storage;
+            if (call.name() == "get") {
+                storage::GetReply reply;
+                reply.found = mode_ != 0;
+                if (mode_ == 1) reply.value = {0};
+                if (mode_ == 2) {
+                    reply.value.assign(256 * 1024, 0x5a);
+                    reply.value.front() = 0;
+                    reply.value.back() = 0x00;
+                }
+                (void)call.reply(0, wire::to_msgpack(reply));
+            } else if (call.name() == "put") {
+                (void)call.reply(0, wire::to_msgpack(storage::Usage{}));
+            } else {
+                (void)call.reply(0, wire::to_msgpack(storage::DeleteReply{}));
+            }
+        }
+    private:
+        int mode_;
+    };
+    for (int mode = 0; mode != 3; ++mode) {
+        Fixture f;
+        REQUIRE_OK(f.runtime->add_system_paglet(std::make_shared<BrokenStorage>(mode)));
+        const auto id = f.create("benchmark.wasm");
+        benchmark_msgs::Bench input;
+        input.budget_ms = 1;
+        input.memory_mb = 1;
+        input.disk_mb = 1;
+        REQUIRE(f.call(id, "start", wire::to_msgpack(input)).status == 0);
+        benchmark_msgs::Ranking ranking;
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto reply = f.call(id, "ranking");
+            if (reply.status == 0 && wire::from_msgpack(reply.payload, ranking) && ranking.state == "done") break;
+            std::this_thread::sleep_for(10ms);
+        }
+        REQUIRE(ranking.state == "done");
+        REQUIRE(ranking.hosts.size() == 1u);
+        CHECK(ranking.hosts.front().error == "storage get: missing or corrupted benchmark block");
+        CHECK(ranking.hosts.front().disk_read_mbs == 0);
+    }
+}
+
+PAGLETS_TEST("example: Mesh Benchmark compares the same job in the interpreter and AOT") {
+    Fixture f;
+    const auto id = f.create("benchmark.wasm");
+    benchmark_msgs::JobBench q{3'000'000, 2};
+    auto reply = f.runtime->call(id, "jobs", wire::to_msgpack(q), 30s);
+    REQUIRE(reply.status == 0);
+    benchmark_msgs::JobComparison interpreted;
+    REQUIRE(wire::from_msgpack(reply.payload, interpreted));
+    REQUIRE(interpreted.error.empty());
+    REQUIRE(interpreted.samples.size() == 2u);
+    CHECK(!interpreted.samples[0].aot);
+    CHECK(interpreted.samples[0].check == interpreted.samples[1].check);
+    report("benchmark_jobs", "integer job, interpreter", interpreted.samples[0].elapsed_ms, "ms");
+#ifdef PAGLETS_TEST_WAMRC
+    rt::Config c;
+    c.aot_compiler = PAGLETS_TEST_WAMRC;
+    Fixture compiled(c);
+    const auto other = compiled.create("benchmark.wasm");
+    REQUIRE(compiled.runtime->compile_job_module(compiled.runtime->info(other)->module, 300s));
+    reply = compiled.runtime->call(other, "jobs", wire::to_msgpack(q), 30s);
+    REQUIRE(reply.status == 0);
+    benchmark_msgs::JobComparison native;
+    REQUIRE(wire::from_msgpack(reply.payload, native));
+    REQUIRE(native.error.empty());
+    REQUIRE(native.samples.size() == 2u);
+    CHECK(native.samples[0].aot);
+    CHECK(native.samples[0].check == interpreted.samples[0].check);
+    report("benchmark_jobs", "integer job, AOT", native.samples[0].elapsed_ms, "ms");
+#endif
+}
+
 PAGLETS_TEST("example: Pi writes its digits to files in order and converts them into decimal digits") {
     namespace fs = std::filesystem;
     const fs::path results = temp_root("pi-results");
@@ -915,7 +1109,7 @@ PAGLETS_TEST("example: Pi writes its digits to files in order and converts them 
     net.add_host("c");
     net.enroll_all();
     fast(net);
-    net.admin_record("policy-rule", data::policy_rule({"results", Decision::allow, "files", {"write", "create"}, {},
+    net.admin_record("policy-rule", data::policy_rule({"results", Decision::allow, "files", {"read", "write", "create"}, {},
                                                        Scope{std::vector<std::string>{"results"}, std::nullopt},
                                                        std::nullopt, 0}));
     REQUIRE(net.settle([&] { return net.converged() && home.node->landscape().size() == 3u; }));
@@ -958,7 +1152,7 @@ PAGLETS_TEST("example: Pi writes its digits to files in order and converts them 
     CHECK(st.files == std::vector<std::string>({"run/pi.hex", "run/pi.txt"}));
     report("pi", "hex digits written to a file in order", static_cast<std::int64_t>(hex.size() - 2));
     report("pi", "decimal digits written to a file", static_cast<std::int64_t>(decimal.size() - 2));
-    // A conversion that would not fit the paglet's memory is refused.
+    // A conversion without files that would not fit a message is refused.
     auto big = home.node->create(module, net.passport(module, paglet_id('8')));
     REQUIRE_OK(big);
     pi_msgs::Start huge;

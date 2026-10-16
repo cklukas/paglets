@@ -1,0 +1,438 @@
+{
+  "native_source_commit": "9fa07fd05949829cf0862dbcd9444bc2d3933bc8",
+  "benchmark_script_sha256": "50ca11f4efdbadcc76e71bf8d33985b4f0fed19f7069face5f3dade981675ba3",
+  "iterations": 30000000,
+  "slots_per_host": 2,
+  "jobs_samples": {
+    "mac": [
+      {
+        "aot": false,
+        "elapsed_ms": 433,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 440,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 438,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 448,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 434,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 83,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 85,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 84,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 86,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      }
+    ],
+    "pi": [
+      {
+        "aot": false,
+        "elapsed_ms": 1580,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1679,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1598,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1514,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1581,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1517,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1592,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1508,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1522,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1516,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1615,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1542,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1539,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1575,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 2242,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 2929,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1538,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1516,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1623,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 1527,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 117,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 116,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 116,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 116,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      }
+    ],
+    "uconsole": [
+      {
+        "aot": false,
+        "elapsed_ms": 627,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 588,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 636,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 610,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 645,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 636,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 619,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 625,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 646,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 597,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 636,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 616,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 635,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 618,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 635,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 636,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": false,
+        "elapsed_ms": 636,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 45,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 45,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 45,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      },
+      {
+        "aot": true,
+        "elapsed_ms": 45,
+        "queued_ms": 0,
+        "check": 2535504059865855682
+      }
+    ]
+  },
+  "common_checksum": "2535504059865855682",
+  "pi_status": {
+    "state": "done",
+    "digits": 6000,
+    "done": 6000,
+    "chunks": 12,
+    "chunks_done": 12,
+    "in_flight": 0,
+    "resent": 0,
+    "finished": true,
+    "decimal_digits": 7222,
+    "decimal_done": 7222,
+    "shown": 4096,
+    "files": [
+      "pi/pi.hex",
+      "pi/pi.txt"
+    ],
+    "hosts": [
+      "mac",
+      "pi",
+      "uconsole"
+    ],
+    "chunks_aot": 0,
+    "compute_ms": 6938,
+    "convert_ms": 35,
+    "error": ""
+  },
+  "pi_parameters": {
+    "digits": 6000,
+    "chunk": 500,
+    "max_in_flight": 32,
+    "work_ms": 200,
+    "decimal": true
+  },
+  "pi_decimal_prefix_verified": "3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679",
+  "host_info": {
+    "mac": "paglets-host 0.2.0\n  platform:   macos arm64\n  compiler:   gcc 16.2.0\n  reflection: yes\n  runtime:    WAMR-2.4.5 (fast-interp, hardware bound checks)\n  paglet ABI: v1\n  protocol:   mesh v1\n",
+    "pi": "paglets-host 0.2.0\n  platform:   linux arm64\n  compiler:   gcc 16.1.0\n  reflection: yes\n  runtime:    WAMR-2.4.5 (fast-interp, software bound checks)\n  paglet ABI: v1\n  protocol:   mesh v1\n",
+    "uconsole": "paglets-host 0.2.0\n  platform:   linux arm64\n  compiler:   gcc 16.1.0\n  reflection: yes\n  runtime:    WAMR-2.4.5 (fast-interp, software bound checks)\n  paglet ABI: v1\n  protocol:   mesh v1\n"
+  },
+  "processes": [
+    [
+      "mac",
+      "55559",
+      "/Volumes/S8T/tmp/paglets/paper-20261014/cpp-wt/cpp/build/macos-arm64/host/paglets-host"
+    ],
+    [
+      "pi",
+      "199446",
+      "/home/klukas/paglets-live/cpp/build/linux-gcc16/host/paglets-host"
+    ],
+    [
+      "uconsole",
+      "471931",
+      "/home/klukas/paglets-live/cpp/build/linux-gcc16/host/paglets-host"
+    ]
+  ],
+  "notes": [
+    "Job elapsed time includes instance setup and worker process startup; queue time is reported separately.",
+    "Interpreter samples occur while the cold AOT compiler runs; AOT sampling includes a complete warm batch.",
+    "Pi is an integration check with a 200 ms minimum chunk hold, not a pure compute speed benchmark. No Pi chunk was AOT in this short cold run.",
+    "Move timing remains unmeasured and is tracked separately.",
+    "The native host/worker code is unchanged since 9fa07fd; subsequent benchmark changes are shell tooling."
+  ],
+  "recipes": {
+    "pi_and_initial_jobs": "mesh_bench.sh --steps \"jobs pi\" --pi-digits 6000 --pi-work-ms 200 --slots 2 --sizes 1 --jobs-iterations 30000000 --jobs-samples 3",
+    "warm_batch_jobs": "mesh_bench.sh --steps jobs --pi-digits 0 --slots 2 --sizes 1 --jobs-iterations 30000000 --jobs-samples 3"
+  },
+  "mac_guest_assets": {
+    "host/paglets-host": {
+      "sha256": "eb9131b3b31f75e53538b8e1c9b91916a2944b88bc74c8b52380db750630a29d",
+      "mtime": 1792012214.555249
+    },
+    "host/paglets-worker": {
+      "sha256": "3b34e1ccced32c4a2802b0850c694f27f2f7f3c7d551f6f069b28ca5faef84b3",
+      "mtime": 1792012196.9733813
+    },
+    "host/paglets-wamrc": {
+      "sha256": "8072cbdc006f6a16fdc38c80e8946bc7cf7a7a59fd9df60b67fd3796de85116d",
+      "mtime": 1792012122.5830007
+    },
+    "tests/paglets_tests": {
+      "sha256": "0d6274802aae251fc40272f4e0ac64ed8948d9beef17e8d207c7773041e124d6",
+      "mtime": 1792012377.7464716
+    },
+    "guests/pi.wasm": {
+      "sha256": "b4d9cffdae59b8d82bab4054d18b4c5b0f9571271cd880a795b97ef59e09ffbe",
+      "mtime": 1792012252.1264756
+    },
+    "guests/benchmark.wasm": {
+      "sha256": "f8a35339f7d1195fa954d7768526fea2b9af116fec55db8ca4c5eabb2caf1755",
+      "mtime": 1792012264.954098
+    },
+    "guests/jobs.wasm": {
+      "sha256": "aa859e9abd0ff9e9c471f71602c7ad747b905685d027704dbbf6bf04104af694",
+      "mtime": 1792012277.6833217
+    }
+  },
+  "recorded_at_utc": "2026-10-14T22:04:46.389409+00:00",
+  "cleanup_verified": "No paglets-host, paglets-wamrc or test processes remained on Mac, rpi4 or uconsole after the live runs."
+}

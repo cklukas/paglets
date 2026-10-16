@@ -53,6 +53,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(GNUInstallDirs)
 include(PagletsWamr)
+include(PagletsWamrc)
 include(PagletsGuest)
 include(PagletsHttplib)
 # Cryptography of the mesh (keys, ledger signatures, passports).

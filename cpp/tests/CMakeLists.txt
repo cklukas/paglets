@@ -1,10 +1,16 @@
 # Copyright (c) 2026 by C. Klukas.
 # Licensed under the MIT License. See LICENSE for details.
 
+# --8<-- [start:c_guests]
 paglets_add_guest(testbed LANGUAGE C NO_SDK SOURCES guests/testbed.c)
 paglets_add_guest(forbidden LANGUAGE C NO_SDK SOURCES guests/forbidden.c)
+paglets_add_guest(plain_counter LANGUAGE C NO_SDK SOURCES guests/plain_counter.c)
+# --8<-- [end:c_guests]
 paglets_add_module(conformance SOURCES guests/conformance.cpp)
+paglets_add_module(system_import SOURCES guests/system_import.cpp)
 paglets_add_module(bomb SOURCES guests/bomb.cpp)
+paglets_add_module(jobs SOURCES guests/jobs.cpp)
+paglets_add_module(zombie_probe SOURCES guests/zombie_probe.cpp SERVICES zombies mesh_info)
 paglets_add_module(explorer
     SOURCES guests/explorer.cpp
     SCHEMA_HEADER guests/explorer_msgs.hpp
@@ -41,6 +47,7 @@ set(test_sources
     test_client.cpp
     test_http.cpp
     test_wasm_binary.cpp
+    test_address_space.cpp
     test_engine.cpp
     test_snapshot.cpp
     test_runtime.cpp
@@ -54,7 +61,8 @@ set(test_sources
     test_zombie_protocol.cpp
     test_protocol_check.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_session.cpp test_web.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
+    list(APPEND test_sources test_job_memory.cpp test_remaining.cpp)
+    list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_jobs.cpp test_session.cpp test_web.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
 
 add_executable(paglets_tests ${test_sources})
@@ -62,6 +70,10 @@ add_executable(paglets_tests ${test_sources})
 target_compile_definitions(paglets_tests PRIVATE
     PAGLETS_TEST_PLATFORM="${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}"
     PAGLETS_TEST_BUILD="${CMAKE_BUILD_TYPE}")
+if(PAGLETS_WAMRC)
+    target_compile_definitions(paglets_tests PRIVATE PAGLETS_TEST_WAMRC="${PAGLETS_WAMRC}")
+    add_dependencies(paglets_tests paglets-wamrc)
+endif()
 target_link_libraries(paglets_tests PRIVATE paglets_host paglets_mesh paglets_net paglets_client paglets_webui)
 if(TARGET paglets_node)
     target_link_libraries(paglets_tests PRIVATE paglets_node paglets_gateway paglets_webapp)
@@ -80,17 +92,64 @@ if(WIN32)
     target_link_libraries(paglets_tests PRIVATE ws2_32 crypt32)
 endif()
 target_compile_options(paglets_tests PRIVATE ${PAGLETS_WARNINGS})
-foreach(guest chronicle counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher file_courier tree_compare log_scout describer watcher explainer benchmark bomb conformance testbed forbidden calc_user explorer patterns_demo)
+add_test(NAME test_runner_cli
+         COMMAND ${CMAKE_COMMAND} -DTESTS=$<TARGET_FILE:paglets_tests>
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/test_runner_cli.cmake)
+find_program(PAGLETS_TEST_JQ jq)
+if(PAGLETS_TEST_JQ)
+    add_test(NAME mesh_pi_results COMMAND ${CMAKE_COMMAND}
+        "-DJQ=${PAGLETS_TEST_JQ}" "-DFILTER=${PROJECT_SOURCE_DIR}/tools/mesh_pi_results.jq"
+        "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/mesh-pi-results"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/mesh_pi_results.cmake")
+endif()
+if(UNIX)
+    find_program(PAGLETS_TEST_BASH bash)
+    if(PAGLETS_TEST_BASH)
+        add_test(NAME live_process_identity
+            COMMAND "${PAGLETS_TEST_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/live_process_identity.sh"
+                "${PROJECT_SOURCE_DIR}/tools/live_process.sh")
+    endif()
+    if(PAGLETS_TEST_BASH AND PAGLETS_TEST_JQ)
+        get_filename_component(PAGLETS_TEST_JQ_DIR "${PAGLETS_TEST_JQ}" DIRECTORY)
+        add_test(NAME mesh_network_baseline
+            COMMAND ${CMAKE_COMMAND} -E env "PATH=${PAGLETS_TEST_JQ_DIR}:$ENV{PATH}"
+                "${PAGLETS_TEST_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/mesh_network_baseline.sh"
+                "${PROJECT_SOURCE_DIR}/tools/mesh_network_baseline.sh"
+                "${CMAKE_CURRENT_BINARY_DIR}/mesh-network-baseline")
+        add_test(NAME live_recording_results
+            COMMAND ${CMAKE_COMMAND} -E env "PATH=${PAGLETS_TEST_JQ_DIR}:$ENV{PATH}"
+                "${PAGLETS_TEST_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/live_recording_results.sh"
+                "${PROJECT_SOURCE_DIR}/tools"
+                "${CMAKE_CURRENT_BINARY_DIR}/live-recording-results")
+    endif()
+endif()
+foreach(guest chronicle counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher file_courier tree_compare log_scout describer watcher explainer benchmark bomb jobs zombie_probe conformance system_import testbed forbidden plain_counter calc_user explorer patterns_demo)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()
 endforeach()
 
 add_test(NAME unit COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
-add_dependencies(paglets_tests paglets-worker)
+add_dependencies(paglets_tests paglets-worker paglets-protocol-check)
 add_test(NAME worker_sandbox COMMAND paglets-worker --check-sandbox)
+if(PAGLETS_TEST_GUEST_DIR)
+    add_test(NAME reports_platforms COMMAND ${CMAKE_COMMAND}
+        "-DTOOL=$<TARGET_FILE:paglets_tests>" "-DGUESTS=${PAGLETS_TEST_GUEST_DIR}"
+        "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/reports-platforms"
+        "-DPLATFORM=${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/reports_platforms.cmake")
+endif()
+
+add_test(NAME protocol_cli COMMAND ${CMAKE_COMMAND}
+    "-DTOOL=$<TARGET_FILE:paglets-protocol-check>"
+    "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/protocol-cli"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol_cli.cmake")
 # The code excerpts and results in docs/ match the sources.
 add_test(NAME docs_sync COMMAND paglets-docs-sync --check --root "${PROJECT_SOURCE_DIR}/..")
+add_test(NAME docs_sync_layout COMMAND ${CMAKE_COMMAND}
+    "-DTOOL=$<TARGET_FILE:paglets-docs-sync>"
+    "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/docs-sync-layout"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/docs_sync_layout.cmake")
 # The same tests with paglet instances in (sandboxed) worker processes.
 add_test(NAME unit_workers COMMAND paglets_tests "${PAGLETS_TEST_GUEST_DIR}")
 set_tests_properties(unit_workers PROPERTIES ENVIRONMENT "PAGLETS_TEST_WORKER=$<TARGET_FILE:paglets-worker>")
@@ -149,6 +208,18 @@ endif()
 add_test(NAME host_cli_ledger
          COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-ledger
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_ledger.cmake)
+
+add_executable(paglets_cli_reply_host cli_reply_host.cpp)
+target_link_libraries(paglets_cli_reply_host PRIVATE paglets_mesh paglets_net)
+if(PAGLETS_ENABLE_REFLECTION)
+    target_link_libraries(paglets_cli_reply_host PRIVATE paglets_webapp)
+endif()
+target_compile_options(paglets_cli_reply_host PRIVATE ${PAGLETS_WARNINGS})
+add_test(NAME host_cli_replies
+         COMMAND ${CMAKE_COMMAND} -DHOST=$<TARGET_FILE:paglets-host> -DFIXTURE=$<TARGET_FILE:paglets_cli_reply_host>
+                 -DDIR=${CMAKE_CURRENT_BINARY_DIR}/cli-replies -DREFLECTION=${PAGLETS_ENABLE_REFLECTION}
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_replies.cmake)
+set_tests_properties(host_cli_replies PROPERTIES TIMEOUT 250)
 
 # The installed package from outside the repository: cmake --install to a
 # temporary prefix, find_package(paglets) in examples/out-of-tree, modules

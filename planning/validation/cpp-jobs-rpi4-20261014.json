@@ -1,0 +1,148 @@
+{
+  "host": "rpi4",
+  "platform": "Linux-6.18.34+rpt-rpi-v8-aarch64-with-glibc2.41",
+  "output": "/home/klukas/tmp/paglets-jobs-takeover-20261014-01/source/cpp/build/linux-gcc16",
+  "source_manifest_sha256": "402c9ab138d362e350c4a1e87b3e73ee7cd31cea21b8c55a6fe68dc6d2b3a6e6",
+  "source_files_matched": 310,
+  "native_source_commit": "9fa07fd05949829cf0862dbcd9444bc2d3933bc8",
+  "benchmark_script_sha256": "50ca11f4efdbadcc76e71bf8d33985b4f0fed19f7069face5f3dade981675ba3",
+  "configuration": {
+    "CMAKE_BUILD_TYPE": "Release",
+    "CMAKE_CXX_COMPILER": "g++-16",
+    "CMAKE_EXE_LINKER_FLAGS": "-static-libstdc++ -static-libgcc",
+    "PAGLETS_LLVM_DIR": "/usr/lib/llvm-19/lib/cmake/llvm",
+    "PAGLETS_WAMR_HW_BOUND_CHECK": "OFF"
+  },
+  "build_times": {
+    "build": {
+      "start": "2026-10-14T20:31:02Z",
+      "end": "2026-10-14T21:00:23Z",
+      "seconds": 1761.0
+    },
+    "final-build": {
+      "start": "2026-10-14T21:01:08Z",
+      "end": "2026-10-14T21:47:22Z",
+      "seconds": 2774.0
+    },
+    "retained-build": {
+      "start": "2026-10-14T21:47:24Z",
+      "end": "2026-10-14T21:47:27Z",
+      "seconds": 3.0
+    }
+  },
+  "assets": {
+    "host/paglets-host": {
+      "sha256": "7319884780a968d0e160251cde8770a083c21191dedf195c540b85bfd7a31f68",
+      "mtime": 1792014220.643942
+    },
+    "host/paglets-worker": {
+      "sha256": "a322642b2db70f34430fdec13f508395eb85d1481bb68e6aa90aef62071b634c",
+      "mtime": 1792012030.5388014
+    },
+    "host/paglets-wamrc": {
+      "sha256": "9e817013bda80d26c23fb5d521c0b61565e6f5d888d8819aa3d1f14cbfe1f3c4",
+      "mtime": 1792011674.1114495
+    },
+    "tests/paglets_tests": {
+      "sha256": "2071d17cee332382a834c0199abc2450d1047eef39b4344c71066bdbba01f1f3",
+      "mtime": 1792014442.1620038
+    },
+    "guests/pi.wasm": {
+      "sha256": "b4d9cffdae59b8d82bab4054d18b4c5b0f9571271cd880a795b97ef59e09ffbe",
+      "mtime": 1792011527.4493897
+    },
+    "guests/benchmark.wasm": {
+      "sha256": "f8a35339f7d1195fa954d7768526fea2b9af116fec55db8ca4c5eabb2caf1755",
+      "mtime": 1792011539.5149288
+    },
+    "guests/jobs.wasm": {
+      "sha256": "aa859e9abd0ff9e9c471f71602c7ad747b905685d027704dbbf6bf04104af694",
+      "mtime": 1792011544.4969964
+    }
+  },
+  "tests": [
+    {
+      "mode": "local",
+      "filter": "jobs:",
+      "start": "2026-10-14T21:47:27.645954+00:00",
+      "seconds": 107.15946602998883,
+      "exit": 0
+    },
+    {
+      "mode": "local",
+      "filter": "compute-slots:",
+      "start": "2026-10-14T21:49:14.806201+00:00",
+      "seconds": 0.3655815970269032,
+      "exit": 0
+    },
+    {
+      "mode": "local",
+      "filter": "example: Mesh Benchmark compares",
+      "start": "2026-10-14T21:49:15.172767+00:00",
+      "seconds": 30.800529097992694,
+      "exit": 0
+    },
+    {
+      "mode": "local",
+      "filter": "example: Pi",
+      "start": "2026-10-14T21:49:45.974231+00:00",
+      "seconds": 3.2386829699971713,
+      "exit": 0
+    },
+    {
+      "mode": "local",
+      "filter": "pi:",
+      "start": "2026-10-14T21:49:49.214806+00:00",
+      "seconds": 4.247222827019868,
+      "exit": 0
+    },
+    {
+      "mode": "workers",
+      "filter": "jobs:",
+      "start": "2026-10-14T21:49:53.463256+00:00",
+      "seconds": 110.33216563597671,
+      "exit": 0
+    },
+    {
+      "mode": "workers",
+      "filter": "compute-slots:",
+      "start": "2026-10-14T21:51:43.796372+00:00",
+      "seconds": 0.4656130179937463,
+      "exit": 0
+    },
+    {
+      "mode": "workers",
+      "filter": "example: Mesh Benchmark compares",
+      "start": "2026-10-14T21:51:44.263006+00:00",
+      "seconds": 31.148326941998675,
+      "exit": 0
+    },
+    {
+      "mode": "workers",
+      "filter": "example: Pi",
+      "start": "2026-10-14T21:52:15.412286+00:00",
+      "seconds": 3.9180460380157456,
+      "exit": 0
+    },
+    {
+      "mode": "workers",
+      "filter": "pi:",
+      "start": "2026-10-14T21:52:19.331316+00:00",
+      "seconds": 4.772459283005446,
+      "exit": 0
+    }
+  ],
+  "baseline": "No recorded comparable clean native GCC 16 Release build baseline. Logs and active compiler processes were inspected; compilation made progress without memory pressure. Final reconfiguration explicitly preserves Release.",
+  "deployment": {
+    "path": "/home/klukas/paglets-live/cpp/build/linux-gcc16",
+    "previous_configuration": {
+      "CMAKE_BUILD_TYPE": "Release",
+      "CMAKE_CXX_COMPILER": "/home/klukas/opt/gcc-16/bin/g++-16",
+      "PAGLETS_WAMR_HW_BOUND_CHECK": "OFF",
+      "CMAKE_HOME_DIRECTORY": "/home/klukas/paglets-live/cpp"
+    },
+    "build_cache_retained": false
+  },
+  "history_note": "Initial all-target build was interrupted for final code synchronization. The successful final-build compiled and linked the current code; the 3 s retained-build only rescanned dependencies and the unchanged compiler.",
+  "cleanup": "Temporary native build, source and test data removed after deployment hash verification and confirmation that all project processes stopped. The deployed host, worker, compiler, guests, source and validation receipt are retained."
+}
