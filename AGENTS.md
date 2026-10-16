@@ -1,5 +1,21 @@
 # Agent Instructions
 
+## Private history and GitHub publication
+
+This development repository contains private paper history. Push development
+branches only to the rpi4 remotes. Never push this repository to GitHub, including
+via a directly typed URL, force push, mirror, tag, or `--no-verify`. Do not disable
+or override its installed pre-push guard or disabled `origin` push URL.
+
+Publish future Python and C++ code, documentation and paper updates through the separate
+public-only clone using the checked snapshot workflow in the private file
+`planning/publication/README.md`.
+Use `python3 -B planning/publication/publish.py prepare cpp` (or `main` / `cpp-paper`),
+review and validate the public candidate, then use the tool's `push` command.
+Never fetch private branches into the public clone. Internal files under
+`planning/` are denied by default unless explicitly listed in the publication
+policy. Install the guards on new independent development clones before pushing.
+
 This branch (`cpp`) holds only paglets/cpp, the C++ edition. The Python
 edition lives on `main`; do not add Python package code, Python tests or
 Python documentation here.

@@ -18,6 +18,7 @@ on:
 
 env:
   WASI_SDK_VERSION: "25"
+  PAGLETS_TEST_TRACE: "1"
 
 jobs:
   linux:
@@ -93,7 +94,7 @@ jobs:
         run: |
           cmake --preset ${{ matrix.preset }} -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
           cmake --build --preset ${{ matrix.preset }}
-          ctest --preset ${{ matrix.preset }}
+          ctest --preset ${{ matrix.preset }} --verbose
       - name: Report failed tests
         if: failure()
         run: bash cpp/tools/ci_failures.sh cpp/build/${{ matrix.preset }}
