@@ -8,6 +8,7 @@
 version: 1
 site:
   title: paglets Python edition
+  logo: docs/images/paglets-logo.png
   description: Python Aglets-inspired mobile object runtime.
   footer: "© 2026 C. Klukas · MIT License"
   links:

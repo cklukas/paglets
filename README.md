@@ -1,4 +1,4 @@
-<img src="https://cklukas.github.io/paglets/repository-open-graph-1280x640.png" alt="paglets social preview" width="640">
+![paglets mobile Python agents](docs/images/paglets-python-intro.png)
 
 # paglets
 

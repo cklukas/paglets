@@ -28,9 +28,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ckdocs is built from ck-git-hosting at this commit (documentation site
-  # generator; 0.5.0 builds portals of several sites).
-  CKDOCS_REF: 7028a8c95b010f896a69e7f0f306ee4314406e1d
+  # Match the C++ portal deployment's verified ckdocs v0.6.3.
+  CKDOCS_REF: b647a36908295e9fcfa88db95a181cee2b5efa21
 
 jobs:
   build:
@@ -182,6 +181,16 @@ jobs:
           ckdocs build --root . --out site --strict
           # Published at a stable URL although no page links it.
           cp "docs/$PAPER_ASSET_NAME" site/
+
+      - name: Add C++ paper PDF
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list --limit 200 --json tagName,isDraft,publishedAt \
+            --jq '[.[] | select(.isDraft | not) | select(.tagName | startswith("cpp-paper-"))] | sort_by(.publishedAt) | last | .tagName')
+          if [ -n "$tag" ] && [ "$tag" != "null" ]; then
+            gh release download "$tag" --pattern paglets-cpp.pdf --output site/cpp/paglets-cpp.pdf --clobber
+          fi
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6

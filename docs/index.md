@@ -1,6 +1,6 @@
-![paglets social preview](repository-open-graph-1280x640.png)
-
 # paglets - mobile python agents
+
+![An angular blue bird carries golden state objects between connected hosts.](images/paglets-python-intro.png)
 
 `paglets` is a compact Python runtime inspired by Java Aglets. A paglet is a
 mobile object with explicit dataclass state, lifecycle hooks, message handling,
