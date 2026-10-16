@@ -19,6 +19,25 @@ struct Explore {
     std::string pattern;
 };
 
+struct ScanCommand {
+    std::int32_t dir = 0;
+    std::string operation;
+    std::vector<std::uint8_t> payload;
+};
+
+struct ScanResult {
+    std::int32_t status = 0;
+    std::vector<std::uint8_t> payload;
+};
+
+struct TaskProbe {
+    std::string state;
+    std::int32_t error = 0;
+    bool done = false;
+    std::uint64_t updates = 0;
+    std::int64_t visited = 0;
+};
+
 struct Report {
     std::string os;
     std::string host_name;

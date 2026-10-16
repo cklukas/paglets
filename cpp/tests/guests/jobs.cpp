@@ -135,6 +135,14 @@ public:
             auto r = last_.cancel();
             (void)m.reply(static_cast<std::int32_t>(r ? 0 : r.error()));
         });
+        router().on("task_cancel", [this](paglets::Message& m) {
+            auto r = last_.task().cancel();
+            (void)m.reply(static_cast<std::int32_t>(r ? 0 : r.error()));
+        });
+        router().on("task_status", [this](paglets::Message& m) {
+            auto s = last_.task().status();
+            (void)m.reply(s ? *s : paglets::tasks::Status{"failed", 0, s.error(), true});
+        });
         router().on("status", [this](paglets::Message& m) {
             auto s = last_.status();
             if (!s) {
@@ -177,6 +185,7 @@ private:
         o.max_ms = r.max_ms;
         o.hosts = r.hosts;
         o.finish_on_departure = r.finish;
+        o.memory_mb = r.memory_mb;
         return o;
     }
 

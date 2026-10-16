@@ -20,7 +20,7 @@ struct Search {
     std::vector<std::string> hosts;
     std::int64_t min_size = 0;
     std::int64_t max_results = 100;  // files listed per host
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;  // whole search, including clone travel
 };
 
 struct Started {
@@ -50,13 +50,25 @@ struct HostFindings {
     std::int64_t files = 0;
     std::int64_t bytes = 0;
     bool truncated = false;
+    std::uint64_t visited = 0;
+    bool cancelled = false;
+    bool extensions_truncated = false;
     std::vector<Found> found;    // the first max_results, by path
     std::vector<Found> largest;  // the five largest
     std::vector<ExtensionTotal> extensions;
 };
 
+struct Progress {
+    std::string clone;
+    std::uint64_t visited = 0;
+    std::int64_t files = 0;
+    std::int64_t bytes = 0;
+};
+
 struct Findings {
     bool finished = false;
+    bool cancelled = false;
+    std::vector<Progress> progress;  // latest counters from unfinished clones
     std::vector<HostFindings> hosts;
     std::int64_t files = 0;
     std::int64_t bytes = 0;

@@ -218,22 +218,19 @@ private:
             pt::endpoint("files", [this, first](paglets::Result<paglets::Endpoint> files) {
                 if (!files) return scanned_error(pt::error_text("files", files.error()));
                 files_ = *files;
-                svc::files::Client client{files_};
                 svc::files::FindRequest q;
                 q.pattern = scout_.files;
                 q.limit = 10'000;
-                auto sent = client.find(
-                    q,
-                    [this, first](paglets::Result<svc::files::FindReply> r, Message&) {
+                (void)paglets::patterns::find_files(files_, *dir_, q,
+                    [this, first](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return scanned_error(pt::error_text("find", r.error()));
+                        if (r->truncated) return scanned_error("file list truncated; narrow the search or use streaming scan_files");
                         todo_.clear();
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file) todo_.push_back(e);
                         }
                         read_next(0, first);
-                    },
-                    pt::lending(*dir_));
-                if (!sent) scanned_error(pt::error_text("find", sent.error()));
+                    });
             });
         });
     }

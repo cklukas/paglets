@@ -108,9 +108,14 @@ at runtime. Admission decodes instructions and refuses table mutation
 and passive-segment mutation, which memory images do not capture. The supported guest build also exports
 all mutable globals needed by an image.
 
-The default handler budget is 5 s of elapsed host time. Exceeding it ends
-the paglet as failed. Use [compute jobs](compute-jobs.md) for long CPU work,
-or divide work into short handlers driven by timers or self-messages.
+The handler watchdog is disabled by default. An operator can enable a
+per-invocation budget, for example 5 s of elapsed host time.
+The paglet itself can work for hours or indefinitely. Waiting for background
+work does not spend handler time. Use the framework's task handles for long
+I/O and [compute jobs](compute-jobs.md) for long CPU work; see
+[Long-running agents and tasks](long-running-tasks.md) for the shared task
+model, cancellation, progress, deadlines, movement and recovery. Exceeding
+the handler watchdog ends the paglet as failed.
 Capability authority travels according to the
 [capability movement rules](sdk-reference.md#capabilities-across-moves).
 
@@ -196,7 +201,7 @@ The patterns library covers the common shapes of paglets. Include
 | Header | Pattern |
 |---|---|
 | `services.hpp` | `endpoint(name, next)`, `lookup`, `lending(cap)`, `here(next)`: services by name, and this host as `mesh-info` sees it |
-| `task.hpp` | `Task<Request, Result>`: a paglet that runs one task, with `start`, `status` and `wait`; `complete(result)` and `fail(why)` end it |
+| `task.hpp` | `Task<Request, Result>`: the paglet-level task abstraction, with `start`, `status`, `wait`, `cancel`, progress and tracked child work; `complete(result)` and `fail(why)` finish the task, while the paglet remains available |
 | `operations.hpp` | `serve<Request, Reply>(router, name, fn)` and `call<Reply>(endpoint, op, request, next)`: typed operations |
 | `fanout.hpp` | `FanOut`: clones on transfer tickets (host names/key IDs, `label:L`, `offer:S`, `any`, or empty for this host), one report each, a deadline, and failed clones; see [dispatch](sdk-reference.md#lifecycle-children-and-timers) |
 | `locate.hpp` | `locate`, `pin`, `release`, `with_pinned(...)`: find a paglet and keep it in place while working with it; repeated `done()` calls release only once |
@@ -216,7 +221,7 @@ struct Count : paglets::patterns::Task<CountRequest, CountResult> {
 > capability of a few bytes, and the content goes directly from host to
 > host (see [Moving content between hosts](system-paglets.md#moving-content-between-hosts)).
 > `pick_up` and `read_file` copy the content into the paglet's memory,
-> whose default total limit is 256 MB. A host can change it with
+> which grows as needed within the Wasm32 address space. A host can opt into a ceiling with
 > `serve --memory-mb N`; intended move destinations must allow the image
 > too. The read and write helpers use 512 KB
 > chunks, leaving room for message metadata below the 1 MB ABI document

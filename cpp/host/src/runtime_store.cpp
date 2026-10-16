@@ -8,6 +8,7 @@
 #include <paglets/sha256.hpp>
 
 #include <charconv>
+#include <algorithm>
 #include <fstream>
 #include <system_error>
 
@@ -298,6 +299,7 @@ namespace {
 constexpr std::int32_t state_version = 1;
 constexpr std::int32_t ready_state_version = 2;
 constexpr std::int32_t timed_state_version = 3;
+constexpr std::int32_t unlimited_state_version = 4;
 }  // namespace
 
 Bytes encode_ready(const ReadyMessage& message) {
@@ -334,7 +336,8 @@ Bytes encode_state(const TravelState& s) {
     put(w, "wake_at_ms", s.wake_at_ms);
     // An old peer must refuse unsupported timing/completion state rather
     // than silently extending a deadline or dropping a continuation.
-    put(w, "v", captured_ms > 0 ? timed_state_version :
+    const bool unlimited = std::ranges::any_of(s.pending, [](const auto& p) { return p.second == -1; });
+    put(w, "v", unlimited ? unlimited_state_version : captured_ms > 0 ? timed_state_version :
                  (s.ready.empty() ? state_version : ready_state_version));
     put(w, "id", s.id);
     put(w, "module", s.module);
@@ -448,11 +451,14 @@ std::expected<TravelState, std::string> decode_state(std::span<const std::uint8_
         return r.skip();
     });
     if (!ok || !r.at_end()) return std::unexpected(std::string("malformed paglet state"));
-    if (version < state_version || version > timed_state_version ||
+    const bool unlimited = std::ranges::any_of(s.pending, [](const auto& p) { return p.second == -1; });
+    const bool invalid_budget = std::ranges::any_of(s.pending, [](const auto& p) { return p.second < -1; });
+    if (version < state_version || version > unlimited_state_version || invalid_budget ||
+        (unlimited && version < unlimited_state_version) ||
         (version >= ready_state_version && !ready_seen) ||
         (version == state_version && !s.ready.empty()) ||
         (version < timed_state_version && s.pending_captured_ms != 0) ||
-        (version == timed_state_version && (!captured_seen || s.pending_captured_ms <= 0)))
+        (version >= timed_state_version && (!captured_seen || s.pending_captured_ms <= 0)))
         return std::unexpected("paglet state version " + std::to_string(version));
     if (s.id.empty() || s.module.empty()) return std::unexpected(std::string("incomplete paglet state"));
     return s;

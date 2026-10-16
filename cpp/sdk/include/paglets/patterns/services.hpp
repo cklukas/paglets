@@ -49,6 +49,14 @@ inline RequestOptions lending(const Capability& cap, RequestOptions options = {}
     return options;
 }
 
+// Waiting for a slow service consumes no handler time. Choose a request
+// deadline for the operation; it is independent of the handler watchdog.
+inline RequestOptions long_request(std::int64_t timeout_ms = 30 * 60 * 1000) {
+    RequestOptions options;
+    options.timeout_ms = timeout_ms;
+    return options;
+}
+
 // The host this paglet is on now (key ID, name, labels, load, offers).
 inline void here(std::function<void(Result<services::mesh_info::Snapshot>)> next) {
     auto mi = service("mesh-info");

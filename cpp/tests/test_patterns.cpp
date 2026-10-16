@@ -163,6 +163,18 @@ PAGLETS_TEST("patterns: tasks, typed operations, fan-out, file mobility, locate 
     CHECK_EQ(st.state, std::string("failed"));
     CHECK_EQ(st.error, std::string("n is negative"));
     CHECK(ask<TaskStatus>(*a.f, id, "status").done);
+    (void)ask<TaskStatus>(*a.f, id, "start", CountRequest{10, 60'000});
+    auto waiting = a.f->runtime->request(id, "wait", wire::to_msgpack(WaitRequest{10'000}), 15s);
+    st = ask<TaskStatus>(*a.f, id, "cancel");
+    CHECK(st.done);
+    CHECK_EQ(st.state, std::string("cancelled"));
+    CHECK(ask<bool>(*a.f, id, "child_cancelled"));
+    TaskStatus waiter;
+    REQUIRE(wire::from_msgpack(waiting.get().payload, waiter));
+    CHECK_EQ(waiter.state, std::string("cancelled"));
+    st = ask<TaskStatus>(*a.f, id, "start", CountRequest{4, 0});
+    REQUIRE(wire::from_msgpack(st.result, result));
+    CHECK_EQ(result.sum, 10);
 
     // A typed operation.
     CHECK_EQ(ask<AddReply>(*a.f, id, "add", AddRequest{2, 40}).sum, 42);

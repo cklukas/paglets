@@ -8,6 +8,7 @@
 #include "explorer.schema.gen.hpp"
 
 #include <paglets/paglet.hpp>
+#include <paglets/patterns/files.hpp>
 #include <paglets/services/artifacts.gen.hpp>
 #include <paglets/services/directory.gen.hpp>
 #include <paglets/services/files.gen.hpp>
@@ -64,6 +65,34 @@ paglets::RequestOptions lending(const Capability& cap) {
 class Explorer : public paglets::Paglet {
 public:
     Explorer() {
+        router().on<explorer::ScanCommand>("scan_call", [](const explorer::ScanCommand& q, Message& m) {
+            auto reply = std::make_shared<Capability>(m.defer_reply());
+            lookup("files", [q, reply](paglets::Result<Endpoint> files) {
+                if (!files) return (void)paglets::reply_to(*reply, explorer::ScanResult{files.error(), {}});
+                paglets::RequestOptions options;
+                if (q.dir) options.lend.push_back(Capability(q.dir));
+                auto sent = files->request_raw(q.operation, q.payload, [reply](Message& r) {
+                    (void)paglets::reply_to(*reply, explorer::ScanResult{r.status(), {r.payload().begin(), r.payload().end()}});
+                }, options);
+                if (!sent) (void)paglets::reply_to(*reply, explorer::ScanResult{sent.error(), {}});
+            });
+        });
+        router().on<explorer::Explore>("scan_task", [this](const explorer::Explore& q, Message& m) {
+            (void)m.reply();
+            lookup("files", [this, q](paglets::Result<Endpoint> files) {
+                if (!files) return;
+                svc::files::FindRequest query;
+                query.pattern = q.pattern;
+                task_ = paglets::patterns::scan_files(*files, Capability(q.dir), query,
+                    [](const svc::files::ScanBatch&) {}, [](paglets::Result<void>) {});
+            });
+        });
+        router().on("task_status", [this](Message& m) {
+            auto s = task_.status();
+            if (!s) return (void)m.reply(explorer::TaskProbe{"missing", s.error()});
+            (void)m.reply(explorer::TaskProbe{s->state, s->error, s->done, s->updates, s->completed});
+        });
+        router().on("task_cancel", [this](Message& m) { (void)task_.cancel(); (void)m.reply(); });
         router().on<explorer::Explore>("explore", [this](const explorer::Explore& q, Message& m) { explore(q, m); });
         router().on<explorer::FileOps>("file_ops", [this](const explorer::FileOps& q, Message& m) { file_ops(q, m); });
         router().on<explorer::Explore>("read_file", [](const explorer::Explore& q, Message& m) { read_file(q, m); });
@@ -114,6 +143,7 @@ public:
     }
 
 private:
+    paglets::tasks::TaskHandle task_;
     struct Exploration {
         Capability reply;
         Capability dir;

@@ -12,6 +12,7 @@
 
 #include <paglets/runtime/mobility.hpp>
 #include <paglets/wasm/snapshot.hpp>
+#include <paglets/sha256.hpp>
 #include "../host/src/runtime_store.hpp"
 
 #include <condition_variable>
@@ -658,6 +659,45 @@ PAGLETS_TEST("requester deadlines: version3 timing metadata cannot be hidden fro
     CHECK(!wire(3, true, -1).has_value());
     CHECK(!wire(3, true, 123, true).has_value());
     CHECK(wire(3, true, 123).has_value());
+}
+
+PAGLETS_TEST("requester deadlines: unlimited job continuations use explicit version4 state") {
+    rt::TravelState state;
+    state.id = std::string(32, 'a');
+    state.module = std::string(64, 'b');
+    state.pending = {{1, -1}, {2, 1000}};
+    state.pending_captured_ms = 123456;
+    auto encoded = rt::encode_state(state);
+    auto restored = rt::decode_state(encoded);
+    REQUIRE_OK(restored);
+    CHECK(restored->pending == state.pending);
+    std::int32_t version = 0;
+    paglets::msgpack::Reader r(encoded);
+    REQUIRE(abi::detail::read_map(r, [&](std::string_view key) {
+        return key == "v" ? paglets::msgpack::read_value(r, version) : r.skip();
+    }));
+    CHECK_EQ(version, 4);
+    state.pending = {{1, -2}};
+    CHECK(!rt::decode_state(rt::encode_state(state)));
+}
+
+PAGLETS_TEST("resource admission: an oversized incoming image is refused before committing the move") {
+    rt::Config config;
+    config.limits.max_memory_pages = 512;  // optional operator ceiling, 32 MB
+    Fixture destination(config);
+    const auto module = destination.module("hello.wasm");
+    auto bytes = destination.runtime->modules().bytes(module);
+    REQUIRE_OK(bytes);
+    rt::Arrival arrival;
+    arrival.state.id = std::string(32, 'a');
+    arrival.state.module = module;
+    arrival.image.module_hash = paglets::sha256(*bytes);
+    arrival.image.page_count = 1024;  // actual state already needs 64 MB
+    arrival.image.pages.resize(1024);
+    auto refused = destination.runtime->prepare_arrival(std::move(arrival), {});
+    CHECK(!refused);
+    CHECK(refused.error().find("incoming image") != std::string::npos);
+    CHECK(!destination.runtime->info(std::string(32, 'a')));
 }
 
 PAGLETS_TEST("runtime safety: transferring the used endpoint preserves routing badge and remaining uses") {

@@ -29,7 +29,7 @@ struct Scout {
     std::int64_t max_excerpts = 5;  // per host and pattern
     bool live = false;
     std::int64_t interval_ms = 60'000;
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

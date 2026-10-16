@@ -10,6 +10,7 @@
 
 #include <jobs_msgs.hpp>
 #include <paglets/services/system_services.hpp>
+#include <paglets/wire/reflect.hpp>
 
 #include <filesystem>
 #include <future>
@@ -69,7 +70,7 @@ bool eventually(const std::function<bool()>& cond, std::chrono::milliseconds tim
 
 }  // namespace
 
-PAGLETS_TEST("memory defaults: paglets and jobs start small and grow to their separate ceilings") {
+PAGLETS_TEST("memory defaults: unknown requirements grow without the former paglet and job caps") {
     Fixture f;
     const auto id = f.create("jobs.wasm");
     auto check = [](const std::vector<std::int64_t>& probe, std::int64_t ceiling) {
@@ -77,7 +78,7 @@ PAGLETS_TEST("memory defaults: paglets and jobs start small and grow to their se
         CHECK(probe[0] > 0 && probe[0] < 256);  // initially below the former 16 MB paglet cap
         CHECK_EQ(probe[1], probe[0]);
         CHECK_EQ(probe[2], ceiling);
-        CHECK_EQ(probe[3], 1);  // a page beyond the ceiling is refused
+        CHECK_EQ(probe[3], 0);  // the old default ceiling no longer stops growth
         CHECK_EQ(probe[4], 1);  // first and last new bytes are writable
     };
     const auto paglet = f.call(id, "memory-probe", body(std::int64_t{4096}));
@@ -86,6 +87,80 @@ PAGLETS_TEST("memory defaults: paglets and jobs start small and grow to their se
     const auto task = run(f, id, job("memory", body(std::int64_t{16384})));
     REQUIRE(task.status == abi::ok);
     check(value_of<std::vector<std::int64_t>>(task.output), 16384);
+}
+
+PAGLETS_TEST("resource declarations: explicit 2 GB jobs work and owner memory policy rejects before execution") {
+    {
+        Fixture f;
+        const auto id = f.create("jobs.wasm");
+        auto request = job("memory", body(std::int64_t{32768}));
+        request.memory_mb = 2048;
+        const auto result = run(f, id, request);
+        REQUIRE(result.status == abi::ok);
+        const auto probe = value_of<std::vector<std::int64_t>>(result.output);
+        REQUIRE(probe.size() == 5u);
+        CHECK_EQ(probe[2], 32768);
+        CHECK_EQ(probe[3], 1);  // declared ceiling, not the old 1 GB framework maximum
+        CHECK_EQ(probe[4], 1);
+    }
+    {
+        rt::Config config;
+        config.job_max_memory_mb = 64;
+        Fixture f(config);
+        const auto id = f.create("jobs.wasm");
+        auto request = job("sum", {}, 1000);
+        request.memory_mb = 128;
+        CHECK_EQ(run(f, id, request).status, abi::quota);
+        CHECK(f.runtime->jobs().empty());
+        request.memory_mb = 32;
+        CHECK_EQ(run(f, id, request).status, abi::ok);
+    }
+    {
+        rt::Config config;
+        config.require_job_resources = true;
+        Fixture f(config);
+        const auto id = f.create("jobs.wasm");
+        CHECK_EQ(run(f, id, job("sum")).status, abi::denied);
+        auto request = job("sum", {}, 1000);
+        request.memory_mb = 16;
+        CHECK_EQ(run(f, id, request).status, abi::ok);
+    }
+    {
+        rt::Config config;
+        config.limits.max_memory_pages = 512;  // operator allows 32 MB
+        Fixture f(config);
+        const auto module = f.module("memory_declared.wasm");
+        auto denied = f.runtime->create(module);
+        CHECK(!denied);
+        CHECK(denied.error().find("declared memory") != std::string::npos);
+    }
+    {
+        rt::Config config;
+        config.require_paglet_memory = true;
+        Fixture f(config);
+        const auto id = f.create("memory_declared.wasm");
+        CHECK(f.runtime->call(id, "greet", body(std::string("declared")), 2s).status == abi::ok);
+    }
+}
+
+PAGLETS_TEST("resource declarations: unknown, unlimited and week-long job budgets have no hidden cap") {
+    rt::Config config;
+    config.job_slots = 1;
+    Fixture f(config);
+    const auto id = f.create("jobs.wasm");
+    REQUIRE(f.runtime->reserve_compute_slots(1));
+    for (const auto budget : {std::int64_t{0}, std::int64_t{-1}, std::int64_t{7LL * 24 * 60 * 60 * 1000}}) {
+        auto pending = f.runtime->request(id, "run", body(job("sum", {}, budget)), 10s);
+        REQUIRE(eventually([&] { return f.runtime->jobs_queued() == 1; }));
+        const auto jobs = f.runtime->jobs();
+        REQUIRE(jobs.size() == 1);
+        CHECK_EQ(jobs[0].max_ms, budget == 0 ? -1 : budget);
+        CHECK_EQ(jobs[0].memory_pages, 65536u);
+        CHECK_EQ(value_of<std::int32_t>(f.call(id, "cancel").payload), 0);
+        CHECK_EQ(outcome(pending.get()).status, abi::cancelled);
+    }
+    f.runtime->release_compute_slots(1);
+    CHECK_EQ(run(f, id, job("sum", {}, -2)).status, abi::invalid_argument);
 }
 
 PAGLETS_TEST("jobs: a job runs a function of the module and answers with its output") {
@@ -103,7 +178,7 @@ PAGLETS_TEST("jobs: a job runs a function of the module and answers with its out
     CHECK(!trapped.error.empty());
 }
 
-PAGLETS_TEST("jobs: inline submission is bounded and extreme requested duration is capped") {
+PAGLETS_TEST("jobs: inline submission is bounded and extreme requested duration cannot overflow") {
     Fixture f;
     const auto id = f.create("jobs.wasm");
     CHECK_EQ(value_of<std::int32_t>(f.call(id, "oversized").payload), abi::too_large);
@@ -141,6 +216,30 @@ PAGLETS_TEST("jobs: the paglet keeps handling messages while its job runs") {
     CHECK_EQ(o.status, 0);
     CHECK(o.elapsed_ms >= 1400);
     CHECK(value_of<std::int64_t>(o.output) > 0);
+}
+
+PAGLETS_TEST("jobs: compute and service work share the Task control lifecycle") {
+    Fixture f;
+    const auto id = f.create("jobs.wasm");
+    struct Status { std::string state; bool done = false; std::int32_t error = 0; std::int64_t completed = 0; };
+    auto status = [&] {
+        Status s;
+        REQUIRE(paglets::wire::from_msgpack(f.call(id, "task_status").payload, s));
+        return s;
+    };
+    auto pending = f.runtime->request(id, "run", body(job("spin", body(std::int64_t{60000}))), 60s);
+    REQUIRE(eventually([&] { return status().state == "running"; }));
+    CHECK_EQ(value_of<std::int32_t>(f.call(id, "task_cancel").payload), 0);
+    CHECK_EQ(outcome(pending.get()).status, abi::cancelled);
+    CHECK(status().done);
+    CHECK(status().state == "cancelled");
+    CHECK_EQ(status().error, abi::cancelled);
+    CHECK_EQ(value_of<std::int32_t>(f.call(id, "task_cancel").payload), 0);
+    CHECK_EQ(run(f, id, job("sum", Bytes{1, 2, 3})).status, 0);
+    CHECK(status().state == "completed");
+    CHECK(status().done);
+    CHECK_EQ(run(f, id, job("trap")).status, abi::failed);
+    CHECK(status().state == "failed");
 }
 
 PAGLETS_TEST("jobs: cancel, wall time and code that ignores cancellation") {
@@ -371,7 +470,7 @@ PAGLETS_TEST("jobs: modules compiled ahead of time run faster, with the same res
     CHECK(pages[0] > 0 && pages[0] < 256);
     CHECK_EQ(pages[1], pages[0]);
     CHECK_EQ(pages[2], 16384);
-    CHECK_EQ(pages[3], 1);
+    CHECK_EQ(pages[3], 0);  // no implicit 1 GB ceiling in AOT either
     CHECK_EQ(pages[4], 1);
     report("jobs", "mix, 30 million rounds, interpreter", interpreted.elapsed_ms, "ms");
     report("jobs", "mix, 30 million rounds, ahead-of-time compiled", compiled.elapsed_ms, "ms");
@@ -558,6 +657,8 @@ PAGLETS_TEST("jobs: the mesh policy caps a job's wall time or refuses jobs") {
     m.net.settle([] { return false; }, 20);
     CHECK_EQ(run_in(m.net, *m.a, m.paglet, job("spin", body(std::int64_t{60000}))).status, abi::timeout);
     CHECK_EQ(run_in(m.net, *m.a, m.paglet, on(job("spin", body(std::int64_t{60000})), {"b"})).status, abi::timeout);
+    CHECK_EQ(run_in(m.net, *m.a, m.paglet, job("spin", body(std::int64_t{60000}), -1)).status, abi::timeout);
+    CHECK_EQ(run_in(m.net, *m.a, m.paglet, on(job("spin", body(std::int64_t{60000}), -1), {"b"})).status, abi::timeout);
     m.net.admin_record("policy-rule", data::policy_rule({"no jobs", Decision::deny, "compute-jobs", {"submit"}, {},
                                                          std::nullopt, std::nullopt, 10}));
     REQUIRE(m.net.settle([&] { return m.net.converged(); }, 2000));

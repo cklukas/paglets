@@ -87,9 +87,28 @@ and `lease_cap`, normalized to 1 ms through 24 hours with cap at least base.
 Timing changes affect new grants and renewal extensions; an existing
 lease's original continuous deadline remains fixed.
 
+## Background file scans
+
+`files.scan_start`, `files.scan_next` and `files.scan_cancel` implement the
+framework's service-task protocol. Applications normally use
+`patterns::scan_files`, which returns a `tasks::TaskHandle` and drives the
+protocol, progress, backpressure, cancellation and deadlines automatically.
+The native filesystem traversal runs on a two-thread background pool;
+each batch is bounded, and a scan can take minutes while its paglet keeps
+answering messages. Scan ownership and directory authority are checked by
+the host, and ending a paglet cancels its scans. Cursors stay on the host
+and are not durable across restarts.
+
+`files.find` remains a one-reply compatibility operation, now also running
+in the background. It returns at most 10000 entries and 512 KB with a
+`truncated` flag. Its caller's request timeout still applies; use scan tasks
+for large or slow trees. See [Long-running agents and tasks](long-running-tasks.md)
+for the common API and lifecycle, and [Mesh File Finder](examples/file-finder.md)
+for a complete scan with bounded returned samples.
+
 ## Moving content between hosts
 
-A paglet moves as a memory image (default ceiling 256 MB), so it should avoid carrying
+A paglet moves as a memory image (within its declared/host allowance), so it should avoid carrying
 large data in its memory. Instead, it carries **artifact capabilities**: a
 capability names its content by SHA-256 and names the host that holds it,
 together with a token that this host made. The capability is a few bytes.

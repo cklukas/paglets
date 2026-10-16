@@ -23,9 +23,10 @@ Directory: [`cpp/examples/finder/`](https://github.com/cklukas/paglets/tree/cpp/
   capability, and the mesh policy decides (see
   [Policy](../hosts-and-meshes.md#policy)). The finder asks for `read` on
   the root.
-- **`files.find`.** With the directory capability lent for one request,
-  the `files` system paglet finds the files that match a pattern, such as
-  `**/*.csv`, and returns their paths, sizes and modification times.
+- **Background file tasks.** With a directory capability,
+  `patterns::scan_files` returns bounded batches of matches, such as
+  `**/*.csv`, with paths, sizes and modification times. Traversal runs in
+  the background, reports progress through nonmatches, and can be cancelled.
 - **The work goes to the data.** Each host searches its own root. Only the
   results travel, never the files.
 
@@ -52,14 +53,21 @@ Source: [`cpp/examples/finder/finder.cpp`](https://github.com/cklukas/paglets/bl
 
 ```cpp
 void start(const Search& s, Message& m) {
-    if (s.root.empty()) {
-        (void)m.reply(Started{false, "no root", 0});
+    if (s.root.empty() || s.timeout_ms <= 0 || s.max_results < 0 || s.max_results > 1000 || !fan_.finished() || starting_) {
+        (void)m.reply(Started{false, "invalid search or a search is already running", 0});
         return;
     }
     findings_ = Findings{};
+    starting_ = true;
     auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
     auto go = [this, s, reply](std::vector<std::string> hosts) {
-        const auto sent = fan_.start(hosts, paglets::encode(s), s.timeout_ms);
+        starting_ = false;
+        if (findings_.cancelled) {
+            findings_.finished = true;
+            (void)paglets::reply_to(*reply, Started{false, "cancelled", 0});
+            return;
+        }
+        const auto sent = fan_.start(hosts, paglets::encode(s), s.timeout_ms, "finder.cancel");
         findings_.finished = fan_.finished();
         (void)paglets::reply_to(*reply, Started{sent > 0, sent > 0 ? "" : "no clone went out",
                                                 static_cast<std::int64_t>(hosts.size())});
@@ -105,38 +113,32 @@ void on_move_failed(const paglets::abi::MoveFailed& f) override {
 ```
 <!-- /snippet -->
 
-On its host, the clone asks `grants` for the root with `read`, then calls
-`files.find` with the directory capability lent to `files` for that one
-request. It drops the capability, analyzes the answer, reports to the
-parent and disposes of itself two seconds later. An error at any step is
-reported to the parent instead:
+On its host, the clone asks `grants` for the root with `read`, then starts
+`patterns::scan_files`, a framework service task controlled by a
+`tasks::TaskHandle`. It analyzes bounded batches as they arrive, sends
+progress counters, and reports its final summary before disposing itself.
+An error returns the partial summary with a reason:
 
 <!-- snippet: cpp/examples/finder/finder.cpp#search -->
 Source: [`cpp/examples/finder/finder.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/finder/finder.cpp)
 
 ```cpp
 void search_here(const Search& q) {
+    params_ = q;
+    if (auto me = paglets::self_info()) clone_id_ = me->id;
     pt::granted_dir(q.root, "", {"read"}, "mesh file finder", [this, q](paglets::Result<paglets::Capability> dir) {
-        if (!dir) return pt::report_error(parent_, pt::error_text("files of " + q.root, dir.error()));
-        auto cap = std::make_shared<paglets::Capability>(*dir);
-        pt::endpoint("files", [this, q, cap](paglets::Result<paglets::Endpoint> files) {
-            if (!files) return pt::report_error(parent_, pt::error_text("files", files.error()));
-            svc::files::Client client{*files};
-            svc::files::FindRequest f;
-            f.pattern = q.pattern;
-            if (q.min_size > 0) f.min_size = static_cast<std::uint64_t>(q.min_size);
-            f.limit = 100'000;
-            auto sent = client.find(
-                f,
-                [this, q, cap](paglets::Result<svc::files::FindReply> r, Message&) {
-                    (void)cap->drop();
-                    if (!r) return pt::report_error(parent_, pt::error_text("find", r.error()));
-                    pt::report(parent_, paglets::encode(analyze(q, *r)));
-                    (void)paglets::after_raw(2000, "done", {});
-                    router().on("done", [](Message&) { (void)paglets::dispose(); });
-                },
-                pt::lending(*cap));
-            if (!sent) pt::report_error(parent_, pt::error_text("find", sent.error()));
+        if (!dir) return finish(std::unexpected(dir.error()));
+        dir_ = *dir;
+        if (cancel_requested_) return finish(std::unexpected(paglets::abi::cancelled));
+        pt::endpoint("files", [this, q](paglets::Result<paglets::Endpoint> files) {
+            if (!files) return finish(std::unexpected(files.error()));
+            if (cancel_requested_) return finish(std::unexpected(paglets::abi::cancelled));
+            svc::files::FindRequest request;
+            request.pattern = q.pattern;
+            if (q.min_size > 0) request.min_size = static_cast<std::uint64_t>(q.min_size);
+            scan_ = pt::scan_files(*files, dir_, request,
+                [this](const svc::files::ScanBatch& batch) { accumulate(batch); },
+                [this](paglets::Result<void> result) { finish(result); }, q.timeout_ms);
         });
     });
 }
@@ -146,12 +148,13 @@ void search_here(const Search& q) {
 The analysis counts only files, not directories. It keeps the first
 `max_results` files by path, the five largest files, and the number and
 bytes of files per extension (lower case, `""` for files without one),
-largest first. `truncated` is set when `files.find` stopped at its limit
-of 100 000 entries.
+largest first. Totals cover the whole successful scan. `truncated` marks
+bounded returned path samples; extension overflow is combined into one
+group and marked with `extensions_truncated`.
 
 The parent handles each report as it arrives. It adds the host's
 findings to the totals; a child that failed, or whose report does not
-decode, gets a section with the error only:
+decode, gets a section with the error and any progress already received:
 
 <!-- snippet: cpp/examples/finder/finder.cpp#collect -->
 Source: [`cpp/examples/finder/finder.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/finder/finder.cpp)
@@ -162,7 +165,15 @@ fan_.attach(router(), [this](const pt::FanOut::Child& c) {
     if (!c.ok || !paglets::decode(c.result, h)) {
         h = HostFindings{};
         h.error = c.error.empty() ? "no report" : c.error;
+        h.cancelled = findings_.cancelled;
+        const auto progress = std::ranges::find(findings_.progress, c.clone, &Progress::clone);
+        if (progress != findings_.progress.end()) {
+            h.visited = progress->visited;
+            h.files = progress->files;
+            h.bytes = progress->bytes;
+        }
     }
+    std::erase_if(findings_.progress, [&](const auto& p) { return p.clone == c.clone; });
     h.host = c.host;
     h.host_name = c.host_name.empty() ? c.destination : c.host_name;
     findings_.files += h.files;
@@ -201,7 +212,7 @@ struct Search {
     std::vector<std::string> hosts;
     std::int64_t min_size = 0;
     std::int64_t max_results = 100;  // files listed per host
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;  // whole search, including clone travel
 };
 
 struct Started {
@@ -231,13 +242,25 @@ struct HostFindings {
     std::int64_t files = 0;
     std::int64_t bytes = 0;
     bool truncated = false;
+    std::uint64_t visited = 0;
+    bool cancelled = false;
+    bool extensions_truncated = false;
     std::vector<Found> found;    // the first max_results, by path
     std::vector<Found> largest;  // the five largest
     std::vector<ExtensionTotal> extensions;
 };
 
+struct Progress {
+    std::string clone;
+    std::uint64_t visited = 0;
+    std::int64_t files = 0;
+    std::int64_t bytes = 0;
+};
+
 struct Findings {
     bool finished = false;
+    bool cancelled = false;
+    std::vector<Progress> progress;  // latest counters from unfinished clones
     std::vector<HostFindings> hosts;
     std::int64_t files = 0;
     std::int64_t bytes = 0;
@@ -272,8 +295,37 @@ $H remote call $R $ID findings
 ```
 
 Fields left out of the body keep their defaults: every host, no minimum
-size, 100 files listed per host, and a deadline of 20 s. Call `findings`
-until `finished` is true.
+size, 100 files listed per host, and an overall deadline of 30 minutes.
+Set `timeout_ms` explicitly for longer searches. Call `findings` while the
+search runs: `progress` holds each unfinished clone's latest visited-entry,
+matching-file and byte counters. Completed hosts include their final
+`visited` count. Progress is sent at most four times per second, plus the
+final update; an unknown tree size has no meaningful percentage estimate.
+
+Send `cancel` to finish collection immediately and ask unfinished clones
+to cancel their task handles. Cancellation is best effort across the mesh;
+each clone also enforces its own scan deadline, and ending a clone cancels
+its native scan. The parent reports `cancelled` and retains completed
+results and the latest received counters for unfinished hosts. A deadline
+also requests cancellation. Starting a second search while one is active
+is refused; the parent can be reused after completion or cancellation.
+
+Totals and extension counts cover all files visited by a successful scan,
+including beyond the old 10000-entry result limit. `truncated` now describes
+the returned path samples, not an incomplete scan: samples are limited by
+`max_results` (0 to 1000) and an 8 KB path budget. The largest-file list has
+at most five entries and an 8 KB path budget. Extension groups use at most
+128 named groups and a 4 KB budget, with overflow combined into
+`(other extensions)` and `extensions_truncated` set. These bounds keep
+results and agent memory small while totals remain complete. An error or
+cancellation makes that host's counts partial.
+
+An operator may enable a handler watchdog, such as five seconds; it does not limit scan duration. Every batch
+is handled in a fresh short callback; filesystem work happens on the host's
+background pool. The helper supplies progress exchanges, cancellation and
+cleanup through `tasks::TaskHandle`. See
+[Long-running agents and tasks](../long-running-tasks.md) for why these
+budgets differ and how to use the same lifecycle for CPU work.
 
 ## Test results
 

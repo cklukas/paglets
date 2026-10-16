@@ -28,9 +28,11 @@ Directory: [`cpp/examples/benchmark/`](https://github.com/cklukas/paglets/tree/c
   `storage` system paglet: a key-value store of each paglet, which the host
   keeps in the paglet's scratch directory, within a quota of 16 MB. The
   paglet opens no files.
-- **Work in steps.** A host gives every handler call at most 5 s. The
-  benchmark runs one test per handler call and schedules the next test
-  with a timer, so a test may take up to that budget.
+- **Work in steps.** An optional handler watchdog applies to each handler, not
+  the full measurement. CPU and memory measurements run in slices of at
+  most 200 ms, scheduled with timers; longer `budget_ms` values extend the
+  measurement across many handlers. Set the overall `timeout_ms` to cover
+  all three measurements, slot queuing, disk work and clone travel.
 
 ## Why it is useful
 
@@ -112,12 +114,12 @@ void run(const std::string& lease) {
 ```
 <!-- /snippet -->
 
-The CPU and memory tests run one per handler call. Each repeats a short
+The CPU and memory tests run in handler slices of at most 200 ms. Each repeats a short
 loop until `budget_ms` has passed and counts the operations: three
 xor-shifts, an `and` and an add per integer step; the iteration
 `z = z^2 + c` of a bounded orbit for floating point; `memcpy` between two
-buffers of `memory_mb` MB for memory (4 MB by default, at most 6 MB, so
-both fit the paglet's default memory allowance). The results go into `check`, so the
+buffers of `memory_mb` MB for memory (4 MB by default, at most 6 MB to keep
+this teaching benchmark's footprint small). The results go into `check`, so the
 compiler cannot drop the loops. Then the clone asks `mesh-info` about its
 host (name, operating system, architecture, CPUs):
 
@@ -126,15 +128,36 @@ Source: [`cpp/examples/benchmark/benchmark.cpp`](https://github.com/cklukas/pagl
 
 ```cpp
 void next_step() {
-    if (!paglets::after_raw(0, "bench.step", {})) step();
+    if (!paglets::after_raw(0, "bench.step", {})) {
+        result_.error = "could not schedule the next benchmark step";
+        finish();
+    }
 }
 
 void step() {
-    switch (step_++) {
-        case 0: cpu_int(); return next_step();
-        case 1: cpu_float(); return next_step();
-        case 2: memory(); return next_step();
-        default: break;
+    if (step_ < 3) {
+        // A long measurement consists of many short handler calls.
+        const auto left = std::max<std::int64_t>(1, bench_.budget_ms - sampled_ms_);
+        slice_ms_ = std::min<std::int64_t>(200, left);
+        double rate = 0;
+        switch (step_) {
+            case 0: cpu_int(); rate = result_.int_mops; break;
+            case 1: cpu_float(); rate = result_.float_mflops; break;
+            case 2: memory(); rate = result_.memory_mbs; break;
+        }
+        measured_units_ += rate * slice_seconds_;
+        measured_seconds_ += slice_seconds_;
+        sampled_ms_ += std::max<std::int64_t>(1, static_cast<std::int64_t>(slice_seconds_ * 1000));
+        if (sampled_ms_ >= bench_.budget_ms) {
+            const double combined = measured_units_ / measured_seconds_;
+            if (step_ == 0) result_.int_mops = combined;
+            if (step_ == 1) result_.float_mflops = combined;
+            if (step_ == 2) result_.memory_mbs = combined;
+            ++step_;
+            sampled_ms_ = 0;
+            measured_units_ = measured_seconds_ = 0;
+        }
+        return next_step();
     }
     pt::here([this](paglets::Result<svc::mesh_info::Snapshot> s) {
         if (s) {
@@ -148,7 +171,7 @@ void step() {
 }
 
 void cpu_int() {
-    const std::int64_t budget = bench_.budget_ms * 1'000'000;
+    const std::int64_t budget = slice_ms_ * 1'000'000;
     std::uint64_t x = 88172645463325252ull, acc = 0, iterations = 0;
     const auto t = mono_ns();
     while (mono_ns() - t < budget) {
@@ -160,7 +183,8 @@ void cpu_int() {
         }
         iterations += 10'000;
     }
-    result_.int_mops = static_cast<double>(iterations) * 5 / seconds_since(t) / 1e6;  // 3 xor-shifts, an and, an add
+    slice_seconds_ = seconds_since(t);
+    result_.int_mops = static_cast<double>(iterations) * 5 / slice_seconds_ / 1e6;  // 3 xor-shifts, an and, an add
     result_.check ^= acc;
 }
 ```
@@ -320,9 +344,10 @@ $H remote call $R $ID ranking
 An empty `hosts` measures every host of the mesh; otherwise name the hosts
 by name or key ID. `ranking` answers with `state` `running` until every
 clone has reported or the `timeout_ms` has passed, then `done`, with the
-hosts fastest first and the clones that failed under `errors`. Keep
-`budget_ms` well below 5000 (each test runs in one handler call), and
-`disk_mb` below 16 (the storage quota of a paglet). `remote slots` shows
+hosts fastest first and the clones that failed under `errors`. CPU and memory
+measurements split `budget_ms` across slices; allow enough `timeout_ms` for
+all measurements and collection. Keep `disk_mb` below 16 (the storage quota
+of a paglet). `remote slots` shows
 the leases while the clones run.
 
 > [!NOTE]

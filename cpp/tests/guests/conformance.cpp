@@ -307,6 +307,7 @@ public:
         });
         r.on("trap", [](Message&) { __builtin_trap(); });
         r.on("spin", [this](Message&) {
+            paglets::log("spin entered");
             volatile std::uint64_t n = 0;
             for (;;) n = n + 1;
         });
@@ -314,6 +315,7 @@ public:
         // Keeps the paglet busy so that later messages queue up.
         r.on<Cmd>("busy", [this](const Cmd& c, Message& m) {
             note("msg:busy");
+            paglets::log("busy entered");
             const std::int64_t until = paglets::now_ns(abi::Clock::monotonic) + c.ms * 1'000'000;
             while (paglets::now_ns(abi::Clock::monotonic) < until) {
             }

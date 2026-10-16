@@ -12,6 +12,13 @@ one and send the new matches home.
 
 Directory: [`cpp/examples/log_scout/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/log_scout)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **Range reads.** The `files` system paglet reads a file from an offset.
@@ -51,7 +58,7 @@ for, the time window and optionally the hosts. Without hosts, it asks
 `mesh-info` for every host of the mesh. Then it sends a scout to each
 host.
 
-A scout asks `grants` for the root, finds the log files (`files.find`)
+A scout asks `grants` for the root, finds the log files (the framework background scan-task helper)
 and goes through them one by one. For each file, it decides where to
 start reading. On the first scan, a file not written within the window
 is skipped, and its end is remembered as the read position. A file the
@@ -249,7 +256,7 @@ struct Scout {
     std::int64_t max_excerpts = 5;  // per host and pattern
     bool live = false;
     std::int64_t interval_ms = 60'000;
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

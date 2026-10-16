@@ -108,12 +108,12 @@ configuration structures.
 | Paglets of one owner on a host | 10 000 | `runtime::Config::owner_paglet_limit` |
 | Children and clones per handler call | 16 | `runtime::Config::spawn_limit_per_call` |
 | Pins on one paglet | 64 | `runtime::Config::pin_limit` |
-| Time per handler call | 5 s; a handler that runs longer is stopped and its paglet ends | `runtime::Config::handler_budget` |
+| Time per handler call | Unknown/unlimited; optional watchdog per uninterrupted invocation ([guide](long-running-tasks.md)) | `serve --handler-ms N`, `runtime::Config::handler_budget` |
 | Messages in a paglet's mailbox | 1024 | `runtime::Config::mailbox_limit` |
 | Serialized ready notifications captured by one move | 64 MB | `runtime::Config::move_ready_bytes` |
 | Capabilities per paglet | 1024 | `runtime::Config::cap_limit` |
 | Pending timers per paglet | 64 | `runtime::Config::timer_limit` |
-| Linear memory per paglet | 256 MB (4096 pages) | `serve --memory-mb N`, or `wasm::Limits::max_memory_pages` |
+| Linear memory per paglet | Unknown; no operator cap, within Wasm32's 4 GB address space | `serve --memory-mb N`, or `wasm::Limits::max_memory_pages` |
 | Pages cached for later moves | 256 MB per host | `node::Node::set_page_cache_bytes` |
 | Message size | 1 MB | `abi::max_document_size` |
 | Storage per paglet | 16 MB | `services::ServicesConfig::storage_quota` |
@@ -136,8 +136,8 @@ For example, add `--memory-mb 256` to a host's `serve` command to allow up
 to 256 MB per paglet. This is a ceiling, not a reservation of that much
 physical RAM for every paglet. The heap, static data and C/C++ linear-memory
 stack share it, so usable application memory is smaller; host and worker
-overhead is additional. The default does not automatically scale with host
-RAM. A destination host must allow enough memory to restore a moving
+overhead is additional. Without an operator ceiling, memory grows as
+needed within Wasm32's address space; available physical RAM can still run out. A destination host must allow enough memory to restore a moving
 paglet's image, so configure every intended destination accordingly.
 
 A move captures already queued replies, timer deliveries and host reports
@@ -146,7 +146,7 @@ serialized state; it does not allocate that memory for every paglet. The
 encoded move offer must also fit `net::TransportConfig::max_frame`.
 Exceeding either limit reports `on_move_failed` on the source host and
 leaves the queued deliveries there. Queued notifications require travel-state
-version 2; unresolved requests use version 3, which also carries their budget
+version 2; finite unresolved requests use version 3 (unlimited job continuations use version 4), which also carries their budget
 capture time. Arrival subtracts elapsed transit time before arming local
 monotonic deadlines, including the wait for commit. Across hosts the capture
 time uses Unix milliseconds, like timer and capability expiry times. The
@@ -165,9 +165,12 @@ paglet heap; see [Memory and image size](writing-paglets.md#memory-and-image-siz
 The page cache is a separate host-wide budget for reusing previously seen
 pages across moves.
 
-Compute jobs have a separate default ceiling and maximum of 1 GB per job,
-configured through `runtime::Config`; `serve --memory-mb` does not change
-them. See [Compute jobs](compute-jobs.md).
+Compute jobs also default to unknown resource requirements, with no
+operator-imposed duration or memory ceiling. `--job-max-memory-mb`,
+`--job-max-ms`, `--require-job-resources` and the corresponding
+`runtime::Config` fields opt into policy. `serve --memory-mb` applies to
+paglets. Explicit memory declarations that exceed a host ceiling are rejected
+before execution. See [resource policy](long-running-tasks.md#unknown-requirements-and-optional-host-policy).
 
 The runtime's configuration is in
 `cpp/host/include/paglets/runtime/runtime.hpp`, the services' in
@@ -197,7 +200,7 @@ error or a reply status, and on the command line as `error: <name>`.
 | -11 | `internal` | an error of the host |
 | -12 | `timeout` | reply status: no reply within the request's timeout |
 | -13 | `unknown_message` | reply status: the receiver has no handler for the message |
-| -14 | `failed` | reply status: the receiver trapped or its handler exceeded its elapsed time budget (5 s by default); the receiver has ended, and the other requests waiting for its replies fail too |
+| -14 | `failed` | reply status: the receiver trapped or its handler exceeded its elapsed time budget (when the operator enables a watchdog); the receiver has ended, and the other requests waiting for its replies fail too |
 | -15 | `gone` | reply status: the receiver was disposed of, or did not answer the request |
 | -16 | `revoked` | the capability, one it was derived from, or its grant was revoked |
 | -17 | `pinned` | `dispatch` while the paglet is pinned to its host |
@@ -339,8 +342,8 @@ shows `reflection: no`.
 
 Guard-page bounds checks reserve 8 GB of virtual address space per Wasm
 instance. On a 39-bit kernel, a process can hold only about 60 instances.
-This reservation is separate from physical RAM and the configured 256 MB
-paglet / 1 GB compute-job linear-memory ceilings.
+This reservation is separate from physical RAM and the optional
+paglet and compute-job memory policies. The Wasm32 address space is 4 GB per instance.
 
 On Linux ARM64, a hardware-check build probes a 1 TB virtual reservation
 once when WAMR starts, in the host and each worker. It immediately releases

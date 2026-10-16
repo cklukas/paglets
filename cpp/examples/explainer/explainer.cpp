@@ -224,9 +224,9 @@ private:
                         status_.groups[i].explanation = t->text;
                         status_.model = t->model;
                         explain(i + 1);
-                    });
+                    }, paglets::patterns::long_request());
                     if (!asked) fail(pt::error_text("generate", asked.error()));
-                });
+                }, paglets::patterns::long_request());
             if (!sent) fail(pt::error_text("classify", sent.error()));
         });
     }

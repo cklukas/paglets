@@ -49,7 +49,7 @@ void fill_random(std::span<std::uint8_t> out);
 
 struct Limits {
     std::uint32_t stack_size = 64 * 1024;  // Wasm operand/call stack of the interpreter
-    std::uint32_t max_memory_pages = 4096;  // 256 MB ceiling; initial memory comes from the module
+    std::uint32_t max_memory_pages = 65536;  // wasm32 address space; no operator cap by default
 };
 
 class Module {

@@ -18,7 +18,7 @@ struct Search {
     std::string pattern = "**";
     std::vector<std::string> hosts;
     std::int64_t min_size = 1;
-    std::int64_t timeout_ms = 30'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

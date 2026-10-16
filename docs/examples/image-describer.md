@@ -7,6 +7,13 @@ and writes a JSON catalogue of all images on another host.
 
 Directory: [`cpp/examples/describer/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/describer)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **Offer requirements.** Not every `ai` host can describe images. A host
@@ -194,7 +201,7 @@ struct Start {
     Output output;
     std::string model;  // empty: the AI host's default
     std::int64_t max_images = 50;
-    // The images travel in the paglet's memory (default ceiling 256 MB), and each
+    // The images travel in the paglet's memory (within its module/host allowance), and each
     // goes to the `ai` system paglet in one request (by default at most
     // 256 KB of input).
     std::int64_t max_image_bytes = 256 * 1024;
@@ -270,7 +277,7 @@ $H remote call $R $ID start '{"sources": [{"host": "photos", "root": "pics", "pa
 ```
 
 > [!NOTE]
-> The images travel in the paglet's memory, whose default ceiling is 256 MB,
+> The images travel in the paglet's memory, which has no operator ceiling by default within Wasm32's address space,
 > and each image goes to the `ai` system paglet in one request. That
 > system paglet takes at most 256 KB of input per request by default
 > (`AiConfig::max_input_bytes`), and a message holds at most 1 MB. The

@@ -8,6 +8,13 @@ lists groups of identical files and the space taken by the extra copies.
 
 Directory: [`cpp/examples/dupes/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/dupes)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **Coordination in several phases.** The paglet at home runs two rounds
@@ -40,7 +47,7 @@ hosts. Without hosts, it asks `mesh-info` for every host of the mesh. It
 then sends a clone to every host with `Phase` 1.
 
 A clone asks `grants` for the root and finds the matching files of at
-least `min_size` bytes (`files.find`). In phase 1, it reports every file
+least `min_size` bytes (the framework background scan-task helper). In phase 1, it reports every file
 with its path and size. In phase 2, it keeps only the files whose size is
 among the sizes it was given, and hashes them:
 
@@ -48,15 +55,14 @@ among the sizes it was given, and hashes them:
 Source: [`cpp/examples/dupes/dupes.cpp`](https://github.com/cklukas/paglets/blob/cpp/cpp/examples/dupes/dupes.cpp)
 
 ```cpp
-svc::files::Client client{files_};
 svc::files::FindRequest q;
 q.pattern = phase_.search.pattern;
 q.min_size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, phase_.search.min_size));
-q.limit = 100'000;
-auto sent = client.find(
-    q,
-    [this](paglets::Result<svc::files::FindReply> r, Message&) {
+q.limit = 10'000;
+(void)paglets::patterns::find_files(files_, *dir_, q,
+        [this](paglets::Result<svc::files::FindReply> r) {
         if (!r) return done(pt::error_text("find", r.error()));
+            if (r->truncated) return done("file list truncated; narrow the search or use streaming scan_files");
         const std::set<std::int64_t> wanted(phase_.sizes.begin(), phase_.sizes.end());
         for (const auto& e : r->entries) {
             if (e.type != svc::files::EntryType::file) continue;
@@ -66,9 +72,7 @@ auto sent = client.find(
         }
         if (phase_.phase == 1) return done({});
         hash(0);
-    },
-    pt::lending(*dir_));
-if (!sent) done(pt::error_text("find", sent.error()));
+    });
 ```
 <!-- /snippet -->
 
@@ -184,7 +188,7 @@ struct Search {
     std::string pattern = "**";
     std::vector<std::string> hosts;
     std::int64_t min_size = 1;
-    std::int64_t timeout_ms = 30'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

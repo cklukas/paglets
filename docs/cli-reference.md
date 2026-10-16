@@ -284,7 +284,12 @@ required. The host key must be unencrypted.
 | `--no-aot` | | run compute jobs in the interpreter |
 | `--slots N` | | compute slots this host offers (`compute-slots`); a positive number |
 | `--threads N` | 2 | scheduler lanes and worker processes; 0 uses one lane |
-| `--memory-mb N` | 256 | linear-memory ceiling per paglet, 1 to 4096 MB; not a reservation of physical RAM. Compute jobs use separate limits (default 1 GB) |
+| `--memory-mb N` | 0, none | opt into a per-paglet memory ceiling, 1 to 4096 MB; 0 leaves requirements unknown, within Wasm32's 4 GB address space |
+| `--handler-ms N` | -1, off | optional watchdog per handler invocation; positive elapsed milliseconds |
+| `--job-max-ms N` | -1, none | optional elapsed-time ceiling for compute jobs; positive milliseconds |
+| `--job-max-memory-mb N` | 0, none | optional job memory ceiling; explicit declarations that exceed it are rejected before execution |
+| `--require-job-resources` | off | require finite positive execution-time and memory declarations for jobs |
+| `--require-paglet-memory` | off | require a Wasm memory maximum declaration; set it with `paglets_add_module(... MEMORY_MB N)` |
 | `--in-process` | | run paglets inside the host process |
 | `--no-sandbox` | | worker processes without the operating-system sandbox |
 | `--stop-file FILE` | | stop when this file appears |

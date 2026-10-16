@@ -61,6 +61,33 @@ struct FindReply {
     bool truncated = false;  // more matches than `limit`
 };
 
+// A pull-driven background scan. Each scan_next does a bounded amount of
+// work and returns progress, including when there were no matches. Unlike
+// find, scans visit the whole tree; query.limit is not used.
+struct ScanRequest {
+    FindRequest query;
+    std::int64_t timeout_ms = 0;  // unknown/unlimited; positive: caller's overall deadline
+};
+
+struct ScanStarted {
+    std::string id;
+};
+
+struct ScanId {
+    std::string id;
+};
+
+struct ScanBatch {
+    std::vector<Entry> entries;
+    std::uint64_t completed = 0;  // directory entries visited, including nonmatches
+    std::uint64_t matched = 0;
+    bool finished = false;
+};
+
+struct ScanCancelled {
+    bool cancelled = false;
+};
+
 // At most 4 MB per request; larger files are read in ranges.
 struct ReadRequest {
     std::string path;
@@ -144,6 +171,9 @@ struct Contract {
     ListReply list(const ListRequest&);
     Entry stat(const StatRequest&);
     FindReply find(const FindRequest&);
+    ScanStarted scan_start(const ScanRequest&);
+    ScanBatch scan_next(const ScanId&);
+    ScanCancelled scan_cancel(const ScanId&);
     ReadReply read(const ReadRequest&);
     Entry write(const WriteRequest&);
     Entry mkdir(const MkdirRequest&);

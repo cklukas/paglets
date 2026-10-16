@@ -18,6 +18,7 @@
 #pragma once
 
 #include <paglets/patterns/services.hpp>
+#include <paglets/tasks.hpp>
 #include <paglets/services/files.gen.hpp>
 #include <paglets/services/grants.gen.hpp>
 
@@ -33,6 +34,51 @@ struct CarriedFile {
     std::string name;  // the path it was read from, below the directory
     Bytes data;
 };
+
+// File scanning is a thin adapter over the framework's service-task API.
+// The task handles progress delivery, cancellation, deadlines and cleanup.
+inline tasks::TaskHandle scan_files(Endpoint files, Capability dir, services::files::FindRequest query,
+                                             std::function<void(const services::files::ScanBatch&)> batch,
+                                             std::function<void(Result<void>)> done,
+                                             std::int64_t timeout_ms = 0) {
+    tasks::Options options;
+    options.timeout_ms = timeout_ms;
+    options.start.lend.push_back(dir);
+    return tasks::start<services::files::ScanBatch>(files, "scan",
+        services::files::ScanRequest{std::move(query), timeout_ms}, std::move(batch), std::move(done), std::move(options));
+}
+
+// Convenience for examples that need a small complete list. Accumulation is
+// bounded by query.limit (at most 10000) and 512 KB, with explicit truncation.
+inline tasks::TaskHandle find_files(Endpoint files, Capability dir, services::files::FindRequest query,
+                                             std::function<void(Result<services::files::FindReply>)> done,
+                                             std::int64_t timeout_ms = 0) {
+    struct State {
+        services::files::FindReply result;
+        std::size_t bytes = 0;
+        std::weak_ptr<tasks::detail::Control> scan;
+    };
+    auto state = std::make_shared<State>();
+    const auto limit = std::clamp(query.limit, 1u, 10000u);
+    auto scan = scan_files(files, dir, std::move(query), [state, limit](const services::files::ScanBatch& b) {
+        for (const auto& e : b.entries) {
+            const auto bytes = e.path.size() + e.name.size() + 128;
+            if (state->result.entries.size() >= limit || state->bytes + bytes > 512 * 1024) {
+                state->result.truncated = true;
+                if (auto s = state->scan.lock()) (void)s->cancel();
+                return;
+            }
+            state->bytes += bytes;
+            state->result.entries.push_back(e);
+        }
+    }, [state, done = std::move(done)](Result<void> r) {
+        if (!r && !state->result.truncated) return done(std::unexpected(r.error()));
+        std::ranges::sort(state->result.entries, {}, &services::files::Entry::path);
+        done(std::move(state->result));
+    }, timeout_ms);
+    state->scan = scan.weak();
+    return scan;
+}
 
 // A `dir` capability for `root`/`path` with `rights` (read, write, create,
 // delete), granted on this host by the mesh policy.

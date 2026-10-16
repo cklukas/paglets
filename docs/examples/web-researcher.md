@@ -115,7 +115,7 @@ void summarize(std::size_t i) {
                                 [this, i](paglets::Result<svc::ai::TextReply> r, Message&) {
                                     report_.sources[i].summary = r ? r->text : pt::error_text("(summarize", r.error()) + ")";
                                     summarize(i + 1);
-                                });
+                                }, paglets::patterns::long_request());
         if (!sent) fail(pt::error_text("summarize", sent.error()));
     });
 }

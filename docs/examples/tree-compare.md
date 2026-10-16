@@ -8,6 +8,13 @@ hosts and the files that differ in size or in content.
 
 Directory: [`cpp/examples/tree_compare/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/tree_compare)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **Parallel scans with a fan-out of clones.** The paglet clones itself
@@ -88,7 +95,7 @@ void start(const Compare& q, Message& m) {
 At least two hosts are needed. Each clone gets the `Compare` request as
 its arguments and the endpoint of the paglet at home. On its host, it
 asks `grants` for the directory with `read`, finds the matching files
-(`files.find`, at most 100 000 entries), and keeps the path, size and
+(the framework background scan-task helper, at most 10000 entries and 512 KB), and keeps the path, size and
 modification time of each. With `hashes`, it then asks the host to hash
 one file after another (`files.hash`). Files larger than `max_file_bytes`
 (64 GB by default) are not hashed. When it is done, it drops the
@@ -104,13 +111,11 @@ void scan_here(const Compare& q) {
         dir_ = std::make_shared<paglets::Capability>(*dir);
         pt::endpoint("files", [this, q](paglets::Result<paglets::Endpoint> files) {
             if (!files) return finish_error(pt::error_text("files", files.error()));
-            svc::files::Client client{*files};
             svc::files::FindRequest f;
             f.pattern = q.pattern;
-            f.limit = 100'000;
-            auto sent = client.find(
-                f,
-                [this, q](paglets::Result<svc::files::FindReply> r, Message&) {
+            f.limit = 10'000;
+            (void)paglets::patterns::find_files(*files, *dir_, f,
+                [this, q](paglets::Result<svc::files::FindReply> r) {
                     if (!r) return finish_error(pt::error_text("find", r.error()));
                     tree_.truncated = r->truncated;
                     for (const auto& e : r->entries) {
@@ -120,9 +125,7 @@ void scan_here(const Compare& q) {
                     if (!q.hashes) return finish();
                     max_file_bytes_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, q.max_file_bytes));
                     hash_next(0);
-                },
-                pt::lending(*dir_));
-            if (!sent) finish_error(pt::error_text("find", sent.error()));
+                });
         });
     });
 }
@@ -141,7 +144,7 @@ void hash_next(std::size_t i) {
 
 > [!NOTE]
 > `files.hash` computes the SHA-256 on the host, so files of any size are
-> hashed without entering the clone's memory (256 MB ceiling by default). The content
+> hashed without entering the clone's memory. The content
 > does not travel; only the hash goes home.
 
 When every host has reported or timed out, the paglet at home groups the
@@ -185,7 +188,7 @@ for (const auto& [path, have] : by_path) {
 Without `hashes`, every hash is empty, so the comparison is by size only.
 The same holds for files above `max_file_bytes`. The report keeps at most
 1000 differences and sets `truncated` beyond that, or when a host found
-more files than `files.find` returned. Hosts that could not be scanned
+more files than the bounded list helper returned. Hosts that could not be scanned
 (no grant, no report in time) are listed in `errors` and take no part in
 the comparison.
 
@@ -215,7 +218,7 @@ struct Compare {
     std::string pattern = "**";
     bool hashes = false;
     std::int64_t max_file_bytes = 64LL * 1024 * 1024 * 1024;  // larger files are not hashed
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

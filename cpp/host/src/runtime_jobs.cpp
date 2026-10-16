@@ -4,6 +4,7 @@
 #include "runtime_jobs.hpp"
 
 #include "ipc.hpp"
+#include "job_budget.hpp"
 
 #include <paglets/msgpack.hpp>
 #include <paglets/sha256.hpp>
@@ -227,7 +228,7 @@ struct JobPool::Impl {
             cores_used += j.request.cores;
             j.running = true;
             j.started = Clock::now();
-            j.deadline = j.started + std::chrono::milliseconds(j.request.max_ms);
+            j.deadline = job_detail::deadline<Clock>(j.started, j.request.max_ms);
             j.thread = std::thread([this, id = j.id] { run(id); });
         }
     }
@@ -431,7 +432,7 @@ struct JobPool::Impl {
             const auto now = Clock::now();
             for (auto& [id, j] : jobs) {
                 if (!j->running) continue;
-                if (j->stop_status == 0 && now >= j->deadline) request_stop(*j, abi::timeout);
+                if (j->stop_status == 0 && j->request.max_ms != -1 && now >= j->deadline) request_stop(*j, abi::timeout);
                 // Code that does not check for termination (it must not
                 // happen, but a worker can be killed): after 3 s, the
                 // worker process goes.
@@ -474,6 +475,8 @@ struct JobPool::Impl {
             i.total = j.imports->total;
         }
         i.aot = j.aot;
+        i.max_ms = j.request.max_ms;
+        i.memory_pages = j.request.memory_pages;
         return i;
     }
 };
@@ -491,10 +494,11 @@ std::expected<std::uint64_t, std::int32_t> JobPool::submit(JobRequest request) {
     const std::size_t of_owner = std::ranges::count_if(
         impl_->jobs, [&](const auto& e) { return e.second->request.owner == request.owner; });
     if (of_owner >= impl_->settings.owner_limit) return std::unexpected(abi::quota);
-    if (request.max_ms <= 0) request.max_ms = impl_->settings.default_max_ms;
-    request.max_ms = std::min(request.max_ms, impl_->settings.cap_max_ms);
-    if (request.memory_pages == 0) request.memory_pages = impl_->settings.default_pages;
-    request.memory_pages = std::min(request.memory_pages, impl_->settings.max_pages);
+    request.max_ms = job_detail::budget(request.max_ms, impl_->settings.default_max_ms, impl_->settings.cap_max_ms);
+    if (request.max_ms < -1) return std::unexpected(abi::invalid_argument);
+    if (request.memory_pages == 0) request.memory_pages = impl_->settings.default_pages == 0 ? impl_->settings.max_pages : impl_->settings.default_pages;
+    if (request.memory_pages > 65536 || request.memory_pages == 0) return std::unexpected(abi::invalid_argument);
+    if (request.memory_pages > impl_->settings.max_pages) return std::unexpected(abi::quota);
     auto job = std::make_unique<Impl::Job>();
     job->id = impl_->next_id++;
     job->request = std::move(request);

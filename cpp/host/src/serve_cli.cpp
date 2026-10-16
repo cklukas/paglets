@@ -61,7 +61,12 @@ int usage() {
                  "starts with its peers as seeds and waits for its enrollment). Hosts find each other through\n"
                  "any enrolled host they can reach (--join), gossip and multicast beacons on the local network.\n"
                  "--no-listen: no inbound port (behind NAT); other hosts relay for this one.\n"
-                 "--memory-mb: linear-memory cap per paglet (1-4096 MB, default 256); separate from compute-job limits.\n"
+                 "--memory-mb: optional paglet memory cap (0: none, default; 1-4096 MB). Wasm32 supports at most 4 GB.\n"
+                 "--handler-ms: optional handler watchdog (-1: off, default; positive elapsed milliseconds).\n"
+                 "--job-max-ms: optional job duration cap (-1: none, default; positive elapsed milliseconds).\n"
+                 "--job-max-memory-mb: optional per-job memory cap (0: none, default; 1-4096 MB).\n"
+                 "--require-job-resources: reject jobs without finite time and memory declarations.\n"
+                 "--require-paglet-memory: reject paglets without a Wasm memory maximum declaration.\n"
                  "--slots: cores for compute work (leases and compute jobs; default: the CPUs). Job modules are\n"
                  "compiled for this CPU with paglets-wamrc next to this program (--aot-compiler: another one;\n"
                  "--no-aot: jobs run in the interpreter).\n"
@@ -85,7 +90,12 @@ struct Options {
     std::vector<std::string> sources;
     std::vector<std::string> joins;
     unsigned threads = 2;
-    unsigned memory_mb = 256;
+    unsigned memory_mb = 0;
+    unsigned job_memory_mb = 0;
+    std::int64_t handler_ms = -1;
+    std::int64_t job_max_ms = -1;
+    bool require_job_resources = false;
+    bool require_paglet_memory = false;
     bool in_process = false;
     bool no_sandbox = false;
     bool beacon = true;
@@ -165,8 +175,23 @@ std::optional<Options> parse(int argc, char** argv) {
         } else if (a == "--memory-mb") {
             const auto v = next();
             auto n = v ? decimal_integer<unsigned>(*v) : std::nullopt;
-            ok = n && *n >= 1 && *n <= 4096;
+            ok = n && *n <= 4096;
             if (ok) o.memory_mb = *n;
+        } else if (a == "--job-max-memory-mb") {
+            const auto v = next();
+            auto n = v ? decimal_integer<unsigned>(*v) : std::nullopt;
+            ok = n && *n <= 4096;
+            if (ok) o.job_memory_mb = *n;
+        } else if (a == "--handler-ms" || a == "--job-max-ms") {
+            const auto v = next();
+            auto n = v ? decimal_integer<std::int64_t>(*v) : std::nullopt;
+            ok = n && (*n == -1 || *n > 0);
+            if (ok && a == "--handler-ms") o.handler_ms = *n;
+            if (ok && a == "--job-max-ms") o.job_max_ms = *n;
+        } else if (a == "--require-job-resources") {
+            o.require_job_resources = true;
+        } else if (a == "--require-paglet-memory") {
+            o.require_paglet_memory = true;
         } else if (a == "--threads") {
             auto v = next();
             auto n = v ? decimal_integer<unsigned>(*v) : std::nullopt;
@@ -256,7 +281,12 @@ int serve_command(int argc, char** argv, const fs::path& self) {
     rt::Config rc;
     rc.host_name = key_id.substr(0, 16);
     rc.threads = std::max(1u, o.threads);
-    rc.limits.max_memory_pages = o.memory_mb * 16;
+    rc.limits.max_memory_pages = (o.memory_mb == 0 ? 4096u : o.memory_mb) * 16;
+    rc.handler_budget = std::chrono::milliseconds(o.handler_ms);
+    rc.job_max_time = std::chrono::milliseconds(o.job_max_ms);
+    rc.job_max_memory_mb = o.job_memory_mb;
+    rc.require_job_resources = o.require_job_resources;
+    rc.require_paglet_memory = o.require_paglet_memory;
     rc.state_dir = fs::path(*o.state) / "runtime";
     rc.sandbox_workers = !o.no_sandbox;
     if (!o.in_process) {

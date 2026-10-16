@@ -134,23 +134,19 @@ private:
             endpoint("files", [this, s](paglets::Result<Endpoint> files) {
                 if (!files) return fail(error_text("files", files.error()));
                 files_ = *files;
-                svc::files::Client client{files_};
                 svc::files::FindRequest q;
                 q.pattern = s.pattern;
                 q.max_size = max_document;
                 q.limit = static_cast<std::uint32_t>(std::max<std::int64_t>(1, params_.max_files));
-                auto sent = client.find(
-                    q,
-                    [this](paglets::Result<svc::files::FindReply> r, Message&) {
+                (void)paglets::patterns::find_files(files_, *dir_, q,
+                    [this](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return fail(error_text("find", r.error()));
                         found_.clear();
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file) found_.push_back(e.path);
                         }
                         read_next(0);
-                    },
-                    lending(*dir_));
-                if (!sent) fail(error_text("find", sent.error()));
+                    });
             });
         });
     }
@@ -202,7 +198,7 @@ private:
                 status_.documents[i].summary = r->text;
                 status_.model = r->model;
                 summarize(i + 1);
-            });
+            }, paglets::patterns::long_request());
             if (!sent) fail(error_text("summarize", sent.error()));
         });
     }
