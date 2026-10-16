@@ -87,6 +87,8 @@ cd ..
 The test executable supports `--list [FILTER]` to show its configured cases
 without running them. An unmatched filter exits with status 2.
 
+ASan/UBSan presets use `-g -O1` and make undefined-behavior reports fail CTest.
+
 Run a paglet:
 
 ```bash

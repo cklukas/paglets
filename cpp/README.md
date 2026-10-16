@@ -218,6 +218,9 @@ UndefinedBehaviorSanitizer) and `linux-gcc16-tsan` (ThreadSanitizer), and
 off, guests taken from `-DPAGLETS_PREBUILT_GUEST_DIR=...`; Wasm modules are
 platform-independent, so guests built anywhere can be used).
 
+ASan/UBSan presets keep debug symbols and use `-O1`; CTest treats
+undefined-behavior reports as failures.
+
 Build options:
 
 | Option | Default | Meaning |
