@@ -140,9 +140,16 @@ if(PAGLETS_TEST_GUEST_DIR)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/reports_platforms.cmake")
 endif()
 
+# State exploration performs many instrumented allocations. Allow sanitizer
+# builds more wall time without reducing any world or property checks.
+set(protocol_quick_timeout 300)
+if(PAGLETS_SANITIZE OR PAGLETS_SANITIZE_THREAD)
+    set(protocol_quick_timeout 1200)
+endif()
 add_test(NAME protocol_cli COMMAND ${CMAKE_COMMAND}
     "-DTOOL=$<TARGET_FILE:paglets-protocol-check>"
     "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/protocol-cli"
+    "-DQUICK_TIMEOUT=${protocol_quick_timeout}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol_cli.cmake")
 # The code excerpts and results in docs/ match the sources.
 add_test(NAME docs_sync COMMAND paglets-docs-sync --check --root "${PROJECT_SOURCE_DIR}/..")
