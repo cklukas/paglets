@@ -6,6 +6,7 @@
 version: 1
 site:
   title: paglets C++ edition
+  logo: docs/images/paglets-logo.png
   description: C++ edition of paglets, mobile agents as WebAssembly modules.
   footer: "© 2026 C. Klukas · MIT License"
   links:

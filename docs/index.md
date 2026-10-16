@@ -1,5 +1,7 @@
 # paglets/cpp
 
+![An angular blue agent carries memory fragments between connected hosts.](images/paglets-cpp-intro.png)
+
 paglets/cpp is the C++ edition of paglets. Its paglets are WebAssembly
 modules, run by the embedded
 [WAMR](https://github.com/bytecodealliance/wasm-micro-runtime) runtime.
