@@ -57,7 +57,7 @@ PAGLETS_TEST("session: move counters are readable but clearing cached pages requ
     m.enroll_all();
     const auto read = ask(*a.node, m.owner, "owner", Map{{"t", Value("moves")}});
     REQUIRE(ok(read));
-    CHECK_EQ(Fields{read}.integer("memory_limit_pages").value_or(0), 4096);
+    CHECK_EQ(Fields{read}.integer("memory_limit_pages").value_or(0), 65536);
     CHECK_EQ(Fields{read}.integer("arrival_acks").value_or(-1), 0);
     CHECK(!ok(ask(*a.node, m.owner, "owner", Map{{"t", Value("moves")}, {"clear_cache", Value(true)}})));
     CHECK(ok(ask(*a.node, m.admin, "admin", Map{{"t", Value("moves")}, {"clear_cache", Value(true)}})));

@@ -63,7 +63,7 @@ struct Config {
     // restricted token and job object; see docs for platform limits).
     bool sandbox_workers = true;
     wasm::Limits limits{};
-    std::chrono::milliseconds handler_budget{5000};
+    std::chrono::milliseconds handler_budget{-1};  // unknown/unlimited unless the operator enables a watchdog
     // With a state directory: checkpoint an active paglet after a handler
     // when its last image is older than this (0: after every handler).
     std::chrono::milliseconds checkpoint_interval{1000};
@@ -94,10 +94,12 @@ struct Config {
     // mesh sets it to the host's compute slots), wall time (default, cap),
     // linear memory (default, cap) and queued or running jobs per owner.
     unsigned job_slots = 0;
-    std::chrono::milliseconds job_default_time{std::chrono::hours(1)};
-    std::chrono::milliseconds job_max_time{std::chrono::hours(24)};
-    std::uint32_t job_memory_mb = 1024;      // 1 GB ceiling, not an initial allocation
-    std::uint32_t job_max_memory_mb = 1024;
+    std::chrono::milliseconds job_default_time{-1};
+    std::chrono::milliseconds job_max_time{-1};  // no owner-imposed duration ceiling
+    std::uint32_t job_memory_mb = 0;      // unknown: grow as needed within the module/host allowance
+    std::uint32_t job_max_memory_mb = 0;  // no operator cap; wasm32's 4 GB address space still applies
+    bool require_job_resources = false;  // operator may deny jobs without finite time/memory declarations
+    bool require_paglet_memory = false;  // operator may require a Wasm memory maximum declaration
     std::size_t job_owner_limit = 256;
     // The AOT compiler (paglets-wamrc) for job modules; empty: jobs run in
     // the interpreter. Compiled code is cached in `aot_cache` (default:
@@ -137,7 +139,7 @@ struct IncomingJob {
 
 struct JobHooks {
     // Whether `caller` may submit the job; the effective wall-time cap
-    // (0: the host's), or an abi::Error. Called with the runtime's lock held:
+    // (0: no additional policy cap), or an abi::Error. Called with the runtime's lock held:
     // it must not call the runtime (nor wait for locks that do).
     std::function<std::expected<std::int64_t, std::int32_t>(const abi::SenderRecord& caller, const abi::JobSpec& spec)>
         admit;
@@ -208,6 +210,8 @@ struct JobInfo {
     std::int64_t queued_ms = 0;
     std::int64_t elapsed_ms = 0;
     bool aot = false;
+    std::int64_t max_ms = 0;  // admitted duration; -1: unlimited
+    std::uint32_t memory_pages = 0;
 };
 
 // Why a paglet ended.

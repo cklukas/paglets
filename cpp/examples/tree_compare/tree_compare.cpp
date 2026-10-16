@@ -164,13 +164,11 @@ private:
             dir_ = std::make_shared<paglets::Capability>(*dir);
             pt::endpoint("files", [this, q](paglets::Result<paglets::Endpoint> files) {
                 if (!files) return finish_error(pt::error_text("files", files.error()));
-                svc::files::Client client{*files};
                 svc::files::FindRequest f;
                 f.pattern = q.pattern;
-                f.limit = 100'000;
-                auto sent = client.find(
-                    f,
-                    [this, q](paglets::Result<svc::files::FindReply> r, Message&) {
+                f.limit = 10'000;
+                (void)paglets::patterns::find_files(*files, *dir_, f,
+                    [this, q](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return finish_error(pt::error_text("find", r.error()));
                         tree_.truncated = r->truncated;
                         for (const auto& e : r->entries) {
@@ -180,9 +178,7 @@ private:
                         if (!q.hashes) return finish();
                         max_file_bytes_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, q.max_file_bytes));
                         hash_next(0);
-                    },
-                    pt::lending(*dir_));
-                if (!sent) finish_error(pt::error_text("find", sent.error()));
+                    });
             });
         });
     }

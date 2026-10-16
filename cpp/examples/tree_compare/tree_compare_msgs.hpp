@@ -21,7 +21,7 @@ struct Compare {
     std::string pattern = "**";
     bool hashes = false;
     std::int64_t max_file_bytes = 64LL * 1024 * 1024 * 1024;  // larger files are not hashed
-    std::int64_t timeout_ms = 20'000;
+    std::int64_t timeout_ms = 30 * 60 * 1000;
 };
 
 struct Started {

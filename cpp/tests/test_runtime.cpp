@@ -219,6 +219,54 @@ PAGLETS_TEST("abi C15: a handler exceeding its time budget is terminated") {
     CHECK(end->reason.find("time budget") != std::string::npos);
 }
 
+PAGLETS_TEST("resource defaults: handlers have no watchdog until enabled and shutdown can still stop them") {
+    rt::Config config;
+    CHECK_EQ(config.handler_budget.count(), -1);
+    CHECK_EQ(config.limits.max_memory_pages, 65536u);
+    Fixture f(config);
+    const auto id = f.create("conformance.wasm");
+    auto pending = f.runtime->request(id, "spin", {}, 10s);
+    const auto until = std::chrono::steady_clock::now() + 3s;
+    while (!f.logged("spin entered") && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(5ms);
+    REQUIRE(f.logged("spin entered"));
+    CHECK(pending.wait_for(100ms) == std::future_status::timeout);
+    const auto began = std::chrono::steady_clock::now();
+    f.runtime->shutdown(false);
+    CHECK(std::chrono::steady_clock::now() - began < 3s);
+    REQUIRE(pending.wait_for(1s) == std::future_status::ready);
+    CHECK(pending.get().status != abi::ok);
+}
+
+PAGLETS_TEST("resource defaults: graceful shutdown preserves a short in-flight handler") {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("paglets-shutdown-grace-" + std::to_string(std::random_device{}()));
+    rt::PagletId id;
+    {
+        rt::Config config;
+        config.state_dir = dir;
+        Fixture f(config);
+        id = f.create("conformance.wasm");
+        CHECK_EQ(f.code(id, "lifecycle", Cmd{.code = static_cast<std::int32_t>(abi::LifecycleOp::restart),
+                                            .ms = 1, .async = true}), 0);
+        auto pending = f.runtime->request(id, "busy", enc(Cmd{.ms = 150}), 10s);
+        const auto until = std::chrono::steady_clock::now() + 3s;
+        while (!f.logged("busy entered") && std::chrono::steady_clock::now() < until) std::this_thread::sleep_for(5ms);
+        REQUIRE(f.logged("busy entered"));
+        REQUIRE(pending.wait_for(0ms) == std::future_status::timeout);
+        f.runtime->shutdown();
+        CHECK_EQ(pending.get().status, abi::ok);
+    }
+    {
+        rt::Config config;
+        config.state_dir = dir;
+        Fixture f(config);
+        f.module("conformance.wasm");
+        CHECK(journal_eventually(f, id, "event:recovered:ok"));
+        CHECK(contains(f.journal(id), "msg:busy"));
+    }
+    std::filesystem::remove_all(dir);
+}
+
 // ---------------------------------------------------------------------------
 // Capabilities
 

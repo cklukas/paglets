@@ -19,6 +19,7 @@
 #include "jobs.hpp"
 
 #include <deque>
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -71,7 +72,10 @@ class Artifacts;
 
 class Files final : public ContractPaglet<files::Contract, Files> {
 public:
-    explicit Files(std::map<std::string, fs::path> roots);
+    explicit Files(std::map<std::string, fs::path> roots, std::function<void()> before_scan_step = {});
+    ~Files() override;
+    void stop() override;
+    void paglet_ended(runtime::SystemContext&, const runtime::PagletId&) override;
 
     const std::map<std::string, fs::path>& roots() const { return roots_; }
     // `share` and `save` work with the artifacts of this host.
@@ -80,6 +84,9 @@ public:
     Result<files::ListReply> list(const files::ListRequest&, Operation&);
     Result<files::Entry> stat(const files::StatRequest&, Operation&);
     Result<files::FindReply> find(const files::FindRequest&, Operation&);
+    Result<files::ScanStarted> scan_start(const files::ScanRequest&, Operation&);
+    Result<files::ScanBatch> scan_next(const files::ScanId&, Operation&);
+    Result<files::ScanCancelled> scan_cancel(const files::ScanId&, Operation&);
     Result<files::ReadReply> read(const files::ReadRequest&, Operation&);
     Result<files::Entry> write(const files::WriteRequest&, Operation&);
     Result<files::Entry> mkdir(const files::MkdirRequest&, Operation&);
@@ -107,6 +114,13 @@ private:
 
     std::map<std::string, fs::path> roots_;
     std::shared_ptr<Artifacts> artifacts_;
+    struct Scan;
+    Result<files::ScanBatch> scan_step(Scan&, runtime::SystemContext&);
+    std::mutex scans_mu_;
+    std::map<std::string, std::shared_ptr<Scan>> scans_;
+    Jobs scan_jobs_{2};
+    bool scans_stopping_ = false;
+    std::function<void()> before_scan_step_;
 };
 
 // -- storage --------------------------------------------------------------------

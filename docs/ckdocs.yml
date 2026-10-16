@@ -21,6 +21,7 @@ nav:
     pages:
       - docs/building.md
       - docs/writing-paglets.md
+      - docs/long-running-tasks.md
       - docs/compute-jobs.md
   - title: Examples
     pages:

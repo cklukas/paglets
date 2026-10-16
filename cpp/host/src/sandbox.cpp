@@ -37,12 +37,18 @@ constexpr std::uint32_t audit_arch = AUDIT_ARCH_X86_64;
 constexpr std::uint32_t audit_arch = AUDIT_ARCH_AARCH64;
 #endif
 
-// After startup a worker only needs memory, threads, clocks and IPC over
-// inherited descriptors. New kernel interfaces are denied automatically.
+// After startup a worker only needs memory, threads, clocks and local IPC.
+// New kernel interfaces are denied automatically.
 constexpr long allowed[] = {
     SYS_read, SYS_write, SYS_readv, SYS_writev, SYS_close,
     SYS_recvfrom, SYS_sendto, SYS_recvmsg, SYS_sendmsg, SYS_shutdown,
     SYS_fstat, SYS_lseek,
+    // UBSan probes vtable memory through an anonymous pipe. Pipes create
+    // process-local descriptors without granting file or network access.
+    SYS_pipe2,
+#ifdef SYS_pipe
+    SYS_pipe,
+#endif
     SYS_mmap, SYS_munmap, SYS_mprotect, SYS_mremap, SYS_madvise, SYS_brk,
     SYS_rt_sigaction, SYS_rt_sigprocmask, SYS_rt_sigreturn, SYS_sigaltstack,
     SYS_futex, SYS_set_robust_list, SYS_set_tid_address,
@@ -193,6 +199,17 @@ std::expected<void, std::string> check_sandbox() {
     std::thread thread([&] { thread_ran = true; });
     thread.join();
     if (!thread_ran) return std::unexpected(std::string("worker threads are not allowed"));
+
+    int pipe_fds[2];
+    if (::pipe2(pipe_fds, O_CLOEXEC) != 0)
+        return std::unexpected(std::string("anonymous pipes are not allowed"));
+    const char sent = 'p';
+    char received = 0;
+    const bool pipe_ok = ::write(pipe_fds[1], &sent, 1) == 1 &&
+        ::read(pipe_fds[0], &received, 1) == 1 && received == sent;
+    ::close(pipe_fds[0]);
+    ::close(pipe_fds[1]);
+    if (!pipe_ok) return std::unexpected(std::string("anonymous pipe exchange failed"));
 
     return {};
 }

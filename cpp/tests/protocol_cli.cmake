@@ -7,6 +7,9 @@ if(NOT TOOL OR NOT WORK)
     message(FATAL_ERROR "TOOL and WORK are required")
 endif()
 file(MAKE_DIRECTORY "${WORK}")
+if(NOT DEFINED QUICK_TIMEOUT)
+    set(QUICK_TIMEOUT 300)
+endif()
 
 execute_process(COMMAND "${TOOL}" --replicas 1 --work 1 --observations 1 --in-flight 1 --max-states 100000
     RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 30)
@@ -29,7 +32,7 @@ endif()
 set(results "${WORK}/quick.json")
 file(REMOVE "${results}")
 execute_process(COMMAND "${TOOL}" --suite quick --quiet --results "${results}"
-    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 300)
+    RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT ${QUICK_TIMEOUT})
 if(NOT status EQUAL 0 OR NOT error STREQUAL "")
     message(FATAL_ERROR "quick suite failed: ${status}: ${output} ${error}")
 endif()

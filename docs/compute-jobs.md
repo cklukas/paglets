@@ -9,6 +9,15 @@ its paglet keeps answering messages. The job sees its input, not the
 paglet's memory; its result arrives in a later handler. Jobs require ABI
 v1.3. Paglets and their memory images remain interpreted and portable.
 
+Compute is the isolated CPU backend of the framework's task model.
+`job.task()` returns a `tasks::TaskHandle`, the same cancellation/status
+interface used by long service operations. The existing
+`patterns::Task<Request, Result>` is the paglet coordinating such work;
+`track(job.task())` ties a job to its cancellation lifecycle. Compute jobs
+have no filesystem or network authority, so capability-controlled I/O uses
+service tasks instead. See [Long-running agents and tasks](long-running-tasks.md)
+for the distinction, shared controls, and the separate timing budgets.
+
 ## Register and submit
 
 Include `paglets/compute.hpp`. A function receives `compute::JobContext`;
@@ -55,8 +64,10 @@ Source: [`cpp/sdk/include/paglets/compute.hpp`](https://github.com/cklukas/pagle
 ```cpp
 struct Options {
     std::int64_t cores = 1;      // slots the job takes while it runs
-    std::int64_t max_ms = 0;     // wall time; 0: the host's default (1 h), capped by the host and the policy
-    std::int64_t memory_mb = 0;  // linear-memory ceiling; 0: the host's default (1 GB)
+    std::int64_t max_ms = 0;     // 0: unknown (unlimited by default), -1: unlimited, positive: elapsed milliseconds
+    std::int64_t memory_mb = 0;  // 0: unknown (grow as needed), -1: wasm32 maximum (4 GB), positive: declared MB
+    // Explicit host-owner or mesh policy limits still apply. Memory requests
+    // exceeding an owner ceiling are rejected, never silently reduced.
     // Where it runs: empty for this host; {"any"} for the host of the mesh
     // with the most free slots (this one first); else host names or key IDs
     // (the one of them with the most free slots).
@@ -80,14 +91,27 @@ the job reports `not_found`. Job host lists do not accept key-ID prefixes.
 Jobs queue when their host has no slot. `cores` accounts for slots; it does
 not create guest threads or parallelize a function.
 
-Runtime defaults are one hour of elapsed running time, 1 GB of linear
-memory and at most 256 queued or running jobs per owner. The default caps
-are 24 hours and 1 GB. The memory value is a ceiling: a job starts with
-its module's initial memory and grows only when needed. It does not reserve
-1 GB of physical RAM at startup. Embedders can change these in `runtime::Config`.
-The reply deadline is the capped running limit plus one minute, measured
-from submission. A long queue wait can exhaust it before the job starts;
-expiry cancels queued or running work and replies `timeout`.
+Memory and execution time default to unknown (`0`), with no host-imposed
+ceiling. A job starts with its module's initial memory and grows when
+needed; Wasm32 supports up to 4 GB per instance. `max_ms = -1` explicitly
+requests unlimited execution; positive values support a week or longer.
+`memory_mb = 2048` declares a 2 GB allowance. No upfront 2 GB allocation
+occurs merely because it is declared. `max_ms` measures elapsed time, not
+cumulative CPU time.
+
+Operators can opt into `serve --job-max-ms N`, `--job-max-memory-mb N`
+and `--require-job-resources`, or the corresponding `runtime::Config`
+fields. Admission rejects a memory declaration that does not fit an enabled
+ceiling instead of silently shrinking it. Declared and imposed limits are
+enforced during execution; cancellation and shutdown still work for jobs
+with no deadline. The default concurrency limit remains 256 queued/running
+jobs per owner, separate from per-job time and memory policy.
+
+Only finite jobs get a result deadline: their admitted running limit plus
+one minute, measured from submission. A long queue wait can exhaust it
+before the job starts; expiry cancels queued or running work and replies
+`timeout`. Unlimited jobs have no hidden one-hour reply deadline. See
+[resource declarations and policy](long-running-tasks.md#unknown-requirements-and-optional-host-policy).
 
 Mesh policy for service `compute-jobs`, operation `submit`, can refuse a
 job or further cap its duration. Queuing time is reported separately.
@@ -128,7 +152,8 @@ own worker process, under the configured sandbox.
 
 A pending result's reply timeout keeps counting through a paglet move.
 Moving an unresolved request or job continuation requires travel-state
-version 3; a destination with an older reader refuses the move.
+version 3 for finite deadlines and version 4 for unlimited job
+continuations; a destination with an older reader refuses the move.
 
 The current finish-on-departure implementation forwards the result, but
 does not transfer the job-status/cancel record to the destination runtime.

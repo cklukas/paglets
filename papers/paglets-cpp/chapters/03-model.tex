@@ -91,11 +91,19 @@ travels as \emph{artifacts}, stored objects identified by a content hash,
 rather than as part of the paglet's heap. Section~\ref{sec:movement-record}
 explains how the destination reconstructs the capability table.
 
-The default memory limits are 256\,MB per paglet and 1\,GB per compute
-job. These are limits on growth; the runtime does not allocate the whole
-allowance at startup. The module specifies its initial memory. Handlers
-have a 5\,s time limit and message documents a 1\,MB size limit. Guest code
-can handle a failed \code{memory.grow} or an allocation that returns a
-null pointer. Ordinary C++ \code{new}, however, aborts on failure in these
-guests, which do not use exceptions; that failure ends the paglet.
-The memory limits exclude additional host and worker overhead.
+Memory and execution-time requirements default to unknown. Hosts impose
+no memory or execution-time policy ceiling unless their operators enable
+one. The current Wasm32 implementation still has a technical address-space
+boundary of 4\,GB per instance; physical memory can run out earlier.
+An operator can require declarations and refuse a module or job whose
+declared memory allowance does not fit. These allowances bound linear-memory
+growth; they do not reserve physical RAM or meter total process memory,
+host-side buffers or worker overhead. The module specifies its initial
+memory. Message documents retain a separate 1\,MB size limit.
+
+\Needspace{6\baselineskip}
+Guest code can handle a failed \code{memory.grow} or an allocation that
+returns a null pointer. Ordinary C++ \code{new}, however, aborts on failure
+in these guests, which do not use exceptions; that failure ends the
+paglet. An access outside linear memory traps. An enabled handler watchdog
+or job-time budget interrupts work exceeding its elapsed-time allowance.

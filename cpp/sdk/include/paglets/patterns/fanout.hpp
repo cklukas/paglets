@@ -26,6 +26,7 @@
 #include <paglets/patterns/task.hpp>
 
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,7 @@ public:
         bool ok = false;
         std::string error;
         Bytes result;
+        Endpoint endpoint;  // retained until report, failure, timeout or cancellation
     };
 
     // Handles reports and the deadline; `on_child` runs for each child that
@@ -90,8 +92,12 @@ public:
     // Clones this paglet to every transfer ticket (host name or key ID,
     // label:L, offer:S, any; "" for this host) with `args` and this paglet's
     // endpoint. Returns how many clones went out; the others fail at once.
-    std::size_t start(const std::vector<std::string>& destinations, const Bytes& args, std::int64_t timeout_ms) {
+    std::size_t start(const std::vector<std::string>& destinations, const Bytes& args, std::int64_t timeout_ms,
+                         std::string cancel_message = {}) {
+        for (auto& c : children_) (void)c.endpoint.drop();
+        (void)deadline_timer_.drop();
         children_.clear();
+        cancel_message_ = std::move(cancel_message);
         const std::uint64_t generation = ++generation_;
         std::size_t sent = 0;
         for (const auto& d : destinations) {
@@ -105,13 +111,18 @@ public:
                 // The clone reports with its ID: the endpoint names it.
                 if (auto info = clone->inspect(); info && info->target.starts_with("paglet:"))
                     c.clone = info->target.substr(7);
-                (void)clone->drop();  // the clone reports through the parent's endpoint
+                c.endpoint = Endpoint(clone->release());
                 ++sent;
             }
             children_.push_back(std::move(c));
         }
-        deadline_ = unix_ms() + timeout_ms;
-        if (sent > 0) (void)after_raw(timeout_ms, fanout_timeout, {});
+        const auto now = unix_ms();
+        deadline_ = now + std::clamp<std::int64_t>(timeout_ms, 0, std::numeric_limits<std::int64_t>::max() - now);
+        if (sent > 0) {
+            auto timer = after_raw(timeout_ms, fanout_timeout, {});
+            if (timer) deadline_timer_ = *timer;
+            else end_pending("could not schedule the fan-out deadline");
+        }
         // Callbacks get copies: one may start the next fan-out.
         std::vector<Child> failed;
         for (const auto& c : children_) {
@@ -132,6 +143,8 @@ public:
             c.done = true;
             c.clone = f.clone;
             c.error = "clone did not arrive: " + f.reason;
+            (void)c.endpoint.drop();
+            if (finished()) (void)deadline_timer_.drop();
             const Child copy = c;
             if (on_child_) on_child_(copy);
             return;
@@ -145,6 +158,10 @@ public:
         return static_cast<std::size_t>(std::ranges::count_if(children_, [](const Child& c) { return c.done && c.ok; }));
     }
     const std::vector<Child>& children() const { return children_; }
+
+    // Stop collecting and ask unfinished children to cancel their work.
+    // Cancellation messages are best effort; children also need local deadlines.
+    void cancel(std::string reason = "cancelled") { end_pending(std::move(reason)); }
 
 private:
     void received(const FanOutReport& r) {
@@ -170,17 +187,30 @@ private:
         match->host_name = r.host_name;
         match->error = r.error;
         match->result = r.result;
+        (void)match->endpoint.drop();
+        if (finished()) (void)deadline_timer_.drop();
         const Child copy = *match;
         if (on_child_) on_child_(copy);
     }
 
     void expire() {
         if (unix_ms() < deadline_) return;
+        end_pending("no report in time");
+    }
+
+    void end_pending(std::string reason) {
+        (void)deadline_timer_.drop();
         std::vector<Child> late;
         for (auto& c : children_) {
             if (c.done) continue;
             c.done = true;
-            c.error = "no report in time";
+            c.error = reason;
+            if (!cancel_message_.empty() && c.endpoint) {
+                SendOptions options;
+                options.async = true;
+                (void)c.endpoint.send(cancel_message_, options);
+            }
+            (void)c.endpoint.drop();
             late.push_back(c);
         }
         const std::uint64_t generation = generation_;
@@ -193,6 +223,8 @@ private:
     std::vector<Child> children_;
     std::uint64_t generation_ = 0;
     std::int64_t deadline_ = 0;
+    std::string cancel_message_;
+    Capability deadline_timer_;
     std::function<void(const Child&)> on_child_;
 };
 

@@ -4,7 +4,7 @@
 // Mesh File Finder and Storage Analyzer (planning/cpp-demo-paglets.md,
 // demos 2 and 3): the paglet sends a clone of itself to every host. Each
 // clone asks its host for a directory of the named root (the mesh policy
-// decides through `grants`), finds the matching files with `files.find`,
+// decides through `grants`), scans matching files with a background task,
 // adds up what it found and reports to the parent; the parent puts the
 // mesh's answer together.
 
@@ -40,13 +40,39 @@ public:
     Finder() {
         router().on<Search>("start", [this](const Search& s, Message& m) { start(s, m); });
         router().on("findings", [this](Message& m) { (void)m.reply(findings_); });
+        router().on<Progress>("finder.progress", [this](const Progress& p, Message& m) {
+            if (findings_.finished || !m.sender() || m.sender()->id != p.clone) return;
+            const auto& children = fan_.children();
+            if (!std::ranges::any_of(children, [&](const auto& c) { return !c.done && c.clone == p.clone; })) return;
+            auto it = std::ranges::find(findings_.progress, p.clone, &Progress::clone);
+            if (it == findings_.progress.end()) findings_.progress.push_back(p);
+            else *it = p;
+        });
+        router().on("cancel", [this](Message& m) {
+            findings_.cancelled = true;
+            fan_.cancel();
+            findings_.finished = true;
+            (void)m.reply(findings_);
+        });
+        router().on("finder.cancel", [this](Message&) {
+            if (scan_) (void)scan_.cancel();
+            else cancel_requested_ = true;
+        });
         // --8<-- [start:collect]
         fan_.attach(router(), [this](const pt::FanOut::Child& c) {
             HostFindings h;
             if (!c.ok || !paglets::decode(c.result, h)) {
                 h = HostFindings{};
                 h.error = c.error.empty() ? "no report" : c.error;
+                h.cancelled = findings_.cancelled;
+                const auto progress = std::ranges::find(findings_.progress, c.clone, &Progress::clone);
+                if (progress != findings_.progress.end()) {
+                    h.visited = progress->visited;
+                    h.files = progress->files;
+                    h.bytes = progress->bytes;
+                }
             }
+            std::erase_if(findings_.progress, [&](const auto& p) { return p.clone == c.clone; });
             h.host = c.host;
             h.host_name = c.host_name.empty() ? c.destination : c.host_name;
             findings_.files += h.files;
@@ -76,14 +102,21 @@ public:
 private:
     // --8<-- [start:start]
     void start(const Search& s, Message& m) {
-        if (s.root.empty()) {
-            (void)m.reply(Started{false, "no root", 0});
+        if (s.root.empty() || s.timeout_ms <= 0 || s.max_results < 0 || s.max_results > 1000 || !fan_.finished() || starting_) {
+            (void)m.reply(Started{false, "invalid search or a search is already running", 0});
             return;
         }
         findings_ = Findings{};
+        starting_ = true;
         auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
         auto go = [this, s, reply](std::vector<std::string> hosts) {
-            const auto sent = fan_.start(hosts, paglets::encode(s), s.timeout_ms);
+            starting_ = false;
+            if (findings_.cancelled) {
+                findings_.finished = true;
+                (void)paglets::reply_to(*reply, Started{false, "cancelled", 0});
+                return;
+            }
+            const auto sent = fan_.start(hosts, paglets::encode(s), s.timeout_ms, "finder.cancel");
             findings_.finished = fan_.finished();
             (void)paglets::reply_to(*reply, Started{sent > 0, sent > 0 ? "" : "no clone went out",
                                                     static_cast<std::int64_t>(hosts.size())});
@@ -108,58 +141,97 @@ private:
 
     // --8<-- [start:search]
     void search_here(const Search& q) {
+        params_ = q;
+        if (auto me = paglets::self_info()) clone_id_ = me->id;
         pt::granted_dir(q.root, "", {"read"}, "mesh file finder", [this, q](paglets::Result<paglets::Capability> dir) {
-            if (!dir) return pt::report_error(parent_, pt::error_text("files of " + q.root, dir.error()));
-            auto cap = std::make_shared<paglets::Capability>(*dir);
-            pt::endpoint("files", [this, q, cap](paglets::Result<paglets::Endpoint> files) {
-                if (!files) return pt::report_error(parent_, pt::error_text("files", files.error()));
-                svc::files::Client client{*files};
-                svc::files::FindRequest f;
-                f.pattern = q.pattern;
-                if (q.min_size > 0) f.min_size = static_cast<std::uint64_t>(q.min_size);
-                f.limit = 100'000;
-                auto sent = client.find(
-                    f,
-                    [this, q, cap](paglets::Result<svc::files::FindReply> r, Message&) {
-                        (void)cap->drop();
-                        if (!r) return pt::report_error(parent_, pt::error_text("find", r.error()));
-                        pt::report(parent_, paglets::encode(analyze(q, *r)));
-                        (void)paglets::after_raw(2000, "done", {});
-                        router().on("done", [](Message&) { (void)paglets::dispose(); });
-                    },
-                    pt::lending(*cap));
-                if (!sent) pt::report_error(parent_, pt::error_text("find", sent.error()));
+            if (!dir) return finish(std::unexpected(dir.error()));
+            dir_ = *dir;
+            if (cancel_requested_) return finish(std::unexpected(paglets::abi::cancelled));
+            pt::endpoint("files", [this, q](paglets::Result<paglets::Endpoint> files) {
+                if (!files) return finish(std::unexpected(files.error()));
+                if (cancel_requested_) return finish(std::unexpected(paglets::abi::cancelled));
+                svc::files::FindRequest request;
+                request.pattern = q.pattern;
+                if (q.min_size > 0) request.min_size = static_cast<std::uint64_t>(q.min_size);
+                scan_ = pt::scan_files(*files, dir_, request,
+                    [this](const svc::files::ScanBatch& batch) { accumulate(batch); },
+                    [this](paglets::Result<void> result) { finish(result); }, q.timeout_ms);
             });
         });
     }
     // --8<-- [end:search]
 
-    static HostFindings analyze(const Search& q, const svc::files::FindReply& r) {
-        HostFindings h;
-        h.truncated = r.truncated;
-        std::map<std::string, ExtensionTotal> by_ext;
-        std::vector<Found> all;
-        for (const auto& e : r.entries) {
+    void accumulate(const svc::files::ScanBatch& batch) {
+        mine_.visited = batch.completed;
+        for (const auto& e : batch.entries) {
             if (e.type != svc::files::EntryType::file) continue;
             Found f{e.path, static_cast<std::int64_t>(e.size), e.modified_ms};
-            ++h.files;
-            h.bytes += f.size;
-            auto& t = by_ext[extension_of(e.path)];
-            t.extension = extension_of(e.path);
+            ++mine_.files;
+            mine_.bytes += f.size;
+            auto ext = extension_of(e.path);
+            if (!by_ext_.contains(ext) && (by_ext_.size() >= 128 || extension_bytes_ + ext.size() + 64 > 4096)) {
+                ext = "(other extensions)";
+                mine_.extensions_truncated = true;
+            }
+            if (!by_ext_.contains(ext)) extension_bytes_ += ext.size() + 64;
+            auto& t = by_ext_[ext];
+            t.extension = ext;
             ++t.files;
             t.bytes += f.size;
-            all.push_back(std::move(f));
+            mine_.found.push_back(f);
+            std::ranges::sort(mine_.found, {}, &Found::path);
+            if (mine_.found.size() > static_cast<std::size_t>(params_.max_results)) mine_.found.pop_back();
+            // Bound samples by bytes as well as count; totals still cover every file.
+            std::size_t bytes = 0;
+            for (const auto& sample : mine_.found) bytes += sample.path.size() + 64;
+            while (bytes > 8 * 1024 && !mine_.found.empty()) {
+                bytes -= mine_.found.back().path.size() + 64;
+                mine_.found.pop_back();
+            }
+            mine_.largest.push_back(std::move(f));
+            std::ranges::sort(mine_.largest, [](const Found& a, const Found& b) { return a.size > b.size; });
+            if (mine_.largest.size() > 5) mine_.largest.pop_back();
+            std::size_t largest_bytes = 0;
+            for (const auto& sample : mine_.largest) largest_bytes += sample.path.size() + 64;
+            while (largest_bytes > 8 * 1024 && !mine_.largest.empty()) {
+                largest_bytes -= mine_.largest.back().path.size() + 64;
+                mine_.largest.pop_back();
+            }
         }
-        std::ranges::sort(all, [](const Found& a, const Found& b) { return a.path < b.path; });
-        h.found.assign(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(
-                                                      all.size(), static_cast<std::size_t>(std::max<std::int64_t>(0, q.max_results)))));
-        std::ranges::sort(all, [](const Found& a, const Found& b) { return a.size > b.size; });
-        h.largest.assign(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(all.size(), 5)));
-        for (auto& [ext, t] : by_ext) h.extensions.push_back(t);
-        std::ranges::sort(h.extensions, [](const auto& a, const auto& b) { return a.bytes > b.bytes; });
-        return h;
+        mine_.truncated = mine_.files > static_cast<std::int64_t>(mine_.found.size());
+        const auto now = pt::unix_ms();
+        if (batch.finished || now >= next_progress_) {
+            paglets::SendOptions options;
+            options.async = true;
+            (void)parent_.send("finder.progress", Progress{clone_id_, mine_.visited, mine_.files, mine_.bytes}, options);
+            next_progress_ = now + 250;
+        }
     }
 
+    void finish(paglets::Result<void> result) {
+        if (reported_) return;
+        reported_ = true;
+        (void)dir_.drop();
+        if (!result) {
+            mine_.error = pt::error_text("scan", result.error());
+            mine_.cancelled = result.error() == paglets::abi::cancelled;
+        }
+        for (auto& [ext, total] : by_ext_) mine_.extensions.push_back(std::move(total));
+        std::ranges::sort(mine_.extensions, [](const auto& a, const auto& b) { return a.bytes > b.bytes; });
+        pt::report(parent_, paglets::encode(mine_), {}, [] { (void)paglets::dispose(); });
+    }
+
+    Search params_;
+    HostFindings mine_;
+    std::map<std::string, ExtensionTotal> by_ext_;
+    paglets::Capability dir_;
+    paglets::tasks::TaskHandle scan_;
+    std::string clone_id_;
+    std::int64_t next_progress_ = 0;
+    std::size_t extension_bytes_ = 0;
+    bool reported_ = false;
+    bool cancel_requested_ = false;
+    bool starting_ = false;
     pt::FanOut fan_;
     Findings findings_;
     paglets::Endpoint parent_;

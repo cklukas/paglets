@@ -281,8 +281,8 @@ struct JobSpec {
     std::optional<std::int32_t> input_artifact;  // an artifact capability with the input (lent)
     std::optional<std::string> module;           // hex hash
     std::int64_t cores = 1;
-    std::int64_t max_ms = 0;     // wall time; 0: the host's default
-    std::int64_t memory_mb = 0;  // linear memory; 0: the host's default
+    std::int64_t max_ms = 0;     // wall time; 0: host default, -1: unlimited, positive: milliseconds
+    std::int64_t memory_mb = 0;  // 0: host default, -1: wasm32 maximum, positive: MB
     // Where: empty for this host, "any" for the host with the most free
     // slots (this one first), else host names or key IDs (one of them).
     std::vector<std::string> hosts;
@@ -309,6 +309,7 @@ struct JobStatus {
     std::int64_t total = 0;
     std::int64_t elapsed_ms = 0;
     bool aot = false;
+    std::int64_t max_ms = 0;  // admitted limit; -1: unlimited
 };
 
 // The argument of paglets_on_job; the job reads its input with job_input.
@@ -780,13 +781,14 @@ inline bool paglets_decode(msgpack::Reader& r, JobResult& v) {
 }
 
 inline void paglets_encode(msgpack::Writer& w, const JobStatus& v) {
-    w.write_map_header(6);
+    w.write_map_header(7);
     detail::put(w, "state", v.state);
     detail::put(w, "host", v.host);
     detail::put(w, "done", v.done);
     detail::put(w, "total", v.total);
     detail::put(w, "elapsed_ms", v.elapsed_ms);
     detail::put(w, "aot", v.aot);
+    detail::put(w, "max_ms", v.max_ms);
 }
 
 inline bool paglets_decode(msgpack::Reader& r, JobStatus& v) {
@@ -797,6 +799,7 @@ inline bool paglets_decode(msgpack::Reader& r, JobStatus& v) {
         if (k == "total") return msgpack::read_value(r, v.total);
         if (k == "elapsed_ms") return msgpack::read_value(r, v.elapsed_ms);
         if (k == "aot") return msgpack::read_value(r, v.aot);
+        if (k == "max_ms") return msgpack::read_value(r, v.max_ms);
         return r.skip();
     });
 }

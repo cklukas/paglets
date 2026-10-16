@@ -8,6 +8,13 @@ access to the documents' directories.
 
 Directory: [`cpp/examples/digest/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/digest)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **A paglet that goes to the AI.** The digest reads the documents on
@@ -68,7 +75,7 @@ void on_move_failed(const abi::MoveFailed& f) override {
 <!-- /snippet -->
 
 On each source host, it gets a directory with `read`, finds the matching
-files of at most 64 KB (`files.find`), and reads them into its memory,
+files of at most 64 KB (the framework background scan-task helper), and reads them into its memory,
 until it holds `max_files` documents:
 
 <!-- snippet: cpp/examples/digest/digest.cpp#read -->
@@ -128,7 +135,7 @@ void summarize(std::size_t i) {
             status_.documents[i].summary = r->text;
             status_.model = r->model;
             summarize(i + 1);
-        });
+        }, paglets::patterns::long_request());
         if (!sent) fail(error_text("summarize", sent.error()));
     });
 }

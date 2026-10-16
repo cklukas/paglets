@@ -51,6 +51,17 @@ that milestone; it is not a current performance test on native x86.
 Later correctness tests added a physical Windows~11 x86-64 host. Those
 basic functional tests are not Windows performance measurements.
 
+Separate long-operation regressions on macOS exercised scan progress,
+cancellation and authority checks, and a scan with injected filesystem
+latency lasting over two minutes while status requests remained responsive.
+Memory tests grew a job's linear memory to a declared 2\,GB allowance;
+duration tests checked admission of unknown, unlimited and week-long
+budgets. They did not run a computation for a week or reserve 2\,GB of
+physical RAM. These are functional checks, not additional performance
+measurements; their implementations are in
+\sourcefile{cpp/tests/test_file_scans.cpp}{the scan tests} and
+\sourcefile{cpp/tests/test_jobs.cpp}{the job tests}.
+
 \subsection{Physical migration and page reuse}\label{sec:evaluation-moves}
 
 The 2026-10-15 tests completed 480 moves across all six directed pairs

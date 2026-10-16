@@ -12,8 +12,17 @@ before the original's departure or disposal hook changes it. No image is
 taken while a handler or imported function is running. The implementation
 is in \sourcefile{cpp/host/src/runtime.cpp}{\code{Runtime::Impl::finish\_call}}.
 
-A runtime execution error (a \emph{trap}) or a time-limit overrun in a
-handler or lifecycle hook ends the paglet as failed. If the dispatching
+A paglet can work indefinitely, but cannot process another message or
+capture an image during an uninterrupted handler. The handler watchdog is
+off by default; operators may enable it for shared hosts. Long operations
+therefore normally run in background services or compute jobs, with
+continuations delivered in later handlers. This keeps status, cancellation
+and state capture available while work proceeds. A handler budget, a
+caller's reply timeout and an overall task deadline serve different
+purposes; none is a general agent lifetime limit.
+
+A runtime execution error (a \emph{trap}) or an overrun of an enabled time
+budget in a handler or lifecycle hook ends the paglet as failed. If the dispatching
 hook fails, the runtime does not publish the departure. Disposal and
 deactivation are refused while an arrival or move is undecided, so
 administrative operations cannot bypass the transfer protocol. Negative

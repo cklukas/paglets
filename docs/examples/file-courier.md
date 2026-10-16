@@ -8,10 +8,17 @@ arrived and how long each step took.
 
 Directory: [`cpp/examples/file_courier/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/file_courier)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **Files of any size, carried as capabilities.** A paglet moves as a
-  memory image with a default ceiling of 256 MB, so it should avoid carrying large data in its
+  memory image within its declared/host memory allowance, so it should avoid carrying large data in its
   memory. The courier asks the source host to *share* each file, and gets
   an artifact capability of a few bytes for it. Only the capabilities move
   with the courier. On the destination host it *saves* each file: that
@@ -79,7 +86,7 @@ if (!sent) (void)paglets::reply_to(*reply, Started{false, pt::error_text("mesh-i
 <!-- /snippet -->
 
 On the source host, it asks `grants` for the source root with `read`,
-finds the matching files (`files.find`), and shares them one by one. The
+finds the matching files (the framework background scan-task helper), and shares them one by one. The
 host hashes each file; the courier keeps the name, size, hash and the
 artifact capability, and measures how long the host took:
 
@@ -306,7 +313,7 @@ read on another; a host that the residency rule excludes gets nothing; a
 file that changed after it was shared is no longer served.
 
 The recorded results below used the earlier 16 MB paglet ceiling. The
-current default is 256 MB; artifact transfer still keeps file contents
+current default has no operator ceiling within Wasm32's 4 GB address space; artifact transfer still keeps file contents
 outside the courier's linear memory.
 
 <!-- results: file_courier -->

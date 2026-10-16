@@ -101,7 +101,7 @@ struct TravelState {
     std::int64_t checkpoint_ms = -1;
     std::vector<std::pair<std::string, std::int32_t>> services;   // default service endpoints: name, handle
     std::vector<std::pair<std::int32_t, Cap>> caps;               // every capability, endpoints with host hints
-    std::vector<std::pair<std::uint64_t, std::int64_t>> pending;  // requests in flight: correlation, ms left
+    std::vector<std::pair<std::uint64_t, std::int64_t>> pending;  // correlation, ms left; v4: -1 unlimited
     // State v3: when pending remaining budgets were captured (Unix ms).
     // Zero identifies legacy state with no transit-time metadata.
     std::int64_t pending_captured_ms = 0;

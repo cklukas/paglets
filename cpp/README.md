@@ -10,6 +10,14 @@ documentation is the `paglets/cpp` section of the documentation site
 [guest SDK reference](../docs/sdk-reference.md) and
 [configuration and troubleshooting](../docs/configuration.md).
 
+The handler watchdog is opt-in; resources default to unknown with no host-imposed time or memory cap.
+`patterns::Task<Request, Result>` coordinates long work and provides progress,
+cancellation and tracked child operations. `tasks::TaskHandle` controls both
+background service tasks and compute jobs (`job.task()`); file scans use
+`patterns::scan_files` with bounded progress batches and cancellation. See
+[Long-running agents and tasks](../docs/long-running-tasks.md) for the API
+distinctions, deadlines and movement/recovery rules.
+
 Compute jobs (ABI v1.3) run functions in separate fresh Wasm instances,
 with slot admission, cancellation, remote execution, artifacts and optional
 AOT compilation. The SDK provides continuations and C++ coroutines; Pi uses
@@ -117,9 +125,12 @@ startup; read its `report` for completion.
 
 ## Layout
 
-`paglets-host serve --memory-mb N` sets the per-paglet linear-memory cap
-(default 256 MB), separately from compute jobs (default and maximum 1 GB).
-Instances start with their module’s initial memory and grow as needed.
+`paglets-host serve --memory-mb N` opts into a per-paglet memory ceiling;
+`--job-max-memory-mb N`, `--job-max-ms N` and `--handler-ms N` enable job
+and handler limits. Defaults are unknown/unlimited within Wasm32's 4 GB
+address space. `MEMORY_MB` on `paglets_add_module` declares an optional
+module memory allowance, checked at host admission. Instances start small
+and grow as needed.
 `remote moves` exposes move
 and phase counters. `tools/mesh_bench.sh --steps move` measures 0, 1, 4 and
 16 MB ballast, with ten cold-page and return samples per direction and
@@ -217,6 +228,9 @@ UndefinedBehaviorSanitizer) and `linux-gcc16-tsan` (ThreadSanitizer), and
 `linux-host-only` for hosts without GCC 16 or a Wasm toolchain (reflection
 off, guests taken from `-DPAGLETS_PREBUILT_GUEST_DIR=...`; Wasm modules are
 platform-independent, so guests built anywhere can be used).
+
+ASan/UBSan presets keep debug symbols and use `-O1`; CTest treats
+undefined-behavior reports as failures.
 
 Build options:
 

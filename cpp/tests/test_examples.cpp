@@ -216,6 +216,72 @@ PAGLETS_TEST("example: Ping Pong cleans up its child after a remote ping fails")
     CHECK_EQ(a.f->runtime->capabilities(id).size(), caps);
 }
 
+PAGLETS_TEST("example: Mesh File Finder streams beyond the old result cap and cancels searches") {
+    const auto root = temp_root("finder-stream");
+    for (int i = 0; i < 10'250; ++i) write_file(root / (std::to_string(i) + ".csv"), 3);
+    {
+        ps::ServicesConfig config;
+        config.roots["docs"] = root;
+        Mesh net;
+        auto& a = net.add_host("a", config);
+        net.enroll_all();
+        fast(net);
+        net.admin_record("policy-rule", data::policy_rule({"read docs", Decision::allow, "files", {"read"}, Match{},
+            Scope{std::vector<std::string>{"docs"}, std::nullopt}, std::nullopt, 0}));
+        REQUIRE(net.settle([&] { return net.converged(); }));
+        const auto module = a.f->module("finder.wasm");
+        auto created = a.node->create(module, net.passport(module, paglet_id('2')));
+        REQUIRE_OK(created);
+        const auto id = *created;
+        finder_msgs::Search q;
+        q.root = "docs";
+        q.hosts = {""};
+        q.max_results = 3;
+        auto start = [&] {
+            auto r = a.f->runtime->call(id, "start", wire::to_msgpack(q), 10s);
+            finder_msgs::Started s;
+            REQUIRE(wire::from_msgpack(r.payload, s));
+            return s;
+        };
+        REQUIRE(start().accepted);
+        CHECK(!start().accepted);  // one search at a time
+        finder_msgs::Findings result;
+        bool saw_progress = false;
+        REQUIRE(net.settle([&] {
+            auto r = a.f->runtime->call(id, "findings", {}, 2s);
+            if (r.status != 0 || !wire::from_msgpack(r.payload, result)) return false;
+            saw_progress |= !result.progress.empty();
+            return result.finished;
+        }, 15000));
+        CHECK(saw_progress);
+        CHECK_EQ(result.files, 10'250);
+        CHECK_EQ(result.bytes, 30'750);
+        REQUIRE(result.hosts.size() == 1);
+        CHECK(result.hosts[0].error.empty());
+        CHECK_EQ(result.hosts[0].found.size(), 3u);
+        CHECK(result.hosts[0].truncated);  // samples only; totals cover the whole tree
+        CHECK_EQ(result.hosts[0].visited, 10'250u);
+        REQUIRE(start().accepted);
+        auto cancelled = a.f->runtime->call(id, "cancel", {}, 2s);
+        REQUIRE(wire::from_msgpack(cancelled.payload, result));
+        CHECK(result.finished);
+        CHECK(result.cancelled);
+        REQUIRE(net.settle([&] {
+            const auto live = a.f->runtime->list();
+            return std::ranges::none_of(live, [&](const auto& p) { return p.id != id && p.module == module; });
+        }, 5000));
+        q.timeout_ms = 1;
+        REQUIRE(start().accepted);
+        REQUIRE(net.settle([&] {
+            auto r = a.f->runtime->call(id, "findings", {}, 2s);
+            return wire::from_msgpack(r.payload, result) && result.finished;
+        }, 5000));
+        CHECK(!result.hosts.empty());
+        CHECK(!result.hosts[0].error.empty());
+    }
+    std::filesystem::remove_all(root);
+}
+
 PAGLETS_TEST("example: Mesh File Finder and Storage Analyzer search every host's root") {
     namespace fs = std::filesystem;
     const fs::path ra = temp_root("a"), rb = temp_root("b"), rc = temp_root("c");

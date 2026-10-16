@@ -51,6 +51,7 @@ execute_process(
             --listen 127.0.0.1:${pa} --peer ${b}=https://127.0.0.1:${pb} --stop-file "${DIR}/stop" --in-process
     COMMAND "${HOST}" serve --key "${DIR}/b.key" --ledger "${DIR}/ledger-b" --state "${DIR}/state-b"
             --listen 127.0.0.1:${pb} --peer ${a}=https://127.0.0.1:${pa} --stop-file "${DIR}/stop" --in-process --memory-mb 32
+            --handler-ms 5000 --job-max-ms 604800000 --job-max-memory-mb 2048 --require-job-resources
     COMMAND "${CMAKE_COMMAND}" -DHOST=${HOST} -DDIR=${DIR} -DGUEST=${GUEST} -DA=https://127.0.0.1:${pa}
             -DB=https://127.0.0.1:${pb} -P "${CMAKE_CURRENT_LIST_DIR}/cli_serve_driver.cmake"
     RESULTS_VARIABLE results

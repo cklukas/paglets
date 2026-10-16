@@ -110,23 +110,20 @@ private:
             dir_ = std::make_shared<paglets::Capability>(*d);
             pt::endpoint("files", [this, s](paglets::Result<paglets::Endpoint> files) {
                 if (!files) return fail(pt::error_text("files", files.error()));
-                svc::files::Client c{*files};
                 svc::files::FindRequest q;
                 q.pattern = s.pattern;
                 q.max_size = max_document;
                 q.limit = static_cast<std::uint32_t>(std::max<std::int64_t>(1, params_.max_files));
-                auto sent = c.find(
-                    q,
-                    [this](paglets::Result<svc::files::FindReply> r, Message&) {
+                (void)paglets::patterns::find_files(*files, *dir_, q,
+                    [this](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return fail(pt::error_text("find", r.error()));
+                        if (r->truncated) return fail("file list truncated; narrow the search or use streaming scan_files");
                         found_.clear();
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file) found_.push_back(e.path);
                         }
                         read(0);
-                    },
-                    pt::lending(*dir_));
-                if (!sent) fail(pt::error_text("find", sent.error()));
+                    });
             });
         });
     }
@@ -166,7 +163,7 @@ private:
                 status_.model = r->model;
                 for (std::size_t i = from; i < to; ++i) docs_[i].vector = std::move(r->vectors[i - from].values);
                 embed(to);
-            });
+            }, paglets::patterns::long_request());
             if (!sent) fail(pt::error_text("embed", sent.error()));
         });
     }
@@ -197,7 +194,7 @@ private:
                                 hits.hits.resize(std::min<std::size_t>(
                                     hits.hits.size(), static_cast<std::size_t>(std::max<std::int64_t>(1, q.limit))));
                                 (void)paglets::reply_to(*reply, hits);
-                            });
+                            }, paglets::patterns::long_request());
         if (!sent) (void)paglets::reply_to(*reply, Hits{{}, pt::error_text("embed", sent.error())});
     }
     // --8<-- [end:query]

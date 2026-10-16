@@ -16,6 +16,14 @@ This branch (`cpp`) holds only the C++ edition. The Python edition, the
 [`main` branch](https://github.com/cklukas/paglets/tree/main). The two
 editions share concepts but no wire formats, and do not exchange paglets.
 
+Agents can work for hours or indefinitely. Resource requirements default to
+unknown; hosts impose no duration or linear-memory policy cap by default. Long I/O runs
+as background service tasks, and CPU work runs as compute jobs; both expose
+`tasks::TaskHandle` controls. The existing `Task<Request, Result>` coordinates
+them with progress, cancellation and tracked child work. See
+[Long-running agents and tasks](docs/long-running-tasks.md). Mesh File Finder
+streams background scan batches, reports progress and supports cancellation.
+
 Requests retain their expiry through mesh forwarding; timed deactivation
 wakes survive stored recovery and movement. Clones discard inherited SDK
 reply waits while the original keeps them. See the
@@ -39,10 +47,13 @@ permitted name cannot authorize a non-function import.
 
 ## Quick start
 
-Paglets allow up to 256 MB of linear memory by default; compute jobs allow
-up to 1 GB. Instances start with their module's initial memory and grow
-as needed. `serve --memory-mb N` changes the paglet ceiling; configure move
-destinations too. Compute-job limits are separate.
+Paglets and compute jobs start with their module's initial memory and grow
+as needed. The current Wasm32 address space supports up to 4 GB per instance.
+Operators can opt into memory/time limits and resource admission checks;
+`serve --memory-mb N` sets a paglet ceiling, while `--job-max-memory-mb N`
+and `--job-max-ms N` govern compute jobs. Developers can optionally declare
+job budgets or a module's `MEMORY_MB` requirement. See the
+[resource policy guide](docs/long-running-tasks.md#unknown-requirements-and-optional-host-policy).
 For the separate `compute-slots` service, release an existing lease before
 changing its job or core count.
 Leases and native jobs share admission priority: later work leaves capacity
@@ -86,6 +97,8 @@ cd ..
 
 The test executable supports `--list [FILTER]` to show its configured cases
 without running them. An unmatched filter exits with status 2.
+
+ASan/UBSan presets use `-g -O1` and make undefined-behavior reports fail CTest.
 
 Run a paglet:
 

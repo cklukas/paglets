@@ -19,6 +19,7 @@ struct Run {
     std::vector<std::string> hosts;
     bool finish = false;            // finish_on_departure
     std::int32_t artifact = 0;      // the input as an artifact made by the guest first (size in bytes)
+    std::int64_t memory_mb = 0;
 };
 
 struct Outcome {
@@ -35,7 +36,7 @@ struct Outcome {
 
 inline void paglets_encode(paglets::msgpack::Writer& w, const Run& c) {
     using paglets::abi::detail::put;
-    w.write_map_header(7);
+    w.write_map_header(8);
     put(w, "function", c.function);
     put(w, "input", c.input);
     put(w, "max_ms", c.max_ms);
@@ -43,6 +44,7 @@ inline void paglets_encode(paglets::msgpack::Writer& w, const Run& c) {
     put(w, "hosts", c.hosts);
     put(w, "finish", c.finish);
     put(w, "artifact", c.artifact);
+    put(w, "memory_mb", c.memory_mb);
 }
 
 inline bool paglets_decode(paglets::msgpack::Reader& r, Run& c) {
@@ -55,6 +57,7 @@ inline bool paglets_decode(paglets::msgpack::Reader& r, Run& c) {
         if (k == "hosts") return mp::read_value(r, c.hosts);
         if (k == "finish") return mp::read_value(r, c.finish);
         if (k == "artifact") return mp::read_value(r, c.artifact);
+        if (k == "memory_mb") return mp::read_value(r, c.memory_mb);
         return r.skip();
     });
 }

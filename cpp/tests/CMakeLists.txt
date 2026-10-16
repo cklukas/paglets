@@ -9,6 +9,7 @@ paglets_add_guest(plain_counter LANGUAGE C NO_SDK SOURCES guests/plain_counter.c
 paglets_add_module(conformance SOURCES guests/conformance.cpp)
 paglets_add_module(system_import SOURCES guests/system_import.cpp)
 paglets_add_module(bomb SOURCES guests/bomb.cpp)
+paglets_add_module(memory_declared SOURCES ${PROJECT_SOURCE_DIR}/examples/hello/hello.cpp MEMORY_MB 64)
 paglets_add_module(jobs SOURCES guests/jobs.cpp)
 paglets_add_module(zombie_probe SOURCES guests/zombie_probe.cpp SERVICES zombies mesh_info)
 paglets_add_module(explorer
@@ -61,7 +62,7 @@ set(test_sources
     test_zombie_protocol.cpp
     test_protocol_check.cpp)
 if(PAGLETS_ENABLE_REFLECTION)
-    list(APPEND test_sources test_job_memory.cpp test_remaining.cpp)
+    list(APPEND test_sources test_job_memory.cpp test_remaining.cpp test_file_scans.cpp)
     list(APPEND test_sources test_reflect.cpp test_guest_roundtrip.cpp test_contract.cpp test_services.cpp test_policy.cpp test_code_mobility.cpp test_movement.cpp test_location.cpp test_discovery.cpp test_compute.cpp test_gateway.cpp test_patterns.cpp test_fuzz.cpp test_hardening.cpp test_examples.cpp test_exchange.cpp test_bench.cpp test_zombies.cpp test_jobs.cpp test_session.cpp test_web.cpp ${PROJECT_SOURCE_DIR}/host/src/process_stats.cpp)
 endif()
 
@@ -123,7 +124,7 @@ if(UNIX)
                 "${CMAKE_CURRENT_BINARY_DIR}/live-recording-results")
     endif()
 endif()
-foreach(guest chronicle counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher file_courier tree_compare log_scout describer watcher explainer benchmark bomb jobs zombie_probe conformance system_import testbed forbidden plain_counter calc_user explorer patterns_demo)
+foreach(guest chronicle counter hello ping_pong pi courier digest journey finder latency inventory seek guard dupes semantic researcher file_courier tree_compare log_scout describer watcher explainer benchmark bomb jobs zombie_probe conformance system_import testbed forbidden plain_counter calc_user explorer patterns_demo memory_declared)
     if(TARGET ${guest}_wasm)
         add_dependencies(paglets_tests ${guest}_wasm)
     endif()
@@ -140,9 +141,16 @@ if(PAGLETS_TEST_GUEST_DIR)
         -P "${CMAKE_CURRENT_SOURCE_DIR}/reports_platforms.cmake")
 endif()
 
+# State exploration performs many instrumented allocations. Allow sanitizer
+# builds more wall time without reducing any world or property checks.
+set(protocol_quick_timeout 300)
+if(PAGLETS_SANITIZE OR PAGLETS_SANITIZE_THREAD)
+    set(protocol_quick_timeout 1200)
+endif()
 add_test(NAME protocol_cli COMMAND ${CMAKE_COMMAND}
     "-DTOOL=$<TARGET_FILE:paglets-protocol-check>"
     "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/protocol-cli"
+    "-DQUICK_TIMEOUT=${protocol_quick_timeout}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/protocol_cli.cmake")
 # The code excerpts and results in docs/ match the sources.
 add_test(NAME docs_sync COMMAND paglets-docs-sync --check --root "${PROJECT_SOURCE_DIR}/..")

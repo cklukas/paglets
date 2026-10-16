@@ -83,7 +83,8 @@ Result<files::Entry> entry_of(const fs::path& p, std::string rel) {
 
 }  // namespace
 
-Files::Files(std::map<std::string, fs::path> roots) : roots_(std::move(roots)) {}
+Files::Files(std::map<std::string, fs::path> roots, std::function<void()> before_scan_step)
+    : roots_(std::move(roots)), before_scan_step_(std::move(before_scan_step)) {}
 
 Result<Files::Resolved> Files::resolve(Operation& op, std::initializer_list<std::string_view> rights,
                                        std::string_view rel, bool mark) const {
@@ -165,37 +166,240 @@ Result<files::Entry> Files::stat(const files::StatRequest& q, Operation& op) {
     return entry_of(*p, r->rel);
 }
 
-Result<files::FindReply> Files::find(const files::FindRequest& q, Operation& op) {
-    auto r = resolve(op, "read", q.path);
-    if (!r) return std::unexpected(r.error());
-    if (q.pattern.empty() || q.pattern.size() > 256) return std::unexpected(abi::invalid_argument);
-    auto dir = content_path(r->base, r->path);
-    if (!dir) return std::unexpected(dir.error());
-    std::error_code ec;
-    if (!fs::is_directory(*dir, ec)) return std::unexpected(ec ? error_of(ec) : abi::invalid_argument);
-    const auto pattern = glob::segments(q.pattern);
-    if (std::ranges::count(pattern, std::string_view("**")) > 4) return std::unexpected(abi::invalid_argument);
-    const std::size_t limit = std::clamp<std::size_t>(q.limit, 1, 10000);
-    files::FindReply reply;
-    // Directory links are not followed (the default of the iterator).
-    fs::recursive_directory_iterator it(*dir, fs::directory_options::skip_permission_denied, ec);
-    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        const std::string rel = utf8_of(it->path().lexically_relative(*dir));
-        if (!glob::match_segments(pattern, 0, glob::segments(rel), 0)) continue;
-        auto e = entry_of(it->path(), join_relative(r->rel, rel));
-        if (!e) continue;
-        if (q.min_size && e->size < *q.min_size) continue;
-        if (q.max_size && e->size > *q.max_size) continue;
-        if (q.modified_after_ms && e->modified_ms < *q.modified_after_ms) continue;
-        if (q.modified_before_ms && e->modified_ms >= *q.modified_before_ms) continue;
-        if (reply.entries.size() == limit) {
-            reply.truncated = true;
-            break;
-        }
-        reply.entries.push_back(std::move(*e));
+// Scan cursors live on their host, owned by the requesting paglet. Only a
+// background job touches an iterator; cancellation only sets its atomic flag.
+struct Files::Scan {
+    std::string owner;
+    runtime::Cap dir;
+    fs::path root_path;
+    std::string cap_rel;
+    fs::path path;
+    std::string rel;
+    files::FindRequest query;
+    std::optional<fs::recursive_directory_iterator> iterator;
+    std::chrono::steady_clock::time_point deadline;
+    std::chrono::steady_clock::time_point touched;
+    std::atomic<bool> cancelled{false};
+    bool busy = false;  // scans_mu_ protects this and the map
+    std::uint64_t visited = 0;
+    std::uint64_t matched = 0;
+};
+
+Files::~Files() { stop(); }
+
+void Files::stop() {
+    {
+        std::lock_guard lock(scans_mu_);
+        scans_stopping_ = true;
+        for (auto& [id, s] : scans_) s->cancelled = true;
+        scans_.clear();
     }
-    std::ranges::sort(reply.entries, {}, &files::Entry::path);
-    return reply;
+    scan_jobs_.stop();
+}
+
+void Files::paglet_ended(runtime::SystemContext&, const runtime::PagletId& owner) {
+    std::lock_guard lock(scans_mu_);
+    std::erase_if(scans_, [&](const auto& item) {
+        if (item.second->owner != owner) return false;
+        item.second->cancelled = true;
+        return true;
+    });
+}
+
+Result<files::ScanStarted> Files::scan_start(const files::ScanRequest& q, Operation& op) {
+    if (q.timeout_ms < -1 || q.query.pattern.empty() || q.query.pattern.size() > 256 ||
+        std::ranges::count(glob::segments(q.query.pattern), std::string_view("**")) > 4)
+        return std::unexpected(abi::invalid_argument);
+    if (op.lent().empty()) return std::unexpected(abi::invalid_argument);
+    const auto& cap = op.lent().front();
+    if (auto c = op.ctx.check(cap, "dir", "read"); c != abi::ok) return std::unexpected(c);
+    if (!valid_relative(q.query.path, true)) return std::unexpected(abi::invalid_argument);
+    const auto slash = cap.resource.find('/');
+    const std::string root = cap.resource.substr(0, slash);
+    const std::string cap_rel = slash == std::string::npos ? std::string() : cap.resource.substr(slash + 1);
+    const auto root_it = roots_.find(root);
+    if (root_it == roots_.end() || !valid_relative(cap_rel, true)) return std::unexpected(abi::not_found);
+    if (op.sender()) op.ctx.runtime().mark(op.sender()->id, "root:" + root);
+    auto s = std::make_shared<Scan>();
+    s->owner = op.sender() ? op.sender()->id : "host";
+    s->dir = op.lent().front();
+    s->root_path = root_it->second;
+    s->cap_rel = cap_rel;
+    s->rel = q.query.path;
+    s->query = q.query;
+    const auto now = std::chrono::steady_clock::now();
+    const auto safe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        (std::chrono::steady_clock::time_point::max() - now) / 2).count();
+    s->deadline = q.timeout_ms > 0 ? now + std::chrono::milliseconds(std::min(q.timeout_ms, safe_ms))
+                                : std::chrono::steady_clock::time_point::max();
+    s->touched = now;
+    const std::string id = random_hex(16);
+    std::lock_guard lock(scans_mu_);
+    if (scans_stopping_) return std::unexpected(abi::gone);
+    // Idle cursors own no running work. Reap abandoned cursors on admission;
+    // a hard count also bounds resources when callers stop pulling.
+    std::erase_if(scans_, [&](const auto& item) {
+        auto& old = *item.second;
+        if (old.busy || (now < old.deadline && now - old.touched < std::chrono::minutes(1))) return false;
+        old.cancelled = true;
+        return true;
+    });
+    const auto owned = std::ranges::count_if(scans_, [&](const auto& item) { return item.second->owner == s->owner; });
+    if (scans_.size() + scan_jobs_.pending() >= 64 || owned >= 4) return std::unexpected(abi::quota);
+    scans_.emplace(id, std::move(s));
+    return files::ScanStarted{id};
+}
+
+Result<files::ScanBatch> Files::scan_step(Scan& s, runtime::SystemContext& ctx) {
+    const auto began = std::chrono::steady_clock::now();
+    auto check = [&]() -> std::int32_t {
+        if (s.cancelled) return abi::cancelled;
+        if (std::chrono::steady_clock::now() >= s.deadline) return abi::timeout;
+        return ctx.check(s.dir, "dir", "read");
+    };
+    if (auto c = check(); c != abi::ok) return std::unexpected(c);
+    if (before_scan_step_) before_scan_step_();  // deterministic slow-I/O tests
+    if (auto c = check(); c != abi::ok) return std::unexpected(c);
+    std::error_code ec;
+    if (!s.iterator) {
+        // Even canonicalization can block on a slow filesystem. Do all
+        // filesystem calls on the worker, never on a scheduler lane.
+        const auto root = fs::canonical(s.root_path, ec);
+        if (ec) return std::unexpected(error_of(ec));
+        const auto base = fs::weakly_canonical(root / to_path(s.cap_rel), ec);
+        if (ec) return std::unexpected(error_of(ec));
+        if (!(base == root || within(root, base))) return std::unexpected(abi::denied);
+        auto path = content_path(base, base / to_path(s.rel));
+        if (!path) return std::unexpected(path.error());
+        s.path = *path;
+        s.iterator.emplace(s.path, fs::directory_options::skip_permission_denied, ec);
+        if (ec) return std::unexpected(error_of(ec));
+    }
+    const auto pattern = glob::segments(s.query.pattern);
+    files::ScanBatch batch;
+    std::size_t bytes = 0;
+    std::size_t inspected = 0;
+    auto& it = *s.iterator;
+    while (it != fs::recursive_directory_iterator()) {
+        if (auto c = check(); c != abi::ok) return std::unexpected(c);
+        const std::string rel = utf8_of(it->path().lexically_relative(s.path));
+        ++s.visited;
+        ++inspected;
+        if (glob::match_segments(pattern, 0, glob::segments(rel), 0)) {
+            auto e = entry_of(it->path(), join_relative(s.rel, rel));
+            if (e && (!s.query.min_size || e->size >= *s.query.min_size) &&
+                (!s.query.max_size || e->size <= *s.query.max_size) &&
+                (!s.query.modified_after_ms || e->modified_ms >= *s.query.modified_after_ms) &&
+                (!s.query.modified_before_ms || e->modified_ms < *s.query.modified_before_ms)) {
+                ++s.matched;
+                bytes += e->path.size() + e->name.size() + 128;
+                batch.entries.push_back(std::move(*e));
+            }
+        }
+        it.increment(ec);  // directory links are never followed
+        if (ec) return std::unexpected(error_of(ec));
+        if (batch.entries.size() >= 128 || bytes >= 128 * 1024 || inspected >= 2048 ||
+            std::chrono::steady_clock::now() - began >= std::chrono::milliseconds(50)) break;
+    }
+    batch.completed = s.visited;
+    batch.matched = s.matched;
+    batch.finished = it == fs::recursive_directory_iterator();
+    return batch;
+}
+
+Result<files::ScanBatch> Files::scan_next(const files::ScanId& q, Operation& op) {
+    std::shared_ptr<Scan> s;
+    {
+        std::lock_guard lock(scans_mu_);
+        auto it = scans_.find(q.id);
+        if (it == scans_.end()) return std::unexpected(abi::not_found);
+        s = it->second;
+        if (s->owner != (op.sender() ? op.sender()->id : "host")) return std::unexpected(abi::denied);
+        if (s->busy) return std::unexpected(abi::bad_state);
+        s->busy = true;
+        s->touched = std::chrono::steady_clock::now();
+    }
+    auto reply = op.call.defer();
+    if (!reply) {
+        std::lock_guard lock(scans_mu_);
+        s->busy = false;
+        return std::unexpected(abi::invalid_argument);
+    }
+    scan_jobs_.post([this, s, id = q.id, ctx = &op.ctx, reply = *reply](bool stopping) {
+        Result<files::ScanBatch> batch = std::unexpected(abi::failed);
+        try {
+            if (!stopping) batch = scan_step(*s, *ctx);
+        } catch (const std::exception&) { /* a failed scan still releases its cursor and answers */ }
+        {
+            std::lock_guard lock(scans_mu_);
+            s->busy = false;
+            s->touched = std::chrono::steady_clock::now();
+            if (!batch || batch->finished) scans_.erase(id);
+        }
+        auto delivered = batch ? ctx->reply(reply, abi::ok, wire::to_msgpack(*batch)) : ctx->reply(reply, batch.error());
+        if (!delivered) {
+            std::lock_guard lock(scans_mu_);
+            s->cancelled = true;
+            scans_.erase(id);
+        }
+    });
+    return files::ScanBatch{};  // deferred
+}
+
+Result<files::ScanCancelled> Files::scan_cancel(const files::ScanId& q, Operation& op) {
+    std::lock_guard lock(scans_mu_);
+    auto it = scans_.find(q.id);
+    if (it == scans_.end()) return files::ScanCancelled{};
+    if (it->second->owner != (op.sender() ? op.sender()->id : "host")) return std::unexpected(abi::denied);
+    it->second->cancelled = true;
+    scans_.erase(it);
+    return files::ScanCancelled{true};
+}
+
+Result<files::FindReply> Files::find(const files::FindRequest& q, Operation& op) {
+    // Compatibility one-reply API. New callers use scan_start/next/cancel
+    // through patterns::scan_files so progress and cancellation are available.
+    auto started = scan_start(files::ScanRequest{q}, op);
+    if (!started) return std::unexpected(started.error());
+    std::shared_ptr<Scan> s;
+    {
+        std::lock_guard lock(scans_mu_);
+        s = scans_.at(started->id);
+        s->busy = true;
+    }
+    auto reply = op.call.defer();
+    if (!reply) {
+        std::lock_guard lock(scans_mu_);
+        scans_.erase(started->id);
+        return std::unexpected(abi::invalid_argument);
+    }
+    scan_jobs_.post([this, s, id = started->id, ctx = &op.ctx, reply = *reply, limit = std::clamp(q.limit, 1u, 10000u)](bool stopping) {
+        files::FindReply result;
+        std::int32_t status = stopping ? abi::failed : abi::ok;
+        std::size_t bytes = 0;
+        try {
+            while (status == abi::ok) {
+                auto batch = scan_step(*s, *ctx);
+                if (!batch) { status = batch.error(); break; }
+                for (auto& e : batch->entries) {
+                    if (result.entries.size() >= limit || bytes + e.path.size() + e.name.size() + 128 > 512 * 1024) {
+                        result.truncated = true;
+                        break;
+                    }
+                    bytes += e.path.size() + e.name.size() + 128;
+                    result.entries.push_back(std::move(e));
+                }
+                if (result.truncated || batch->finished) break;
+            }
+            std::ranges::sort(result.entries, {}, &files::Entry::path);
+        } catch (const std::exception&) { status = abi::failed; }
+        {
+            std::lock_guard lock(scans_mu_);
+            scans_.erase(id);
+        }
+        (void)ctx->reply(reply, status, status == abi::ok ? wire::to_msgpack(result) : runtime::Bytes{});
+    });
+    return files::FindReply{};
 }
 
 Result<files::ReadReply> Files::read(const files::ReadRequest& q, Operation& op) {

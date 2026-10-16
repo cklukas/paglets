@@ -26,7 +26,7 @@ Directory: [`cpp/examples/courier/`](https://github.com/cklukas/paglets/tree/cpp
   host fetches the content from the web host when the courier asks its
   `artifacts` service about the artifact, and checks its SHA-256 (see
   [Moving content between hosts](../system-paglets.md#moving-content-between-hosts)).
-  A paglet moves as a memory image with a default ceiling of 256 MB, but the size of the
+  A paglet moves as a memory image within its declared/host memory allowance, but the size of the
   file is limited only by the web host's download limit (64 MB by
   default).
 - **Notifications.** The courier tells its owner through `user-info`

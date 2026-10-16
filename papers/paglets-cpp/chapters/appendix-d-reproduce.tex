@@ -4,7 +4,7 @@
 \subsection{Source versions and full implementations}
 
 The software studied here is the C++ branch of
-\paglets{}~\cite{pagletsCpp}, using library revision \code{c01902c93beb} and
+\paglets{}~\cite{pagletsCpp}, using library revision \code{024709697b33} and
 WAMR~2.4.5. Source links name the full library commit so their content
 does not change as the branch advances. This snapshot contains the
 implementation described here; the earlier software release,
@@ -27,6 +27,7 @@ Module checks and images & \sourcefile{cpp/host/src/wasm_binary.cpp}{module vali
 Scheduling and recovery & \sourcefile{cpp/host/src/runtime.cpp}{runtime}; \sourcefile{cpp/host/include/paglets/runtime/mobility.hpp}{travelling state} \\
 Transfer and routing & \sourcefile{cpp/host/src/node/movement.cpp}{move protocol}; \sourcefile{cpp/host/src/node/location.cpp}{location records} \\
 Jobs and examples & \sourcefile{cpp/host/src/runtime_jobs.cpp}{job pool}; \sourcefile{cpp/examples/pi/pi.cpp}{Pi}; \sourcefile{cpp/examples/counter/counter.cpp}{Counter}; \sourcefile{cpp/examples/chronicle/chronicle.cpp}{Chronicle} \\
+Tasks and background I/O & \sourcefile{cpp/sdk/include/paglets/patterns/task.hpp}{coordinating task}; \sourcefile{cpp/sdk/include/paglets/tasks.hpp}{shared task controls}; \sourcefile{cpp/examples/finder/finder.cpp}{Mesh File Finder}; \sourcefile{docs/long-running-tasks.md}{API and policy guide} \\
 Replication checks & \sourcefile{cpp/common/include/paglets/protocols/zombie/model.hpp}{fault model}; \sourcefile{cpp/common/include/paglets/protocols/zombie/sim.hpp}{timed simulator}; \sourcefile{cpp/tools/protocol_check/protocol_check.cpp}{checker driver} \\
 Physical experiments & \sourcefile{cpp/tools/mesh_bench.sh}{measurement driver}; \sourcefile{cpp/tools/chronicle_live.sh}{fault schedule}; \sourcefile{docs/results/live_move.json}{move records}; \sourcefile{docs/results/live_three_host_jobs.json}{job records} \\
 \bottomrule

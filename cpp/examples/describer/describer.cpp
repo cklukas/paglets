@@ -155,22 +155,19 @@ private:
             dir_ = std::make_shared<Capability>(*d);
             pt::endpoint("files", [this, s](paglets::Result<Endpoint> files) {
                 if (!files) return fail(pt::error_text("files", files.error()));
-                svc::files::Client client{*files};
                 svc::files::FindRequest q;
                 q.pattern = s.pattern;
                 q.limit = 10'000;
-                auto sent = client.find(
-                    q,
-                    [this](paglets::Result<svc::files::FindReply> r, Message&) {
+                (void)paglets::patterns::find_files(*files, *dir_, q,
+                    [this](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return fail(pt::error_text("find", r.error()));
+                        if (r->truncated) return fail("file list truncated; narrow the search or use streaming scan_files");
                         found_.clear();
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file && is_image(e.path)) found_.push_back(e);
                         }
                         read_next(0);
-                    },
-                    pt::lending(*dir_));
-                if (!sent) fail(pt::error_text("find", sent.error()));
+                    });
             });
         });
     }
@@ -267,7 +264,7 @@ private:
             if (!ai) return next(std::unexpected(ai.error()));
             svc::ai::Client client{*ai};
             auto sent = client.describe_image(svc::ai::DescribeImageRequest{image, prompt, params_.model},
-                                              [next](paglets::Result<svc::ai::TextReply> r, Message&) { next(std::move(r)); });
+                                              [next](paglets::Result<svc::ai::TextReply> r, Message&) { next(std::move(r)); }, paglets::patterns::long_request());
             if (!sent) next(std::unexpected(sent.error()));
         });
     }

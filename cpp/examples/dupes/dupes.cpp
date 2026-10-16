@@ -145,15 +145,14 @@ private:
             if (!files) return done(pt::error_text("files", files.error()));
             files_ = *files;
             // --8<-- [start:find]
-            svc::files::Client client{files_};
             svc::files::FindRequest q;
             q.pattern = phase_.search.pattern;
             q.min_size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, phase_.search.min_size));
-            q.limit = 100'000;
-            auto sent = client.find(
-                q,
-                [this](paglets::Result<svc::files::FindReply> r, Message&) {
+            q.limit = 10'000;
+            (void)paglets::patterns::find_files(files_, *dir_, q,
+                    [this](paglets::Result<svc::files::FindReply> r) {
                     if (!r) return done(pt::error_text("find", r.error()));
+                        if (r->truncated) return done("file list truncated; narrow the search or use streaming scan_files");
                     const std::set<std::int64_t> wanted(phase_.sizes.begin(), phase_.sizes.end());
                     for (const auto& e : r->entries) {
                         if (e.type != svc::files::EntryType::file) continue;
@@ -163,9 +162,7 @@ private:
                     }
                     if (phase_.phase == 1) return done({});
                     hash(0);
-                },
-                pt::lending(*dir_));
-            if (!sent) done(pt::error_text("find", sent.error()));
+                });
             // --8<-- [end:find]
         });
     }

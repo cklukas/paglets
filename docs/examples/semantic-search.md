@@ -8,6 +8,13 @@ vectors point in the most similar direction are the answer.
 
 Directory: [`cpp/examples/semantic/`](https://github.com/cklukas/paglets/tree/cpp/cpp/examples/semantic)
 
+
+File selection uses the framework's background scan-task helper. The agent
+stays responsive while the directory walk runs; bounded list results and
+operation deadlines are separate from handler time. See
+[Long-running agents and tasks](../long-running-tasks.md) for the shared
+`TaskHandle` API, cancellation, progress and the example audit.
+
 ## What it shows
 
 - **An index without a database.** The index is an ordinary
@@ -89,7 +96,7 @@ void embed(std::size_t from) {
             status_.model = r->model;
             for (std::size_t i = from; i < to; ++i) docs_[i].vector = std::move(r->vectors[i - from].values);
             embed(to);
-        });
+        }, paglets::patterns::long_request());
         if (!sent) fail(pt::error_text("embed", sent.error()));
     });
 }
@@ -131,7 +138,7 @@ void query(const Query& q, Message& m) {
                             hits.hits.resize(std::min<std::size_t>(
                                 hits.hits.size(), static_cast<std::size_t>(std::max<std::int64_t>(1, q.limit))));
                             (void)paglets::reply_to(*reply, hits);
-                        });
+                        }, paglets::patterns::long_request());
     if (!sent) (void)paglets::reply_to(*reply, Hits{{}, pt::error_text("embed", sent.error())});
 }
 ```

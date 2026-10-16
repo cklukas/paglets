@@ -22,7 +22,8 @@
 
 namespace paglets::ipc {
 
-// A full default 256 MB paglet image also carries page/global metadata.
+// Control-frame bound, separate from the instance's memory allowance.
+// Large state should use artifacts; this bounds a serialized frame, not RAM growth.
 inline constexpr std::size_t max_frame = 512u * 1024 * 1024;
 
 // Operations of the control process (first array element of a request).

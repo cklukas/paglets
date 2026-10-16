@@ -199,7 +199,7 @@ function(paglets_add_guest name)
     if(NOT PAGLETS_GUESTS_AVAILABLE)
         return()
     endif()
-    cmake_parse_arguments(G "NO_SDK;PATTERNS;SHA256" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE;INTERFACE" "SOURCES;SERVICES" ${ARGN})
+    cmake_parse_arguments(G "NO_SDK;PATTERNS;SHA256" "LANGUAGE;SCHEMA_HEADER;SCHEMA_NAMESPACE;INTERFACE;MEMORY_MB" "SOURCES;SERVICES" ${ARGN})
     if(G_PATTERNS)
         list(APPEND G_SERVICES directory files grants locator mesh_info user_info zombies)
     endif()
@@ -337,10 +337,18 @@ function(paglets_add_guest name)
         list(APPEND objects "${object}")
     endforeach()
 
+    set(resource_link_flags "")
+    if(DEFINED G_MEMORY_MB)
+        if(NOT G_MEMORY_MB MATCHES "^[1-9][0-9]*$" OR G_MEMORY_MB GREATER 4096)
+            message(FATAL_ERROR "paglets: MEMORY_MB must be 1 to 4096 (wasm32)")
+        endif()
+        math(EXPR declared_memory_bytes "${G_MEMORY_MB} * 1024 * 1024")
+        list(APPEND resource_link_flags "-Wl,--max-memory=${declared_memory_bytes}")
+    endif()
     add_custom_command(
         OUTPUT "${out}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${PAGLETS_GUEST_OUTPUT_DIR}"
-        COMMAND "${compiler}" ${PAGLETS_GUEST_COMMON_FLAGS} ${objects} -o "${out}"
+        COMMAND "${compiler}" ${PAGLETS_GUEST_COMMON_FLAGS} ${resource_link_flags} ${objects} -o "${out}"
         ${describe_command}
         DEPENDS ${objects} ${depends}
         COMMENT "Building guest paglet ${name}.wasm"

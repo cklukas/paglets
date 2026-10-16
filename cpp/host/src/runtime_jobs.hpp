@@ -76,10 +76,10 @@ public:
         unsigned slots = 0;  // cores for jobs; 0: the CPUs of the machine
         std::filesystem::path worker;  // paglets-worker; empty: jobs run in this process
         bool sandbox = true;
-        std::int64_t default_max_ms = 3'600'000;
-        std::int64_t cap_max_ms = 24LL * 3'600'000;
-        std::uint32_t default_pages = 16384;  // 1 GB ceiling, not an initial allocation
-        std::uint32_t max_pages = 16384;
+        std::int64_t default_max_ms = -1;
+        std::int64_t cap_max_ms = -1;
+        std::uint32_t default_pages = 0;  // unknown: grow within the host/wasm32 allowance
+        std::uint32_t max_pages = 65536;  // wasm32, 4 GB; not a preallocation
         std::uint32_t stack_size = 256 * 1024;
         std::size_t owner_limit = 256;  // queued and running jobs per owner
         std::filesystem::path aot_compiler;  // empty: no AOT compilation

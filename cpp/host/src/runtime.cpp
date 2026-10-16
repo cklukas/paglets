@@ -8,6 +8,8 @@
 #include "runtime_exec.hpp"
 #include "runtime_jobs.hpp"
 #include "runtime_store.hpp"
+#include "job_budget.hpp"
+#include "time_arithmetic.hpp"
 
 #include <paglets/abi.hpp>
 #include <paglets/runtime/system.hpp>
@@ -530,6 +532,12 @@ struct Runtime::Impl {
                     std::max<std::int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(at - now).count()));
             }
         }
+        // Unlimited jobs still need their continuation correlation after a
+        // move. -1 is carried explicitly in travel-state version 4.
+        for (auto correlation : rec.pending_requests) {
+            if (!std::ranges::any_of(st.pending, [&](const auto& p) { return p.first == correlation; }))
+                st.pending.emplace_back(correlation, -1);
+        }
         if (!st.pending.empty()) st.pending_captured_ms = captured_ms;
         return st;
     }
@@ -598,6 +606,17 @@ struct Runtime::Impl {
 
     // The module admission check (mu held); empty if the module may run.
     std::string refusal(const std::string& module, TrustClass trust) const {
+        if (trust != TrustClass::system) {
+            const auto info = modules->info(module);
+            if (info && info->memory) {
+                const auto& memory = *info->memory;
+                if (memory.min_pages > config.limits.max_memory_pages ||
+                    (memory.max_pages && *memory.max_pages > config.limits.max_memory_pages))
+                    return "resource admission: declared memory exceeds this host's configured allowance";
+                if (config.require_paglet_memory && !memory.max_pages)
+                    return "resource admission: this host requires a declared memory maximum";
+            }
+        }
         if (!admission) return {};
         auto ok = admission(module, trust);
         return ok ? std::string() : ok.error();
@@ -965,8 +984,10 @@ struct Runtime::Impl {
             std::lock_guard lock(mu);
             if (rec.kill_reason) return std::unexpected(*rec.kill_reason);
             rec.budget_exceeded = false;
-            rec.call_deadline = SteadyClock::now() + config.handler_budget;
-            in_call.insert(&rec);
+            if (config.handler_budget.count() > 0) {
+                rec.call_deadline = job_detail::deadline<SteadyClock>(SteadyClock::now(), config.handler_budget.count());
+                in_call.insert(&rec);
+            }
         }
         auto result = call();
         {
@@ -1497,18 +1518,21 @@ public:
         abi::JobSpec spec;
         if (!abi::decode(doc, spec)) return abi::malformed;
         if (spec.function.empty() || spec.function.size() > abi::max_name_length) return abi::invalid_argument;
-        if (spec.cores < 1 || spec.max_ms < 0 || spec.memory_mb < 0) return abi::invalid_argument;
+        if (spec.cores < 1 || spec.max_ms < -1 || spec.memory_mb < -1 || spec.memory_mb > 4096) return abi::invalid_argument;
         if (spec.on_departure != "cancel" && spec.on_departure != "finish") return abi::invalid_argument;
         std::lock_guard lock(rt_.mu);
         if (rec_.in_end_hook) return abi::bad_state;
         if (rt_.stopping || !rt_.job_pool) return abi::unsupported;
+        if (rt_.config.require_job_resources && (spec.max_ms <= 0 || spec.memory_mb <= 0)) return abi::denied;
         const std::string module = spec.module.value_or(rec_.module_hash());
         if (module.size() != 64) return abi::invalid_argument;
+        spec.max_ms = job_detail::budget(spec.max_ms, rt_.config.job_default_time.count(), rt_.config.job_max_time.count());
+        if (spec.max_ms < -1) return abi::invalid_argument;
         // The mesh policy decides, and may cap the wall time.
         if (rt_.job_hooks.admit) {
             auto cap_ms = rt_.job_hooks.admit(rec_.sender(rt_.identity_host()), spec);
             if (!cap_ms) return cap_ms.error();
-            if (*cap_ms > 0 && (spec.max_ms == 0 || spec.max_ms > *cap_ms)) spec.max_ms = *cap_ms;
+            if (*cap_ms > 0 && (spec.max_ms == -1 || spec.max_ms > *cap_ms)) spec.max_ms = *cap_ms;
         }
         std::optional<Cap> artifact;
         if (spec.input_artifact) {
@@ -1531,10 +1555,10 @@ public:
         // If no result comes, the paglet hears `timeout` a minute after the
         // job's limit. The deadline also carries the correlation along when
         // the paglet moves, so a result can follow it.
-        const std::int64_t limit = std::min(spec.max_ms > 0 ? spec.max_ms : rt_.config.job_default_time.count(),
-                                          rt_.config.job_max_time.count());
-        rt_.schedule(SteadyClock::now() + std::chrono::milliseconds(limit + 60'000),
-                     Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
+        if (spec.max_ms != -1) {
+            rt_.schedule(job_detail::deadline<SteadyClock>(SteadyClock::now(), time_detail::saturating_add(spec.max_ms, 60'000)),
+                         Deadline{Deadline::Type::request_timeout, rec_.id, correlation});
+        }
         IncomingJob job{rec_.id, {}, correlation, rec_.owner, module, spec.function, std::move(spec.input),
                         spec.cores, spec.max_ms, spec.memory_mb, {rec_.marks.begin(), rec_.marks.end()}, artifact};
         if (remote) {
@@ -1592,6 +1616,7 @@ public:
                 st.total = info->total;
                 st.elapsed_ms = info->elapsed_ms;
                 st.aot = info->aot;
+                st.max_ms = info->max_ms;
             } else if (it->second.id != 0) {
                 st.state = "done";  // the result is on its way
             }
@@ -2290,6 +2315,7 @@ void Runtime::Impl::lane_loop(std::size_t index) {
             make_ready(*rec);
         }
         --running_count;
+        if (stopping && running_count == 0) clock_cv.notify_all();
         if (!outgoing.empty() && mobility.depart) {
             auto leaving = std::move(outgoing);
             outgoing.clear();
@@ -2497,12 +2523,16 @@ void Runtime::Impl::run_deferred() {
 // mu held.
 std::expected<std::uint64_t, std::int32_t> Runtime::Impl::start_job(IncomingJob job) {
     if (!job_pool || stopping) return std::unexpected(abi::unsupported);
+    if (config.require_job_resources && (job.max_ms <= 0 || job.memory_mb <= 0)) return std::unexpected(abi::denied);
     if (!modules->info(job.module)) return std::unexpected(abi::not_found);
     if (!modules->add_user(job.module)) return std::unexpected(abi::not_found);
     std::uint32_t pages = 0;
-    if (job.memory_mb > 0) {
-        const auto mb = std::min<std::int64_t>(job.memory_mb, config.job_max_memory_mb);
-        pages = static_cast<std::uint32_t>(mb * 1024 * 1024 / wasm::page_size);
+    if (job.memory_mb < -1 || job.memory_mb > 4096) { modules->remove_user(job.module); return std::unexpected(abi::invalid_argument); }
+    if (job.memory_mb != 0) pages = static_cast<std::uint32_t>((job.memory_mb == -1 ? 4096 : job.memory_mb) * 16);
+    else if (auto info = modules->info(job.module); info && info->memory && info->memory->max_pages) {
+        const auto host_max = config.job_max_memory_mb == 0 ? 4096u : std::min(config.job_max_memory_mb, 4096u);
+        const auto host_default = config.job_memory_mb == 0 ? host_max : config.job_memory_mb;
+        pages = static_cast<std::uint32_t>(std::min<std::uint64_t>(*info->memory->max_pages, host_default * 16u));
     }
     JobRequest r{std::move(job.paglet), std::move(job.requester_host), job.correlation, std::move(job.owner),
                  job.module, std::move(job.function), std::move(job.input), job.cores, job.max_ms, pages,
@@ -2519,7 +2549,8 @@ void Runtime::Impl::start_job_from_artifact(IncomingJob job) {
         deliver_reply(job.paglet, job.correlation, abi::unsupported, {}, {}, job.requester_host);
         return;
     }
-    const std::uint64_t max = std::uint64_t{config.job_max_memory_mb} * 1024 * 1024;
+    const auto max_mb = config.job_max_memory_mb == 0 ? 4096u : std::min(config.job_max_memory_mb, 4096u);
+    const std::uint64_t max = std::uint64_t{max_mb} * 1024 * 1024;
     Cap artifact = std::move(*job.input_artifact);
     job.input_artifact.reset();
     defer([this, load = job_artifacts.load, artifact = std::move(artifact), max, job = std::move(job)]() mutable {
@@ -2681,8 +2712,8 @@ Runtime::Runtime(Config config) : impl_(std::make_unique<Impl>(std::move(config)
         js.sandbox = c.sandbox_workers;
         js.default_max_ms = c.job_default_time.count();
         js.cap_max_ms = c.job_max_time.count();
-        js.default_pages = static_cast<std::uint32_t>(std::uint64_t{c.job_memory_mb} * 1024 * 1024 / wasm::page_size);
-        js.max_pages = static_cast<std::uint32_t>(std::uint64_t{c.job_max_memory_mb} * 1024 * 1024 / wasm::page_size);
+        js.default_pages = c.job_memory_mb == 0 ? 0 : std::min(c.job_memory_mb, 4096u) * 16u;
+        js.max_pages = (c.job_max_memory_mb == 0 ? 4096u : std::min(c.job_max_memory_mb, 4096u)) * 16u;
         js.owner_limit = c.job_owner_limit;
         js.aot_compiler = c.aot_compiler;
         js.aot_cache = c.aot_cache;
@@ -2711,9 +2742,17 @@ Runtime::~Runtime() {
 
 void Runtime::shutdown(bool save_state) {
     {
-        std::lock_guard lock(impl_->mu);
+        std::unique_lock lock(impl_->mu);
         if (impl_->stopping) return;
         impl_->stopping = true;
+        // Let short in-flight handlers finish, preserving restartable state.
+        // Unrestricted handlers can run indefinitely, so stop any remaining
+        // ones after a brief grace period before joining their lanes.
+        impl_->clock_cv.notify_all();
+        impl_->clock_cv.wait_for(lock, std::chrono::milliseconds(250), [&] { return impl_->running_count == 0; });
+        for (auto& [id, rec] : impl_->paglets) {
+            if (rec->running && rec->instance) rec->instance->terminate();
+        }
     }
     for (auto& lane : impl_->lanes) lane->cv.notify_all();
     impl_->clock_cv.notify_all();
@@ -3352,6 +3391,8 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     auto info = rt.modules->info(st.module);
     if (!info) return std::unexpected("module " + st.module + " is not here");
     if (to_hex(a.image.module_hash) != st.module) return std::unexpected(std::string("the image is of another module"));
+    if (a.image.page_count > rt.config.limits.max_memory_pages)
+        return std::unexpected("resource admission: incoming image exceeds this host's configured memory allowance");
     // An arriving paglet is always roaming (security design, section 2).
     if (auto ok = check_paglet_module(*info, TrustClass::roaming); !ok) return std::unexpected(ok.error());
     if (auto why = rt.refusal(st.module, TrustClass::roaming); !why.empty()) return std::unexpected(why);
@@ -3427,8 +3468,9 @@ std::expected<std::vector<std::string>, std::string> Runtime::prepare_arrival(Ar
     const auto elapsed_ms = st.pending_captured_ms > 0 && arrival_ms > st.pending_captured_ms
         ? arrival_ms - st.pending_captured_ms : std::int64_t{0};
     for (const auto& [correlation, ms] : st.pending) {
-        const auto remaining_ms = ms > elapsed_ms ? ms - elapsed_ms : std::int64_t{0};
         rec.pending_requests.insert(correlation);
+        if (ms == -1) continue;
+        const auto remaining_ms = ms > elapsed_ms ? ms - elapsed_ms : std::int64_t{0};
         rt.schedule(timeout_now + bounded_delay(remaining_ms),
                     Deadline{Deadline::Type::request_timeout, st.id, correlation});
     }

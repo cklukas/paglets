@@ -436,8 +436,9 @@ returning paglet transfers only pages the destination no longer has; cache
 eviction can require unchanged pages to be sent again. Embedders adjust
 this with `Node::set_page_cache_bytes`.
 
-The paglet memory ceiling defaults to 256 MB (`serve --memory-mb N`),
-separate from compute jobs' 1 GB default. Growth beyond it fails; an
+Memory requirements default to unknown, with no operator cap for paglets
+or jobs. Wasm32 supports up to 4 GB per instance; `serve --memory-mb N`
+opts into a paglet ceiling, with separate job policy options. Growth beyond it fails; an
 unhandled allocation failure or abort ends the paglet as `failed`. See
 [allocation and image limits](configuration.md#limits).
 
@@ -501,13 +502,14 @@ A host keeps one owner's paglets from taking it over:
   cannot arrive stays where it was;
 - at most 16 children and clones per handler call;
 - at most 64 pins on one paglet;
-- at most 5 s per handler;
+- an optional per-handler watchdog, off unless the operator enables it;
 - a 16 MB storage quota per paglet;
 - messages of at most 1 MB.
 
 A clone bomb therefore stops at the owner's limit, and other owners'
 paglets keep running. These limits are compiled-in defaults: no
-`paglets-host` option changes them.
+`paglets-host` option changes the count/storage defaults; memory and time policies
+are opt-in host options (see [resource policy](long-running-tasks.md)).
 [Configuration and troubleshooting](configuration.md#limits) names where
 each one is defined. The
 [hardening design](https://github.com/cklukas/paglets/blob/cpp/planning/cpp-hardening.md)

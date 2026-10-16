@@ -254,7 +254,7 @@ bool Node::Impl::on_jobs_frame(std::string_view type, const mesh::PublicKey& fro
         if (!s || !m || !j) return true;
         auto sender = decode_sender(*s);
         abi::JobSpec spec;
-        if (!sender || !abi::decode(*j, spec) || spec.cores < 1) return true;
+        if (!sender || !abi::decode(*j, spec) || spec.cores < 1 || spec.max_ms < -1 || spec.memory_mb < -1 || spec.memory_mb > 4096) return true;
         auto refuse = [&](std::int32_t error) {
             mesh::Map frame = job_frame("job-refused", *paglet, correlation);
             frame.emplace_back("e", mesh::Value(static_cast<std::int64_t>(error)));
@@ -263,7 +263,7 @@ bool Node::Impl::on_jobs_frame(std::string_view type, const mesh::PublicKey& fro
         // This host's policy decides too.
         auto cap_ms = admit_job(*sender, spec, key.public_key());
         if (!cap_ms) return refuse(cap_ms.error()), true;
-        if (*cap_ms > 0 && (spec.max_ms == 0 || spec.max_ms > *cap_ms)) spec.max_ms = *cap_ms;
+        if (*cap_ms > 0 && (spec.max_ms <= 0 || spec.max_ms > *cap_ms)) spec.max_ms = *cap_ms;
         std::optional<runtime::Cap> artifact;
         if (auto a = f.bin("a")) {
             auto caps = runtime::decode_caps(*a);
@@ -326,7 +326,7 @@ void Node::Impl::jobs_tick() {
     // Where the jobs that run here are, for their paglets.
     const std::string host = mesh::key_id(self);
     for (const auto& j : runtime.jobs()) {
-        abi::JobStatus status{j.state, host, j.done, j.total, j.elapsed_ms, j.aot};
+        abi::JobStatus status{j.state, host, j.done, j.total, j.elapsed_ms, j.aot, j.max_ms};
         if (j.requester_host.empty()) {
             if (jobs.sent.contains({j.paglet, j.correlation})) runtime.note_job(j.paglet, j.correlation, status);
             continue;

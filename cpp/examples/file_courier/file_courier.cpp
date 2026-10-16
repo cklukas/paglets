@@ -174,22 +174,18 @@ private:
             dir_ = std::make_shared<Capability>(*d);
             pt::endpoint("files", [this](paglets::Result<paglets::Endpoint> files) {
                 if (!files) return fail(pt::error_text("files", files.error()));
-                svc::files::Client client{*files};
                 svc::files::FindRequest q;
                 q.pattern = params_.pattern;
                 q.limit = static_cast<std::uint32_t>(std::max<std::int64_t>(1, params_.max_files));
-                auto sent = client.find(
-                    q,
-                    [this](paglets::Result<svc::files::FindReply> r, Message&) {
+                (void)paglets::patterns::find_files(*files, *dir_, q,
+                    [this](paglets::Result<svc::files::FindReply> r) {
                         if (!r) return fail(pt::error_text("find", r.error()));
                         found_.clear();
                         for (const auto& e : r->entries) {
                             if (e.type == svc::files::EntryType::file) found_.push_back(e.path);
                         }
                         share_next(0);
-                    },
-                    pt::lending(*dir_));
-                if (!sent) fail(pt::error_text("find", sent.error()));
+                    });
             });
         });
     }

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <ranges>
 #include <string>
 #include <vector>
@@ -142,6 +143,8 @@ private:
 
     void start(const Bench& b, Message& m) {
         if (ranking_.state == "running") return (void)m.reply(Started{false, "already running", 0});
+        if (b.budget_ms <= 0 || b.budget_ms > std::numeric_limits<std::int64_t>::max() / 3 || b.timeout_ms <= 0)
+            return (void)m.reply(Started{false, "positive benchmark budgets and deadline are required", 0});
         bench_ = b;
         ranking_ = Ranking{"running"};
         auto reply = std::make_shared<paglets::Capability>(m.defer_reply());
@@ -196,15 +199,36 @@ private:
 
     // --8<-- [start:steps]
     void next_step() {
-        if (!paglets::after_raw(0, "bench.step", {})) step();
+        if (!paglets::after_raw(0, "bench.step", {})) {
+            result_.error = "could not schedule the next benchmark step";
+            finish();
+        }
     }
 
     void step() {
-        switch (step_++) {
-            case 0: cpu_int(); return next_step();
-            case 1: cpu_float(); return next_step();
-            case 2: memory(); return next_step();
-            default: break;
+        if (step_ < 3) {
+            // A long measurement consists of many short handler calls.
+            const auto left = std::max<std::int64_t>(1, bench_.budget_ms - sampled_ms_);
+            slice_ms_ = std::min<std::int64_t>(200, left);
+            double rate = 0;
+            switch (step_) {
+                case 0: cpu_int(); rate = result_.int_mops; break;
+                case 1: cpu_float(); rate = result_.float_mflops; break;
+                case 2: memory(); rate = result_.memory_mbs; break;
+            }
+            measured_units_ += rate * slice_seconds_;
+            measured_seconds_ += slice_seconds_;
+            sampled_ms_ += std::max<std::int64_t>(1, static_cast<std::int64_t>(slice_seconds_ * 1000));
+            if (sampled_ms_ >= bench_.budget_ms) {
+                const double combined = measured_units_ / measured_seconds_;
+                if (step_ == 0) result_.int_mops = combined;
+                if (step_ == 1) result_.float_mflops = combined;
+                if (step_ == 2) result_.memory_mbs = combined;
+                ++step_;
+                sampled_ms_ = 0;
+                measured_units_ = measured_seconds_ = 0;
+            }
+            return next_step();
         }
         pt::here([this](paglets::Result<svc::mesh_info::Snapshot> s) {
             if (s) {
@@ -218,7 +242,7 @@ private:
     }
 
     void cpu_int() {
-        const std::int64_t budget = bench_.budget_ms * 1'000'000;
+        const std::int64_t budget = slice_ms_ * 1'000'000;
         std::uint64_t x = 88172645463325252ull, acc = 0, iterations = 0;
         const auto t = mono_ns();
         while (mono_ns() - t < budget) {
@@ -230,13 +254,14 @@ private:
             }
             iterations += 10'000;
         }
-        result_.int_mops = static_cast<double>(iterations) * 5 / seconds_since(t) / 1e6;  // 3 xor-shifts, an and, an add
+        slice_seconds_ = seconds_since(t);
+        result_.int_mops = static_cast<double>(iterations) * 5 / slice_seconds_ / 1e6;  // 3 xor-shifts, an and, an add
         result_.check ^= acc;
     }
     // --8<-- [end:steps]
 
     void cpu_float() {
-        const std::int64_t budget = bench_.budget_ms * 1'000'000;
+        const std::int64_t budget = slice_ms_ * 1'000'000;
         double zr = 0, zi = 0, sum = 0;
         std::uint64_t iterations = 0;
         const auto t = mono_ns();
@@ -249,7 +274,8 @@ private:
             }
             iterations += 10'000;
         }
-        result_.float_mflops = static_cast<double>(iterations) * 8 / seconds_since(t) / 1e6;
+        slice_seconds_ = seconds_since(t);
+        result_.float_mflops = static_cast<double>(iterations) * 8 / slice_seconds_ / 1e6;
         result_.check ^= static_cast<std::uint64_t>(sum);
     }
 
@@ -257,7 +283,7 @@ private:
         // Two buffers: together they must fit the paglet's memory allowance.
         const std::size_t size = static_cast<std::size_t>(std::clamp<std::int64_t>(bench_.memory_mb, 1, 6)) * mb;
         std::vector<std::uint8_t> a(size, 1), b(size, 2);
-        const std::int64_t budget = bench_.budget_ms * 1'000'000;
+        const std::int64_t budget = slice_ms_ * 1'000'000;
         std::uint64_t copied = 0;
         const auto t = mono_ns();
         while (mono_ns() - t < budget) {
@@ -265,7 +291,8 @@ private:
             a[copied % size] ^= 1;
             copied += size;
         }
-        result_.memory_mbs = static_cast<double>(copied) / static_cast<double>(mb) / seconds_since(t);
+        slice_seconds_ = seconds_since(t);
+        result_.memory_mbs = static_cast<double>(copied) / static_cast<double>(mb) / slice_seconds_;
         result_.check ^= b[size / 2];
     }
 
@@ -367,6 +394,11 @@ private:
     paglets::Endpoint parent_;
     bool running_ = false;
     int step_ = 0;
+    std::int64_t sampled_ms_ = 0;
+    std::int64_t slice_ms_ = 0;
+    double slice_seconds_ = 0;
+    double measured_units_ = 0;
+    double measured_seconds_ = 0;
     std::string lease_;
     HostResult result_;
     std::int64_t bench_start_ns_ = 0;

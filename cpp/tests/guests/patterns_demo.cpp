@@ -25,6 +25,7 @@ public:
             return AddReply{q.a + q.b};
         });
         router().on("count-done", [this](Message&) { finish_count(); });
+        router().on("child_cancelled", [this](Message& m) { (void)m.reply(child_cancelled_); });
 
         fan_.attach(router(), [this](const pt::FanOut::Child& c) {
             std::int64_t v = 0;
@@ -126,9 +127,27 @@ public:
 protected:
     void run(const CountRequest& q) override {
         request_ = q;
+        child_cancelled_ = false;
+        child_done_ = false;
+        progress(0, q.n);
         if (q.n < 0) return fail("n is negative");
         if (q.delay_ms > 0) {
-            (void)paglets::after_raw(q.delay_ms, "count-done", {});
+            auto timer = paglets::after_raw(q.delay_ms, "count-done", {});
+            if (!timer) return fail("could not schedule count");
+            timer_ = *timer;
+            track(paglets::tasks::TaskHandle::callbacks([this]() -> paglets::Result<void> {
+                if (!child_done_) {
+                    child_cancelled_ = true;
+                    child_done_ = true;
+                    (void)timer_.drop();
+                }
+                return {};
+            }, [this]() -> paglets::Result<paglets::tasks::Status> {
+                paglets::tasks::Status s;
+                s.done = child_done_;
+                s.state = child_done_ ? "completed" : "running";
+                return s;
+            }));
         } else {
             finish_count();
         }
@@ -136,6 +155,8 @@ protected:
 
 private:
     void finish_count() {
+        child_done_ = true;
+        progress(request_.n, request_.n);
         std::int64_t sum = 0;
         for (std::int64_t i = 1; i <= request_.n; ++i) sum += i;
         complete(CountResult{sum});
@@ -147,6 +168,9 @@ private:
     }
 
     CountRequest request_;
+    paglets::Capability timer_;
+    bool child_done_ = false;
+    bool child_cancelled_ = false;
     pt::FanOut fan_;
     SpreadStatus spread_;
     CarryRequest carry_;

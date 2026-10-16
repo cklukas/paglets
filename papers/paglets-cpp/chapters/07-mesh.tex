@@ -38,23 +38,46 @@ one atomic transaction.
 
 \subsection{Mobile coordination and host-specific computation}\label{sec:mesh-compute}
 
-A long computation inside a handler must finish within the time limit
-or be split into smaller handler calls by the application. Compute jobs
-provide another option. A paglet submits a function and input. The host
+A long computation inside a handler delays the coordinating agent's next
+message and state capture, even without a watchdog. Compute jobs let that
+agent submit a function and input instead. The host
 runs a separate instance in a job pool and delivers its result later.
 The coordinating paglet can handle messages while the job runs. The
 job's active call stack stays on its execution host and cannot itself
 be migrated.
 
+The existing \code{patterns::Task<Request, Result>} represents the
+coordinating paglet, with start, status, wait and cancel operations.
+\code{tasks::TaskHandle} is a shared control interface for its child work,
+returned by service helpers or by \code{compute::Job::task()}. Tracking
+these handles propagates cancellation from the overall task. The two
+execution backends differ in authority: native services retain filesystem
+and other resource capabilities on their host, while isolated compute
+jobs receive input and output operations, clocks, progress and cancellation,
+without filesystem, network or paglet-messaging capabilities.
+
 A job reserves the requested number of CPU slots. Queued jobs share
 capacity with cooperative compute-slot leases, which reserve capacity
 for application-managed work. Each queue serves jobs in arrival order; its first job reserves the
-capacity it needs against later arrivals. Runtime-managed jobs have an enforced
-elapsed-time limit. Expiring a cooperative lease, by contrast, does not
-interrupt arbitrary CPU work. The default job limit is one hour, capped
-at 24 hours. Imported functions let a job report progress and check
-cancellation. The runtime interrupts cancelled or over-budget jobs.
-Job memory is limited separately from the coordinator's memory.
+capacity it needs against later arrivals. Job duration is unlimited by
+default. A developer can request unlimited time explicitly or declare a
+positive elapsed-time budget, including a week or longer. Operators and
+mesh policy can impose ceilings and require finite declarations.
+Elapsed-time budgets do not meter cumulative CPU time. Expiring a
+cooperative lease does not interrupt arbitrary CPU work. Imported
+functions let a job report progress and check cancellation; the runtime
+interrupts cancelled or over-budget jobs. Job memory allowances are
+independent of the coordinator's allowance.
+
+Mesh File Finder illustrates the service backend. The
+\sourcefile{cpp/sdk/include/paglets/patterns/files.hpp}{\code{scan\_files} helper}
+starts native background scanning and delivers bounded batches with
+progress, rather than holding a handler or collecting the whole tree.
+Each batch checks directory authority; cancellation releases the cursor.
+An already blocked OS call must return before native cancellation can
+finish. Cursors remain on the filesystem host and are not restored from
+the agent's checkpoint. Recovery requires a new scan; background execution
+alone does not make an operation durable.
 
 When \code{paglets-wamrc} is available, the host compiles job modules for
 its own CPU and caches the result; otherwise it interprets them. Paglets

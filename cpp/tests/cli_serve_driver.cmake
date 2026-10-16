@@ -45,8 +45,8 @@ until(TRIES 80 ARGS remote status --connect ${B} --key "${DIR}/olga.key" ${P} ${
 # The owner launches a paglet on a (its module travels with the request).
 until(ARGS remote moves --connect ${A} --key "${DIR}/alice.key" ${P} ${L})
 string(JSON cap GET "${OUT}" memory_limit_pages)
-if(NOT cap EQUAL 4096)
-    stop_and_fail("serve did not apply the default 256 MB paglet ceiling: ${OUT}")
+if(NOT cap EQUAL 65536)
+    stop_and_fail("serve did not leave memory unrestricted within Wasm32 by default: ${OUT}")
 endif()
 until(ARGS remote moves --connect ${B} --key "${DIR}/alice.key" ${P} ${L})
 string(JSON cap GET "${OUT}" memory_limit_pages)

@@ -173,10 +173,13 @@ recognized by the SDK before ordinary routing. The `paglets.` message
 prefix is reserved for the host; public sends and module descriptions
 cannot claim it.
 
-The default handler budget is 5 s of elapsed host time, including imports
-and worker IPC. A trap or exhausted budget fails the paglet. Use compute
-jobs for long computations, or divide work into short handlers scheduled
-with `after`; awaiting a job keeps ordinary handlers responsive.
+The handler watchdog is off by default. An enabled budget measures elapsed
+host time per invocation, including imports and worker IPC. It does not limit the paglet's lifetime
+or time spent waiting for background operations. A trap or exhausted budget
+fails the paglet. Use `tasks::TaskHandle` for progress/status and cancellation
+of service work or `compute::Job::task()` for the same controls over CPU work;
+see [Long-running agents and tasks](long-running-tasks.md). Each continuation
+runs as a fresh handler with its own budget.
 
 `Started::caps` preserves the order supplied by the creator. Capability
 roles, such as a parent endpoint in slot zero, belong to the application's
@@ -503,7 +506,7 @@ template <class T> Result<Capability> after(std::int64_t delay_ms, std::string_v
   If this serialized state exceeds the configured notification budget or
   transport frame limit, the move is refused and deliveries remain on the
   source host. Queued notifications require travel-state version 2;
-  unresolved requests require version 3. Older peers refuse moves requiring
+  finite unresolved requests require version 3; unlimited job continuations require version 4. Older peers refuse moves requiring
   a version they cannot read. Outstanding request timeouts count time spent
   moving and waiting for commit; a late reply stays late after arrival.
   A queued reply containing capabilities that cannot travel becomes
