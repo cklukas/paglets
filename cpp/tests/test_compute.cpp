@@ -675,7 +675,29 @@ PAGLETS_TEST("pi: the pi example computes across three hosts and survives the lo
     hosts[2]->f->runtime->shutdown(false);
     hosts[2]->transport->stop();
     hosts.pop_back();
-    REQUIRE(eventually([&] { return status().finished; }, 6000));
+    const bool recovered = eventually([&] {
+        const auto s = status();
+        return s.finished || s.state == "failed";
+    }, 6000);
+    const auto recovered_status = status();
+    if (!recovered || !recovered_status.finished) {
+        std::cerr << "    Pi recovery: state=" << recovered_status.state << " error=" << recovered_status.error
+                  << " chunks=" << recovered_status.chunks_done << '/' << recovered_status.chunks
+                  << " in_flight=" << recovered_status.in_flight << " resent=" << recovered_status.resent << '\n';
+        for (std::size_t i = 0; i < hosts.size(); ++i) {
+            auto& h = *hosts[i];
+            std::cerr << "    host " << names[i] << ": landscape=" << h.node->landscape().size()
+                      << " jobs=" << h.f->runtime->jobs().size()
+                      << " remote_jobs=" << h.f->runtime->remote_jobs().size() << '\n';
+            for (const auto& j : h.f->runtime->jobs()) {
+                std::cerr << "      job " << j.id << " correlation=" << j.correlation << " state=" << j.state
+                          << " progress=" << j.done << '/' << j.total << " elapsed_ms=" << j.elapsed_ms << '\n';
+            }
+            std::lock_guard lock(h.f->log_mu);
+            for (const auto& line : h.f->log) std::cerr << "      " << line << '\n';
+        }
+    }
+    REQUIRE(recovered && recovered_status.finished);
     const auto done = status();
     CHECK_EQ(done.done, 1200);
     CHECK_EQ(done.chunks_done, 40);
