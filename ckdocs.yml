@@ -13,6 +13,7 @@
 version: 1
 site:
   title: paglets
+  logo: docs/images/paglets-logo.png
   description: "Mobile agents that move between hosts with their state, in two independent editions: the Python package, and the C++ edition whose paglets are sandboxed WebAssembly modules."
   footer: "© 2026 C. Klukas · MIT License"
   links:
