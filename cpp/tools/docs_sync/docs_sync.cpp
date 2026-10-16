@@ -62,7 +62,16 @@ struct Failure {
 std::string read_file(const fs::path& p) {
     std::ifstream in(p, std::ios::binary);
     if (!in) throw Failure{"cannot read " + p.string()};
-    return std::string(std::istreambuf_iterator<char>(in), {});
+    const std::string text(std::istreambuf_iterator<char>(in), {});
+    // Git can check out both pages and snippet sources with CRLF on Windows.
+    // Compare their text independently of that checkout setting and emit LF.
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r' && i + 1 < text.size() && text[i + 1] == '\n') continue;
+        normalized += text[i];
+    }
+    return normalized;
 }
 
 std::vector<std::string> lines_of(const std::string& text) {

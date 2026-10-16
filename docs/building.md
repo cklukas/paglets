@@ -495,6 +495,7 @@ See [Compute jobs](compute-jobs.md).
 Run `build/<preset>/tools/docs_sync/paglets-docs-sync --root ..` from
 `cpp/` after changing marked example code or `docs/results/*.json`.
 `--check` reports stale generated blocks without rewriting them.
+LF and Windows CRLF checkouts are equivalent; regenerated pages use LF.
 Markdown uses `<!-- snippet: PATH#SECTION -->` and
 `<!-- results: TOPIC -->` markers; LaTeX papers use `% snippet:` and
 `% results:` with matching closing markers. Edit the source or result
