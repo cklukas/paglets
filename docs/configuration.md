@@ -383,7 +383,9 @@ mapped memory remain usable. The profile otherwise allows operations by
 default; it is not a general syscall allow list.
 
 Linux workers use a seccomp allow list for memory management, threads,
-clocks and IPC over inherited descriptors. Other system calls return
+clocks, anonymous pipes and IPC over inherited descriptors. Anonymous pipes
+also let sanitizer builds check C++ object pointers inside the sandbox.
+Other system calls return
 `EPERM`; thread creation is restricted to pthread flags, signals to this
 worker, and resource-limit calls to reading this process's limits.
 
