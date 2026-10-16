@@ -27,7 +27,6 @@ site/
 public/
 *.egg-info/
 *.egg
-uv.lock
 
 # Local/editor/system files
 .DS_Store

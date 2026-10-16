@@ -21,8 +21,13 @@ Hosts are expected to already have the same paglet code importable. Movement tra
 Install and run tests from a checkout:
 
 ```bash
+uv sync --dev --locked
 uv run pytest
 ```
+
+The committed `uv.lock` records the dependency versions used by development
+and CI. Update it deliberately when changing dependencies, and keep the Ruff
+pre-commit revision aligned with the locked formatter version.
 
 Build the Python package locally:
 
