@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
 
 env:
-  # ckdocs is built from ck-git-hosting at this commit (documentation site generator).
-  CKDOCS_REF: 7d693f09c830e8b1272e444d238d8c130d153afa
+  # Match both documentation deployment workflows (ckdocs v0.6.3).
+  CKDOCS_REF: b647a36908295e9fcfa88db95a181cee2b5efa21
 
 jobs:
   checks:
@@ -23,6 +23,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v7
 
+      - name: Fetch C++ documentation for the portal
+        run: git fetch --quiet --depth=1 origin cpp:refs/remotes/origin/cpp
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -34,7 +37,7 @@ jobs:
           cache-suffix: ci-${{ matrix.python-version }}
 
       - name: Install project
-        run: uv sync --dev
+        run: uv sync --dev --locked
 
       - name: Lint
         run: uv run ruff check .
@@ -65,15 +68,20 @@ jobs:
 
       - name: Smoke-test wheel installation
         run: |
-          python -m venv /tmp/paglets-wheel-smoke
-          /tmp/paglets-wheel-smoke/bin/python -m pip install dist/*.whl
-          /tmp/paglets-wheel-smoke/bin/paglets-host --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-benchmark --help
-          /tmp/paglets-wheel-smoke/bin/paglets-mesh-info --help
-          /tmp/paglets-wheel-smoke/bin/paglets-perf-test --help
-          /tmp/paglets-wheel-smoke/bin/paglets-pi-compute --help
-          /tmp/paglets-wheel-smoke/bin/paglets-search --help
-          /tmp/paglets-wheel-smoke/bin/paglets-sysinfo --help
+          python -m venv "$RUNNER_TEMP/paglets-wheel-smoke"
+          "$RUNNER_TEMP/paglets-wheel-smoke/bin/python" -m pip install dist/*.whl
+          cli="$RUNNER_TEMP/paglets-wheel-smoke/bin/paglets"
+          "$cli" --help
+          "$cli" host --help
+          "$cli" mesh --help
+          "$cli" sys --help
+          "$cli" jobs --help
+          "$cli" artifacts --help
+          "$cli" search --help
+          "$cli" examples --help
+          "$cli" examples mesh-benchmark --help
+          "$cli" examples perf --help
+          "$cli" examples pi --help
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v6
@@ -83,10 +91,14 @@ jobs:
 
       - name: Smoke-test command line entry points
         run: |
-          uv run paglets-host --help
-          uv run paglets-mesh-benchmark --help
-          uv run paglets-mesh-info --help
-          uv run paglets-perf-test --help
-          uv run paglets-pi-compute --help
-          uv run paglets-search --help
-          uv run paglets-sysinfo --help
+          uv run paglets --help
+          uv run paglets host --help
+          uv run paglets mesh --help
+          uv run paglets sys --help
+          uv run paglets jobs --help
+          uv run paglets artifacts --help
+          uv run paglets search --help
+          uv run paglets examples --help
+          uv run paglets examples mesh-benchmark --help
+          uv run paglets examples perf --help
+          uv run paglets examples pi --help

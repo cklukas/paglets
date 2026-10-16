@@ -302,8 +302,8 @@ overriding `compute_usage_paths()`:
 
 ```python
 class MyJobPaglet(ComputeJobPaglet[MyJobState]):
-  def compute_usage_paths(self):
-    return [self.state.scratch_dir]
+    def compute_usage_paths(self):
+        return [self.state.scratch_dir]
 ```
 
 The default hook returns no extra paths. `paglets jobs top`
