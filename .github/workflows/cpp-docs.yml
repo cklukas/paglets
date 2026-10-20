@@ -30,8 +30,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ckdocs (the documentation site generator) from ck-git-hosting v0.6.3.
-  CKDOCS_REF: b647a36908295e9fcfa88db95a181cee2b5efa21
+  # ckdocs (the documentation site generator) from ck-git-hosting v0.8.1.
+  CKDOCS_REF: ad6dc1de73cedef8eb64d53ab607043ae09845ee
 
 jobs:
   build:
